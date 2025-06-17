@@ -31,8 +31,7 @@ then the total gradient of $c_i$ is
 
 $$\frac{\partial \ln L }{\partial c_i} = w_j \frac{\partial \ln P_j }{\partial c_i} - w_j \frac{\partial \ln N }{\partial c_i}.$$
 
-Base on the complex grdients relation $\frac{\partial \ln L }{\partial c_i^{*}}=(\frac{\partial \ln L }{\partial c_i})^{*}$, we can convert it to real value
-
+Base on the complex grdients relation $\frac{\partial \ln L}{\partial c_i^{*}}=(\frac{\partial \ln L }{\partial c_i})^{*}$, we can convert it to real value using
 $$\frac{\partial \ln L }{\partial x_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}).$$
 
 $$\frac{\partial \ln L }{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}).$$
