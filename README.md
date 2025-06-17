@@ -35,9 +35,9 @@ $$\frac{\partial \ln L}{\partial c_i} = w_j \frac{\partial \ln P_j }{\partial c_
 
 Base on the complex grdients relation $\frac{\partial \ln L}{\partial c_i^\star}=(\frac{\partial \ln L }{\partial c_i})^\star$, we can convert it to real value using
 
-$$\frac{\partial \ln L}{\partial x_i}=\frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}). $$
+$$\frac{\partial \ln L}{\partial x_i}=\frac{\partial \ln L }{\partial c_i}\frac{\partial c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}). $$
 
-$$\frac{\partial \ln L}{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}). $$
+$$\frac{\partial \ln L}{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{\partial  c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}). $$
 
-and polar version $\frac{\partial \ln L}{\partial \rho_i} = 2Re (\frac{\partial \ln L }{\partial c_i} \exp(i\phi)). $
-$\frac{\partial \ln L}{\partial \phi_i} = -2\rho_i Im(\frac{\partial \ln L }{\partial c_i} \exp(i\phi)). $
+and polar version $\frac{\partial \ln L}{\partial \rho_i} = 2Re (\frac{\partial \ln L }{\partial c_i} \exp(i\phi_i)). $
+$\frac{\partial \ln L}{\partial \phi_i} = -2\rho_i Im(\frac{\partial \ln L }{\partial c_i} \exp(i\phi_i)). $
