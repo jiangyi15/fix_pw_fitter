@@ -3,7 +3,7 @@ Partial wave analysis fitter when shape is fixed.
 
 The package is to solve the problem as
 
-$$\vartheta =\arg\min (- \ln L) = \arg\min\[-\sum_{j} w_j \ln \frac{|\sum_i c_i(\vartheta) f_{ij} |^2}{\sum_k |\sum_i c_i(\vartheta) f_{ik} |^2} \].$$
+$$\vartheta =\arg\min (- \ln L) = \arg\min[-\sum_{j} w_j \ln \frac{|\sum_i c_i(\vartheta) f_{ij} |^2}{\sum_k |\sum_i c_i(\vartheta) f_{ik} |^2}].$$
 
 $f_{ij} = f_i(x_j)$ is the fixed shape. $c_i(\vartheta)$ is the complex number coupling of $f_{i}(x)$.
 It could be some combination of real fit parameters $\vartheta$.
@@ -35,3 +35,5 @@ Base on the complex grdients relation $\frac{\partial \ln L}{\partial c_i^{*}}=(
 $$\frac{\partial \ln L }{\partial x_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}).$$
 
 $$\frac{\partial \ln L }{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}).$$
+
+Then we can combine it with the jacobian of $c_i(\vartheta)$ to get the final gradients of $\frac{\partial \ln L}{\partial \vartheta}$.
