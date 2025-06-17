@@ -11,14 +11,20 @@ It could be some combination of real fit parameters $\vartheta$.
 The analytic gradient is simple based on the complex number.
 Here we define some simple intermediate variable, and using Einstein summation convention,
 $$A_j = c_i F_{ij}.$$
+
 $$P_j = |A_j|^2 = A_j A_j^{*}.$$
+
 $$M_{ik} = F_{ij} F_{kj}^{*}.$$
+
 $$N = c_i M_{ik} c_k^{*}.$$
 
 We can get the gradient is
 $$\frac{\partial P_j }{\partial c_i} = F_{ij}A_j^{*}.$$
+
 $$\frac{\partial \ln P_j }{\partial c_i} = \frac{F_{ij}A_j^{*}}{P_j} = \frac{F_{ij}}{A_j}.$$
+
 $$\frac{\partial N }{\partial c_i} = M_{ik} c_{k}^{*}.$$
+
 $$\frac{\partial \ln N }{\partial c_i} = \frac{M_{ik} c_{k}^{*}}{N}.$$
 
 then the total gradient of $c_i$ is
@@ -26,5 +32,7 @@ then the total gradient of $c_i$ is
 $$\frac{\partial \ln L }{\partial c_i} = w_j \frac{\partial \ln P_j }{\partial c_i} - w_j \frac{\partial \ln N }{\partial c_i}.$$
 
 Base on the complex grdients relation $\frac{\partial \ln L }{\partial c_i^{*}}=(\frac{\partial \ln L }{\partial c_i})^{*}$, we can convert it to real value
+
 $$\frac{\partial \ln L }{\partial x_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}).$$
+
 $$\frac{\partial \ln L }{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}).$$
