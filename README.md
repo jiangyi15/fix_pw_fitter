@@ -8,6 +8,15 @@ $$\vartheta =\arg\min (- \ln L) = \arg\min[-\sum_{j} w_j \ln \frac{|\sum_i c_i(\
 $f_{ij} = f_i(x_j)$ is the fixed shape. $c_i(\vartheta)$ is the complex number coupling of $f_{i}(x)$.
 It could be some combination of real fit parameters $\vartheta$.
 
+## Install
+
+```
+pip install git+https://github.com/jiangyi15/fix_pw_fitter.git
+```
+
+
+## method
+
 The analytic gradient is simple based on the complex number.
 Here we define some simple intermediate variable, and using Einstein summation convention,
 $$A_j = c_i F_{ij}.$$

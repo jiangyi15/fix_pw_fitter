@@ -1,0 +1,23 @@
+[project]
+name = "fix_pw_fitter"
+version = "0.0.1"
+authors = [
+  { name="Yi Jiang", email="jiangyi15@mails.ucas.ac.cn" },
+]
+description = "Partial wave analysis fitter when shape is fixed."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/jiangyi15/fix_pw_fitter"
+Issues = "https://github.com/jiangyi15/fix_pw_fitter/issues"
+
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
