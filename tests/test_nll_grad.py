@@ -32,3 +32,7 @@ def test_nll_grad():
         gall.append(gi)
     gall = np.stack(gall)
     assert np.allclose(yg, gall)
+
+    ret = nll.minimize()
+    ret2 = nll.minimize(ret.x)
+    assert np.allclose(ret.x, ret2.x)

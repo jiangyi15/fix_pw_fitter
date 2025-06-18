@@ -94,3 +94,10 @@ class NLLGrad:
         lnL, dlnLdck = self.nll_grad_ck(ck)
         dlnLdx = self.pc.build_ck_vjp(x, ck, dlnLdck)
         return lnL, dlnLdx
+
+    def minimize(self, x0=None):
+        if x0 is None:
+            x0 = self.pc.random_x()
+        from scipy.optimize import minimize
+        ret = minimize(self.nll_grad, x0, jac=True)
+        return ret
