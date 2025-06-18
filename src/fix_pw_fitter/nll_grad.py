@@ -23,7 +23,7 @@ class ParamsConverter(AbsParamsConverter):
 
     def build_ck(self, x):
         ret = []
-        x = x[::2] + 1.0j*x[::2]
+        x = x[::2] + 1.0j*x[1::2]
         all_x = {name: x[i] for i, name in enumerate(self.all_used_x)}
         for i in self.combinations:
             tmp = 1.0+0j
@@ -33,23 +33,23 @@ class ParamsConverter(AbsParamsConverter):
                 else:
                     tmp = tmp*all_x[j]
             ret.append(tmp)
-        return np.stack(tmp)
+        return np.stack(ret)
 
     def build_ck_vjp(self, x, ck, g):
-        x = x[::2] + 1.0j*x[::2]
+        x = x[::2] + 1.0j*x[1::2]
         all_x = {name: x[i] for i, name in enumerate(self.all_used_x)}
         ret = {name: 0.0j for name in self.all_used_x}
         for i, comb in enumerate(self.combinations):
             gi = g[i]
             scale = 1.0+0j
-            for j in i:
+            for j in comb:
                 if j in self.fixed_params:
                     scale *= self.fixed_params[j]
 
-            for j, ji in enumerate(i):
+            for j, ji in enumerate(comb):
                 if ji in self.all_used_x:
                     other_prod = 1.+0j
-                    for k, ki in enumerate(i):
+                    for k, ki in enumerate(comb):
                         if k!=j and ki in self.all_used_x:  # allow same ji,ki, but different k,j
                             other_prod = other_prod * all_x[k]
                     ret[ji] += scale * other_prod* gi
@@ -69,28 +69,28 @@ class NLLGrad:
     def nll_grad_lnL_ck(self, ck):
         Aij = np.sum(ck*self.Fijk, axis=-1)
         Aij_C = np.conj(Aij)
-        Pi = np.abs(Aij)**2 # np.sum(Aij*Aij_C, axis=-1)
-        Li = np.log(np.real(Pi))
-        L = np.sum(self.wi*Li)
-        dlnLidck = np.sum(self.Fijk *Aij_C[...,np.newaxis], axis=-2)/Pi
-        dlnLdck = np.sum(wi[...,np.newaxis]*dlnLidck, axis=0)
+        Pi = np.sum(np.abs(Aij)**2, axis=-1) # np.sum(Aij*Aij_C, axis=-1)
+        lnLi = np.log(np.real(Pi))
+        lnL = np.sum(self.wi*lnLi)
+        dlnLidck = np.sum(self.Fijk *Aij_C[...,np.newaxis], axis=-2)/Pi[:,None]
+        dlnLdck = np.sum(self.wi[...,np.newaxis]*dlnLidck, axis=0)
         return lnL, dlnLdck
 
-    def nll_grad_lnN(self, ck):
+    def nll_grad_lnN_ck(self, ck):
         dNdck = np.sum(self.Mkl * np.conj(ck), axis=-1)
-        N = np.sum(ck * Gk)
-        dlnNdck = Ck/N
+        N = np.sum(ck * dNdck)
+        dlnNdck = dNdck/N
         return np.log(np.real(N)), dlnNdck
 
     def nll_grad_ck(self, ck):
-        lnL, dlnLdck = nll_grad_lnL_ck(ck)
-        lnN, dlnNdck = nll_grad_lnN_ck(ck)
-        ret = -L + self.nsig * lnN
+        lnL, dlnLdck = self.nll_grad_lnL_ck(ck)
+        lnN, dlnNdck = self.nll_grad_lnN_ck(ck)
+        ret = -lnL + self.nsig * lnN
         ret_g = - dlnLdck + self.nsig * dlnNdck
         return ret, ret_g
 
     def nll_grad(self, x):
-        ck = self.pc.build_ck(self, x)
-        lnL, dlnLdck = nll_grad_ck(self, ck)
+        ck = self.pc.build_ck(x)
+        lnL, dlnLdck = self.nll_grad_ck(ck)
         dlnLdx = self.pc.build_ck_vjp(x, ck, dlnLdck)
         return lnL, dlnLdx
