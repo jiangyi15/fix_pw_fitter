@@ -19,30 +19,36 @@ pip install git+https://github.com/jiangyi15/fix_pw_fitter.git
 
 The analytic gradient is simple based on the complex number.
 Here we define some simple intermediate variable, and using Einstein summation convention,
+
 $$A_j = c_i F_{ij}.$$
 
-$$P_j = |A_j|^2 = A_j A_j^{*}.$$
+$$P_j = |A_j|^2 = A_j A_j^\star.$$
 
-$$M_{ik} = F_{ij} F_{kj}^{*}.$$
+$$M_{ik} = F_{ij} F_{kj}^\star.$$
 
-$$N = c_i M_{ik} c_k^{*}.$$
+$$N = c_i M_{ik} c_k^\star.$$
 
 We can get the gradient is
-$$\frac{\partial P_j }{\partial c_i} = F_{ij}A_j^{*}.$$
 
-$$\frac{\partial \ln P_j }{\partial c_i} = \frac{F_{ij}A_j^{*}}{P_j} = \frac{F_{ij}}{A_j}.$$
+$$\frac{\partial P_j }{\partial c_i} = F_{ij}A_j^\star.$$
 
-$$\frac{\partial N }{\partial c_i} = M_{ik} c_{k}^{*}.$$
+$$\frac{\partial \ln P_j }{\partial c_i} = \frac{F_{ij}A_j^\star}{P_j} = \frac{F_{ij}}{A_j}.$$
 
-$$\frac{\partial \ln N }{\partial c_i} = \frac{M_{ik} c_{k}^{*}}{N}.$$
+$$\frac{\partial N }{\partial c_i} = M_{ik} c_{k}^\star.$$
+
+$$\frac{\partial \ln N }{\partial c_i} = \frac{M_{ik} c_{k}^\star}{N}.$$
 
 then the total gradient of $c_i$ is
 
-$$\frac{\partial \ln L }{\partial c_i} = w_j \frac{\partial \ln P_j }{\partial c_i} - w_j \frac{\partial \ln N }{\partial c_i}.$$
+$$\frac{\partial \ln L}{\partial c_i} = w_j \frac{\partial \ln P_j }{\partial c_i} - w_j \frac{\partial \ln N }{\partial c_i}.$$
 
-Base on the complex grdients relation $\frac{\partial \ln L}{\partial c_i^{*}}=(\frac{\partial \ln L }{\partial c_i})^{*}$, we can convert it to real value using
-$$\frac{\partial \ln L }{\partial x_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}).$$
+Base on the complex grdients relation $\frac{\partial \ln L}{\partial c_i^\star}=(\frac{\partial \ln L }{\partial c_i})^\star$, we can convert it to real value using
 
-$$\frac{\partial \ln L }{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^*}\frac{\partial c_i^* }{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}).$$
+$$\frac{\partial \ln L}{\partial x_i}=\frac{\partial \ln L }{\partial c_i}\frac{\partial c_i }{\partial x_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial x_i} = 2Re(\frac{\partial \ln L }{\partial c_i}). $$
+
+$$\frac{\partial \ln L}{\partial y_i} = \frac{\partial \ln L }{\partial c_i}\frac{\partial  c_i }{\partial y_i} + \frac{\partial \ln L }{\partial c_i^\star}\frac{\partial c_i^\star}{\partial y_i} = -2Im(\frac{\partial \ln L }{\partial c_i}). $$
+
+and polar version $\frac{\partial \ln L}{\partial \rho_i} = 2Re (\frac{\partial \ln L }{\partial c_i} \exp(i\phi_i)). $
+$\frac{\partial \ln L}{\partial \phi_i} = -2\rho_i Im(\frac{\partial \ln L }{\partial c_i} \exp(i\phi_i)). $
 
 Then we can combine it with the jacobian of $c_i(\vartheta)$ to get the final gradients of $\frac{\partial \ln L}{\partial \vartheta}$.
