@@ -182,4 +182,101 @@ $S_i, P_i$ & $i = 10^6$ each & $\sim$16 MB each \\ \bottomrule
 \item \textbf{Using complex conjugate symmetry}: $\partial(-\ln L)/\partial c_k = [\partial(-\ln L)/\partial c_k^*]^*$, which halves the gradient computation cost.
 \end{enumerate}
 
+\section{Optimized Computation Order}
+
+The naive approach computes per-event, per-component intermediate quantities unnecessarily. The key optimization is to \textbf{restructure all computations as batched matrix multiplications (GEMM/GEMV)}, which enable BLAS/GPU acceleration and eliminate redundant storage.
+
+Define the matrix $F^{(j)}$ of shape $(N, k)$ with elements $F^{(j)}_{nk} = F_{njk}$, where $N$ is the number of events.
+
+\subsection{Gradient Reformulation}
+
+The data term in the gradient can be rewritten as:
+\begin{equation}
+\sum_i \frac{w_i}{P_i} \frac{\partial S_i}{\partial c_k^*} = \sum_i \frac{w_i}{P_i} \sum_j F_{ijk}^* A_{ij} = \sum_j \sum_i G_{ij} F_{ijk}^*
+\end{equation}
+where $G_{ij} \equiv \frac{w_i}{P_i} A_{ij}$. This is a \textbf{batched GEMM}:
+\begin{equation}
+g^{\text{data}} = \sum_j \left(F_{\text{data}}^{(j)}\right)^\dagger G^{(j)}
+\end{equation}
+with shape $(k, i) \times (i, 1) \to (k, 1)$.
+
+The normalization correction term is a simple scalar sum:
+\begin{equation}
+S_{\text{corr}} = \sum_i \frac{w_i S_i}{P_i}
+\end{equation}
+
+The full gradient is then assembled as an $O(k)$ vector operation:
+\begin{equation}
+\frac{\partial(-\ln L)}{\partial c_k^*} = -\frac{p}{N_s} \, g_k^{\text{data}} + \frac{p}{N_s^2} \, \frac{\partial N_s}{\partial c_k^*} \, S_{\text{corr}}
+\end{equation}
+
+\textbf{This eliminates the $O(i \cdot k)$ per-event-per-k loops} for $\partial P_i/\partial c_k^*$ and $\partial(-\ln L)/\partial c_k^*$, saving $2 \times 10^8$ operations per iteration.
+
+\subsection{Optimized Per-Iteration Cost}
+
+\begin{center}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Step} & \textbf{Operation} & \textbf{Complexity} & \textbf{Ops} & \textbf{Type} \\ \midrule
+1. $A^{(j)} = F^{(j)} c$ & Batched GEMV & $O(ijk)$ & $2\times 10^8$ & GEMV \\
+2. $S_i = \sum_j |A_{ij}|^2$ & Element-wise & $O(ij)$ & $2\times 10^6$ & Vector \\
+3. $N_s = c^\dagger M c$ & Quad. form & $O(k^2)$ & $10^4$ & BLAS \\
+4. $P_i$, $-\ln L$ & Element-wise & $O(i)$ & $10^6$ & Vector \\
+5. $\partial N_s/\partial c^* = Mc$ & Matrix-vec & $O(k^2)$ & $10^4$ & GEMV \\
+6. $G_{ij} = \frac{w_i}{P_i} A_{ij}$ & Scaling & $O(ij)$ & $2\times 10^6$ & Vector \\
+7. $g^{\text{data}} = \sum_j (F^{(j)})^\dagger G^{(j)}$ & Batched GEMM & $O(ijk)$ & $2\times 10^8$ & GEMM \\
+8. $S_{\text{corr}} = \sum_i \frac{w_i S_i}{P_i}$ & Dot product & $O(i)$ & $10^6$ & Vector \\
+9. Assemble gradient & Vector ops & $O(k)$ & $10^2$ & Vector \\
+\textbf{Total} & & & $\mathbf{\approx 4\times 10^8}$ & \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Cost Comparison}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Metric} & \textbf{Naive} & \textbf{Optimized} & \textbf{Improvement} \\ \midrule
+Operations per iteration & $7 \times 10^8$ & $4 \times 10^8$ & $\mathbf{1.75\times}$ fewer \\
+Per-event-per-$k$ loops & $3$ & $0$ & Eliminated \\
+Hardware utilization & Low & High (BLAS/GPU) & $\mathbf{10\text{--}100\times}$ throughput \\
+Peak memory (chunked) & 35 GB & 320 MB & $\mathbf{100\times}$ less \\
+\textbf{Effective speedup} & & & $\mathbf{\sim 3\text{--}5\times}$ \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Chunked Memory Optimization}
+
+For $M_{kk'}$ computation, process MC events in chunks of size $C$:
+\begin{equation}
+M = \sum_{\text{chunks}} \sum_j \left(F^{(j)}_{\text{chunk}}\right)^\dagger \text{diag}(\omega_{\text{chunk}}) F^{(j)}_{\text{chunk}}
+\end{equation}
+With $C = 10^5$: peak memory drops from 35 GB to $\sim$320 MB, with identical total FLOPs.
+
+\subsection{Optimized Algorithm}
+
+\begin{verbatim}
+Pre-computation:
+  M = 0
+  for each MC chunk:
+    for j in {0, 1}:
+      T = diag(omega_chunk) @ F_chunk[j]    # O(C*k)
+      M += F_chunk[j].T @ T                  # O(C*k^2)
+  N_b = sum(omega * B)                       # O(i')
+
+Per iteration:
+  for j in {0, 1}:
+    A[j] = F_data[j] @ c                     # O(i*k) GEMV
+  S = sum(|A|^2, axis=j)                     # O(i*j)
+  N_s = c.T @ M @ c                          # O(k^2)
+  P = S/N_s * p + B/N_b * (1-p)             # O(i)
+  nll = -sum(w * log(P))                     # O(i)
+  dN_s = M @ c                               # O(k^2)
+  G = (w/P)[:,None] * A                      # O(i*j)
+  g_data = sum(F_data[j].T @ G[j] for j)    # O(i*j*k) GEMM
+  S_corr = sum(w * S / P)                   # O(i)
+  grad = -p/N_s * g_data + p/N_s^2 * dN_s * S_corr  # O(k)
+  return nll, grad, conj(grad)              # O(k)
+\end{verbatim}
+
 \end{document}
