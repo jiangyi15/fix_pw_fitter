@@ -294,16 +294,70 @@ def test_fitter_compute_hess_inv():
     if np.any(diag_num <= 0):
         print("⚠ Numerical Hessian has negative diagonal entries (unstable)")
         print(f"✓ test_fitter_compute_hess_inv (skipped comparison)")
-        return
+    else:
+        sig_num = np.sqrt(diag_num)
+        sig_bfgs = np.sqrt(diag_bfgs)
 
-    sig_num = np.sqrt(diag_num)
-    sig_bfgs = np.sqrt(diag_bfgs)
+        rel_err = np.linalg.norm(sig_num - sig_bfgs) / np.linalg.norm(sig_bfgs)
+        
+        # Numerical Hessians can differ from BFGS by a significant margin
+        assert rel_err < 1.0, f"Relative error {rel_err} too large"
+        print(f"✓ test_fitter_compute_hess_inv (sig rel_err={rel_err:.2f})")
 
-    rel_err = np.linalg.norm(sig_num - sig_bfgs) / np.linalg.norm(sig_bfgs)
+
+def test_fitter_gradient_of_partial_R():
+    """Test calculation of the gradient of partial R."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+    x = full.best_x
+    c = params.build_c(x)
+
+    # 1. Full R (all components) should match gradient of N_s
+    # N_s = c^† M c
+    g_Ns = M @ c
+    grad_Ns = params.gradient_chain_rule(g_Ns, x)
     
-    # Numerical Hessians can differ from BFGS by a significant margin
-    assert rel_err < 1.0, f"Relative error {rel_err} too large"
-    print(f"✓ test_fitter_compute_hess_inv (sig rel_err={rel_err:.2f})")
+    grad_R_all = full.gradient_of_partial_R(list(range(params.n_components)), M=M, x=x)
+    assert np.allclose(grad_R_all, grad_Ns), "Full R gradient should match N_s gradient"
+
+    # 2. Single component R
+    idx = 0
+    g_k = np.zeros_like(c)
+    g_k[idx] = M[idx, idx] * c[idx]
+    grad_R_k_manual = params.gradient_chain_rule(g_k, x)
+    
+    grad_R_k_auto = full.gradient_of_partial_R([idx], M=M, x=x)
+    assert np.allclose(grad_R_k_auto, grad_R_k_manual), "Single component R gradient mismatch"
+    
+    print("✓ test_fitter_gradient_of_partial_R")
+
+
+def test_fitter_compute_fit_fractions():
+    """Test calculation of fit fractions and uncertainties."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+    
+    # Check full group FF is 1 and error is 0
+    n_comp = params.n_components
+    full_group = [[i for i in range(n_comp)]]
+    full_frac = full.compute_fit_fractions(full_group)
+    assert np.isclose(full_frac[0]["value"], 1.0), f"Full group FF should be 1, got {full_frac[0]['value']}"
+    assert np.isclose(full_frac[0]["error"], 0.0, atol=1e-10), f"Full group error should be 0, got {full_frac[0]['error']}"
+    assert full_frac[0]["gradient"].shape == (params.n_free,)
+    
+    # Check individual components
+    groups = [[i] for i in range(n_comp)]
+    fractions = full.compute_fit_fractions(groups)
+    
+    for f in fractions:
+        assert np.isfinite(f["value"])
+        assert np.isfinite(f["error"])
+        assert f["value"] >= 0
+        assert f["gradient"].shape == (params.n_free,)
+        
+    print("✓ test_fitter_compute_fit_fractions")
 
 
 if __name__ == "__main__":
@@ -317,4 +371,6 @@ if __name__ == "__main__":
     test_fitter_cached_methods()
     test_fitter_save_load_results()
     test_fitter_compute_hess_inv()
+    test_fitter_gradient_of_partial_R()
+    test_fitter_compute_fit_fractions()
     print("\n✓ All Fitter tests passed")

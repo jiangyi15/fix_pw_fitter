@@ -262,11 +262,11 @@ class Fitter:
     def compute_hess_inv(self, x: Optional[np.ndarray] = None, epsilon: float = 1e-4) -> np.ndarray:
         """Calculate the inverse Hessian matrix using the 3-point method.
 
-        Computes the Hessian $H_{ij} = \frac{\partial^2 (-\ln L)}{\partial x_i \partial x_j}$ 
+        Computes the Hessian H_ij = d^2(-ln L) / dx_i dx_j 
         via finite difference of the gradients, then returns its inverse.
 
         Formula:
-            $H_{ij} \approx \frac{g_j(x + \epsilon e_i) - g_j(x - \epsilon e_i)}{2\epsilon}$
+            H_ij = [g_j(x + e*e_i) - g_j(x - e*e_i)] / (2*e)
 
         Args:
             x: Real parameter values. Defaults to best-fit x.
@@ -298,6 +298,159 @@ class Fitter:
             return np.linalg.inv(H)
         except np.linalg.LinAlgError:
             return np.linalg.pinv(H)
+
+    def gradient_of_partial_R(
+        self, component_indices: list[int], M: Optional[np.ndarray] = None, x: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        """Calculate the gradient of the partial intensity R = c^† M_sub c.
+
+        R represents the contribution to the signal normalization from a subset of 
+        components. For k not in `component_indices`, the contribution is ignored.
+
+        Args:
+            component_indices: List of component indices (integers) to include.
+            M: The overlap matrix (n_comp x n_comp). 
+               If None, tries to retrieve from the fitter.
+            x: Real parameter values. Defaults to best-fit x.
+
+        Returns:
+            grad: Real gradient vector of shape (n_free_real,).
+        """
+        if x is None:
+            x = self._require_fit().x
+            
+        if M is None:
+            # Attempt to retrieve M from the underlying fitter
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError(
+                    "M is not available. Please pass M explicitly or ensure "
+                    "the fitter stores it as _M."
+                )
+
+        c = self.parameters.build_c(x)
+        n_comp = len(c)
+        
+        # Create mask for active components
+        mask = np.zeros(n_comp, dtype=bool)
+        for idx in component_indices:
+            if not (0 <= idx < n_comp):
+                raise IndexError(f"Component index {idx} is out of range [0, {n_comp})")
+            mask[idx] = True
+            
+        # Construct M_sub: only rows/cols in mask are non-zero
+        M_sub = np.zeros_like(M)
+        M_sub[np.ix_(mask, mask)] = M[np.ix_(mask, mask)]
+        
+        # Compute g_k = dR / dc_k*
+        # R = sum_{p,q} c_p* M_sub_{pq} c_q
+        # dR/dc_k* = sum_q M_sub_{kq} c_q = (M_sub c)_k
+        g = M_sub @ c
+        
+        # Apply chain rule to get gradient wrt real parameters x
+        return self.parameters.gradient_chain_rule(g, x)
+
+    def compute_fit_fractions(
+        self,
+        component_groups: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> list[dict]:
+        """Calculate fit fractions and their uncertainties for groups of components.
+
+        The fit fraction for a group of components $S$ is defined as:
+            $FF_S = R_S / R_{total}$
+        where $R = c^\\dagger M c$, and $R_S$ is the contribution from components in $S$.
+        $R_S$ includes all intensity and interference terms within the group.
+
+        Uncertainty is calculated using the error propagation formula:
+            $\sigma = \sqrt{ g^T V g }$
+        where $g = \nabla_x FF_S$ and $V$ is the covariance matrix (inverse Hessian).
+
+        Args:
+            component_groups: List of component index lists, e.g., `[[0, 1], [2]]`.
+            M: Overlap matrix. If None, tries to retrieve from the fitter.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
+                        or falls back to `compute_hess_inv`.
+
+        Returns:
+            List of dictionaries, each containing:
+                - "indices": The component indices for the group.
+                - "value": The fit fraction value.
+                - "error": The estimated uncertainty.
+                - "gradient": The gradient of the fit fraction wrt real parameters x.
+        """
+        if x is None:
+            x = self._require_fit().x
+
+        if M is None:
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError(
+                    "M is not available. Please pass M explicitly."
+                )
+
+        c = self.parameters.build_c(x)
+        n_comp = len(c)
+        
+        # Calculate Total R and its gradient
+        R_total = np.real(c.conj() @ (M @ c))
+        all_indices = list(range(n_comp))
+        grad_R_total = self.gradient_of_partial_R(all_indices, M=M, x=x)
+
+        # Determine Covariance Matrix V
+        if cov_matrix is not None:
+            V = np.asarray(cov_matrix)
+        else:
+            if hasattr(self, '_result') and self._result is not None:
+                res = self._result
+                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
+                    V = np.asarray(res.hess_inv)
+                else:
+                    V = self.compute_hess_inv(x=x)
+            else:
+                V = self.compute_hess_inv(x=x)
+
+        # Symmetrize V
+        V = 0.5 * (V + V.T)
+
+        results = []
+        for group in component_groups:
+            indices_list = list(group)
+            for idx in indices_list:
+                if not (0 <= idx < n_comp):
+                    raise IndexError(f"Component index {idx} is out of range [0, {n_comp})")
+
+            # Calculate R_sub by zeroing components not in the group
+            c_sub = np.zeros_like(c)
+            c_sub[indices_list] = c[indices_list]
+            R_sub = np.real(c_sub.conj() @ (M @ c_sub))
+            
+            # Gradient of R_sub
+            grad_R_sub = self.gradient_of_partial_R(indices_list, M=M, x=x)
+            
+            # Fit Fraction
+            FF = R_sub / R_total
+            
+            # Gradient of FF: d(R_sub/R_total) = (dR_sub - FF * dR_total) / R_total
+            grad_FF = (grad_R_sub - FF * grad_R_total) / R_total
+            
+            # Uncertainty: sqrt( g^T V g )
+            variance = grad_FF @ V @ grad_FF
+            sigma = np.sqrt(max(0.0, np.real(variance)))
+            
+            results.append({
+                "indices": indices_list,
+                "value": FF,
+                "error": sigma,
+                "gradient": grad_FF,
+            })
+
+        return results
 
     def save_results(self, path: str) -> None:
         """Save fit results to a JSON file.
