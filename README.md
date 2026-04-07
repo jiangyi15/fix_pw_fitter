@@ -31,7 +31,7 @@ $\partial |\sum_{k} c_k F_{ijk}|^2/\partial c_k = \sum_{k'} F_{ijk} F_{ijk}^{\*}
 
 The implementation uses a **single fused CUDA kernel** for the forward pass (A → S → P → NLL → G → S_corr) and cuBLAS ZGEMV for the gradient. All intermediates stay in registers — no global memory traffic between stages.
 
-### GPU Speedup vs NumPy CPU (single thread)
+### GPU Speedup vs NumPy CPU (single thread, RTX 3070 Ti Laptop)
 
 | n_data | n_mc | n_comp | CPU | GPU | Speedup |
 |--------|------|--------|-----|-----|---------|
@@ -39,8 +39,10 @@ The implementation uses a **single fused CUDA kernel** for the forward pass (A �
 | 50,000 | 200,000 | 50 | 45 ms | 0.7 ms | **60×** |
 | 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | **66×** |
 | 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | **61×** |
+| 1,000,000 | — | 100 | 1.37 s | 23.5 ms | **58×** |
 
-For n_data = 10⁶, n_comp = 100, a single evaluate takes **~0.74 s** on GPU vs **~5 s** on CPU (~7×, still CPU-bound at large sizes).
+For n_data = 10⁶, n_comp = 100 the GPU evaluates in **24 ms** — fast enough
+for real-time fitting with L-BFGS (10-50 iterations ≈ 0.2-1.2 s total).
 
 ### Key Optimizations
 
