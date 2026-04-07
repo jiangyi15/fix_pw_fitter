@@ -35,10 +35,10 @@ The implementation uses a **single fused CUDA kernel** for the forward pass (A �
 
 | n_data | n_mc | n_comp | CPU | GPU | Speedup |
 |--------|------|--------|-----|-----|---------|
-| 10,000 | 50,000 | 20 | 3.7 ms | 0.1 ms | **29×** |
-| 50,000 | 200,000 | 50 | 50 ms | 1.1 ms | **44×** |
-| 100,000 | 500,000 | 50 | 96 ms | 2.1 ms | **46×** |
-| 100,000 | 500,000 | 100 | 170 ms | 3.8 ms | **44×** |
+| 10,000 | 50,000 | 20 | 4.9 ms | 0.2 ms | **31×** |
+| 50,000 | 200,000 | 50 | 47 ms | 1.8 ms | **26×** |
+| 100,000 | 500,000 | 50 | 89 ms | 2.7 ms | **33×** |
+| 100,000 | 500,000 | 100 | 156 ms | 4.1 ms | **38×** |
 
 For n_data = 10⁶, n_comp = 100, a single evaluate takes **~0.74 s** on GPU vs **~5 s** on CPU (~7×, still CPU-bound at large sizes).
 

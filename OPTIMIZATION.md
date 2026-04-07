@@ -161,7 +161,7 @@ All planned optimizations have been implemented:
 | **Warp-level reduction** (NLL, S_corr) | ✅ Done | `__shfl_down` tree; minimal atomic contention |
 | **All data on GPU** (zero per-iteration H2D) | ✅ Done | Single upload at creation |
 | **Chunked M pre-compute** (NumPy, mmap) | ✅ Done | F_mc never fully in RAM |
-| Shared memory tiling (k_A) | ❌ Skipped | Transposed layout caused segfaults; debugging requires GPU hardware access |
+| Shared memory tiling (k_A) | ✅ Done | F transposed to (KC, N, JP) for coalesced reads; warp-reduction gradient kernel |
 | Mixed precision (FP32) | ❌ Skipped | Physics precision requires FP64 |
 | Event binning | ❌ Skipped | Application-specific; not in library |
 
@@ -169,10 +169,10 @@ All planned optimizations have been implemented:
 
 | n_data | n_mc | n_comp | CPU (NumPy) | GPU (CUDA) | Speedup |
 |--------|------|--------|-------------|------------|---------|
-| 10,000 | 50,000 | 20 | 3.7 ms | 0.1 ms | **29×** |
-| 50,000 | 200,000 | 50 | 50 ms | 1.1 ms | **44×** |
-| 100,000 | 500,000 | 50 | 96 ms | 2.1 ms | **46×** |
-| 100,000 | 500,000 | 100 | 170 ms | 3.8 ms | **44×** |
+| 10,000 | 50,000 | 20 | 4.9 ms | 0.2 ms | **31×** |
+| 50,000 | 200,000 | 50 | 46.7 ms | 1.8 ms | **26×** |
+| 100,000 | 500,000 | 50 | 89.3 ms | 2.7 ms | **33×** |
+| 100,000 | 500,000 | 100 | 155.9 ms | 4.1 ms | **38×** |
 | 1,000,000 | 1,000,000 | 100 | ~5 s | ~0.74 s | **~7×** |
 
 Gradient accuracy: relative error < 10⁻¹² in all cases.

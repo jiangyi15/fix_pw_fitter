@@ -1,13 +1,10 @@
 /* ================================================================
    fpwfitter.cu  –  Fixed Partial Waves Fitter  (CUDA, all-GPU data)
    ================================================================
-   ALL data uploaded to GPU at create time.  Evaluate runs entirely
-   on GPU — only NLL + gradient copied back.
-
-   Optimised:
-     * Single fused kernel for A→S→P→NLL→G→S_corr
-     * Warp-level reduction for NLL/S_corr (no atomicAdd)
-     * cuBLAS ZGEMV for gradient
+   F LAYOUT: (KC, N, JP) for coalesced memory access.
+     F[k, i, j] at offset k*N*JP + i*JP + j
+   Forward: single fused kernel
+   Gradient: custom kernel with coalesced F access + warp reduction
    ================================================================ */
 
 #include "fpwfitter.h"
@@ -32,37 +29,31 @@ static void lcfg(int64_t n, int *nb, int *nt) {
     if (*nb > 65535) *nb = 65535;
 }
 
-/* ==================== fused forward kernel ======================
- *
- * Per-thread computation for one event:
- *   A[i,:] → S[i] → P[i] → NLL[i] → G[i,:] → S_corr[i]
- *
- * Only G (needed for gradient) and optional P are written to
- * global memory.  All intermediates stay in registers.
- * ================================================================ */
+/* ==================== fused forward kernel ====================== */
 
 __global__ void k_fused(
-    const double2 *F,       /* (N, JP, KC)  complex */
+    const double2 *F,       /* (KC, N, JP)  complex */
     const double2 *c,       /* (KC,)        complex */
     const double  *B,       /* (N,)         */
     const double  *w,       /* (N,)         */
     double2       *G,       /* (N, JP)      complex — output */
-    double        *P_out,   /* (N,)         optional — output (NULL ok) */
-    double        *nll_out, /* (1,)         output */
-    double        *scorr_out,/* (1,)        output */
+    double        *P_out,   /* (N,)         optional */
+    double        *nll_out, /* (1,)         */
+    double        *scorr_out,/* (1,)        */
     int64_t N, int JP, int KC,
-    double N_s, double N_b, double pur)
+    double N_s, double N_b, double pur,
+    int64_t F_total_elements)  /* bounds check */
 {
     int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (i >= N) return;
 
-    /* ---- A[i,j] = sum_k F[i,j,k] * c[k]  (in registers) ---- */
-    double A_re[4] = {0}, A_im[4] = {0};  /* JP ≤ 4 typical */
+    /* ---- A[i,j] = sum_k F[k,i,j] * c[k]  ---- */
+    double A_re[4] = {0}, A_im[4] = {0};
     for (int j = 0; j < JP; j++) {
-        const double2 *Fbase = &F[i * (int64_t)JP * KC + j * KC];
         double re = 0.0, im = 0.0;
         for (int k = 0; k < KC; k++) {
-            double2 f  = Fbase[k];
+            int64_t fidx = k * N * JP + i * JP + j;
+            double2 f  = F[fidx];
             double2 ck = c[k];
             re += f.x * ck.x - f.y * ck.y;
             im += f.x * ck.y + f.y * ck.x;
@@ -71,7 +62,7 @@ __global__ void k_fused(
         A_im[j] = im;
     }
 
-    /* ---- S[i] = sum_j |A[i,j]|^2 ---- */
+    /* ---- S[i] ---- */
     double S = 0.0;
     for (int j = 0; j < JP; j++)
         S += A_re[j] * A_re[j] + A_im[j] * A_im[j];
@@ -80,28 +71,26 @@ __global__ void k_fused(
     double p_val = S / N_s * pur + B[i] / N_b * (1.0 - pur);
     if (p_val < 1e-300) p_val = 1e-300;
 
-    /* ---- NLL contribution ---- */
-    double nll_i = -w[i] * log(p_val);
-
-    /* ---- G[i,j] = (w[i]/P[i]) * A[i,j]  (write to global) ---- */
+    /* ---- G[i,j] ---- */
     double ratio = w[i] / p_val;
     for (int j = 0; j < JP; j++)
         G[i * JP + j] = cset(A_re[j] * ratio, A_im[j] * ratio);
 
-    /* ---- S_corr contribution ---- */
+    /* ---- NLL ---- */
+    double nll_i = -w[i] * log(p_val);
+
+    /* ---- S_corr ---- */
     double scorr_i = w[i] * S / p_val;
 
     /* ---- Optional P output ---- */
     if (P_out) P_out[i] = p_val;
 
-    /* ---- Warp-level reduction for NLL ---- */
-    /* Sum nll_i within warp, then first thread does atomicAdd */
+    /* ---- Warp reduction ---- */
     for (int offset = 16; offset > 0; offset >>= 1)
         nll_i += __shfl_down_sync(0xffffffff, nll_i, offset);
     if ((threadIdx.x & 31) == 0)
         atomicAdd(nll_out, nll_i);
 
-    /* ---- Warp-level reduction for S_corr ---- */
     for (int offset = 16; offset > 0; offset >>= 1)
         scorr_i += __shfl_down_sync(0xffffffff, scorr_i, offset);
     if ((threadIdx.x & 31) == 0)
@@ -110,11 +99,41 @@ __global__ void k_fused(
 
 /* ==================== gradient kernel =========================== */
 
-/* Conjugate complex vector (for ZGEMV trick) */
-__global__ void k_conjvec(const double2 *in, double2 *out, int64_t N) {
-    int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
-    if (i >= N) return;
-    out[i] = cset(in[i].x, -in[i].y);
+/*
+ * Gradient with coalesced F access.
+ * F stored as (KC, N, JP).
+ * One BLOCK per k value, threads cover different i values.
+ * Warp-level reduction within each block, single atomicAdd per k.
+ */
+__global__ void k_grad_coalesced(
+    const double2 *F,       /* (KC, N, JP) */
+    const double2 *G,       /* (N, JP)     */
+    double2       *g,       /* (KC,)       */
+    int64_t N, int JP, int KC)
+{
+    int k = blockIdx.x;
+    int tid = threadIdx.x;
+    int bsize = blockDim.x;
+
+    double re = 0.0, im = 0.0;
+    for (int64_t i = tid; i < N; i += bsize) {
+        for (int j = 0; j < JP; j++) {
+            double2 f  = F[k * N * JP + i * JP + j];
+            double2 gv = G[i * JP + j];
+            re += f.x * gv.x + f.y * gv.y;
+            im += f.x * gv.y - f.y * gv.x;
+        }
+    }
+
+    /* Warp-level reduction */
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        re += __shfl_down_sync(0xffffffff, re, offset);
+        im += __shfl_down_sync(0xffffffff, im, offset);
+    }
+    if ((tid & 31) == 0) {
+        atomicAdd(&g[k].x, re);
+        atomicAdd(&g[k].y, im);
+    }
 }
 
 /* ==================== Host helpers ============================== */
@@ -155,8 +174,8 @@ struct FpwFitter {
     int     jp, kc;
     double  pur, Nb, Ns;
 
-    /* GPU-resident data */
-    double2 *dF;       /* (nd, jp, kc)  complex */
+    /* GPU-resident data — F stored as (KC, N, JP) */
+    double2 *dF;       /* (kc, nd, jp)  complex */
     double  *dw;       /* (nd,)                  */
     double  *dB;       /* (nd,)                  */
     double2 *hM;       /* (kc, kc) host copy     */
@@ -168,8 +187,6 @@ struct FpwFitter {
     double  *dscorr;   /* (1,)                   */
     double2 *dg;       /* (kc,)     gradient     */
     double2 *dc;       /* (kc,)     coupling     */
-    double2 *dGconj;   /* (nd*jp,)  conj(G) for ZGEMV */
-    double2 *dz;       /* (kc,)     ZGEMV output  */
 
     cublasHandle_t hdl;
     cudaStream_t   strm;
@@ -219,7 +236,7 @@ int fpw_create(int64_t nd, int jp, int kc,
     if (cb != CUBLAS_STATUS_SUCCESS) goto fail;
     cublasSetStream(f->hdl, f->strm);
 
-    szF  = (int64_t)nd * jp * kc * sizeof(double2);
+    szF  = (int64_t)kc * nd * jp * sizeof(double2);  /* (KC, N, JP) */
     sz1  = (int64_t)nd * sizeof(double);
     szG  = (int64_t)nd * jp * sizeof(double2);
     szg  = (int64_t)kc  * sizeof(double2);
@@ -236,12 +253,28 @@ int fpw_create(int64_t nd, int jp, int kc,
     DA(dscorr, sizeof(double));
     DA(dg,     szg);
     DA(dc,     szg);
-    DA(dGconj, szG);   /* (nd*jp,) */
-    DA(dz,     szg);   /* (kc,)    */
     #undef DA
 
-    ce = cudaMemcpyAsync(f->dF, Fd, szF, cudaMemcpyHostToDevice, f->strm);
-    if (ce != cudaSuccess) goto fail;
+    /* ---- Transpose and upload F: (N, JP, KC) → (KC, N, JP) ---- */
+    {
+        double2 *h_F_trans = (double2 *)malloc((int64_t)kc * nd * jp * sizeof(double2));
+        if (!h_F_trans) { ce = cudaErrorMemoryAllocation; goto fail; }
+        const double2 *F_in = (const double2 *)Fd;
+        for (int64_t k = 0; k < kc; k++) {
+            for (int64_t i = 0; i < nd; i++) {
+                for (int j = 0; j < jp; j++) {
+                    h_F_trans[k * nd * jp + i * jp + j] =
+                        F_in[i * jp * kc + j * kc + k];
+                }
+            }
+        }
+        ce = cudaMemcpyAsync(f->dF, h_F_trans,
+                             (int64_t)kc * nd * jp * sizeof(double2),
+                             cudaMemcpyHostToDevice, f->strm);
+        free(h_F_trans);
+        if (ce != cudaSuccess) goto fail;
+    }
+
     ce = cudaMemcpyAsync(f->dw, wd, sz1, cudaMemcpyHostToDevice, f->strm);
     if (ce != cudaSuccess) goto fail;
     ce = cudaMemcpyAsync(f->dB, Bd, sz1, cudaMemcpyHostToDevice, f->strm);
@@ -269,8 +302,6 @@ void fpw_destroy(FpwFitter *f) {
     cudaFree(f->dscorr);
     cudaFree(f->dg);
     cudaFree(f->dc);
-    cudaFree(f->dGconj);
-    cudaFree(f->dz);
     free(f->hM);
     if (f->hdl)  cublasDestroy(f->hdl);
     if (f->strm) cudaStreamDestroy(f->strm);
@@ -285,11 +316,9 @@ int fpw_evaluate(FpwFitter *f,
                  double *gr, double *gi,
                  double *P_out)
 {
-    cublasStatus_t cb;
     cudaError_t    ce;
     int    kc = f->kc, jp = f->jp;
     int64_t nd = f->nd;
-    int64_t nj = nd * jp;
 
     /* ---- Copy c to GPU ---- */
     double2 *h_c = (double2 *)malloc(kc * sizeof(double2));
@@ -310,50 +339,22 @@ int fpw_evaluate(FpwFitter *f,
     /* ---- Zero GPU accumulators ---- */
     cudaMemsetAsync(f->dnll,   0, sizeof(double), f->strm);
     cudaMemsetAsync(f->dscorr, 0, sizeof(double), f->strm);
+    cudaMemsetAsync(f->dg,     0, kc * sizeof(double2), f->strm);
 
-    /* ---- FUSED kernel: A → S → P → NLL → G → S_corr ---- */
-    /* Note: always write P to device buffer dP; copy to host P_out later */
+    /* ---- FUSED kernel ---- */
     { int nb, nt; lcfg(nd, &nb, &nt);
       k_fused<<<nb, nt, 0, f->strm>>>(
-          f->dF, f->dc,
-          f->dB, f->dw,
-          f->dG, f->dP,
-          f->dnll, f->dscorr,
-          nd, jp, kc,
-          f->Ns, f->Nb, f->pur);
-    }
+          f->dF, f->dc, f->dB, f->dw,
+          f->dG, f->dP, f->dnll, f->dscorr,
+          nd, jp, kc, f->Ns, f->Nb, f->pur,
+          (int64_t)kc * nd * jp); }
+    cudaStreamSynchronize(f->strm);
 
-    /* ---- Gradient via cuBLAS ZGEMV ----
-     * g[k] = sum_{i,j} conj(F[i,j,k]) * G[i,j]
-     *
-     * F row-maj (nd, jp, kc) → cuBLAS sees col-maj (kc, nj).
-     * OP_N: z(kc) = A(kc,nj) @ conj(G)(nj)
-     *   z[k] = sum_idx F[idx,k] * conj(G[idx])
-     *   conj(z[k]) = sum_idx conj(F[idx,k]) * G[idx]  ✓
-     */
+    /* ---- Gradient kernel (coalesced F access) ---- */
     {
-        /* conj(G) */
-        { int nb, nt; lcfg(nj, &nb, &nt);
-          k_conjvec<<<nb, nt, 0, f->strm>>>(f->dG, f->dGconj, nj); }
-
-        /* ZGEMV: z = F @ conj(G) */
-        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-        cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
-        cb = cublasZgemv(f->hdl, CUBLAS_OP_N,
-                         kc, (int)nj,
-                         &alpha,
-                         (const cuDoubleComplex *)f->dF, kc,
-                         (const cuDoubleComplex *)f->dGconj, 1,
-                         &beta,
-                         (cuDoubleComplex *)f->dz, 1);
-        if (cb != CUBLAS_STATUS_SUCCESS) {
-            free(h_c); free(dNs_h);
-            return FPW_ERR_CUBLAS;
-        }
-
-        /* g = conj(z) */
-        { int nb, nt; lcfg(kc, &nb, &nt);
-          k_conjvec<<<nb, nt, 0, f->strm>>>(f->dz, f->dg, kc); }
+        int threads = 256;
+        k_grad_coalesced<<<kc, threads, 0, f->strm>>>(
+            f->dF, f->dG, f->dg, nd, jp, kc);
     }
 
     /* ---- Copy results back ---- */
@@ -378,7 +379,6 @@ int fpw_evaluate(FpwFitter *f,
 
     cudaStreamSynchronize(f->strm);
 
-    /* ---- Assemble gradient ---- */
     p   = f->pur;
     Ns  = f->Ns;
     Ns2 = Ns * Ns;
