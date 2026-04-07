@@ -1,8 +1,13 @@
 """
 Test: validate CUDA fitter against pure NumPy reference implementation.
 """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import numpy as np
 import time
+from fpwfitter import FpwFitter, compute_M
 
 # ---------------------------------------------------------------------------
 # Pure NumPy reference
@@ -100,7 +105,7 @@ def test_small():
     # CUDA
     try:
         from fpwfitter import FpwFitter
-        fitter = FpwFitter(F_data, F_mc, w_data, w_mc, B_data, B_mc, purity)
+        fitter = FpwFitter.from_mc(F_data, F_mc, w_data, w_mc, B_data, B_mc, purity)
         cuda_nll, cuda_grad = fitter.evaluate(c)
         print(f"\nCUDA:       NLL = {cuda_nll:.6f}")
         print(f"            N_s = {fitter.N_s:.4f},  N_b = {fitter.N_b:.4f}")
@@ -147,7 +152,7 @@ def test_performance():
         from fpwfitter import FpwFitter
 
         t0 = time.perf_counter()
-        fitter = FpwFitter(F_data, F_mc, w_data, w_mc, B_data, B_mc, purity)
+        fitter = FpwFitter.from_mc(F_data, F_mc, w_data, w_mc, B_data, B_mc, purity)
         t_create = time.perf_counter() - t0
         print(f"  Create (pre-compute): {t_create:.3f} s")
 

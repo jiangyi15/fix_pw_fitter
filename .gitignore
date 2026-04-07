@@ -1,0 +1,31 @@
+# Build artifacts
+*.so
+*.pyc
+__pycache__/
+**/__pycache__/
+.cu_hash
+
+# LaTeX build outputs
+DERIVATION.aux
+DERIVATION.log
+DERIVATION.out
+DERIVATION.pdf
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.qwen/
+
+# OS
+.fuse_hidden*
+
+# Temp files
+test_file.py
+
+# Python packaging
+*.egg-info/
+dist/
+build/

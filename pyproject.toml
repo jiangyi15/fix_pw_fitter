@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fpwfitter"
+version = "0.1.0"
+description = "Fixed Partial Waves Fitter — GPU-accelerated likelihood and gradient"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "cffi>=1.15",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
