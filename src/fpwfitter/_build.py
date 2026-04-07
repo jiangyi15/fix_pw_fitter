@@ -73,8 +73,12 @@ def _needs_rebuild() -> bool:
 
 
 def _cu_hash() -> str:
-    """SHA-256 of the .cu file (fast change detection)."""
-    return hashlib.sha256(_CU.read_bytes()).hexdigest()
+    """SHA-256 of all .cu source files (fast change detection)."""
+    h = hashlib.sha256(_CU.read_bytes())
+    mp_cu = _PKG_DIR / "fpwfitter_mp.cu"
+    if mp_cu.exists():
+        h.update(mp_cu.read_bytes())
+    return h.hexdigest()
 
 
 def _build() -> None:
