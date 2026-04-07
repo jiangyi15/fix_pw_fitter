@@ -7,18 +7,18 @@ complex coupling coefficients c_k, and computes -log L and its gradient.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Optional
 
 import numpy as np
 from scipy.optimize import minimize, OptimizeResult
 
 from .parameters import Parameters
+from .fit_fractions import FitFractions
 
 
 class Fitter:
     """Combines Parameters + FpwFitter for end-to-end fitting.
-
+    
     A thin wrapper that connects parameter conversion (x → c_k)
     to fitter evaluation (c_k → -log L, d(-log L)/dc*).
 
@@ -41,61 +41,58 @@ class Fitter:
         self.fitter = fitter
         self._result: Optional[OptimizeResult] = None
 
+    def _get_cov_matrix(self) -> np.ndarray:
+        """Retrieve or compute the covariance matrix (inverse Hessian)."""
+        if hasattr(self, '_result') and self._result is not None:
+            res = self._result
+            if hasattr(res, 'hess_inv') and res.hess_inv is not None:
+                return np.asarray(res.hess_inv)
+        
+        # Fallback to numerical calculation if not available
+        try:
+            return self.compute_hess_inv()
+        except Exception:
+            return np.eye(self.parameters.n_free)
+
+    def _get_fit_fractions_obj(
+        self,
+        M: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> FitFractions:
+        """Helper to create a FitFractions instance with current context."""
+        if M is None:
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError(
+                    "M is not available. Please pass M explicitly."
+                )
+
+        if cov_matrix is None:
+            cov_matrix = self._get_cov_matrix()
+
+        return FitFractions(self.parameters, M, cov_matrix=cov_matrix)
+
     def get_couplings(self, x: np.ndarray) -> np.ndarray:
-        """Get complex coupling coefficients c_k from real params x.
-
-        Args:
-            x: real parameter values [r_0, phi_0, r_1, phi_1, ...]
-
-        Returns:
-            c: complex128 array of shape (n_components,)
-        """
+        """Get complex coupling coefficients c_k from real params x."""
         return self.parameters.build_c(x)
 
     def objective(self, x: np.ndarray) -> float:
-        """Compute -log L from real parameters x.
-
-        Args:
-            x: real parameter values, shape (n_free_real,)
-
-        Returns:
-            nll: negative log-likelihood (float)
-        """
+        """Compute -log L from real parameters x."""
         c = self.parameters.build_c(x)
         nll, _ = self.fitter.evaluate(c)
         return float(nll)
 
     def gradient(self, x: np.ndarray) -> np.ndarray:
-        """Compute d(-log L)/dx from real parameters x.
-
-        Uses the chain rule:
-            d(-log L)/dx_j = 2 Re( sum_k g_k * (dc_k/dx_j)* )
-        where g_k = d(-log L)/dc*_k from the fitter.
-
-        Args:
-            x: real parameter values, shape (n_free_real,)
-
-        Returns:
-            grad: real gradient, shape (n_free_real,)
-        """
+        """Compute d(-log L)/dx from real parameters x."""
         c = self.parameters.build_c(x)
-        _, g = self.fitter.evaluate(c)  # g = d(-log L)/dc*
+        _, g = self.fitter.evaluate(c)
         return self.parameters.gradient_chain_rule(g, x)
 
     def objective_and_gradient(
         self, x: np.ndarray
     ) -> tuple[float, np.ndarray]:
-        """Compute both -log L and gradient efficiently.
-
-        Only calls fitter.evaluate once.
-
-        Args:
-            x: real parameter values, shape (n_free_real,)
-
-        Returns:
-            nll: float
-            grad: real gradient, shape (n_free_real,)
-        """
+        """Compute both -log L and gradient efficiently."""
         c = self.parameters.build_c(x)
         nll, g = self.fitter.evaluate(c)
         grad = self.parameters.gradient_chain_rule(g, x)
@@ -108,27 +105,11 @@ class Fitter:
         options: Optional[dict] = None,
         **kwargs,
     ) -> OptimizeResult:
-        """Run optimization using scipy.optimize.minimize.
-
-        Results are cached and accessible via convenience methods
-        (couplings, uncertainties, correlations, etc.).
-
-        Args:
-            x0: initial real parameter values [r_0, phi_0, ...].
-                Defaults to [1.0, 0.0, 1.0, 0.0, ...] (r=1, phi=0).
-            method: optimization method. Default: 'BFGS' (provides
-                inverse Hessian for uncertainty estimation).
-            options: passed to scipy.optimize.minimize.
-            **kwargs: additional kwargs for scipy.optimize.minimize.
-
-        Returns:
-            OptimizeResult with x, fun, jac, hess_inv, etc.
-        """
+        """Run optimization using scipy.optimize.minimize."""
         if x0 is None:
             n = self.parameters.n_free
             x0 = np.zeros(n)
-            x0[0::2] = 1.0  # r = 1
-            # phi = 0 by default
+            x0[0::2] = 1.0
 
         if options is None:
             options = {}
@@ -137,40 +118,17 @@ class Fitter:
             fun=self.objective_and_gradient,
             x0=x0,
             method=method,
-            jac=True,  # objective_and_gradient returns (f, grad)
+            jac=True,
             options=options,
             **kwargs,
         )
         return self._result
 
-    def _require_fit(self) -> OptimizeResult:
-        """Raise if fit() hasn't been called."""
-        if self._result is None:
-            raise RuntimeError(
-                "No fit results available. Call fit() first."
-            )
-        return self._result
-
     def uncertainties(self, result: Optional[OptimizeResult] = None) -> np.ndarray:
-        """Extract parameter uncertainties from fit result.
-
-        For BFGS (and other quasi-Newton methods), uses result.hess_inv
-        (inverse Hessian at optimum).
-
-        For -log L minimization, the Hessian at the minimum approximates
-        the Fisher Information Matrix, so:
-            Cov(θ) ≈ H^{-1} = hess_inv
-            σ_j = sqrt(Cov[j,j])
-
-        Args:
-            result: OptimizeResult from fit(). Defaults to cached result.
-
-        Returns:
-            sigma: 1-sigma uncertainties for each real parameter,
-                   shape (n_free_real,)
-        """
+        """Extract parameter uncertainties from fit result."""
         if result is None:
             result = self._require_fit()
+
         if not hasattr(result, "hess_inv") or result.hess_inv is None:
             raise ValueError(
                 "No hess_inv in result. "
@@ -178,25 +136,16 @@ class Fitter:
                 "to get uncertainty estimates."
             )
 
-        # hess_inv is the inverse Hessian ≈ covariance matrix
         hess_inv = np.asarray(result.hess_inv)
-
-        # Ensure symmetric
         hess_inv = (hess_inv + hess_inv.T) / 2.0
-
-        # Covariance diagonal → variances → uncertainties
-        variances = np.diag(hess_inv)
-
-        # Guard against negative variances (numerical issues)
-        variances = np.maximum(variances, 0.0)
-
+        variances = np.maximum(np.diag(hess_inv), 0.0)
         return np.sqrt(variances)
 
     # ---- Cached result convenience methods ----
 
     @property
     def result(self) -> OptimizeResult:
-        """Cached fit result. Raises if fit() hasn't been called."""
+        """Cached fit result."""
         return self._require_fit()
 
     @property
@@ -210,25 +159,11 @@ class Fitter:
         return self._require_fit().x.copy()
 
     def best_couplings(self) -> np.ndarray:
-        """Complex coupling coefficients c_k at best fit.
-
-        Returns:
-            c: complex128 array of shape (n_components,)
-        """
+        """Complex coupling coefficients c_k at best fit."""
         return self.parameters.build_c(self._require_fit().x)
 
     def correlations(self, result: Optional[OptimizeResult] = None) -> np.ndarray:
-        """Parameter correlation matrix from fit.
-
-        Uses hess_inv to compute:
-            corr[i,j] = cov[i,j] / (sigma_i * sigma_j)
-
-        Args:
-            result: OptimizeResult. Defaults to cached result.
-
-        Returns:
-            corr: correlation matrix, shape (n_free_real, n_free_real)
-        """
+        """Parameter correlation matrix from fit."""
         if result is None:
             result = self._require_fit()
 
@@ -236,23 +171,13 @@ class Fitter:
         hess_inv = (hess_inv + hess_inv.T) / 2.0
         variances = np.maximum(np.diag(hess_inv), 0.0)
         sigma = np.sqrt(variances)
-
-        # Avoid division by zero
         sigma = np.where(sigma > 0, sigma, 1.0)
+        
         corr = hess_inv / np.outer(sigma, sigma)
-        # Clamp to [-1, 1]
-        corr = np.clip(corr, -1.0, 1.0)
-        return corr
+        return np.clip(corr, -1.0, 1.0)
 
     def predict_P(self, x: Optional[np.ndarray] = None) -> np.ndarray:
-        """Compute P_i values at given or best-fit parameters.
-
-        Args:
-            x: real parameter values. Defaults to best-fit x.
-
-        Returns:
-            P: float64 array of shape (n_data,)
-        """
+        """Compute P_i values at given or best-fit parameters."""
         if x is None:
             x = self._require_fit().x
         c = self.parameters.build_c(x)
@@ -260,22 +185,7 @@ class Fitter:
         return P
 
     def compute_hess_inv(self, x: Optional[np.ndarray] = None, epsilon: float = 1e-4) -> np.ndarray:
-        """Calculate the inverse Hessian matrix using the 3-point method.
-
-        Computes the Hessian H_ij = d^2(-ln L) / dx_i dx_j 
-        via finite difference of the gradients, then returns its inverse.
-
-        Formula:
-            H_ij = [g_j(x + e*e_i) - g_j(x - e*e_i)] / (2*e)
-
-        Args:
-            x: Real parameter values. Defaults to best-fit x.
-            epsilon: Finite difference step size.
-
-        Returns:
-            hess_inv: Inverse Hessian matrix (covariance matrix approximation),
-                      shape (n_free_real, n_free_real).
-        """
+        """Calculate the inverse Hessian matrix using the 3-point method."""
         if x is None:
             x = self._require_fit().x
 
@@ -285,15 +195,11 @@ class Fitter:
         for i in range(n):
             dx = np.zeros(n)
             dx[i] = epsilon
-
             g_plus = self.gradient(x + dx)
             g_minus = self.gradient(x - dx)
-
             H[:, i] = (g_plus - g_minus) / (2.0 * epsilon)
 
-        # Symmetrize to handle numerical noise
         H = 0.5 * (H + H.T)
-
         try:
             return np.linalg.inv(H)
         except np.linalg.LinAlgError:
@@ -302,54 +208,11 @@ class Fitter:
     def gradient_of_partial_R(
         self, component_indices: list[int], M: Optional[np.ndarray] = None, x: Optional[np.ndarray] = None
     ) -> np.ndarray:
-        """Calculate the gradient of the partial intensity R = c^† M_sub c.
-
-        R represents the contribution to the signal normalization from a subset of 
-        components. For k not in `component_indices`, the contribution is ignored.
-
-        Args:
-            component_indices: List of component indices (integers) to include.
-            M: The overlap matrix (n_comp x n_comp). 
-               If None, tries to retrieve from the fitter.
-            x: Real parameter values. Defaults to best-fit x.
-
-        Returns:
-            grad: Real gradient vector of shape (n_free_real,).
-        """
+        """Calculate the gradient of the partial intensity R = c^† M_sub c."""
+        ff = self._get_fit_fractions_obj(M=M)
         if x is None:
             x = self._require_fit().x
-            
-        if M is None:
-            # Attempt to retrieve M from the underlying fitter
-            if hasattr(self.fitter, "_M"):
-                M = self.fitter._M
-            else:
-                raise ValueError(
-                    "M is not available. Please pass M explicitly or ensure "
-                    "the fitter stores it as _M."
-                )
-
-        c = self.parameters.build_c(x)
-        n_comp = len(c)
-        
-        # Create mask for active components
-        mask = np.zeros(n_comp, dtype=bool)
-        for idx in component_indices:
-            if not (0 <= idx < n_comp):
-                raise IndexError(f"Component index {idx} is out of range [0, {n_comp})")
-            mask[idx] = True
-            
-        # Construct M_sub: only rows/cols in mask are non-zero
-        M_sub = np.zeros_like(M)
-        M_sub[np.ix_(mask, mask)] = M[np.ix_(mask, mask)]
-        
-        # Compute g_k = dR / dc_k*
-        # R = sum_{p,q} c_p* M_sub_{pq} c_q
-        # dR/dc_k* = sum_q M_sub_{kq} c_q = (M_sub c)_k
-        g = M_sub @ c
-        
-        # Apply chain rule to get gradient wrt real parameters x
-        return self.parameters.gradient_chain_rule(g, x)
+        return ff._gradient_of_R_sub(component_indices, x)
 
     def compute_fit_fractions(
         self,
@@ -358,99 +221,11 @@ class Fitter:
         x: Optional[np.ndarray] = None,
         cov_matrix: Optional[np.ndarray] = None,
     ) -> list[dict]:
-        """Calculate fit fractions and their uncertainties for groups of components.
-
-        The fit fraction for a group of components $S$ is defined as:
-            $FF_S = R_S / R_{total}$
-        where $R = c^\\dagger M c$, and $R_S$ is the contribution from components in $S$.
-        $R_S$ includes all intensity and interference terms within the group.
-
-        Uncertainty is calculated using the error propagation formula:
-            $\\sigma = \\sqrt{ g^T V g }$
-        where $g = \\nabla_x FF_S$ and $V$ is the covariance matrix (inverse Hessian).
-
-        Args:
-            component_groups: List of component index lists, e.g., `[[0, 1], [2]]`.
-            M: Overlap matrix. If None, tries to retrieve from the fitter.
-            x: Real parameter values. Defaults to best-fit x.
-            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
-                        or falls back to `compute_hess_inv`.
-
-        Returns:
-            List of dictionaries, each containing:
-                - "indices": The component indices for the group.
-                - "value": The fit fraction value.
-                - "error": The estimated uncertainty.
-                - "gradient": The gradient of the fit fraction wrt real parameters x.
-        """
+        """Calculate fit fractions and their uncertainties for groups of components."""
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
         if x is None:
             x = self._require_fit().x
-
-        if M is None:
-            if hasattr(self.fitter, "_M"):
-                M = self.fitter._M
-            else:
-                raise ValueError(
-                    "M is not available. Please pass M explicitly."
-                )
-
-        c = self.parameters.build_c(x)
-        n_comp = len(c)
-        
-        # Calculate Total R and its gradient
-        R_total = np.real(c.conj() @ (M @ c))
-        all_indices = list(range(n_comp))
-        grad_R_total = self.gradient_of_partial_R(all_indices, M=M, x=x)
-
-        # Determine Covariance Matrix V
-        if cov_matrix is not None:
-            V = np.asarray(cov_matrix)
-        else:
-            if hasattr(self, '_result') and self._result is not None:
-                res = self._result
-                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
-                    V = np.asarray(res.hess_inv)
-                else:
-                    V = self.compute_hess_inv(x=x)
-            else:
-                V = self.compute_hess_inv(x=x)
-
-        # Symmetrize V
-        V = 0.5 * (V + V.T)
-
-        results = []
-        for group in component_groups:
-            indices_list = list(group)
-            for idx in indices_list:
-                if not (0 <= idx < n_comp):
-                    raise IndexError(f"Component index {idx} is out of range [0, {n_comp})")
-
-            # Calculate R_sub by zeroing components not in the group
-            c_sub = np.zeros_like(c)
-            c_sub[indices_list] = c[indices_list]
-            R_sub = np.real(c_sub.conj() @ (M @ c_sub))
-            
-            # Gradient of R_sub
-            grad_R_sub = self.gradient_of_partial_R(indices_list, M=M, x=x)
-            
-            # Fit Fraction
-            FF = R_sub / R_total
-            
-            # Gradient of FF: d(R_sub/R_total) = (dR_sub - FF * dR_total) / R_total
-            grad_FF = (grad_R_sub - FF * grad_R_total) / R_total
-            
-            # Uncertainty: sqrt( g^T V g )
-            variance = grad_FF @ V @ grad_FF
-            sigma = np.sqrt(max(0.0, np.real(variance)))
-            
-            results.append({
-                "indices": indices_list,
-                "value": FF,
-                "error": sigma,
-                "gradient": grad_FF.tolist(),
-            })
-
-        return results
+        return ff.compute(x, component_groups)
 
     def compute_interference_fractions(
         self,
@@ -459,306 +234,112 @@ class Fitter:
         x: Optional[np.ndarray] = None,
         cov_matrix: Optional[np.ndarray] = None,
     ) -> list[dict]:
-        """Calculate interference fit fractions and their uncertainties.
-
-        The interference fit fraction between two components $i$ and $j$ is defined as:
-            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
-        where $FF_S$ is the fit fraction of the set of components $S$.
-        This isolates the interference term (cross-term) contribution between the two components.
-
-        Args:
-            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
-            M: Overlap matrix. If None, tries to retrieve from the fitter.
-            x: Real parameter values. Defaults to best-fit x.
-            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` or `compute_hess_inv`.
-
-        Returns:
-            List of dictionaries, each containing:
-                - "indices": The component indices [i, j].
-                - "value": The interference fit fraction value.
-                - "error": The estimated uncertainty.
-                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
-        """
+        """Calculate interference fit fractions and their uncertainties."""
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
         if x is None:
             x = self._require_fit().x
+        return ff.compute_interference(x, component_pairs)
 
-        if M is None:
-            if hasattr(self.fitter, "_M"):
-                M = self.fitter._M
-            else:
-                raise ValueError("M is not available. Please pass M explicitly.")
-
-        # Ensure component_pairs is valid
-        for pair in component_pairs:
-            if len(pair) != 2:
-                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
-
-        # Compute V if not provided
-        if cov_matrix is not None:
-            V = np.asarray(cov_matrix)
-        else:
-            if hasattr(self, '_result') and self._result is not None:
-                res = self._result
-                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
-                    V = np.asarray(res.hess_inv)
-                else:
-                    V = self.compute_hess_inv(x=x)
-            else:
-                V = self.compute_hess_inv(x=x)
-        V = 0.5 * (V + V.T)
-
-        results = []
-        for pair in component_pairs:
-            i, j = pair[0], pair[1]
-            
-            # Compute gradients for FF_{i,j}, FF_{i}, FF_{j}
-            grad_ff_ij = self.compute_fit_fractions([[i, j]], M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
-            grad_ff_i  = self.compute_fit_fractions([[i]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
-            grad_ff_j  = self.compute_fit_fractions([[j]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
-
-            # Compute values for FF_{i,j}, FF_{i}, FF_{j}
-            ff_ij = self.compute_fit_fractions([[i, j]], M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
-            ff_i  = self.compute_fit_fractions([[i]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
-            ff_j  = self.compute_fit_fractions([[j]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
-            
-            # Interference value and gradient
-            val = ff_ij - ff_i - ff_j
-            grad = grad_ff_ij - grad_ff_i - grad_ff_j
-            
-            # Uncertainty
-            variance = grad @ V @ grad
-            sigma = np.sqrt(max(0.0, np.real(variance)))
-            
-            results.append({
-                "indices": [i, j],
-                "value": val,
-                "error": sigma,
-                "gradient": grad.tolist(),
-            })
-
-        return results
-
-    def compute_interference_fractions(
+    def compute_fit_fraction_matrix(
         self,
-        component_pairs: list[list[int]],
+        component_groups: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> dict:
+        """Calculate a matrix of fit fractions and interferences.
+
+        For input `[[0, 1], [2, 3]]`:
+            - Diagonal[i, i] = FF of the i-th group (e.g., FF[0, 1]).
+            - Off-diagonal[i, j] = Interference between groups i and j.
+              Interference = FF[group_i + group_j] - FF[group_i] - FF[group_j].
+
+        Args:
+            component_groups: List of component index lists.
+            M: Overlap matrix.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V.
+
+        Returns:
+            Dictionary with "matrix", "errors", "groups".
+        """
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
+        if x is None:
+            x = self._require_fit().x
+        return ff.compute_matrix(x, component_groups)
+
+    def compute_ratios(
+        self,
+        numerator_groups: list[list[int]],
+        denominator_group: list[int],
         M: Optional[np.ndarray] = None,
         x: Optional[np.ndarray] = None,
         cov_matrix: Optional[np.ndarray] = None,
     ) -> list[dict]:
-        """Calculate interference fit fractions and their uncertainties.
-
-        The interference fit fraction between two components $i$ and $j$ is defined as:
-            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
-        where $FF_S$ is the fit fraction of the set of components $S$.
-        This isolates the interference term (cross-term) contribution between the two components.
-
-        Uncertainty is calculated using the error propagation formula:
-            $\sigma = \sqrt{ g^T V g }$
-        where $g = \nabla_x I_{i,j}$ and $V$ is the covariance matrix.
-
-        Args:
-            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
-            M: Overlap matrix. If None, tries to retrieve from the fitter.
-            x: Real parameter values. Defaults to best-fit x.
-            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
-                        or falls back to `compute_hess_inv`.
-
-        Returns:
-            List of dictionaries, each containing:
-                - "indices": The component indices [i, j].
-                - "value": The interference fit fraction value.
-                - "error": The estimated uncertainty.
-                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
-        """
+        """Calculate ratios of fit fractions: R = FF_num / FF_den."""
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
         if x is None:
             x = self._require_fit().x
+        return ff.compute_ratios(x, numerator_groups, denominator_group)
 
-        if M is None:
-            if hasattr(self.fitter, "_M"):
-                M = self.fitter._M
-            else:
-                raise ValueError(
-                    "M is not available. Please pass M explicitly."
-                )
-
-        # Ensure component_pairs is valid
-        for pair in component_pairs:
-            if len(pair) != 2:
-                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
-
-        # Determine Covariance Matrix V
-        if cov_matrix is not None:
-            V = np.asarray(cov_matrix)
-        else:
-            if hasattr(self, '_result') and self._result is not None:
-                res = self._result
-                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
-                    V = np.asarray(res.hess_inv)
-                else:
-                    V = self.compute_hess_inv(x=x)
-            else:
-                V = self.compute_hess_inv(x=x)
-
-        # Symmetrize V
-        V = 0.5 * (V + V.T)
-
-        results = []
-        for pair in component_pairs:
-            indices = list(pair)
-            i, j = indices[0], indices[1]
-
-            # We need FF_{i,j}, FF_{i}, FF_{j} and their gradients.
-            # To avoid recomputing V multiple times, we can pass it to compute_fit_fractions
-            # or just compute gradients/values and then combine them.
-            
-            # Helper to get FF value and gradient for a set of indices
-            def get_ff(indices_list):
-                # compute_fit_fractions returns a list of dicts
-                res_list = self.compute_fit_fractions([indices_list], M=M, x=x, cov_matrix=V)
-                res = res_list[0]
-                return res["value"], np.array(res["gradient"])
-
-            val_ij, grad_ij = get_ff([i, j])
-            val_i,  grad_i  = get_ff([i])
-            val_j,  grad_j  = get_ff([j])
-
-            # Interference fit fraction
-            ff_interference = val_ij - val_i - val_j
-            grad_interference = grad_ij - grad_i - grad_j
-
-            # Uncertainty: sqrt( g^T V g )
-            variance = grad_interference @ V @ grad_interference
-            sigma = np.sqrt(max(0.0, np.real(variance)))
-
-            results.append({
-                "indices": indices,
-                "value": ff_interference,
-                "error": sigma,
-                "gradient": grad_interference.tolist(),
-            })
-
-        return results
-
-    def compute_interference_fractions(
+    def compute_fit_fraction_matrix(
         self,
-        component_pairs: list[list[int]],
+        component_groups: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> dict:
+        """Calculate a matrix of fit fractions and interferences.
+
+        For input `[[0, 1], [2, 3]]`:
+            - Diagonal[i, i] = FF of the i-th group (e.g., FF[0, 1]).
+            - Off-diagonal[i, j] = Interference between groups i and j.
+              Interference = FF[group_i + group_j] - FF[group_i] - FF[group_j].
+
+        Args:
+            component_groups: List of component index lists.
+            M: Overlap matrix.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V.
+
+        Returns:
+            Dictionary with "matrix", "errors", "groups".
+        """
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
+        if x is None:
+            x = self._require_fit().x
+        return ff.compute_matrix(x, component_groups)
+
+    def compute_ratios(
+        self,
+        numerator_groups: list[list[int]],
+        denominator_group: list[int],
         M: Optional[np.ndarray] = None,
         x: Optional[np.ndarray] = None,
         cov_matrix: Optional[np.ndarray] = None,
     ) -> list[dict]:
-        """Calculate interference fit fractions and their uncertainties.
-
-        The interference fit fraction between two components $i$ and $j$ is defined as:
-            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
-        where $FF_S$ is the fit fraction of the set of components $S$.
-        This isolates the interference term (cross-term) contribution between the two components.
-
-        Uncertainty is calculated using the error propagation formula:
-            $\sigma = \sqrt{ g^T V g }$
-        where $g = \nabla_x I_{i,j}$ and $V$ is the covariance matrix.
-
-        Args:
-            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
-            M: Overlap matrix. If None, tries to retrieve from the fitter.
-            x: Real parameter values. Defaults to best-fit x.
-            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
-                        or falls back to `compute_hess_inv`.
-
-        Returns:
-            List of dictionaries, each containing:
-                - "indices": The component indices [i, j].
-                - "value": The interference fit fraction value.
-                - "error": The estimated uncertainty.
-                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
-        """
+        """Calculate ratios of fit fractions: R = FF_num / FF_den."""
+        ff = self._get_fit_fractions_obj(M=M, cov_matrix=cov_matrix)
         if x is None:
             x = self._require_fit().x
+        return ff.compute_ratios(x, numerator_groups, denominator_group)
 
-        if M is None:
-            if hasattr(self.fitter, "_M"):
-                M = self.fitter._M
-            else:
-                raise ValueError(
-                    "M is not available. Please pass M explicitly."
-                )
-
-        # Ensure component_pairs is valid
-        for pair in component_pairs:
-            if len(pair) != 2:
-                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
-
-        # Determine Covariance Matrix V
-        if cov_matrix is not None:
-            V = np.asarray(cov_matrix)
-        else:
-            if hasattr(self, '_result') and self._result is not None:
-                res = self._result
-                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
-                    V = np.asarray(res.hess_inv)
-                else:
-                    V = self.compute_hess_inv(x=x)
-            else:
-                V = self.compute_hess_inv(x=x)
-
-        # Symmetrize V
-        V = 0.5 * (V + V.T)
-
-        results = []
-        for pair in component_pairs:
-            indices = list(pair)
-            i, j = indices[0], indices[1]
-
-            # We need FF_{i,j}, FF_{i}, FF_{j} and their gradients.
-            # To avoid recomputing V multiple times, we can pass it to compute_fit_fractions
-            # or just compute gradients/values and then combine them.
-            
-            # Helper to get FF value and gradient for a set of indices
-            def get_ff(indices_list):
-                # compute_fit_fractions returns a list of dicts
-                res_list = self.compute_fit_fractions([indices_list], M=M, x=x, cov_matrix=V)
-                res = res_list[0]
-                return res["value"], np.array(res["gradient"])
-
-            val_ij, grad_ij = get_ff([i, j])
-            val_i,  grad_i  = get_ff([i])
-            val_j,  grad_j  = get_ff([j])
-
-            # Interference fit fraction
-            ff_interference = val_ij - val_i - val_j
-            grad_interference = grad_ij - grad_i - grad_j
-
-            # Uncertainty: sqrt( g^T V g )
-            variance = grad_interference @ V @ grad_interference
-            sigma = np.sqrt(max(0.0, np.real(variance)))
-
-            results.append({
-                "indices": indices,
-                "value": ff_interference,
-                "error": sigma,
-                "gradient": grad_interference.tolist(),
-            })
-
-        return results
+    def _require_fit(self) -> OptimizeResult:
+        """Raise if fit() hasn't been called."""
+        if self._result is None:
+            raise RuntimeError(
+                "No fit results available. Call fit() first."
+            )
+        return self._result
 
     def save_results(self, path: str) -> None:
-        """Save fit results to a JSON file.
-
-        JSON structure:
-            {
-              "value": {"a_r": r_val, "a_phi": phi_val, ...},
-              "error": {"a_r": sigma_r, "a_phi": sigma_phi, ...},
-              "status": {"NLL": nll_value, "Ndf": n_free_real}
-            }
-
-        Args:
-            path: output JSON file path
-        """
+        """Save fit results to a JSON file."""
+        import json
         result = self._require_fit()
         x = result.x
         sigma = self.uncertainties(result)
         params = self.parameters
 
-        # Build value and error dicts
         value = {}
         error = {}
         for i, name in enumerate(params.free_params):
@@ -767,15 +348,12 @@ class Fitter:
             error[f"{name}_r"] = float(sigma[2 * i])
             error[f"{name}_phi"] = float(sigma[2 * i + 1])
 
-        # Ndf is the number of free real parameters
-        ndf = params.n_free
-
         output = {
             "value": value,
             "error": error,
             "status": {
                 "NLL": float(result.fun),
-                "Ndf": ndf,
+                "Ndf": params.n_free,
             },
         }
 
@@ -784,13 +362,7 @@ class Fitter:
 
     @classmethod
     def load_results(cls, path: str) -> dict:
-        """Load fit results from a JSON file.
-
-        Args:
-            path: input JSON file path
-
-        Returns:
-            dict with "value", "error", and "status" keys
-        """
+        """Load fit results from a JSON file."""
+        import json
         with open(path) as f:
             return json.load(f)

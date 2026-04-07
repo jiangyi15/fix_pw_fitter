@@ -385,6 +385,40 @@ def test_fitter_compute_interference_fractions():
     print("✓ test_fitter_compute_interference_fractions")
 
 
+def test_fitter_compute_fit_fraction_matrix():
+    """Test calculation of fit fraction matrix."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+    
+    n_comp = params.n_components
+    groups = [[i] for i in range(n_comp)]
+    res = full.compute_fit_fraction_matrix(groups)
+    
+    assert "matrix" in res
+    assert "errors" in res
+    assert "groups" in res
+    assert res["matrix"].shape == (n_comp, n_comp)
+    assert res["errors"].shape == (n_comp, n_comp)
+    
+    # Diagonal should be fit fractions
+    ffs = full.compute_fit_fractions(groups)
+    for i in range(n_comp):
+        assert np.isclose(res["matrix"][i, i], ffs[i]["value"])
+        
+    # Check off-diagonal: Interference = FF[i,j] - FF[i] - FF[j]
+    for i in range(n_comp):
+        for j in range(i + 1, n_comp):
+            ff_ij = full.compute_fit_fractions([[i, j]])[0]["value"]
+            ff_i = ffs[i]["value"]
+            ff_j = ffs[j]["value"]
+            expected_I = ff_ij - ff_i - ff_j
+            assert np.isclose(res["matrix"][i, j], expected_I)
+            assert np.isclose(res["matrix"][j, i], expected_I)
+
+    print("✓ test_fitter_compute_fit_fraction_matrix")
+
+
 if __name__ == "__main__":
     test_fitter_objective()
     test_fitter_gradient_numerical()
@@ -399,4 +433,5 @@ if __name__ == "__main__":
     test_fitter_gradient_of_partial_R()
     test_fitter_compute_fit_fractions()
     test_fitter_compute_interference_fractions()
+    test_fitter_compute_fit_fraction_matrix()
     print("\n✓ All Fitter tests passed")
