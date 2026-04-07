@@ -64,6 +64,9 @@ def ensure_lib() -> Path:
 def _needs_rebuild() -> bool:
     if not _LIB.exists():
         return True
+    mp_lib = _PKG_DIR / "libfpwfitter_mp.so"
+    if not mp_lib.exists():
+        return True
     if not _HASH.exists():
         return True
     return _HASH.read_text() != _cu_hash()
@@ -77,24 +80,33 @@ def _cu_hash() -> str:
 def _build() -> None:
     sm = _detect_sm()
     nvcc = os.environ.get("NVCC", "nvcc")
-    cmd = [
-        nvcc,
-        "-Xcompiler", "-fPIC",
-        "-shared",
-        "-O3",
-        f"-arch={sm}",
-        str(_CU),
-        "-lcublas",
-        "-o", str(_LIB),
-    ]
-    print(f"[fpwfitter] Building CUDA library ({_CU.name}) "
-          f"for {sm} …", flush=True)
-    t0 = time.perf_counter()
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        print(exc.stderr, file=__import__("sys").stderr)
-        raise RuntimeError(f"nvcc failed (exit {exc.returncode})") from exc
-    elapsed = time.perf_counter() - t0
-    print(f"[fpwfitter] Built {_LIB.name} in {elapsed:.1f}s", flush=True)
-    _HASH.write_text(_cu_hash())
+    for name, sources, extra in [
+        ("libfpwfitter.so", ["fpwfitter.cu"], "-lcublas"),
+        ("libfpwfitter_mp.so", ["fpwfitter_mp.cu"], "-lcublas"),
+    ]:
+        cmd = [
+            nvcc,
+            "-Xcompiler", "-fPIC",
+            "-shared",
+            "-O3",
+            f"-arch={sm}",
+        ]
+        for src in sources:
+            cmd.append(str(_PKG_DIR / src))
+        cmd.extend(extra.split())
+        cmd.extend(["-o", str(_PKG_DIR / name)])
+        print(f"[fpwfitter] Building {name} for {sm} …", flush=True)
+        t0 = time.perf_counter()
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stderr, file=__import__("sys").stderr)
+            raise RuntimeError(f"nvcc failed on {name} (exit {exc.returncode})") from exc
+        elapsed = time.perf_counter() - t0
+        print(f"[fpwfitter] Built {name} in {elapsed:.1f}s", flush=True)
+    # Hash based on both .cu files
+    h = hashlib.sha256(_CU.read_bytes())
+    mp_cu = _PKG_DIR / "fpwfitter_mp.cu"
+    if mp_cu.exists():
+        h.update(mp_cu.read_bytes())
+    _HASH.write_text(h.hexdigest())
