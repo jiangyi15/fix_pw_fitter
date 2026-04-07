@@ -366,8 +366,8 @@ class Fitter:
         $R_S$ includes all intensity and interference terms within the group.
 
         Uncertainty is calculated using the error propagation formula:
-            $\sigma = \sqrt{ g^T V g }$
-        where $g = \nabla_x FF_S$ and $V$ is the covariance matrix (inverse Hessian).
+            $\\sigma = \\sqrt{ g^T V g }$
+        where $g = \\nabla_x FF_S$ and $V$ is the covariance matrix (inverse Hessian).
 
         Args:
             component_groups: List of component index lists, e.g., `[[0, 1], [2]]`.
@@ -447,7 +447,7 @@ class Fitter:
                 "indices": indices_list,
                 "value": FF,
                 "error": sigma,
-                "gradient": grad_FF,
+                "gradient": grad_FF.tolist(),
             })
 
         return results
