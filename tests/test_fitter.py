@@ -184,6 +184,44 @@ def test_fitter_with_chunked():
     print(f"✓ test_fitter_with_chunked (NLL={nll:.2f})")
 
 
+def test_fitter_cached_methods():
+    """Test cached result convenience methods."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    # Before fit, cached methods should raise
+    try:
+        _ = full.best_nll
+        assert False, "Should have raised"
+    except RuntimeError:
+        pass
+
+    # Fit
+    x0 = np.array([1.0, 0.0, 1.0, 0.0])
+    result = full.fit(x0=x0)
+
+    # Test cached methods
+    assert np.isclose(full.best_nll, result.fun)
+    assert np.allclose(full.best_x, result.x)
+
+    c_best = full.best_couplings()
+    assert c_best.shape == (params.n_components,)
+    assert np.all(np.isfinite(c_best))
+
+    corr = full.correlations()
+    assert corr.shape == (params.n_free, params.n_free)
+    assert np.allclose(np.diag(corr), 1.0), "Diagonal should be 1"
+    assert np.all(np.isfinite(corr))
+    assert np.all(corr >= -1.0) and np.all(corr <= 1.0)
+
+    P = full.predict_P()
+    assert P.shape == (F_data.shape[0],)
+    assert np.all(np.isfinite(P))
+    assert np.all(P > 0)
+
+    print(f"✓ test_fitter_cached_methods (corr diag={np.diag(corr)[:2]})")
+
+
 if __name__ == "__main__":
     test_fitter_objective()
     test_fitter_gradient_numerical()
@@ -192,4 +230,5 @@ if __name__ == "__main__":
     test_fitter_uncertainties()
     test_fitter_get_couplings()
     test_fitter_with_chunked()
+    test_fitter_cached_methods()
     print("\n✓ All Fitter tests passed")

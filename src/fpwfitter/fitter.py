@@ -23,6 +23,9 @@ class Fitter:
 
     Works with any fitter that has an evaluate(c) method returning
     (nll, grad) where grad = d(-log L)/dc*.
+
+    After calling fit(), results are cached and accessible via
+    convenience methods (couplings, uncertainties, correlations, etc.).
     """
 
     def __init__(self, parameters: Parameters, fitter: Any):
@@ -35,6 +38,7 @@ class Fitter:
         """
         self.parameters = parameters
         self.fitter = fitter
+        self._result: Optional[OptimizeResult] = None
 
     def get_couplings(self, x: np.ndarray) -> np.ndarray:
         """Get complex coupling coefficients c_k from real params x.
@@ -105,6 +109,9 @@ class Fitter:
     ) -> OptimizeResult:
         """Run optimization using scipy.optimize.minimize.
 
+        Results are cached and accessible via convenience methods
+        (couplings, uncertainties, correlations, etc.).
+
         Args:
             x0: initial real parameter values [r_0, phi_0, ...].
                 Defaults to [1.0, 0.0, 1.0, 0.0, ...] (r=1, phi=0).
@@ -125,7 +132,7 @@ class Fitter:
         if options is None:
             options = {}
 
-        result = minimize(
+        self._result = minimize(
             fun=self.objective_and_gradient,
             x0=x0,
             method=method,
@@ -133,9 +140,17 @@ class Fitter:
             options=options,
             **kwargs,
         )
-        return result
+        return self._result
 
-    def uncertainties(self, result: OptimizeResult) -> np.ndarray:
+    def _require_fit(self) -> OptimizeResult:
+        """Raise if fit() hasn't been called."""
+        if self._result is None:
+            raise RuntimeError(
+                "No fit results available. Call fit() first."
+            )
+        return self._result
+
+    def uncertainties(self, result: Optional[OptimizeResult] = None) -> np.ndarray:
         """Extract parameter uncertainties from fit result.
 
         For BFGS (and other quasi-Newton methods), uses result.hess_inv
@@ -147,12 +162,14 @@ class Fitter:
             σ_j = sqrt(Cov[j,j])
 
         Args:
-            result: OptimizeResult from fit()
+            result: OptimizeResult from fit(). Defaults to cached result.
 
         Returns:
             sigma: 1-sigma uncertainties for each real parameter,
                    shape (n_free_real,)
         """
+        if result is None:
+            result = self._require_fit()
         if not hasattr(result, "hess_inv") or result.hess_inv is None:
             raise ValueError(
                 "No hess_inv in result. "
@@ -173,3 +190,70 @@ class Fitter:
         variances = np.maximum(variances, 0.0)
 
         return np.sqrt(variances)
+
+    # ---- Cached result convenience methods ----
+
+    @property
+    def result(self) -> OptimizeResult:
+        """Cached fit result. Raises if fit() hasn't been called."""
+        return self._require_fit()
+
+    @property
+    def best_nll(self) -> float:
+        """Best -log L value from fit."""
+        return float(self._require_fit().fun)
+
+    @property
+    def best_x(self) -> np.ndarray:
+        """Best real parameter values from fit."""
+        return self._require_fit().x.copy()
+
+    def best_couplings(self) -> np.ndarray:
+        """Complex coupling coefficients c_k at best fit.
+
+        Returns:
+            c: complex128 array of shape (n_components,)
+        """
+        return self.parameters.build_c(self._require_fit().x)
+
+    def correlations(self, result: Optional[OptimizeResult] = None) -> np.ndarray:
+        """Parameter correlation matrix from fit.
+
+        Uses hess_inv to compute:
+            corr[i,j] = cov[i,j] / (sigma_i * sigma_j)
+
+        Args:
+            result: OptimizeResult. Defaults to cached result.
+
+        Returns:
+            corr: correlation matrix, shape (n_free_real, n_free_real)
+        """
+        if result is None:
+            result = self._require_fit()
+
+        hess_inv = np.asarray(result.hess_inv)
+        hess_inv = (hess_inv + hess_inv.T) / 2.0
+        variances = np.maximum(np.diag(hess_inv), 0.0)
+        sigma = np.sqrt(variances)
+
+        # Avoid division by zero
+        sigma = np.where(sigma > 0, sigma, 1.0)
+        corr = hess_inv / np.outer(sigma, sigma)
+        # Clamp to [-1, 1]
+        corr = np.clip(corr, -1.0, 1.0)
+        return corr
+
+    def predict_P(self, x: Optional[np.ndarray] = None) -> np.ndarray:
+        """Compute P_i values at given or best-fit parameters.
+
+        Args:
+            x: real parameter values. Defaults to best-fit x.
+
+        Returns:
+            P: float64 array of shape (n_data,)
+        """
+        if x is None:
+            x = self._require_fit().x
+        c = self.parameters.build_c(x)
+        _, _, P = self.fitter.evaluate(c, return_P=True)
+        return P
