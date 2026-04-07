@@ -33,16 +33,17 @@ The implementation uses a **single fused CUDA kernel** for the forward pass (A �
 
 ### GPU Speedup vs NumPy CPU (single thread, RTX 3070 Ti Laptop)
 
-| n_data | n_mc | n_comp | CPU | GPU | Speedup |
-|--------|------|--------|-----|-----|---------|
-| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | **18×** |
-| 50,000 | 200,000 | 50 | 45 ms | 0.7 ms | **60×** |
-| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | **66×** |
-| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | **61×** |
-| 1,000,000 | — | 100 | 1.37 s | 23.5 ms | **58×** |
+| n_data | n_mc | n_comp | CPU (FP64) | GPU FP64 | GPU FP32 | FP32 Speedup |
+|--------|------|--------|------------|----------|----------|-------------|
+| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | 0.1 ms | **2.4× / 18×** |
+| 50,000 | 200,000 | 50 | 45 ms | 0.8 ms | 0.3 ms | **2.2× / 60×** |
+| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | 0.6 ms | **2.2× / 66×** |
+| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | 1.2 ms | **2.1× / 61×** |
+| 1,000,000 | 1,000,000 | 100 | 1.37 s | 23.5 ms | 11.4 ms | **2.1× / 58×** |
 
-For n_data = 10⁶, n_comp = 100 the GPU evaluates in **24 ms** — fast enough
-for real-time fitting with L-BFGS (10-50 iterations ≈ 0.2-1.2 s total).
+FP32 gradient error: 5×10⁻⁶ to 4×10⁻⁴ (acceptable for most fits).
+For n_data = 10⁶, n_comp = 100 the GPU evaluates in **11 ms** (FP32) — fast enough
+for real-time fitting with L-BFGS (10-50 iterations ≈ 0.1-0.6 s total).
 
 ### Key Optimizations
 
@@ -52,6 +53,7 @@ for real-time fitting with L-BFGS (10-50 iterations ≈ 0.2-1.2 s total).
 4. **cuBLAS ZGEMV gradient** — replaces K separate atomicAdd kernels with one BLAS call
 5. **Warp-level reduction** — NLL and S_corr use `__shfl_down` instead of `atomicAdd`
 6. **Auto-detect GPU arch** — compiles for your exact GPU via `nvidia-smi`
-7. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
-8. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
+7. **Mixed precision (FP32)** — `FpwFitterMP` gives ~2× over FP64 with ~5×10⁻⁶ gradient error
+8. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
+9. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
 
