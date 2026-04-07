@@ -58,3 +58,28 @@ for real-time fitting with L-BFGS (10-50 iterations ≈ 0.1-0.6 s total).
 8. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
 9. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
 
+
+### Large Datasets (>8 GB VRAM)
+
+For datasets too large to fit in GPU memory, use `FpwFitterChunked` (FP64):
+
+```python
+from fpwfitter import FpwFitterChunked
+
+# F_data stays on host (FP64), uploaded chunk-by-chunk
+fitter = FpwFitterChunked.from_mc(
+    F_data, F_mc, w_data, w_mc, B_data, B_mc,
+    max_vram_mb=6144  # limit VRAM usage to 6 GB
+)
+nll, grad = fitter.evaluate(c)  # Full FP64 precision
+```
+
+Example: 10⁷ events × 200 components = 64 GB F_data → runs in 6 GB VRAM at ~5 s/eval.
+Available fitters:
+
+| Class | Precision | VRAM | Use case |
+|-------|-----------|------|----------|
+| `FpwFitter` | FP64 | All data on GPU | Fits in VRAM |
+| `FpwFitterMP` | FP32 | All data on GPU | Fits in VRAM, ~2× faster |
+| `FpwFitterChunked` | FP64 | Chunked | Any size data |
+| `NumpyFitter` | FP64 | CPU | No GPU available |

@@ -67,6 +67,9 @@ def _needs_rebuild() -> bool:
     mp_lib = _PKG_DIR / "libfpwfitter_mp.so"
     if not mp_lib.exists():
         return True
+    chunked_lib = _PKG_DIR / "libfpwfitter_chunked.so"
+    if not chunked_lib.exists():
+        return True
     if not _HASH.exists():
         return True
     return _HASH.read_text() != _cu_hash()
@@ -78,6 +81,9 @@ def _cu_hash() -> str:
     mp_cu = _PKG_DIR / "fpwfitter_mp.cu"
     if mp_cu.exists():
         h.update(mp_cu.read_bytes())
+    chunked_cu = _PKG_DIR / "fpwfitter_chunked.cu"
+    if chunked_cu.exists():
+        h.update(chunked_cu.read_bytes())
     return h.hexdigest()
 
 
@@ -87,6 +93,7 @@ def _build() -> None:
     for name, sources, extra in [
         ("libfpwfitter.so", ["fpwfitter.cu"], "-lcublas"),
         ("libfpwfitter_mp.so", ["fpwfitter_mp.cu"], "-lcublas"),
+        ("libfpwfitter_chunked.so", ["fpwfitter_chunked.cu"], "-lcublas"),
     ]:
         cmd = [
             nvcc,

@@ -21,10 +21,11 @@ Both have identical API::
 
 from .core import FpwFitter
 from .mp import FpwFitterMP
+from .chunked import FpwFitterChunked
 from .ref_numpy import NumpyFitter
 from .compute_m import compute_M, compute_M_mmap
 
 
-__all__ = ["FpwFitter", "FpwFitterMP", "NumpyFitter",
+__all__ = ["FpwFitter", "FpwFitterMP", "FpwFitterChunked", "NumpyFitter",
            "compute_M", "compute_M_mmap"]
 __version__ = "0.1.0"
