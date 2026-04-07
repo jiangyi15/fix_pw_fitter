@@ -312,11 +312,12 @@ int fpw_evaluate(FpwFitter *f,
     cudaMemsetAsync(f->dscorr, 0, sizeof(double), f->strm);
 
     /* ---- FUSED kernel: A → S → P → NLL → G → S_corr ---- */
+    /* Note: always write P to device buffer dP; copy to host P_out later */
     { int nb, nt; lcfg(nd, &nb, &nt);
       k_fused<<<nb, nt, 0, f->strm>>>(
           f->dF, f->dc,
           f->dB, f->dw,
-          f->dG, P_out,
+          f->dG, f->dP,
           f->dnll, f->dscorr,
           nd, jp, kc,
           f->Ns, f->Nb, f->pur);
@@ -369,6 +370,11 @@ int fpw_evaluate(FpwFitter *f,
     ce = cudaMemcpyAsync(g_h, f->dg, kc * sizeof(double2),
                          cudaMemcpyDeviceToHost, f->strm);
     if (ce != cudaSuccess) goto copy_fail;
+    if (P_out) {
+        ce = cudaMemcpyAsync(P_out, f->dP, nd * sizeof(double),
+                             cudaMemcpyDeviceToHost, f->strm);
+        if (ce != cudaSuccess) goto copy_fail;
+    }
 
     cudaStreamSynchronize(f->strm);
 
