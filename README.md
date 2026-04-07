@@ -33,14 +33,15 @@ The implementation uses a **single fused CUDA kernel** for the forward pass (A �
 
 ### GPU Speedup vs NumPy CPU (single thread, RTX 3070 Ti Laptop)
 
-| n_data | n_mc | n_comp | CPU (FP64) | GPU FP64 | GPU FP32 | FP32 Speedup |
-|--------|------|--------|------------|----------|----------|-------------|
-| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | 0.1 ms | **2.4× / 18×** |
-| 50,000 | 200,000 | 50 | 45 ms | 0.8 ms | 0.3 ms | **2.2× / 60×** |
-| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | 0.6 ms | **2.2× / 66×** |
-| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | 1.2 ms | **2.1× / 61×** |
-| 1,000,000 | 1,000,000 | 100 | 1.37 s | 23.5 ms | 11.4 ms | **2.1× / 58×** |
+| n_data | n_mc | n_comp | CPU | GPU FP64 | GPU FP32 | FP64 vs CPU | FP32 vs CPU |
+|--------|------|--------|-----|----------|----------|-------------|-------------|
+| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | 0.1 ms | **18×** | **24×** |
+| 50,000 | 200,000 | 50 | 45 ms | 0.8 ms | 0.3 ms | **60×** | **150×** |
+| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | 0.6 ms | **66×** | **153×** |
+| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | 1.2 ms | **61×** | **128×** |
+| 1,000,000 | 1,000,000 | 100 | 1.37 s | 23.5 ms | 11.4 ms | **58×** | **120×** |
 
+FP32 is ~2× faster than FP64 (memory-bound kernels).
 FP32 gradient error: 5×10⁻⁶ to 4×10⁻⁴ (acceptable for most fits).
 For n_data = 10⁶, n_comp = 100 the GPU evaluates in **11 ms** (FP32) — fast enough
 for real-time fitting with L-BFGS (10-50 iterations ≈ 0.1-0.6 s total).
