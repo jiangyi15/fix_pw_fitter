@@ -2,9 +2,12 @@
 Tests for the Fitter module — combined Parameters + FpwFitter.
 """
 import sys
+import tempfile
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import json
 import numpy as np
 from fpwfitter import Parameters, NumpyFitter, Fitter
 
@@ -222,6 +225,45 @@ def test_fitter_cached_methods():
     print(f"✓ test_fitter_cached_methods (corr diag={np.diag(corr)[:2]})")
 
 
+def test_fitter_save_load_results():
+    """Test saving and loading fit results to/from JSON."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "fit_results.json")
+        full.save_results(path, n_data=len(F_data))
+
+        # Verify JSON structure
+        with open(path) as f:
+            data = json.load(f)
+
+        assert "value" in data
+        assert "error" in data
+        assert "status" in data
+
+        # Check parameter names
+        for name in params.free_params:
+            assert f"{name}_r" in data["value"]
+            assert f"{name}_phi" in data["value"]
+            assert f"{name}_r" in data["error"]
+            assert f"{name}_phi" in data["error"]
+
+        # Check status
+        assert "NLL" in data["status"]
+        assert "Ndf" in data["status"]
+        assert data["status"]["Ndf"] == len(F_data) - params.n_free
+
+        # Test load_results
+        loaded = Fitter.load_results(path)
+        assert np.isclose(loaded["status"]["NLL"], full.best_nll)
+        for name in params.free_params:
+            assert np.isclose(loaded["value"][f"{name}_r"], full.best_x[2 * params.free_params.index(name)])
+
+    print(f"✓ test_fitter_save_load_results")
+
+
 if __name__ == "__main__":
     test_fitter_objective()
     test_fitter_gradient_numerical()
@@ -231,4 +273,5 @@ if __name__ == "__main__":
     test_fitter_get_couplings()
     test_fitter_with_chunked()
     test_fitter_cached_methods()
+    test_fitter_save_load_results()
     print("\n✓ All Fitter tests passed")
