@@ -14,7 +14,7 @@ def make_test_params():
 
     Structure:
       fixed: a = 1+0j
-      free: b, c, d
+      free (inferred): b, c, d
       products:
         c_0 = a * b * c
         c_1 = a * b * d
@@ -22,7 +22,6 @@ def make_test_params():
     """
     return Parameters(
         fixed_table={"a": 1.0 + 0j},
-        free_params=["b", "c", "d"],
         product_structure=[
             ["a", "b", "c"],
             ["a", "b", "d"],
@@ -57,7 +56,6 @@ def test_build_c_polar():
     """Test polar form conversion."""
     params = Parameters(
         fixed_table={},
-        free_params=["x"],
         product_structure=[["x"]],
     )
 
@@ -82,7 +80,6 @@ def test_gradient_chain_rule_analytic():
     """
     params = Parameters(
         fixed_table={},
-        free_params=["x"],
         product_structure=[["x"]],
     )
 
@@ -152,7 +149,6 @@ def test_gradient_chain_rule_complex_function():
     """Test with f = -log|c|^2 for a single component."""
     params = Parameters(
         fixed_table={"a": 1.0},
-        free_params=["b"],
         product_structure=[["a", "b"]],
     )
 
@@ -209,12 +205,12 @@ def test_from_dict():
     """Test factory from dict."""
     config = {
         "fixed": {"a": "1+0j"},
-        "free": ["b", "c"],
         "products": [["a", "b"], ["a", "c"], ["b", "c"]],
     }
     params = Parameters.from_dict(config)
-    # Note: from_dict doesn't convert strings to complex
-    # The fixed values should be set separately
+    assert params.free_params == ["b", "c"]
+    assert params.n_fixed == 1
+    assert params.n_free_complex == 2
     print("✓ test_from_dict")
 
 
@@ -222,7 +218,6 @@ def test_empty_fixed_table():
     """Test with no fixed parameters."""
     params = Parameters(
         fixed_table={},
-        free_params=["a", "b"],
         product_structure=[["a", "b"], ["a"]],
     )
     x = np.array([1.0, 0.0, 2.0, np.pi / 2])  # a=1, b=2i
@@ -236,7 +231,6 @@ def test_zero_r_handling():
     """Test that r=0 doesn't cause division by zero."""
     params = Parameters(
         fixed_table={},
-        free_params=["a"],
         product_structure=[["a"]],
     )
     x = np.array([0.0, 0.0])

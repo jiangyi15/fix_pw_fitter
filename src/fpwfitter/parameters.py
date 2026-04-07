@@ -34,24 +34,36 @@ class Parameters:
     def __init__(
         self,
         fixed_table: Dict[str, complex],
-        free_params: List[str],
         product_structure: List[List[str]],
     ):
         """
         Args:
             fixed_table: {param_name: complex_value} — fixed (non-optimized) parameters
-            free_params: list of param names — each has r and phi to optimize
             product_structure: list of lists of param names
                 e.g. [["a", "b", "c"], ["a", "b", "d"]] means
                 c = [y["a"]*y["b"]*y["c"], y["a"]*y["b"]*y["d"]]
+
+        Free parameters are automatically inferred as all unique names
+        in product_structure that are not in fixed_table.
         """
-        # ---- Build unified name → index mapping ----
         self.fixed_table = dict(fixed_table)
-        self.free_params = list(free_params)
         self.product_structure = [list(p) for p in product_structure]
 
-        # All param names in order: fixed first, then free
-        all_names = list(self.fixed_table.keys()) + self.free_params
+        # ---- Determine free params from product_structure ----
+        all_names_ordered = []
+        seen = set()
+        for prod in product_structure:
+            for name in prod:
+                if name not in seen:
+                    seen.add(name)
+                    all_names_ordered.append(name)
+
+        free_names = [name for name in all_names_ordered if name not in self.fixed_table]
+        fixed_names_ordered = [name for name in all_names_ordered if name in self.fixed_table]
+
+        # Unified ordering: fixed first, then free
+        all_names = fixed_names_ordered + free_names
+        self.free_params = free_names
         self.name_to_idx = {name: i for i, name in enumerate(all_names)}
         self.n_total = len(all_names)
         self.n_fixed = len(self.fixed_table)
@@ -205,13 +217,15 @@ class Parameters:
         """Create from a dictionary configuration.
 
         Expected keys:
-            fixed: {name: value}
-            free: [name1, name2, ...]
+            fixed: {name: value}  (optional)
             products: [[name_a, name_b, ...], ...]
         """
+        fixed = {}
+        for name, val in config.get("fixed", {}).items():
+            fixed[name] = complex(val)
+
         return cls(
-            fixed_table=config.get("fixed", {}),
-            free_params=config["free"],
+            fixed_table=fixed,
             product_structure=config["products"],
         )
 
@@ -223,12 +237,12 @@ class Parameters:
             fixed:
               name1: "1.0+0.5j"
               name2: "0.5-0.3j"
-            free:
-              - name3
-              - name4
             products:
-              - [name3, name4]
-              - [name3, name1]
+              - [name1, name3]
+              - [name2, name3]
+              - [name4]
+
+        Free parameters are automatically inferred from product_structure.
         """
         try:
             import yaml
@@ -239,14 +253,12 @@ class Parameters:
         with open(path) as f:
             config = yaml.safe_load(f)
 
-        # Convert string values to complex
         fixed = {}
         for name, val in config.get("fixed", {}).items():
             fixed[name] = complex(val)
 
         return cls(
             fixed_table=fixed,
-            free_params=config["free"],
             product_structure=config["products"],
         )
 
