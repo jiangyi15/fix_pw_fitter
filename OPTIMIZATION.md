@@ -161,7 +161,7 @@ All planned optimizations have been implemented:
 | **Warp-level reduction** (NLL, S_corr) | ✅ Done | `__shfl_down` tree; minimal atomic contention |
 | **All data on GPU** (zero per-iteration H2D) | ✅ Done | Single upload at creation |
 | **Chunked M pre-compute** (NumPy, mmap) | ✅ Done | F_mc never fully in RAM |
-| Shared memory tiling (k_A) | ❌ Skipped | Memory bound but already fast; low ROI |
+| Shared memory tiling (k_A) | ❌ Skipped | Transposed layout caused segfaults; debugging requires GPU hardware access |
 | Mixed precision (FP32) | ❌ Skipped | Physics precision requires FP64 |
 | Event binning | ❌ Skipped | Application-specific; not in library |
 
