@@ -51,9 +51,9 @@ __global__ void k_fused_mp(
     if (i >= N) return;
 
     /* ---- A[i,j] = sum_k F[k,i,j] * c[k]  (FP32) ---- */
-    float A_re[4] = {0}, A_im[4] = {0};
+    double A_re[4] = {0}, A_im[4] = {0};
     for (int j = 0; j < JP; j++) {
-        float re = 0.0f, im = 0.0f;
+        double re = 0.0, im = 0.0;
         for (int k = 0; k < KC; k++) {
             int64_t fidx = k * N * JP + i * JP + j;
             float2 f  = ldg_c(&F[fidx]);
@@ -66,38 +66,38 @@ __global__ void k_fused_mp(
     }
 
     /* ---- S[i] ---- */
-    float S = 0.0f;
+    double S = 0.0;
     for (int j = 0; j < JP; j++)
         S += A_re[j] * A_re[j] + A_im[j] * A_im[j];
 
     /* ---- P[i] ---- */
-    float p_val = S / N_s * pur + B[i] / N_b * (1.0f - pur);
-    if (p_val < 1e-30f) p_val = 1e-30f;
+    double p_val = S / N_s * pur + B[i] / N_b * (1.0 - pur);
+    if (p_val < 1e-30) p_val = 1e-30;
 
     /* ---- G[i,j] ---- */
-    float ratio = w[i] / p_val;
+    double ratio = w[i] / p_val;
     for (int j = 0; j < JP; j++)
-        G[i * JP + j] = cset(A_re[j] * ratio, A_im[j] * ratio);
+        G[i * JP + j] = cset((float)(A_re[j] * ratio), (float)(A_im[j] * ratio));
 
     /* ---- NLL ---- */
-    float nll_i = -w[i] * logf(p_val);
+    double nll_i = -w[i] * log(p_val);
 
     /* ---- S_corr ---- */
-    float scorr_i = w[i] * S / p_val;
+    double scorr_i = w[i] * S / p_val;
 
     /* ---- Optional P output ---- */
-    if (P_out) P_out[i] = p_val;
+    if (P_out) P_out[i] = (float)p_val;
 
     /* ---- Warp reduction ---- */
     for (int offset = 16; offset > 0; offset >>= 1)
         nll_i += __shfl_down_sync(0xffffffff, nll_i, offset);
     if ((threadIdx.x & 31) == 0)
-        atomicAdd(nll_out, nll_i);
+        atomicAdd(nll_out, (float)nll_i);
 
     for (int offset = 16; offset > 0; offset >>= 1)
         scorr_i += __shfl_down_sync(0xffffffff, scorr_i, offset);
     if ((threadIdx.x & 31) == 0)
-        atomicAdd(scorr_out, scorr_i);
+        atomicAdd(scorr_out, (float)scorr_i);
 }
 
 /* ==================== gradient helper =========================== */
@@ -329,7 +329,7 @@ int fpw_mp_evaluate(FpwFitterMP *f,
           f->dG, f->dP, f->dnll, f->dscorr,
           nd, jp, kc, f->Ns, f->Nb, f->pur); }
 
-    /* ---- Gradient via cuBLAS SGEMV (FP32) ---- */
+    /* ---- Gradient via cuBLAS CGEMV (FP32 complex) ---- */
     {
         int64_t nj = nd * jp;
         { int nb, nt; lcfg(nj, &nb, &nt);
