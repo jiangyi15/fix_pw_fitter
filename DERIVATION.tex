@@ -1,0 +1,185 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{titlesec}
+
+\geometry{margin=1in}
+
+\title{\vspace{-2em}\textbf{Full Derivation and Computational Cost Analysis}\\[0.5em]\large Fixed Partial Waves Fitter}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Full Mathematical Derivation}
+
+\subsection{Total Amplitude}
+\begin{equation}
+A_{ij} = \sum_{k} c_k F_{ijk}
+\end{equation}
+
+\subsection{Signal Probability Density (per event)}
+\begin{equation}
+S_i = \sum_{j} |A_{ij}|^2 = \sum_{j} \left|\sum_{k} c_k F_{ijk}\right|^2 = \sum_{j} \sum_{k} \sum_{k'} c_k c_{k'}^* F_{ijk} F_{ijk'}^*
+\end{equation}
+
+\subsection{Normalization Factors}
+
+\textbf{Signal normalization:}
+\begin{equation}
+N_s = \sum_{i'} \omega_{i'} S_{i'} = \sum_{i'} \omega_{i'} \sum_{j} \sum_{k} \sum_{k'} c_k c_{k'}^* F_{i'jk} F_{i'jk'}^* = \sum_{k} \sum_{k'} c_k c_{k'}^* M_{kk'}
+\end{equation}
+where the overlap matrix $M_{kk'}$ is:
+\begin{equation}
+M_{kk'} = \sum_{i'} \sum_{j} \omega_{i'} F_{i'jk} F_{i'jk'}^*
+\end{equation}
+
+\textbf{Background normalization:}
+\begin{equation}
+N_b = \sum_{i'} \omega_{i'} B_{i'}
+\end{equation}
+
+\subsection{Total Probability Density}
+\begin{equation}
+P_i = \frac{S_i}{N_s} \cdot \text{purity} + \frac{B_i}{N_b} \cdot (1 - \text{purity})
+\end{equation}
+
+\subsection{Negative Log-Likelihood}
+\begin{equation}
+-\ln L = -\sum_i w_i \ln P_i
+\end{equation}
+
+\subsection{Gradients}
+
+\textbf{Gradient of $S_i$ w.r.t. $c_k^*$:}
+\begin{equation}
+\frac{\partial S_i}{\partial c_k^*} = \sum_{j} F_{ijk}^* A_{ij} = \sum_{j} F_{ijk}^* \sum_{k'} c_{k'} F_{ijk'}
+\end{equation}
+
+\textbf{Gradient of $N_s$ w.r.t. $c_k^*$:}
+\begin{equation}
+\frac{\partial N_s}{\partial c_k^*} = \sum_{k'} c_{k'} M_{k'k}
+\end{equation}
+
+\textbf{Gradient of $P_i$ w.r.t. $c_k^*$:}
+\begin{equation}
+\frac{\partial P_i}{\partial c_k^*} = p \cdot \frac{\partial}{\partial c_k^*}\left(\frac{S_i}{N_s}\right) = p \cdot \frac{\frac{\partial S_i}{\partial c_k^*} N_s - S_i \frac{\partial N_s}{\partial c_k^*}}{N_s^2} = \frac{p}{N_s}\left(\frac{\partial S_i}{\partial c_k^*} - \frac{S_i}{N_s} \frac{\partial N_s}{\partial c_k^*}\right)
+\end{equation}
+where $p = \text{purity}$.
+
+\textbf{Gradient of $-\ln L$ w.r.t. $c_k^*$:}
+\begin{equation}
+\frac{\partial(-\ln L)}{\partial c_k^*} = -\sum_i \frac{w_i}{P_i} \frac{\partial P_i}{\partial c_k^*} = -\frac{p}{N_s} \sum_i \frac{w_i}{P_i} \left(\frac{\partial S_i}{\partial c_k^*} - \frac{S_i}{N_s} \frac{\partial N_s}{\partial c_k^*}\right)
+\end{equation}
+Expanding to make the $N_s$ contribution explicit:
+\begin{equation}
+\frac{\partial(-\ln L)}{\partial c_k^*} = \underbrace{-\frac{p}{N_s} \sum_i \frac{w_i}{P_i} \frac{\partial S_i}{\partial c_k^*}}_{\text{data term}} + \underbrace{\frac{p}{N_s^2} \frac{\partial N_s}{\partial c_k^*} \sum_i \frac{w_i S_i}{P_i}}_{\text{normalization correction from } N_s}
+\end{equation}
+The second term is critical: it accounts for the fact that changing $c_k^*$ changes $N_s$, which rescales the entire signal PDF. Without this term, the fit would not properly normalize the probability density.
+
+\textbf{Using complex conjugate symmetry:}
+\begin{equation}
+\frac{\partial(-\ln L)}{\partial c_k} = \left(\frac{\partial(-\ln L)}{\partial c_k^*}\right)^*
+\end{equation}
+This halves the gradient computation cost.
+
+\section{Computational Cost Analysis}
+
+\subsection{Parameters}
+
+\begin{center}
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} & \textbf{Value} \\ \midrule
+$i$ & Number of data events & $10^6$ \\
+$j$ & Number of projections & $2$ \\
+$k$ & Number of partial waves / components & $100$ \\
+$i'$ & Number of MC events & $10^7$ \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Pre-computation (One-Time Costs)}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Step} & \textbf{Expression} & \textbf{Complexity} & \textbf{Operations} \\ \midrule
+Compute $M_{kk'}$ & $\sum_{i'} \sum_{j} \omega_{i'} F_{i'jk} F_{i'jk'}^*$ & $O(i' \cdot j \cdot k^2)$ & $10^7 \times 2 \times 10^4 = \mathbf{2 \times 10^{11}}$ \\
+Compute $N_b$ & $\sum_{i'} \omega_{i'} B_{i'}$ & $O(i')$ & $\mathbf{10^7}$ \\
+\textbf{Total pre-computation} & & & $\mathbf{2 \times 10^{11}}$ ($\sim$200 GFLOPs) \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Per Iteration Costs}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Step} & \textbf{Expression} & \textbf{Complexity} & \textbf{Operations} \\ \midrule
+1. Compute $A_{ij}$ & $\sum_{k} c_k F_{ijk}$ & $O(i \cdot j \cdot k)$ & $10^6 \times 2 \times 100 = \mathbf{2 \times 10^8}$ \\
+2. Compute $S_i$ & $\sum_{j} |A_{ij}|^2$ & $O(i \cdot j)$ & $10^6 \times 2 = \mathbf{2 \times 10^6}$ \\
+3. Compute $N_s$ & $\sum_{k,k'} c_k c_{k'}^* M_{kk'}$ & $O(k^2)$ & $100^2 = \mathbf{10^4}$ \\
+4. Compute $P_i$ & $S_i/N_s \cdot p + B_i/N_b \cdot (1-p)$ & $O(i)$ & $\mathbf{10^6}$ \\
+5. Compute $-\ln L$ & $-\sum_i w_i \ln P_i$ & $O(i)$ & $\mathbf{10^6}$ \\
+6. $\partial S_i/\partial c_k^*$ & $\sum_{j} F_{ijk}^* A_{ij}$ & $O(i \cdot j \cdot k)$ & $10^6 \times 2 \times 100 = \mathbf{2 \times 10^8}$ \\
+7. $\partial N_s/\partial c_k^*$ & $\sum_{k'} c_{k'} M_{k'k}$ & $O(k^2)$ & $100^2 = \mathbf{10^4}$ \\
+8. $\partial P_i/\partial c_k^*$ & $\frac{p}{N_s}\!\left(\frac{\partial S_i}{\partial c_k^*} - \frac{S_i}{N_s}\frac{\partial N_s}{\partial c_k^*}\right)$ & $O(i \cdot k)$ & $10^6 \times 100 = \mathbf{10^8}$ \\
+9. $\partial(-\ln L)/\partial c_k^*$ & $-\sum_i \frac{w_i}{P_i} \frac{\partial P_i}{\partial c_k^*}$ & $O(i \cdot k)$ & $10^6 \times 100 = \mathbf{10^8}$ \\
+\textbf{Total per iteration} & & & $\mathbf{\approx 7 \times 10^8}$ ($\sim$0.7 GFLOPs) \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Total Cost Summary}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Scenario} & \textbf{Operations} & \textbf{Equivalent FLOPs} \\ \midrule
+Pre-computation (one-time) & $2 \times 10^{11}$ & $\sim$200 GFLOPs \\
+Per iteration & $7 \times 10^8$ & $\sim$0.7 GFLOPs \\
+100 iterations & $7 \times 10^{10}$ & $\sim$70 GFLOPs \\
+1000 iterations & $7 \times 10^{11}$ & $\sim$700 GFLOPs \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Memory Requirements}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Quantity} & \textbf{Size} & \textbf{Bytes (complex128)} \\ \midrule
+$F_{ijk}$ (data) & $i \times j \times k = 2 \times 10^8$ & $\sim$3.2 GB \\
+$F_{i'jk}$ (MC) & $i' \times j \times k = 2 \times 10^9$ & $\sim$32 GB \\
+$M_{kk'}$ & $k^2 = 10^4$ & $\sim$160 KB \\
+$A_{ij}$ & $i \times j = 2 \times 10^6$ & $\sim$32 MB \\
+$S_i, P_i$ & $i = 10^6$ each & $\sim$16 MB each \\ \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Key Observations}
+
+\begin{enumerate}
+\item \textbf{Pre-computing $M_{kk'}$} is the most expensive one-time step ($2 \times 10^{11}$ ops), but it's done only once and cached.
+
+\item \textbf{Per iteration}, the dominant costs are:
+\begin{itemize}
+\item Computing $A_{ij}$: $2 \times 10^8$ ops
+\item Computing $\partial S_i/\partial c_k^*$: $2 \times 10^8$ ops
+\item Computing $\partial P_i/\partial c_k^*$ and $\partial(-\ln L)/\partial c_k^*$: $2 \times 10^8$ ops
+\end{itemize}
+
+\item Using the $M_{kk'}$ matrix reduces the per-iteration normalization cost from $O(i' \cdot j \cdot k)$ to $O(k^2)$, a speedup factor of $\sim 10^5$.
+
+\item \textbf{Memory bottleneck}: Storing $F_{i'jk}$ for MC requires $\sim$32 GB. If memory is constrained, $M_{kk'}$ can be computed on-the-fly in batches.
+
+\item \textbf{Using complex conjugate symmetry}: $\partial(-\ln L)/\partial c_k = [\partial(-\ln L)/\partial c_k^*]^*$, which halves the gradient computation cost.
+\end{enumerate}
+
+\end{document}
