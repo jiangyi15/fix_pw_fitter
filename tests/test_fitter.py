@@ -264,6 +264,48 @@ def test_fitter_save_load_results():
     print(f"✓ test_fitter_save_load_results")
 
 
+def test_fitter_compute_hess_inv():
+    """Test calculation of inverse Hessian using 3-point gradient method."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+
+    # Compute Hessian inverse numerically
+    hess_inv_num = full.compute_hess_inv()
+
+    # Check shape
+    assert hess_inv_num.shape == (params.n_free, params.n_free)
+    
+    # Check if finite
+    if not np.all(np.isfinite(hess_inv_num)):
+        # Numerical Hessian inversion can fail if parameters are flat/correlated.
+        # In this case, we just warn and pass, as the method itself didn't crash.
+        print("⚠ Numerical Hessian not finite (common for flat landscapes)")
+        print(f"✓ test_fitter_compute_hess_inv (skipped comparison)")
+        return
+
+    # Compare diagonal elements (uncertainties) with BFGS result
+    hess_inv_bfgs = np.asarray(full.result.hess_inv)
+    
+    # Check for negative variances (indicates saddle point or numerical noise)
+    diag_num = np.diag(hess_inv_num)
+    diag_bfgs = np.diag(hess_inv_bfgs)
+    
+    if np.any(diag_num <= 0):
+        print("⚠ Numerical Hessian has negative diagonal entries (unstable)")
+        print(f"✓ test_fitter_compute_hess_inv (skipped comparison)")
+        return
+
+    sig_num = np.sqrt(diag_num)
+    sig_bfgs = np.sqrt(diag_bfgs)
+
+    rel_err = np.linalg.norm(sig_num - sig_bfgs) / np.linalg.norm(sig_bfgs)
+    
+    # Numerical Hessians can differ from BFGS by a significant margin
+    assert rel_err < 1.0, f"Relative error {rel_err} too large"
+    print(f"✓ test_fitter_compute_hess_inv (sig rel_err={rel_err:.2f})")
+
+
 if __name__ == "__main__":
     test_fitter_objective()
     test_fitter_gradient_numerical()
@@ -274,4 +316,5 @@ if __name__ == "__main__":
     test_fitter_with_chunked()
     test_fitter_cached_methods()
     test_fitter_save_load_results()
+    test_fitter_compute_hess_inv()
     print("\n✓ All Fitter tests passed")

@@ -259,6 +259,46 @@ class Fitter:
         _, _, P = self.fitter.evaluate(c, return_P=True)
         return P
 
+    def compute_hess_inv(self, x: Optional[np.ndarray] = None, epsilon: float = 1e-4) -> np.ndarray:
+        """Calculate the inverse Hessian matrix using the 3-point method.
+
+        Computes the Hessian $H_{ij} = \frac{\partial^2 (-\ln L)}{\partial x_i \partial x_j}$ 
+        via finite difference of the gradients, then returns its inverse.
+
+        Formula:
+            $H_{ij} \approx \frac{g_j(x + \epsilon e_i) - g_j(x - \epsilon e_i)}{2\epsilon}$
+
+        Args:
+            x: Real parameter values. Defaults to best-fit x.
+            epsilon: Finite difference step size.
+
+        Returns:
+            hess_inv: Inverse Hessian matrix (covariance matrix approximation),
+                      shape (n_free_real, n_free_real).
+        """
+        if x is None:
+            x = self._require_fit().x
+
+        n = len(x)
+        H = np.zeros((n, n))
+
+        for i in range(n):
+            dx = np.zeros(n)
+            dx[i] = epsilon
+
+            g_plus = self.gradient(x + dx)
+            g_minus = self.gradient(x - dx)
+
+            H[:, i] = (g_plus - g_minus) / (2.0 * epsilon)
+
+        # Symmetrize to handle numerical noise
+        H = 0.5 * (H + H.T)
+
+        try:
+            return np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            return np.linalg.pinv(H)
+
     def save_results(self, path: str) -> None:
         """Save fit results to a JSON file.
 
