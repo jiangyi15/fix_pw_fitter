@@ -1,0 +1,195 @@
+"""
+Tests for the Fitter module — combined Parameters + FpwFitter.
+"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import numpy as np
+from fpwfitter import Parameters, NumpyFitter, Fitter
+
+
+def make_test_components():
+    """Create Parameters, NumpyFitter, and ground truth for testing."""
+    np.random.seed(42)
+
+    # Simple model: 2 components, 1 projection
+    params = Parameters(
+        product_structure=[["a"], ["b"]],  # c_0 = y_a, c_1 = y_b
+        fixed_table={},
+    )
+
+    # Generate MC and data from known couplings
+    n_data, n_mc = 1000, 5000
+    n_proj, n_comp = 1, 2
+
+    # True couplings
+    c_true = np.array([1.5 + 0.5j, 0.8 - 0.3j])
+
+    # Generate F_data and F_mc
+    F_data = np.random.randn(n_data, n_proj, n_comp) + 1j * np.random.randn(n_data, n_proj, n_comp)
+    F_mc   = np.random.randn(n_mc, n_proj, n_comp) + 1j * np.random.randn(n_mc, n_proj, n_comp)
+    w_data = np.abs(np.random.randn(n_data)) + 0.1
+    w_mc   = np.abs(np.random.randn(n_mc)) + 0.1
+    B_data = np.abs(np.random.randn(n_data)) * 0.1
+    B_mc   = np.abs(np.random.randn(n_mc)) * 0.1
+
+    # Compute M
+    M = np.zeros((n_comp, n_comp), dtype=np.complex128)
+    for j in range(n_proj):
+        F_j = F_mc[:, j, :]
+        M += np.dot(np.conj(F_j).T, w_mc[:, None] * F_j)
+    N_b = np.dot(w_mc, B_mc)
+
+    # Create NumpyFitter
+    fitter = NumpyFitter.from_M(F_data, w_data, B_data, M, N_b, purity=0.8)
+
+    return params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b
+
+
+def test_fitter_objective():
+    """Test that objective returns -log L."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    # Convert true couplings to real params
+    x_true = np.zeros(params.n_free)
+    for i, name in enumerate(params.free_params):
+        idx = params.name_to_idx[name]
+        c_val = c_true[idx]
+        x_true[2 * i] = np.abs(c_val)        # r
+        x_true[2 * i + 1] = np.angle(c_val)  # phi
+
+    nll = full.objective(x_true)
+    assert np.isfinite(nll), f"NLL is not finite: {nll}"
+    assert nll > 0, f"NLL should be positive: {nll}"
+    print(f"✓ test_fitter_objective (NLL={nll:.2f})")
+
+
+def test_fitter_gradient_numerical():
+    """Test gradient against finite differences."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    x0 = np.array([1.0, 0.0, 1.0, 0.0])
+    eps = 1e-7
+
+    num_grad = np.zeros_like(x0)
+    for j in range(len(x0)):
+        x_plus = x0.copy()
+        x_plus[j] += eps
+        x_minus = x0.copy()
+        x_minus[j] -= eps
+        num_grad[j] = (full.objective(x_plus) - full.objective(x_minus)) / (2 * eps)
+
+    ana_grad = full.gradient(x0)
+    rel_err = np.linalg.norm(ana_grad - num_grad) / max(np.linalg.norm(num_grad), 1e-300)
+
+    assert rel_err < 1e-5, f"Relative error {rel_err:.2e} too large"
+    print(f"✓ test_fitter_gradient_numerical (rel_err={rel_err:.2e})")
+
+
+def test_fitter_objective_and_gradient():
+    """Test that objective_and_gradient matches separate calls."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    x0 = np.array([1.5, 0.3, 0.8, -0.2])
+
+    nll_sep = full.objective(x0)
+    grad_sep = full.gradient(x0)
+    nll_comb, grad_comb = full.objective_and_gradient(x0)
+
+    assert np.isclose(nll_comb, nll_sep), f"NLL mismatch: {nll_comb} vs {nll_sep}"
+    assert np.allclose(grad_comb, grad_sep), f"Gradient mismatch"
+    print("✓ test_fitter_objective_and_gradient")
+
+
+def test_fitter_fit():
+    """Test that fit converges toward true parameters."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    # Start from wrong initial guess
+    x0 = np.array([0.5, 1.0, 2.0, -1.0])
+
+    result = full.fit(x0=x0, method='BFGS')
+    assert result.success, f"Fit failed: {result.message}"
+
+    # Check that NLL decreased
+    nll_initial = full.objective(x0)
+    assert result.fun < nll_initial, f"NLL did not decrease: {result.fun} vs {nll_initial}"
+
+    # Check couplings are close to true
+    c_fit = full.get_couplings(result.x)
+    c_rel_err = np.linalg.norm(c_fit - c_true) / np.linalg.norm(c_true)
+
+    print(f"✓ test_fitter_fit (c_rel_err={c_rel_err:.2e})")
+
+
+def test_fitter_uncertainties():
+    """Test uncertainty computation from Hessian inverse."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+
+    x0 = np.array([1.0, 0.0, 1.0, 0.0])
+    result = full.fit(x0=x0, method='BFGS')
+
+    sigma = full.uncertainties(result)
+
+    assert sigma.shape == (params.n_free,), f"Wrong shape: {sigma.shape}"
+    assert np.all(np.isfinite(sigma)), f"Non-finite uncertainties: {sigma}"
+    assert np.all(sigma > 0), f"Non-positive uncertainties: {sigma}"
+
+    print(f"✓ test_fitter_uncertainties (sigma={sigma})")
+
+
+def test_fitter_get_couplings():
+    """Test get_couplings delegates to parameters.build_c."""
+    params, fitter, c_true, *_ = make_test_components()
+    full = Fitter(params, fitter)
+
+    x = np.array([2.0, 0.5, 1.5, -0.3])
+    c = full.get_couplings(x)
+    c_direct = params.build_c(x)
+
+    assert np.allclose(c, c_direct), "get_couplings doesn't match build_c"
+    print("✓ test_fitter_get_couplings")
+
+
+def test_fitter_with_chunked():
+    """Test that Fitter works with FpwFitterChunked."""
+    from fpwfitter import FpwFitterChunked
+
+    np.random.seed(42)
+    params = Parameters(
+        product_structure=[["a"], ["b"]],
+    )
+
+    n_data, n_proj, n_comp = 1000, 1, 2
+    F_data = np.random.randn(n_data, n_proj, n_comp) + 1j * np.random.randn(n_data, n_proj, n_comp)
+    w_data = np.abs(np.random.randn(n_data)) + 0.1
+    B_data = np.abs(np.random.randn(n_data)) * 0.1
+    M = np.eye(n_comp, dtype=np.complex128) * 100.0
+    N_b = 1.0
+
+    fitter = FpwFitterChunked.from_M(F_data, w_data, B_data, M, N_b, purity=0.8, max_vram_mb=256)
+    full = Fitter(params, fitter)
+
+    x0 = np.array([1.0, 0.0, 1.0, 0.0])
+    nll, grad = full.objective_and_gradient(x0)
+
+    assert np.isfinite(nll), f"NLL not finite: {nll}"
+    assert np.all(np.isfinite(grad)), f"Grad not finite: {grad}"
+    print(f"✓ test_fitter_with_chunked (NLL={nll:.2f})")
+
+
+if __name__ == "__main__":
+    test_fitter_objective()
+    test_fitter_gradient_numerical()
+    test_fitter_objective_and_gradient()
+    test_fitter_fit()
+    test_fitter_uncertainties()
+    test_fitter_get_couplings()
+    test_fitter_with_chunked()
+    print("\n✓ All Fitter tests passed")
