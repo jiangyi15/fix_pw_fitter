@@ -452,6 +452,294 @@ class Fitter:
 
         return results
 
+    def compute_interference_fractions(
+        self,
+        component_pairs: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> list[dict]:
+        """Calculate interference fit fractions and their uncertainties.
+
+        The interference fit fraction between two components $i$ and $j$ is defined as:
+            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
+        where $FF_S$ is the fit fraction of the set of components $S$.
+        This isolates the interference term (cross-term) contribution between the two components.
+
+        Args:
+            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
+            M: Overlap matrix. If None, tries to retrieve from the fitter.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` or `compute_hess_inv`.
+
+        Returns:
+            List of dictionaries, each containing:
+                - "indices": The component indices [i, j].
+                - "value": The interference fit fraction value.
+                - "error": The estimated uncertainty.
+                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
+        """
+        if x is None:
+            x = self._require_fit().x
+
+        if M is None:
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError("M is not available. Please pass M explicitly.")
+
+        # Ensure component_pairs is valid
+        for pair in component_pairs:
+            if len(pair) != 2:
+                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
+
+        # Compute V if not provided
+        if cov_matrix is not None:
+            V = np.asarray(cov_matrix)
+        else:
+            if hasattr(self, '_result') and self._result is not None:
+                res = self._result
+                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
+                    V = np.asarray(res.hess_inv)
+                else:
+                    V = self.compute_hess_inv(x=x)
+            else:
+                V = self.compute_hess_inv(x=x)
+        V = 0.5 * (V + V.T)
+
+        results = []
+        for pair in component_pairs:
+            i, j = pair[0], pair[1]
+            
+            # Compute gradients for FF_{i,j}, FF_{i}, FF_{j}
+            grad_ff_ij = self.compute_fit_fractions([[i, j]], M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
+            grad_ff_i  = self.compute_fit_fractions([[i]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
+            grad_ff_j  = self.compute_fit_fractions([[j]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["gradient"]
+
+            # Compute values for FF_{i,j}, FF_{i}, FF_{j}
+            ff_ij = self.compute_fit_fractions([[i, j]], M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
+            ff_i  = self.compute_fit_fractions([[i]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
+            ff_j  = self.compute_fit_fractions([[j]],     M=M, x=x, cov_matrix=np.eye(len(x)))[0]["value"]
+            
+            # Interference value and gradient
+            val = ff_ij - ff_i - ff_j
+            grad = grad_ff_ij - grad_ff_i - grad_ff_j
+            
+            # Uncertainty
+            variance = grad @ V @ grad
+            sigma = np.sqrt(max(0.0, np.real(variance)))
+            
+            results.append({
+                "indices": [i, j],
+                "value": val,
+                "error": sigma,
+                "gradient": grad.tolist(),
+            })
+
+        return results
+
+    def compute_interference_fractions(
+        self,
+        component_pairs: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> list[dict]:
+        """Calculate interference fit fractions and their uncertainties.
+
+        The interference fit fraction between two components $i$ and $j$ is defined as:
+            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
+        where $FF_S$ is the fit fraction of the set of components $S$.
+        This isolates the interference term (cross-term) contribution between the two components.
+
+        Uncertainty is calculated using the error propagation formula:
+            $\sigma = \sqrt{ g^T V g }$
+        where $g = \nabla_x I_{i,j}$ and $V$ is the covariance matrix.
+
+        Args:
+            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
+            M: Overlap matrix. If None, tries to retrieve from the fitter.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
+                        or falls back to `compute_hess_inv`.
+
+        Returns:
+            List of dictionaries, each containing:
+                - "indices": The component indices [i, j].
+                - "value": The interference fit fraction value.
+                - "error": The estimated uncertainty.
+                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
+        """
+        if x is None:
+            x = self._require_fit().x
+
+        if M is None:
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError(
+                    "M is not available. Please pass M explicitly."
+                )
+
+        # Ensure component_pairs is valid
+        for pair in component_pairs:
+            if len(pair) != 2:
+                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
+
+        # Determine Covariance Matrix V
+        if cov_matrix is not None:
+            V = np.asarray(cov_matrix)
+        else:
+            if hasattr(self, '_result') and self._result is not None:
+                res = self._result
+                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
+                    V = np.asarray(res.hess_inv)
+                else:
+                    V = self.compute_hess_inv(x=x)
+            else:
+                V = self.compute_hess_inv(x=x)
+
+        # Symmetrize V
+        V = 0.5 * (V + V.T)
+
+        results = []
+        for pair in component_pairs:
+            indices = list(pair)
+            i, j = indices[0], indices[1]
+
+            # We need FF_{i,j}, FF_{i}, FF_{j} and their gradients.
+            # To avoid recomputing V multiple times, we can pass it to compute_fit_fractions
+            # or just compute gradients/values and then combine them.
+            
+            # Helper to get FF value and gradient for a set of indices
+            def get_ff(indices_list):
+                # compute_fit_fractions returns a list of dicts
+                res_list = self.compute_fit_fractions([indices_list], M=M, x=x, cov_matrix=V)
+                res = res_list[0]
+                return res["value"], np.array(res["gradient"])
+
+            val_ij, grad_ij = get_ff([i, j])
+            val_i,  grad_i  = get_ff([i])
+            val_j,  grad_j  = get_ff([j])
+
+            # Interference fit fraction
+            ff_interference = val_ij - val_i - val_j
+            grad_interference = grad_ij - grad_i - grad_j
+
+            # Uncertainty: sqrt( g^T V g )
+            variance = grad_interference @ V @ grad_interference
+            sigma = np.sqrt(max(0.0, np.real(variance)))
+
+            results.append({
+                "indices": indices,
+                "value": ff_interference,
+                "error": sigma,
+                "gradient": grad_interference.tolist(),
+            })
+
+        return results
+
+    def compute_interference_fractions(
+        self,
+        component_pairs: list[list[int]],
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> list[dict]:
+        """Calculate interference fit fractions and their uncertainties.
+
+        The interference fit fraction between two components $i$ and $j$ is defined as:
+            $I_{i,j} = FF_{\{i,j\}} - FF_{\{i\}} - FF_{\{j\}}$
+        where $FF_S$ is the fit fraction of the set of components $S$.
+        This isolates the interference term (cross-term) contribution between the two components.
+
+        Uncertainty is calculated using the error propagation formula:
+            $\sigma = \sqrt{ g^T V g }$
+        where $g = \nabla_x I_{i,j}$ and $V$ is the covariance matrix.
+
+        Args:
+            component_pairs: List of component pairs, e.g., `[[0, 1], [0, 2]]`.
+            M: Overlap matrix. If None, tries to retrieve from the fitter.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix V. If None, uses `result.hess_inv` from the fit,
+                        or falls back to `compute_hess_inv`.
+
+        Returns:
+            List of dictionaries, each containing:
+                - "indices": The component indices [i, j].
+                - "value": The interference fit fraction value.
+                - "error": The estimated uncertainty.
+                - "gradient": The gradient of the interference fit fraction wrt real parameters x.
+        """
+        if x is None:
+            x = self._require_fit().x
+
+        if M is None:
+            if hasattr(self.fitter, "_M"):
+                M = self.fitter._M
+            else:
+                raise ValueError(
+                    "M is not available. Please pass M explicitly."
+                )
+
+        # Ensure component_pairs is valid
+        for pair in component_pairs:
+            if len(pair) != 2:
+                raise ValueError("Each pair in component_pairs must contain exactly 2 indices.")
+
+        # Determine Covariance Matrix V
+        if cov_matrix is not None:
+            V = np.asarray(cov_matrix)
+        else:
+            if hasattr(self, '_result') and self._result is not None:
+                res = self._result
+                if hasattr(res, 'hess_inv') and res.hess_inv is not None:
+                    V = np.asarray(res.hess_inv)
+                else:
+                    V = self.compute_hess_inv(x=x)
+            else:
+                V = self.compute_hess_inv(x=x)
+
+        # Symmetrize V
+        V = 0.5 * (V + V.T)
+
+        results = []
+        for pair in component_pairs:
+            indices = list(pair)
+            i, j = indices[0], indices[1]
+
+            # We need FF_{i,j}, FF_{i}, FF_{j} and their gradients.
+            # To avoid recomputing V multiple times, we can pass it to compute_fit_fractions
+            # or just compute gradients/values and then combine them.
+            
+            # Helper to get FF value and gradient for a set of indices
+            def get_ff(indices_list):
+                # compute_fit_fractions returns a list of dicts
+                res_list = self.compute_fit_fractions([indices_list], M=M, x=x, cov_matrix=V)
+                res = res_list[0]
+                return res["value"], np.array(res["gradient"])
+
+            val_ij, grad_ij = get_ff([i, j])
+            val_i,  grad_i  = get_ff([i])
+            val_j,  grad_j  = get_ff([j])
+
+            # Interference fit fraction
+            ff_interference = val_ij - val_i - val_j
+            grad_interference = grad_ij - grad_i - grad_j
+
+            # Uncertainty: sqrt( g^T V g )
+            variance = grad_interference @ V @ grad_interference
+            sigma = np.sqrt(max(0.0, np.real(variance)))
+
+            results.append({
+                "indices": indices,
+                "value": ff_interference,
+                "error": sigma,
+                "gradient": grad_interference.tolist(),
+            })
+
+        return results
+
     def save_results(self, path: str) -> None:
         """Save fit results to a JSON file.
 
