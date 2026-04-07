@@ -259,24 +259,18 @@ class Fitter:
         _, _, P = self.fitter.evaluate(c, return_P=True)
         return P
 
-    def save_results(
-        self,
-        path: str,
-        n_data: Optional[int] = None,
-    ) -> None:
+    def save_results(self, path: str) -> None:
         """Save fit results to a JSON file.
 
         JSON structure:
             {
               "value": {"a_r": r_val, "a_phi": phi_val, ...},
               "error": {"a_r": sigma_r, "a_phi": sigma_phi, ...},
-              "status": {"NLL": nll_value, "Ndf": ndf_value}
+              "status": {"NLL": nll_value, "Ndf": n_free_real}
             }
 
         Args:
             path: output JSON file path
-            n_data: number of data events (for Ndf calculation).
-                    If None, tries to infer from fitter; falls back to Ndf=-1.
         """
         result = self._require_fit()
         x = result.x
@@ -292,20 +286,8 @@ class Fitter:
             error[f"{name}_r"] = float(sigma[2 * i])
             error[f"{name}_phi"] = float(sigma[2 * i + 1])
 
-        # Ndf = n_data - n_free_params
-        if n_data is None:
-            # Try to infer from fitter
-            if hasattr(self.fitter, '_n_data'):
-                n_data = self.fitter._n_data
-            elif hasattr(self.fitter, 'n_data'):
-                n_data = self.fitter.n_data
-            elif hasattr(self.fitter, 'nd'):
-                n_data = self.fitter.nd
-            else:
-                n_data = -1
-
-        n_free = params.n_free
-        ndf = n_data - n_free if n_data > 0 else -1
+        # Ndf is the number of free real parameters
+        ndf = params.n_free
 
         output = {
             "value": value,
