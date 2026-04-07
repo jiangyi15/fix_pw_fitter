@@ -233,7 +233,7 @@ def test_fitter_save_load_results():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "fit_results.json")
-        full.save_results(path, n_data=len(F_data))
+        full.save_results(path)
 
         # Verify JSON structure
         with open(path) as f:
@@ -253,7 +253,7 @@ def test_fitter_save_load_results():
         # Check status
         assert "NLL" in data["status"]
         assert "Ndf" in data["status"]
-        assert data["status"]["Ndf"] == len(F_data) - params.n_free
+        assert data["status"]["Ndf"] == params.n_free
 
         # Test load_results
         loaded = Fitter.load_results(path)
