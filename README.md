@@ -35,22 +35,21 @@ The implementation uses a **single fused CUDA kernel** for the forward pass (A �
 
 | n_data | n_mc | n_comp | CPU | GPU | Speedup |
 |--------|------|--------|-----|-----|---------|
-| 10,000 | 50,000 | 20 | 4.9 ms | 0.2 ms | **31×** |
-| 50,000 | 200,000 | 50 | 47 ms | 1.8 ms | **26×** |
-| 100,000 | 500,000 | 50 | 89 ms | 2.7 ms | **33×** |
-| 100,000 | 500,000 | 100 | 156 ms | 4.1 ms | **38×** |
+| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | **18×** |
+| 50,000 | 200,000 | 50 | 45 ms | 0.7 ms | **60×** |
+| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | **66×** |
+| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | **61×** |
 
 For n_data = 10⁶, n_comp = 100, a single evaluate takes **~0.74 s** on GPU vs **~5 s** on CPU (~7×, still CPU-bound at large sizes).
 
-### M Pre-computation
-
-The overlap matrix $M_{kk'}$ is computed in Python via NumPy with chunked processing (supports mmap for large F_mc). Typical: **0.8 s** for n_mc = 500,000, n_comp = 50.
-
 ### Key Optimizations
 
-1. **Fused forward kernel** — 6 kernel launches replaced by 1; all intermediates in registers
-2. **cuBLAS ZGEMV gradient** — replaces K separate atomicAdd kernels with a single BLAS call
-3. **Warp-level reduction** — NLL and S_corr use `__shfl_down` instead of `atomicAdd`
-4. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
-5. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
+1. **Fused forward kernel** (A→S→P→NLL→G→S_corr) — 6 kernels → 1; all intermediates stay in registers
+2. **Coalesced F layout** `(KC, N, JP)` — consecutive threads read consecutive memory
+3. **`__ldg()` for read-only loads** — uses texture/L1 cache on Ampere GPUs
+4. **cuBLAS ZGEMV gradient** — replaces K separate atomicAdd kernels with one BLAS call
+5. **Warp-level reduction** — NLL and S_corr use `__shfl_down` instead of `atomicAdd`
+6. **Auto-detect GPU arch** — compiles for your exact GPU via `nvidia-smi`
+7. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
+8. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
 

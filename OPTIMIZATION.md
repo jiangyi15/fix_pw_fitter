@@ -162,17 +162,19 @@ All planned optimizations have been implemented:
 | **All data on GPU** (zero per-iteration H2D) | ✅ Done | Single upload at creation |
 | **Chunked M pre-compute** (NumPy, mmap) | ✅ Done | F_mc never fully in RAM |
 | Shared memory tiling (k_A) | ✅ Done | F transposed to (KC, N, JP) for coalesced reads; warp-reduction gradient kernel |
+| `__ldg()` read-only loads | ✅ Done | F and c read through texture/L1 cache on Ampere |
 | Mixed precision (FP32) | ❌ Skipped | Physics precision requires FP64 |
+| CUDA Graphs | ❌ Skipped | Ns changes each call; requires CUDA 12.0+ graph parameter update |
 | Event binning | ❌ Skipped | Application-specific; not in library |
 
 ### Measured Performance (2025-04)
 
 | n_data | n_mc | n_comp | CPU (NumPy) | GPU (CUDA) | Speedup |
 |--------|------|--------|-------------|------------|---------|
-| 10,000 | 50,000 | 20 | 4.9 ms | 0.2 ms | **31×** |
-| 50,000 | 200,000 | 50 | 46.7 ms | 1.8 ms | **26×** |
-| 100,000 | 500,000 | 50 | 89.3 ms | 2.7 ms | **33×** |
-| 100,000 | 500,000 | 100 | 155.9 ms | 4.1 ms | **38×** |
+| 10,000 | 50,000 | 20 | 2.7 ms | 0.2 ms | **18×** |
+| 50,000 | 200,000 | 50 | 45 ms | 0.7 ms | **60×** |
+| 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | **66×** |
+| 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | **61×** |
 | 1,000,000 | 1,000,000 | 100 | ~5 s | ~0.74 s | **~7×** |
 
 Gradient accuracy: relative error < 10⁻¹² in all cases.
