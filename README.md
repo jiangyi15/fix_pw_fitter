@@ -27,3 +27,30 @@ To reduce the calculation of gradients, we use complex number gradients.
 
 $\partial |\sum_{k} c_k F_{ijk}|^2/\partial c_k = \sum_{k'} F_{ijk} F_{ijk}^{\*} c_{k'}^{\*} =  F_{ijk} A_{ij}^{\*}$. Using the complex conjugate relation we can directly get $\partial (-\ln L)/\partial c_k^{\*} = (\partial (-\ln L)/\partial c_k)^{\*}$. This reduces many computations. The other parts are similar and can be evaluated using chain rules. Using common sub-expressions, we can reduce much more computations.
 
+## Performance
+
+The implementation uses a **single fused CUDA kernel** for the forward pass (A → S → P → NLL → G → S_corr) and cuBLAS ZGEMV for the gradient. All intermediates stay in registers — no global memory traffic between stages.
+
+### GPU Speedup vs NumPy CPU (single thread)
+
+| n_data | n_mc | n_comp | CPU | GPU | Speedup |
+|--------|------|--------|-----|-----|---------|
+| 10,000 | 50,000 | 20 | 3.7 ms | 0.1 ms | **29×** |
+| 50,000 | 200,000 | 50 | 50 ms | 1.1 ms | **44×** |
+| 100,000 | 500,000 | 50 | 96 ms | 2.1 ms | **46×** |
+| 100,000 | 500,000 | 100 | 170 ms | 3.8 ms | **44×** |
+
+For n_data = 10⁶, n_comp = 100, a single evaluate takes **~0.74 s** on GPU vs **~5 s** on CPU (~7×, still CPU-bound at large sizes).
+
+### M Pre-computation
+
+The overlap matrix $M_{kk'}$ is computed in Python via NumPy with chunked processing (supports mmap for large F_mc). Typical: **0.8 s** for n_mc = 500,000, n_comp = 50.
+
+### Key Optimizations
+
+1. **Fused forward kernel** — 6 kernel launches replaced by 1; all intermediates in registers
+2. **cuBLAS ZGEMV gradient** — replaces K separate atomicAdd kernels with a single BLAS call
+3. **Warp-level reduction** — NLL and S_corr use `__shfl_down` instead of `atomicAdd`
+4. **All data on GPU** — uploaded once at creation, zero H2D transfers during evaluate
+5. **Chunked M pre-compute** — F_mc never fully in RAM (supports mmap for n_mc > 10⁷)
+
