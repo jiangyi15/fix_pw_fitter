@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -31,8 +30,7 @@ _HASH    = _PKG_DIR / ".cu_hash"                     # cache key
 # ---------------------------------------------------------------------------
 
 def _detect_sm() -> str:
-    """Return ``sm_XX`` for the current GPU, or fallback ``sm_75``."""
-    # Try nvidia-smi first
+    """Return ``sm_XX`` for the current GPU via nvidia-smi, or ``sm_75``."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
@@ -42,34 +40,6 @@ def _detect_sm() -> str:
             cap = out.stdout.strip().split("\n")[0].strip().replace(".", "")
             return f"sm_{cap}"
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Try a tiny CUDA program
-    cuda_src = """
-#include <stdio.h>
-#include <cuda_runtime.h>
-int main(){
-    int dev; cudaGetDevice(&dev);
-    int major, minor;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-    printf("sm_%d%d\\n", major, minor);
-    return 0;
-}
-"""
-    try:
-        tmp_src = Path("/tmp/_fpw_detect_cuda.cu")
-        tmp_bin = Path("/tmp/_fpw_detect_cuda")
-        tmp_src.write_text(cuda_src)
-        nvcc = os.environ.get("NVCC", "nvcc")
-        subprocess.run([nvcc, "-o", str(tmp_bin), str(tmp_src)],
-                       capture_output=True, timeout=30, check=True)
-        out = subprocess.run([str(tmp_bin)], capture_output=True,
-                             text=True, timeout=5, check=True)
-        sm = out.stdout.strip()
-        if re.match(r"sm_\d+", sm):
-            return sm
-    except Exception:
         pass
 
     return "sm_75"   # safe fallback (Turing)
