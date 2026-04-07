@@ -21,12 +21,12 @@ def make_test_params():
         c_2 = c * d
     """
     return Parameters(
-        fixed_table={"a": 1.0 + 0j},
         product_structure=[
             ["a", "b", "c"],
             ["a", "b", "d"],
             ["c", "d"],
         ],
+        fixed_table={"a": 1.0 + 0j},
     )
 
 
@@ -55,7 +55,6 @@ def test_build_c_values():
 def test_build_c_polar():
     """Test polar form conversion."""
     params = Parameters(
-        fixed_table={},
         product_structure=[["x"]],
     )
 
@@ -79,7 +78,6 @@ def test_gradient_chain_rule_analytic():
     df/dphi = 2 Re(g * (dc/dphi)*) = 2 Re(c * (-i*y)*) = 2 Re(c * i*y*) = 2 Im(c * y*) = 2 Im(|y|^2) = 0
     """
     params = Parameters(
-        fixed_table={},
         product_structure=[["x"]],
     )
 
@@ -148,8 +146,8 @@ def test_gradient_chain_rule_numerical():
 def test_gradient_chain_rule_complex_function():
     """Test with f = -log|c|^2 for a single component."""
     params = Parameters(
-        fixed_table={"a": 1.0},
         product_structure=[["a", "b"]],
+        fixed_table={"a": 1.0},
     )
 
     r, phi = 2.0, 0.3
@@ -204,8 +202,8 @@ def test_repr():
 def test_from_dict():
     """Test factory from dict."""
     config = {
-        "fixed": {"a": "1+0j"},
         "products": [["a", "b"], ["a", "c"], ["b", "c"]],
+        "fixed": {"a": "1+0j"},
     }
     params = Parameters.from_dict(config)
     assert params.free_params == ["b", "c"]
@@ -217,7 +215,6 @@ def test_from_dict():
 def test_empty_fixed_table():
     """Test with no fixed parameters."""
     params = Parameters(
-        fixed_table={},
         product_structure=[["a", "b"], ["a"]],
     )
     x = np.array([1.0, 0.0, 2.0, np.pi / 2])  # a=1, b=2i
@@ -230,7 +227,6 @@ def test_empty_fixed_table():
 def test_zero_r_handling():
     """Test that r=0 doesn't cause division by zero."""
     params = Parameters(
-        fixed_table={},
         product_structure=[["a"]],
     )
     x = np.array([0.0, 0.0])

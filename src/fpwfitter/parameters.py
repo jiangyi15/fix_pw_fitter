@@ -33,21 +33,20 @@ class Parameters:
 
     def __init__(
         self,
-        fixed_table: Dict[str, complex],
         product_structure: List[List[str]],
+        fixed_table: Dict[str, complex] = None,
     ):
         """
         Args:
-            fixed_table: {param_name: complex_value} — fixed (non-optimized) parameters
             product_structure: list of lists of param names
                 e.g. [["a", "b", "c"], ["a", "b", "d"]] means
                 c = [y["a"]*y["b"]*y["c"], y["a"]*y["b"]*y["d"]]
-
-        Free parameters are automatically inferred as all unique names
-        in product_structure that are not in fixed_table.
+            fixed_table: optional {param_name: complex_value} — fixed parameters.
+                Free parameters are automatically inferred as all unique names
+                in product_structure that are not in fixed_table.
         """
-        self.fixed_table = dict(fixed_table)
         self.product_structure = [list(p) for p in product_structure]
+        self.fixed_table = dict(fixed_table) if fixed_table else {}
 
         # ---- Determine free params from product_structure ----
         all_names_ordered = []
@@ -217,16 +216,16 @@ class Parameters:
         """Create from a dictionary configuration.
 
         Expected keys:
-            fixed: {name: value}  (optional)
             products: [[name_a, name_b, ...], ...]
+            fixed: {name: value}  (optional)
         """
         fixed = {}
         for name, val in config.get("fixed", {}).items():
             fixed[name] = complex(val)
 
         return cls(
-            fixed_table=fixed,
             product_structure=config["products"],
+            fixed_table=fixed or None,
         )
 
     @classmethod
@@ -258,8 +257,8 @@ class Parameters:
             fixed[name] = complex(val)
 
         return cls(
-            fixed_table=fixed,
             product_structure=config["products"],
+            fixed_table=fixed or None,
         )
 
     def __repr__(self) -> str:
