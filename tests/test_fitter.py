@@ -419,6 +419,33 @@ def test_fitter_compute_fit_fraction_matrix():
     print("✓ test_fitter_compute_fit_fraction_matrix")
 
 
+def test_fitter_save_fit_fractions_csv():
+    """Test saving fit fractions to CSV."""
+    params, fitter, c_true, F_data, F_mc, w_data, w_mc, B_data, B_mc, M, N_b = make_test_components()
+    full = Fitter(params, fitter)
+    full.fit(x0=np.array([1.0, 0.0, 1.0, 0.0]))
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        prefix = os.path.join(tmpdir, "test_fit_frac")
+        full.save_fit_fractions_csv([[0], [1]], prefix=prefix)
+        
+        frac_file = f"{prefix}.csv"
+        err_file = f"{prefix}_err.csv"
+        
+        assert os.path.exists(frac_file)
+        assert os.path.exists(err_file)
+        
+        # Check content
+        with open(frac_file) as f:
+            lines = f.readlines()
+            # Header + 2 rows
+            assert len(lines) == 3
+            assert "[0]" in lines[0]
+            assert "[1]" in lines[0]
+            
+    print("✓ test_fitter_save_fit_fractions_csv")
+
+
 if __name__ == "__main__":
     test_fitter_objective()
     test_fitter_gradient_numerical()
@@ -434,4 +461,5 @@ if __name__ == "__main__":
     test_fitter_compute_fit_fractions()
     test_fitter_compute_interference_fractions()
     test_fitter_compute_fit_fraction_matrix()
+    test_fitter_save_fit_fractions_csv()
     print("\n✓ All Fitter tests passed")

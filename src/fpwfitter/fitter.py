@@ -324,6 +324,48 @@ class Fitter:
             x = self._require_fit().x
         return ff.compute_ratios(x, numerator_groups, denominator_group)
 
+    def save_fit_fractions_csv(
+        self,
+        component_groups: list[list[int]],
+        prefix: str = "fit_frac",
+        M: Optional[np.ndarray] = None,
+        x: Optional[np.ndarray] = None,
+        cov_matrix: Optional[np.ndarray] = None,
+    ) -> None:
+        """Save fit fraction matrix and uncertainties to CSV files.
+
+        Saves two files:
+            - <prefix>.csv: Matrix of fit fraction values.
+            - <prefix>_err.csv: Matrix of uncertainties.
+
+        Args:
+            component_groups: List of component groups defining the matrix rows/cols.
+            prefix: Filename prefix (default: "fit_frac").
+            M: Overlap matrix.
+            x: Real parameter values. Defaults to best-fit x.
+            cov_matrix: Covariance matrix.
+        """
+        import csv
+
+        res = self.compute_fit_fraction_matrix(
+            component_groups=component_groups, M=M, x=x, cov_matrix=cov_matrix
+        )
+        matrix = res["matrix"]
+        errors = res["errors"]
+        groups = res["groups"]
+
+        labels = [str(g) for g in groups]
+
+        def _write_csv(filename, data):
+            with open(filename, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([""] + labels)
+                for i, label in enumerate(labels):
+                    writer.writerow([label] + list(data[i]))
+
+        _write_csv(f"{prefix}.csv", matrix)
+        _write_csv(f"{prefix}_err.csv", errors)
+
     def _require_fit(self) -> OptimizeResult:
         """Raise if fit() hasn't been called."""
         if self._result is None:
