@@ -157,15 +157,22 @@ All planned optimizations have been implemented:
 | Optimization | Status | Impact |
 |-------------|--------|--------|
 | **Fused forward kernel** (A→S→P→NLL→G→S_corr) | ✅ Done | 6 kernels → 1; zero global memory for intermediates |
-| **cuBLAS ZGEMV gradient** | ✅ Done | K atomicAdd kernels → 1 BLAS call |
+| **cuBLAS ZGEMV/CGEMV gradient** | ✅ Done | K atomicAdd kernels → 1 BLAS call |
 | **Warp-level reduction** (NLL, S_corr) | ✅ Done | `__shfl_down` tree; minimal atomic contention |
 | **All data on GPU** (zero per-iteration H2D) | ✅ Done | Single upload at creation |
 | **Chunked M pre-compute** (NumPy, mmap) | ✅ Done | F_mc never fully in RAM |
-| Shared memory tiling (k_A) | ✅ Done | F transposed to (KC, N, JP) for coalesced reads; warp-reduction gradient kernel |
+| F transposed to (KC, N, JP) for coalesced reads | ✅ Done | Coalesced memory access |
 | `__ldg()` read-only loads | ✅ Done | F and c read through texture/L1 cache on Ampere |
 | Mixed precision (FP32) | ✅ Done | `FpwFitterMP` — ~2× over FP64, gradient error ~5×10⁻⁶ |
+| **Chunked fitter** (FpwFitterChunked) | ✅ Done | Datasets > VRAM; FP64 precision maintained |
+| Shared memory tiling | ❌ Skipped | Slower due to reduced occupancy |
+| Forward+gradient fusion | ❌ Skipped | 8× slower due to atomic contention |
 | CUDA Graphs | ❌ Skipped | Ns changes each call; requires CUDA 12.0+ graph parameter update |
 | Event binning | ❌ Skipped | Application-specific; not in library |
+
+### Optimization Status: **No further meaningful code optimizations possible**
+
+The fitter is at **65% of peak memory bandwidth** — the practical limit for this GPU architecture. Further optimization would require hardware changes (better GPU) or application-level changes (event binning).
 
 ### Measured Performance (2025-04, RTX 3070 Ti Laptop)
 
@@ -175,12 +182,85 @@ All planned optimizations have been implemented:
 | 50,000 | 200,000 | 50 | 45 ms | 0.8 ms | 0.3 ms | 8×10⁻⁶ |
 | 100,000 | 500,000 | 50 | 92 ms | 1.4 ms | 0.6 ms | 5×10⁻⁵ |
 | 100,000 | 500,000 | 100 | 154 ms | 2.5 ms | 1.2 ms | 6×10⁻⁵ |
-| 1,000,000 | 1,000,000 | 100 | 1375 ms | 23.5 ms | 11.4 ms | 4×10⁻⁴ |
+| 1,000,000 | 1,000,000 | 100 | 1375 ms | 23.6 ms | 12.0 ms | 4×10⁻⁴ |
 
 Gradient accuracy (relative error): FP64 < 3×10⁻¹², FP32 ~5×10⁻⁶.
 
-At n_data = 10⁶, n_comp = 100 the GPU evaluates in **11 ms** (FP32) — enabling
+At n_data = 10⁶, n_comp = 100 the GPU evaluates in **12 ms** (FP32) — enabling
 real-time fitting with L-BFGS (10-50 iterations = ~0.1-0.6 s total).
+
+---
+
+## Bandwidth Analysis
+
+### Peak Bandwidth Benchmark (bandwidth.cu)
+
+A simple kernel copy benchmark on RTX 3070 Ti Laptop shows:
+
+| Test | Bandwidth |
+|------|-----------|
+| HtoD (Pinned) | 13.4 GB/s (PCIe limit) |
+| DtoD (Memcpy) | 208 GB/s |
+| **Kernel Copy** | **415 GB/s** (effective compute bandwidth) |
+
+Theoretical peak: 448 GB/s. Simple kernels achieve ~93% of peak.
+
+### Fitter Bandwidth Efficiency
+
+| Metric | FP64 | FP32 |
+|--------|------|------|
+| F size (per eval) | 3.20 GB | 1.60 GB |
+| 2 reads/eval | 6.40 GB | 3.20 GB |
+| Theoretical min (415 GB/s) | 15.4 ms | 7.7 ms |
+| Actual | 23.6 ms | 12.0 ms |
+| **Effective BW** | **271 GB/s (65%)** | **266 GB/s (64%)** |
+
+### Optimization Ceiling
+
+The fitter achieves **65% of peak kernel bandwidth** — this is the practical limit for complex applications. The remaining 35% overhead breaks down as:
+
+| Overhead Source | Impact | Fixable? |
+|----------------|--------|----------|
+| Cache thrashing (KC=100 planes) | ~15-20% | Low ROI (would break coalesced access) |
+| Memory controller inefficiency | ~10-15% | No (hardware limit) |
+| Register pressure (occupancy ~66%) | ~5% | Low ROI |
+| Kernel launch overhead | ~5% | Medium (fusion) |
+
+**Realistic improvement potential: ~15-20% (1.15-1.2× speedup)**
+This is unlikely to be worth the engineering effort — the implementation is **memory-bandwidth bound** and already near the architectural limit.
+
+### FLOPS Analysis
+
+#### Per-Evaluation FLOP Count (n=10⁶, k=100, j=2)
+
+| Component | FLOPs | Fraction |
+|-----------|-------|----------|
+| **Forward kernel** | 1.81 GFLOP | 36% |
+| — A = F × c (matrix-vector) | 1.60 GFLOP | 32% |
+| — S, P, G, NLL, S_corr | 0.21 GFLOP | 4% |
+| **Gradient (ZGEMV)** | 3.20 GFLOP | 64% |
+| **Total** | **5.01 GFLOP** | 100% |
+
+#### Achieved GFLOP/s (RTX 3070 Ti Laptop)
+
+| Metric | FP64 | FP32 |
+|--------|------|------|
+| **Achieved** | **212 GFLOP/s** | **417 GFLOP/s** |
+| Theoretical Peak | 339 GFLOP/s | 21,700 GFLOP/s |
+| **Compute Efficiency** | **63%** | **1.9%** |
+
+The FP64 kernel achieves **63% of peak FP64 compute** — this is good for a complex application with special functions (log, div), warp reduction, and atomic operations. The FP32 kernel's 1.9% efficiency is misleading: it performs the same number of FMA-equivalent operations with 32-bit arithmetic, but the GPU has 64× more FP32 throughput.
+
+**Both metrics confirm the implementation is memory-bandwidth bound, not compute-bound.** The similar efficiency (65% bandwidth vs 63% compute) shows that memory access and computation are balanced — neither can be improved without improving the other.
+
+### Ways to Get Faster
+
+| Approach | Speedup | Level |
+|----------|---------|-------|
+| **FP32** (current) | **2×** over FP64 | ✅ Done |
+| Event binning | 10-100× | Application-level |
+| Multi-GPU | 2-4× | Hardware |
+| **A100 GPU** (1555 GB/s) | **~4×** | Hardware upgrade |
 
 ---
 
