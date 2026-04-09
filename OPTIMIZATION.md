@@ -246,10 +246,10 @@ This is unlikely to be worth the engineering effort — the implementation is **
 | Metric | FP64 | FP32 |
 |--------|------|------|
 | **Achieved** | **212 GFLOP/s** | **417 GFLOP/s** |
-| Theoretical Peak | 339 GFLOP/s | 21,700 GFLOP/s |
-| **Compute Efficiency** | **63%** | **1.9%** |
+| Theoretical Peak | 260 GFLOP/s | 16,600 GFLOP/s |
+| **Compute Efficiency** | **82%** | **2.5%** |
 
-The FP64 kernel achieves **63% of peak FP64 compute** — this is good for a complex application with special functions (log, div), warp reduction, and atomic operations. The FP32 kernel's 1.9% efficiency is misleading: it performs the same number of FMA-equivalent operations with 32-bit arithmetic, but the GPU has 64× more FP32 throughput.
+The FP64 kernel achieves **82% of peak FP64 compute** — excellent for a complex application with special functions (log, div), warp reduction, and atomic operations. The FP32 kernel's 2.5% efficiency is misleading: it performs the same number of FMA-equivalent operations with 32-bit arithmetic, but the laptop GPU has 64× more FP32 throughput (16.6 TFLOP/s vs 260 GFLOP/s FP64).
 
 **Both metrics confirm the implementation is memory-bandwidth bound, not compute-bound.** The similar efficiency (65% bandwidth vs 63% compute) shows that memory access and computation are balanced — neither can be improved without improving the other.
 
