@@ -62,14 +62,14 @@ def ensure_lib() -> Path:
 # ---------------------------------------------------------------------------
 
 def _needs_rebuild() -> bool:
-    if not _LIB.exists():
-        return True
-    mp_lib = _PKG_DIR / "libfpwfitter_mp.so"
-    if not mp_lib.exists():
-        return True
-    chunked_lib = _PKG_DIR / "libfpwfitter_chunked.so"
-    if not chunked_lib.exists():
-        return True
+    for lib_name in [
+        "libfpwfitter.so",
+        "libfpwfitter_mp.so",
+        "libfpwfitter_chunked.so",
+        "libfpwfitter_parallel.so",
+    ]:
+        if not (_PKG_DIR / lib_name).exists():
+            return True
     if not _HASH.exists():
         return True
     return _HASH.read_text() != _cu_hash()
@@ -77,13 +77,9 @@ def _needs_rebuild() -> bool:
 
 def _cu_hash() -> str:
     """SHA-256 of all .cu source files (fast change detection)."""
-    h = hashlib.sha256(_CU.read_bytes())
-    mp_cu = _PKG_DIR / "fpwfitter_mp.cu"
-    if mp_cu.exists():
-        h.update(mp_cu.read_bytes())
-    chunked_cu = _PKG_DIR / "fpwfitter_chunked.cu"
-    if chunked_cu.exists():
-        h.update(chunked_cu.read_bytes())
+    h = hashlib.sha256()
+    for cu_file in sorted(_PKG_DIR.glob("*.cu")):
+        h.update(cu_file.read_bytes())
     return h.hexdigest()
 
 
@@ -116,9 +112,5 @@ def _build() -> None:
             raise RuntimeError(f"nvcc failed on {name} (exit {exc.returncode})") from exc
         elapsed = time.perf_counter() - t0
         print(f"[fpwfitter] Built {name} in {elapsed:.1f}s", flush=True)
-    # Hash based on both .cu files
-    h = hashlib.sha256(_CU.read_bytes())
-    mp_cu = _PKG_DIR / "fpwfitter_mp.cu"
-    if mp_cu.exists():
-        h.update(mp_cu.read_bytes())
-    _HASH.write_text(h.hexdigest())
+    # Hash based on all .cu files
+    _HASH.write_text(_cu_hash())
