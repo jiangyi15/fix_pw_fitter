@@ -94,6 +94,7 @@ def _build() -> None:
         ("libfpwfitter.so", ["fpwfitter.cu"], "-lcublas"),
         ("libfpwfitter_mp.so", ["fpwfitter_mp.cu"], "-lcublas"),
         ("libfpwfitter_chunked.so", ["fpwfitter_chunked.cu"], "-lcublas"),
+        ("libfpwfitter_parallel.so", ["fpwfitter_parallel.cu"], "-lcublas"),
     ]:
         cmd = [
             nvcc,

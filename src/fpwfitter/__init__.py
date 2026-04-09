@@ -22,6 +22,7 @@ Both have identical API::
 from .core import FpwFitter
 from .mp import FpwFitterMP
 from .chunked import FpwFitterChunked
+from .parallel import FpwFitterParallel as FpwFitterParallel
 from .parameters import Parameters
 from .fit_fractions import FitFractions
 from .fitter import Fitter
@@ -29,6 +30,7 @@ from .ref_numpy import NumpyFitter
 from .compute_m import compute_M, compute_M_mmap
 
 
-__all__ = ["FpwFitter", "FpwFitterMP", "FpwFitterChunked", "Parameters",
-           "FitFractions", "Fitter", "NumpyFitter", "compute_M", "compute_M_mmap"]
+__all__ = ["FpwFitter", "FpwFitterMP", "FpwFitterChunked", "FpwFitterParallel",
+           "Parameters", "FitFractions", "Fitter", "NumpyFitter",
+           "compute_M", "compute_M_mmap"]
 __version__ = "0.1.0"
