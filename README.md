@@ -4,6 +4,15 @@ This package is used to fit partial waves analysis with fixed shape partial wave
 
 For the fixed partial waves, the amplitude is only related to the coupling constant. It greatly simplifies the problem of partial wave analysis.
 
+## Installation
+
+```bash
+pip install git+ssh://git@github.com:jiangyi15/fix_pw_fitter.git@qwen_code
+```
+
+**Requirements:** NVIDIA GPU with CUDA support, CUDA toolkit, and `nvcc` compiler.
+On first import, the package auto-detects your GPU architecture and compiles the CUDA kernels.
+
 ## Formula
 
 For the fixed partial waves, all dynamic amplitudes are cached as $F_{ijk}$, where $i$ is for the events, $j$ for the projections, $k$ for the partial waves or components. The coupling parameters are $c_k$, which are complex numbers.
