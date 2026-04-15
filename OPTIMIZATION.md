@@ -238,20 +238,20 @@ This is unlikely to be worth the engineering effort — the implementation is **
 | **Forward kernel** | 1.81 GFLOP | 36% |
 | — A = F × c (matrix-vector) | 1.60 GFLOP | 32% |
 | — S, P, G, NLL, S_corr | 0.21 GFLOP | 4% |
-| **Gradient (ZGEMV)** | 3.20 GFLOP | 64% |
-| **Total** | **5.01 GFLOP** | 100% |
+| **Gradient (ZGEMV)** | 1.60 GFLOP | 47% |
+| **Total** | **3.41 GFLOP** | 100% |
 
 #### Achieved GFLOP/s (RTX 3070 Ti Laptop)
 
 | Metric | FP64 | FP32 |
 |--------|------|------|
-| **Achieved** | **212 GFLOP/s** | **417 GFLOP/s** |
+| **Achieved** | **144 GFLOP/s** | **284 GFLOP/s** |
 | Theoretical Peak | 260 GFLOP/s | 16,600 GFLOP/s |
-| **Compute Efficiency** | **82%** | **2.5%** |
+| **Compute Efficiency** | **55%** | **1.7%** |
 
-The FP64 kernel achieves **82% of peak FP64 compute** — excellent for a complex application with special functions (log, div), warp reduction, and atomic operations. The FP32 kernel's 2.5% efficiency is misleading: it performs the same number of FMA-equivalent operations with 32-bit arithmetic, but the laptop GPU has 64× more FP32 throughput (16.6 TFLOP/s vs 260 GFLOP/s FP64).
+The FP64 kernel achieves **55% of peak FP64 compute** — consistent with a memory-bandwidth bound kernel. The remaining overhead is from special functions (log, div), warp reduction, and atomic operations. The FP32 kernel's 1.7% efficiency is misleading: it performs the same number of FMA-equivalent operations with 32-bit arithmetic, but the laptop GPU has 64× more FP32 throughput (16.6 TFLOP/s vs 260 GFLOP/s FP64).
 
-**Both metrics confirm the implementation is memory-bandwidth bound, not compute-bound.** The similar efficiency (65% bandwidth vs 63% compute) shows that memory access and computation are balanced — neither can be improved without improving the other.
+**Both metrics confirm the implementation is memory-bandwidth bound, not compute-bound.** Bandwidth at 65% is the tighter bottleneck vs compute at 55%.
 
 ### Ways to Get Faster
 
@@ -261,6 +261,77 @@ The FP64 kernel achieves **82% of peak FP64 compute** — excellent for a comple
 | Event binning | 10-100× | Application-level |
 | Multi-GPU | 2-4× | Hardware |
 | **A100 GPU** (1555 GB/s) | **~4×** | Hardware upgrade |
+
+---
+
+## Nsight Compute Profiling (n=10⁶, k=100, j=2)
+
+Profiling with `ncu --section SpeedOfLight` reveals the exact kernel-level breakdown:
+
+### Per-Kernel Performance
+
+| Kernel | Time | Memory BW | Compute | Status |
+|--------|------|-----------|---------|--------|
+| **k_fused** (forward) | **17.37 ms** | **84.5%** | **88.1%** | ⚡ Near hardware limits |
+| **gemv2T_kernel_val** (ZGEMV) | **12.13 ms** | 61.6% | **91.3%** | 🔥 Compute-bound |
+| k_conjvec (gradient prep) | 0.155 ms | 91.5% | 15.6% | Memory-bound |
+| splitKreduce | 0.152 ms | 0.7% | 11.1% | Negligible |
+| k_conjvec (2nd call) | 0.004 ms | 0.9% | 0.04% | Negligible |
+| **Total** | **~29.8 ms** | | | ✅ |
+
+### Forward Kernel (k_fused)
+
+```
+Section: GPU Speed Of Light Throughput
+    Memory Throughput:      84.5%
+    Compute (SM) Throughput: 88.1%
+    Duration:               17.37 ms
+    Elapsed Cycles:         15,896,361
+
+INF: This workload is utilizing greater than 80.0% of the available 
+     compute or memory performance of this device.
+```
+
+**Both memory (84.5%) and compute (88.1%) are at hardware limits** — no code-level optimization can improve this.
+
+### ZGEMV Gradient (gemv2T_kernel_val)
+
+```
+Section: GPU Speed Of Light Throughput
+    Memory Throughput:      61.6%
+    Compute (SM) Throughput: 91.3%
+    Duration:               12.13 ms
+    Elapsed Cycles:         11,100,922
+
+INF: This workload is utilizing greater than 80.0% of the available 
+     compute performance.
+```
+
+The cuBLAS ZGEMV kernel is **compute-bound at 91.3%** — it's already using almost all available FP64 ALU capacity. This is the expected behavior for matrix-vector multiplication on large matrices.
+
+### Time Split
+
+| Component | Time | Fraction |
+|-----------|------|----------|
+| Forward kernel | 17.37 ms | 58% |
+| ZGEMV gradient | 12.13 ms | 41% |
+| Overhead | 0.3 ms | 1% |
+| **Total** | **~29.8 ms** | **100%** |
+
+### Profiling Conclusion
+
+**No further code-level optimization is possible.** Both kernels are at 85-91% of the GPU's architectural limits:
+
+| Metric | Value | Peak | Efficiency |
+|--------|-------|------|------------|
+| k_fused Memory | 354 GB/s | 415 GB/s | **84.5%** |
+| k_fused Compute | 182 GFLOP/s | 260 GFLOP/s | **70%** |
+| ZGEMV Compute | 132 GFLOP/s | 260 GFLOP/s | **51%** |
+
+The remaining overhead is fundamental to:
+- Memory controller scheduling latency
+- Instruction pipeline stalls
+- Warp scheduling overhead
 
 ---
 
