@@ -19,7 +19,7 @@ class ParamMapper:
     Usage:
         mapper = ParamMapper(cfg)
         ck, m0_k, g0_k = mapper.to_kernel(total, gls, glsbar, m0_phys, g0_phys, scalars)
-        grads = mapper.from_kernel(grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
+        grads = mapper.from_kernel_cached(grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
     """
 
     def __init__(self, cfg):
@@ -120,18 +120,20 @@ class ParamMapper:
         grad_glsbar = np.zeros(len(self.glsbar), dtype=np.complex128)
 
         for i, formula in enumerate(self.ck_formulas):
-            gck = grad_ck[i]
-            prod_full = self._cache_ck_vals_full[i]
-            vals = self._cache_ck_vals[i]
+            gck = grad_ck[i]  # ∂J/∂ck_w*  (Wirtinger derivative from kernel)
+            prod_full = self._cache_ck_vals_full[i]  # ck_w
+            vals = self._cache_ck_vals[i]  # [total, g_ls_0, ...]
             for j, (typ, phys_idx) in enumerate(formula):
                 f_j = vals[j]
+                # ∂J/∂f_j* = ∂J/∂ck* * ∂ck*/∂f_j* = grad_ck * conj(∂ck/∂f_j)
+                # ck = ∏_k f_k,  ∂ck/∂f_j = ∏_{k≠j} f_k = ck / f_j
+                # ∂ck*/∂f_j* = conj(ck / f_j)
+                # So: ∂J/∂f_j* = grad_ck * conj(ck / f_j)
                 if abs(f_j) > 1e-15:
-                    contrib = gck * prod_full / f_j
+                    contrib = gck * np.conj(prod_full / f_j)
                 else:
-                    contrib = gck
-                    for k, (t2, p2) in enumerate(formula):
-                        if k != j:
-                            contrib *= vals[k]
+                    # f_j ≈ 0: compute product excluding f_j directly
+                    contrib = gck * np.conj(np.prod([vals[k] for k in range(len(formula)) if k != j]))
                 if typ == 'total':
                     grad_total[phys_idx] += contrib
                 elif typ == 'g_ls':
@@ -158,28 +160,24 @@ class ParamMapper:
 
     def from_kernel_cached(self, grad_ck, grad_m0_k, grad_g0_k, grad_scalar):
         """Backward using cached forward values from last to_kernel call."""
-        # Accumulate per physical parameter
         grad_total = np.zeros(len(self.totals), dtype=np.complex128)
         grad_gls = np.zeros(len(self.gls), dtype=np.complex128)
         grad_glsbar = np.zeros(len(self.glsbar), dtype=np.complex128)
 
+        if not hasattr(self, '_cache_ck_vals'):
+            return {...}  # will fill below
+
         for i, formula in enumerate(self.ck_formulas):
-            if not hasattr(self, '_cache_ck_vals'):
-                break
             gck = grad_ck[i]
-            # For each factor in this wave's ck formula:
+            prod_full = self._cache_ck_vals_full[i]
+            vals = self._cache_ck_vals[i]
             for j, (typ, phys_idx) in enumerate(formula):
-                # dJ/df_j = dJ/d(ck) * ∏_{k≠j} f_k = grad_ck * ck / f_j
-                # If f_j ≈ 0, this blows up — use full product / f_j from cache
-                f_j = self._cache_ck_vals[i][j]
+                f_j = vals[j]
+                # ∂J/∂f_j* = ∂J/∂ck* * conj(∂ck/∂f_j) = grad_ck * conj(ck / f_j)
                 if abs(f_j) > 1e-15:
-                    contrib = gck * self._cache_ck_vals_full[i] / f_j
+                    contrib = gck * np.conj(prod_full / f_j)
                 else:
-                    # f_j = 0, compute product excluding f_j
-                    contrib = gck
-                    for k, (t2, p2) in enumerate(formula):
-                        if k != j:
-                            contrib *= self._cache_ck_vals[i][k]
+                    contrib = gck * np.conj(np.prod([vals[k] for k in range(len(formula)) if k != j]))
                 if typ == 'total':
                     grad_total[phys_idx] += contrib
                 elif typ == 'g_ls':
