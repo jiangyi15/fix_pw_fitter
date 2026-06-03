@@ -309,6 +309,10 @@ class ConstraintMapper:
             model_dict = {}
         return self.pack(model_dict)
 
+    def free_flat_from_phys(self, phys_params):
+        """Convenience: physical params dict → flat free-param array."""
+        return self.pack(self.build_model_dict(phys_params))
+
     # ------------------------------------------------------------------
     # Full compute pipeline
     # ------------------------------------------------------------------

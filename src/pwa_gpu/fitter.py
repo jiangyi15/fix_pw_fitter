@@ -216,31 +216,26 @@ class PWAFitter:
         return result
 
     # ------------------------------------------------------------------
-    # Optimization interface (delegated to ConstraintMapper)
+    # Parameter transforms (delegated to ConstraintMapper)
     # ------------------------------------------------------------------
 
+    @property
+    def cst(self):
+        return self._ensure_cst()
+
     def get_free_keys(self):
-        """Return list of free parameter keys."""
-        return self._ensure_cst().get_free_keys()
+        return self.cst.get_free_keys()
 
     def pack(self, values_dict, keys=None):
-        """Pack parameter values into flat float64 array."""
-        return self._ensure_cst().pack(values_dict, keys)
+        return self.cst.pack(values_dict, keys)
 
     def unpack(self, x, keys=None):
-        """Unpack flat array into model params dict."""
-        return self._ensure_cst().unpack(x, keys)
+        return self.cst.unpack(x, keys)
 
-    def get_free_values(self, params_dict=None):
-        """Get flat initial values for free parameters.
-        Args:
-            params_dict: source physical params (default: self.params)
-        Returns: flat float64 array
-        """
-        if params_dict is None:
-            params_dict = self.params
-        model_dict = self._ensure_cst().build_model_dict(params_dict)
-        return self._ensure_cst().pack(model_dict)
+    def get_free_values(self, phys_params=None):
+        if phys_params is None:
+            phys_params = self.params
+        return self.cst.free_flat_from_phys(phys_params)
 
     def make_fit_func(self, data, phsp, N_phsp=None):
         """
@@ -248,7 +243,7 @@ class PWAFitter:
         
         Returns: fun(x) → (neg_log_likelihood, gradient_array)
         """
-        cst = self._ensure_cst()
+        cst = self.cst
         gpu = self._ensure_fitter()
         keys = cst.get_free_keys()
 
