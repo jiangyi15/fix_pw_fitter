@@ -344,12 +344,17 @@ def load_params(json_path, mapper, config_path=None):
         decay = ycfg.get('decay', {})
 
         def get_resonance_names(name, visited=None):
+            """Yield actual resonance names from an intermediate name.
+            Follows both particle multiplets and decay definitions."""
             if visited is None: visited = set()
             if name in visited: return
             visited.add(name)
+            # Check particle section
             props = particle.get(name)
-            if props is None: return
+            if props is None:
+                return
             if isinstance(props, list):
+                # Multiplet: each entry is a resonance name
                 for p in props:
                     if isinstance(p, str):
                         sub = particle.get(p, {})
@@ -359,19 +364,29 @@ def load_params(json_path, mapper, config_path=None):
                             yield from get_resonance_names(p, visited)
             elif isinstance(props, dict) and 'J' in props:
                 yield name
+                return
+            # Also follow decay definitions (intermediates like pipid)
+            decay_daughters = decay.get(name, [])
+            for item in decay_daughters:
+                if isinstance(item, str) and item not in finals:
+                    yield from get_resonance_names(item, visited)
 
         used_resonances = set()
+        finals = set(ycfg.get('particle', {}).get('$finals', []))
         b_decay_lines = decay.get(ycfg.get('particle', {}).get('$top', 'B'), [])
         for decay_line in b_decay_lines:
             if isinstance(decay_line, list):
                 for item in decay_line:
-                    if isinstance(item, str):
+                    if isinstance(item, str) and item not in finals:
                         for rname in get_resonance_names(item):
-                            used_resonances.add(rname)
+                            if rname not in finals:
+                                used_resonances.add(rname)
 
         # --- m0 ---
         m0_keys = []
-        for rname in used_resonances:
+        for rname in sorted(used_resonances):
+            if rname in finals:
+                continue
             props = particle.get(rname, {})
             if isinstance(props, dict) and 'J' in props:
                 m0_keys.append((props.get('mass', 0), props.get('model', 'BW'), rname))
@@ -393,7 +408,9 @@ def load_params(json_path, mapper, config_path=None):
         # --- g0 ---
         width_keys = []
         flatte_items = []
-        for rname in used_resonances:
+        for rname in sorted(used_resonances):
+            if rname in finals:
+                continue
             props = particle.get(rname, {})
             if isinstance(props, dict) and 'J' in props:
                 model = props.get('model', 'BW')
