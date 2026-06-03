@@ -1051,8 +1051,9 @@ def build_kernel_config(pw_list, kw_list, cfg):
         if model == 'FlatteC':
             props = get_particle(cfg, res_name) if res else {}
             n_g = sum(1 for k in props if k.startswith('g_')) if isinstance(props, dict) else 4
-            for _ in range(n_g):
-                pk = (w_val, model)
+            for sub_g in range(n_g):
+                # Each Flatte coupling is a separate physical parameter
+                pk = (f'g_{sub_g}', w_val, model)
                 if pk not in g0_value_groups: g0_value_groups[pk] = len(g0_value_groups)
                 g0_phys_base[gi] = g0_value_groups[pk]
                 gi += 1
