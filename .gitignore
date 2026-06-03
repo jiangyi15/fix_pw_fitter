@@ -16,3 +16,4 @@ profile_kernel
 profile_kernel.cu
 .benchmarks/
 .pytest_cache/
+*.egg-info/
