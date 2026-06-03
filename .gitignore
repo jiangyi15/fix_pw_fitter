@@ -12,3 +12,7 @@ fitter.py
 pwa_gpu.cu
 pwa_gpu.h
 pwa_gpu_wrapper.cu
+profile_kernel
+profile_kernel.cu
+.benchmarks/
+.pytest_cache/

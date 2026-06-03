@@ -1,96 +1,11 @@
 """
-PWA GPU - CUDA accelerated partial wave analysis
-
-Architecture:
-  PWAConfig - holds indices, tables, matrixes (reused across datasets)
-  PWAData   - holds per-event arrays on GPU (one per dataset)
-  PWAGPU    - high-level fitter that combines a config with a data object
-
-Usage:
-  fitter = PWAGPU(config)
-  data1 = fitter.load_data(data_tuple1)
-  data2 = fitter.load_data(data_tuple2)
-
-  fitter.compute(params, data1, N)
-  fitter.grad(params, data2, N)
+Core PWA GPU classes: PWAData (per-event data on GPU) and PWAGPU (fitter).
 """
 
-import numpy as np
-from cffi import FFI
-import os
-import subprocess
 import time
-
-ffi = FFI()
-
-# Define C interface - matches pwa_gpu_kernels.cu
-ffi.cdef("""
-    typedef struct { double x; double y; } cuDoubleComplex;
-
-    void* pwa_create_config(
-        const int* bw_index, const int* gamma_index, const int* bw_order,
-        const int* bf_index, const int* bf_order, const int* ang_index,
-        const double* ang_k, const double* ang_b,
-        const double* matrix_gamma, const cuDoubleComplex* matrix_ang,
-        const cuDoubleComplex* gamma_table, const double* bf_table,
-        int n_waves, int n_m0, int n_g0,
-        int n_res_per_wave, int n_decays_per_wave,
-        int n_bf_types, int n_basis, int n_ang_per_basis,
-        int n_gamma_points, int n_bf_points
-    );
-    void pwa_destroy_config(void* cfg);
-
-    void* pwa_create_data(
-        const double* mass_flat, const double* q_flat, const double* angles_flat,
-        const double* time_arr, const double* frac_arr,
-        int n_events, int mass_stride, int q_stride, int ang_stride
-    );
-    void pwa_destroy_data(void* data);
-
-    void pwa_compute(
-        void* cfg, void* data,
-        double* p_out, cuDoubleComplex* amp_p_out, cuDoubleComplex* amp_m_out,
-        double* grad_ck_re, double* grad_ck_im,
-        double* grad_m0_out, double* grad_g0_out,
-        double* grad_scalar_out,
-        const cuDoubleComplex* ck, const double* m0, const double* g0,
-        double delta_m, double delta_g, double g_val,
-        double ap, double lam, double phi,
-        double N_val,
-        const double* weights, const double* bkg_arr,
-        int n_waves, int n_m0, int n_g0,
-        int n_res_per_wave, int n_decays_per_wave,
-        int n_bf_types, int n_basis, int n_ang_per_basis,
-        int n_gamma_points, int n_bf_points,
-        double g_min, double g_delta, double q_min, double q_delta
-    );
-""")
-
-# Compile CUDA code
-def compile_cuda():
-    """Compile CUDA code to shared library"""
-    src_dir = os.path.dirname(os.path.abspath(__file__))
-    cu_file = os.path.join(src_dir, 'pwa_gpu_kernels.cu')
-    so_file = os.path.join(src_dir, 'libpwa_gpu.so')
-
-    if os.path.exists(so_file):
-        if os.path.getmtime(cu_file) <= os.path.getmtime(so_file):
-            return so_file
-
-    cmd = [
-        'nvcc', '-shared', '-Xcompiler', '-fPIC',
-        '-o', so_file, cu_file,
-        '-lcudart', '--ptxas-options=-v'
-    ]
-
-    print("Compiling CUDA code...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Compilation failed:\n{result.stderr}")
-        raise RuntimeError("CUDA compilation failed")
-
-    print(f"Compiled to {so_file}")
-    return so_file
+import numpy as np
+from pwa_gpu._ffi import ffi
+from pwa_gpu._compile import compile_cuda
 
 
 class PWAData:
@@ -175,7 +90,7 @@ class PWAGPU:
         data1 = PWAData(fitter, mass1, q1, angles1, time1, frac1, w1, b1)
         data2 = PWAData(fitter, mass2, q2, angles2, time2, frac2, w2, b2)
 
-        p, q, grads = fitter.compute(params, data1, N)
+        q_val, grads = fitter.compute(params, data1, N)
     """
 
     def __init__(self, config, device_id=0):
@@ -185,7 +100,6 @@ class PWAGPU:
         self.config = config
 
         # Compute dimensions from config
-        # Use matrix_ang rows as authoritative n_waves (not bw_order length // 2)
         self.n_waves = config['matrix_ang'].shape[0]
         self.n_m0 = len(config['bw_index'])
         self.n_g0 = len(config['gamma_index'])
@@ -392,10 +306,6 @@ class PWAGPU:
             self._cfg = None
 
 
-# ============================================================
-# Convenience function to compare with numpy
-# ============================================================
-
 def compare_with_numpy(fitter_gpu, fitter_numpy, params, data, N=None):
     """Compare GPU and numpy results"""
     data_gpu = fitter_gpu.load_data(data)
@@ -415,7 +325,3 @@ def compare_with_numpy(fitter_gpu, fitter_numpy, params, data, N=None):
     print(f"Max diff: {max_diff:.2e}")
 
     return max_diff
-
-
-if __name__ == "__main__":
-    print("PWA GPU module loaded successfully")

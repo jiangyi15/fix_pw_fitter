@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pwa-gpu"
+version = "0.1.0"
+description = "CUDA-accelerated partial wave analysis"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "cffi",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
