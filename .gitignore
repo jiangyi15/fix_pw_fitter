@@ -1,0 +1,14 @@
+*.so
+*.pyc
+__pycache__/
+*.aux
+*.log
+*.pdf
+*.eps
+1407.2222/
+1407.2222.tar.gz
+gradient_verification.txt
+fitter.py
+pwa_gpu.cu
+pwa_gpu.h
+pwa_gpu_wrapper.cu

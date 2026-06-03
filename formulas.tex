@@ -1,0 +1,261 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{margin=1in}
+\newcommand{\deriv}{\mathrm{d}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\ii}{\mathrm{i}}
+
+\title{Partial Wave Analysis Formulas}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Amplitude Structure}
+
+The amplitude for wave $k$ at event $i$ is given by:
+
+\begin{equation}
+A_{i,k} = c_k \left[\prod_{r} BW_{k,r}(m, m_0, \Gamma)\right] \left[\prod_{d} F_{k,d}(q)\right] \sum_{j} M_{k,k,j} \left[\prod_{l} \cos(k_{jl} \theta_{l} + b_{jl})\right]
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $c_k$ are complex coupling constants
+    \item $BW_{k,r}$ are Breit-Wigner lineshapes
+    \item $F_{k,d}$ are barrier factors
+    \item $M_{k,k,j}$ is the angular basis matrix
+    \item $\theta_l$ are angles, $k_{jl}$ and $b_{jl}$ are angular coefficients
+\end{itemize}
+
+\section{Breit-Wigner Lineshape}
+
+The relativistic Breit-Wigner denominator (complex):
+
+\begin{equation}
+D_{BW} = m_0^2 - m^2 - \ii m_0 \Gamma
+\end{equation}
+
+\section{Time-Dependent Mixing}
+
+\begin{align}
+g_L &= \ee^{-\ii t \left(-\frac{\Delta m}{2} - \ii \frac{\Gamma + \Delta\Gamma}{2}\right)} \\
+g_H &= \ee^{-\ii t \left(+\frac{\Delta m}{2} - \ii \frac{\Gamma - \Delta\Gamma}{2}\right)}
+\end{align}
+
+Mixing coefficients:
+
+\begin{align}
+g_+ &= \frac{g_L + g_H}{2} \\
+g_- &= \frac{g_L - g_H}{2}
+\end{align}
+
+\section{CP Violation Parameter $q/p$}
+
+The complex parameter $q/p$ is parameterized as:
+
+\begin{equation}
+\frac{q}{p} = |q/p| \, \ee^{i\phi}
+\end{equation}
+
+where $|q/p|$ is the magnitude and $\phi$ is the CP-violating phase.
+
+\section{Time-Dependent Amplitudes}
+
+\begin{align}
+\mathcal{A}_p &= g_+ \, \text{amp}_0 + g_- \, \frac{q}{p} \, \text{amp}_1 \\
+\mathcal{A}_m &= \frac{g_-}{q/p} \, \text{amp}_0 + g_+ \, \text{amp}_1
+\end{align}
+
+The intensities:
+
+\begin{align}
+P_p &= |\mathcal{A}_p|^2 \\
+P_m &= |\mathcal{A}_m|^2
+\end{align}
+
+\section{Probability Function}
+
+\begin{equation}
+P = (1 - f) P_p (1 - A_P) + f P_m (1 + A_P)
+\end{equation}
+
+\section{Likelihood Function}
+
+\begin{equation}
+q = \frac{P}{N} + bkg, \qquad \mathcal{L} = \sum_e w_e \ln(q_e)
+\end{equation}
+
+\section{Parameter Table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\hline
+Code Variable & Notation \\
+\hline
+\texttt{delta\_m} & $\Delta m$ \\
+\texttt{delta\_g} & $\Delta\Gamma$ \\
+\texttt{g} & $\Gamma$ \\
+\texttt{lam} & $|q/p|$ \\
+\texttt{phi} & $\phi$ \\
+\texttt{ap} & $A_P$ (production asymmetry) \\
+\texttt{frac} & $f$ (tagging fraction) \\
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
+\section{Complete Gradient Formulas}
+
+\subsection{Gradient w.r.t.\ Production Asymmetry $A_P$}
+
+\begin{align}
+\frac{\partial P}{\partial A_P} &= -(1-f) P_p + f P_m \\
+\nabla_{A_P} \mathcal{L} &= \sum_e \frac{w_e}{q_e N} \frac{\partial P}{\partial A_P}
+\end{align}
+
+\subsection{Gradient w.r.t.\ Intensities}
+
+\begin{align}
+\frac{\partial P}{\partial P_p} &= (1-f)(1-A_P) \\
+\frac{\partial P}{\partial P_m} &= f(1+A_P)
+\end{align}
+
+Define effective weights:
+
+\begin{align}
+\tilde{w}_p &= \frac{w}{q N} \cdot (1-f)(1-A_P) \\
+\tilde{w}_m &= \frac{w}{q N} \cdot f(1+A_P)
+\end{align}
+
+\subsection{Gradient w.r.t.\ Complex Parameter $q/p$}
+
+Let $\text{pq} = q/p = |q/p|\ee^{i\phi}$.
+
+Wirtinger derivatives of intensities:
+
+\begin{align}
+\frac{\partial P_p}{\partial \text{pq}^*} &= \mathcal{A}_p \cdot \overline{g_- \, \text{amp}_1} \\
+\frac{\partial P_m}{\partial \text{pq}^*} &= -\mathcal{A}_m \cdot \frac{\overline{g_- \, \text{amp}_0}}{(\text{pq}^*)^2}
+\end{align}
+
+Practical gradient (Wirtinger):
+
+\begin{equation}
+\nabla_{\text{pq}} \mathcal{L} = 2 \sum_e \left( \tilde{w}_p \frac{\partial P_p}{\partial \text{pq}^*} + \tilde{w}_m \frac{\partial P_m}{\partial \text{pq}^*} \right)
+\end{equation}
+
+\subsection{Gradient w.r.t.\ Real Parameters $|q/p|$ and $\phi$}
+
+Since $\text{pq} = |q/p| \ee^{i\phi}$:
+
+\begin{align}
+\frac{\partial \mathcal{L}}{\partial |q/p|} &= \operatorname{Re}\!\left(\nabla_{\text{pq}} \mathcal{L} \cdot \ee^{-i\phi}\right) \\
+\frac{\partial \mathcal{L}}{\partial \phi} &= \operatorname{Re}\!\left(-\ii \, \nabla_{\text{pq}} \mathcal{L} \cdot \text{pq}^*\right)
+\end{align}
+
+\subsection{Gradient w.r.t.\ Time-Dependent Mixing Parameters}
+
+Derivatives of $g_L$, $g_H$:
+
+\begin{align}
+\frac{\partial g_L}{\partial \Delta m} &= \frac{\ii\, t}{2} g_L, \qquad
+\frac{\partial g_H}{\partial \Delta m} = -\frac{\ii\, t}{2} g_H \\
+\frac{\partial g_L}{\partial \Delta\Gamma} &= -\frac{t}{2} g_L, \qquad
+\frac{\partial g_H}{\partial \Delta\Gamma} = +\frac{t}{2} g_H \\
+\frac{\partial g_L}{\partial \Gamma} &= -\frac{t}{2} g_L, \qquad
+\frac{\partial g_H}{\partial \Gamma} = -\frac{t}{2} g_H
+\end{align}
+
+Chain rule through $g_+$, $g_-$:
+
+\begin{align}
+\frac{\partial g_+}{\partial x} &= \frac{1}{2}\left(\frac{\partial g_L}{\partial x} + \frac{\partial g_H}{\partial x}\right) \\
+\frac{\partial g_-}{\partial x} &= \frac{1}{2}\left(\frac{\partial g_L}{\partial x} - \frac{\partial g_H}{\partial x}\right)
+\end{align}
+
+Wirtinger derivatives w.r.t.\ $g_+$, $g_-$:
+
+\begin{align}
+\frac{\partial P_p}{\partial g_+^*} &= \mathcal{A}_p \cdot \text{amp}_0^* \\
+\frac{\partial P_p}{\partial g_-^*} &= \mathcal{A}_p \cdot (\text{pq} \cdot \text{amp}_1)^* \\
+\frac{\partial P_m}{\partial g_+^*} &= \mathcal{A}_m \cdot \text{amp}_1^* \\
+\frac{\partial P_m}{\partial g_-^*} &= \mathcal{A}_m \cdot \left(\frac{\text{amp}_0}{\text{pq}}\right)^*
+\end{align}
+
+For real parameter $x \in \{\Delta m, \Delta\Gamma, \Gamma\}$:
+
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial x} = \sum_e 2\operatorname{Re}\!\left[
+\tilde{w}_p \left(\frac{\partial P_p}{\partial g_+^*} \frac{\partial g_+^*}{\partial x} + \frac{\partial P_p}{\partial g_-^*} \frac{\partial g_-^*}{\partial x}\right)
++ \tilde{w}_m \left(\frac{\partial P_m}{\partial g_+^*} \frac{\partial g_+^*}{\partial x} + \frac{\partial P_m}{\partial g_-^*} \frac{\partial g_-^*}{\partial x}\right)
+\right]
+\end{equation}
+
+\subsection{Gradient w.r.t.\ Amplitudes amp$_0$, amp$_1$}
+
+\begin{align}
+\frac{\partial P_p}{\partial \text{amp}_0^*} &= \mathcal{A}_p \cdot g_+^* \\
+\frac{\partial P_p}{\partial \text{amp}_1^*} &= \mathcal{A}_p \cdot (g_- \cdot \text{pq})^* \\
+\frac{\partial P_m}{\partial \text{amp}_0^*} &= \mathcal{A}_m \cdot \left(\frac{g_-}{\text{pq}}\right)^* \\
+\frac{\partial P_m}{\partial \text{amp}_1^*} &= \mathcal{A}_m \cdot g_+^*
+\end{align}
+
+Practical gradients:
+
+\begin{align}
+\nabla_{\text{amp}_0} \mathcal{L} &= \tilde{w}_p \cdot 2 \frac{\partial P_p}{\partial \text{amp}_0^*} + \tilde{w}_m \cdot 2 \frac{\partial P_m}{\partial \text{amp}_0^*} \\
+\nabla_{\text{amp}_1} \mathcal{L} &= \tilde{w}_p \cdot 2 \frac{\partial P_p}{\partial \text{amp}_1^*} + \tilde{w}_m \cdot 2 \frac{\partial P_m}{\partial \text{amp}_1^*}
+\end{align}
+
+\subsection{Gradient w.r.t.\ Coupling Constants $c_k$}
+
+Since $a_{\text{full}} = c_k \cdot \text{prefactor}$:
+
+\begin{equation}
+\nabla_{c_k} \mathcal{L} = \sum_e \nabla_{a_{\text{full}}[e,k]} \mathcal{L} \cdot \text{prefactor}^*[e,k]
+\end{equation}
+
+\subsection{Gradient w.r.t.\ Resonance Mass $m_0$}
+
+Through complex Breit-Wigner:
+
+\begin{equation}
+\frac{\partial D_{BW}}{\partial m_0} = 2m_0 - \ii \Gamma
+\end{equation}
+
+Practical gradient:
+
+\begin{equation}
+\nabla_{m_0} \mathcal{L} = \sum_e \operatorname{Re}\!\left(\nabla_{BW} \mathcal{L} \cdot \overline{\frac{\partial D_{BW}}{\partial m_0}}\right)
+\end{equation}
+
+\subsection{Gradient w.r.t.\ Width Parameter $\Gamma_0$}
+
+\begin{align}
+\frac{\partial D_{BW}}{\partial \Gamma} &= -\ii m_0 \\
+\nabla_{\Gamma_0} \mathcal{L} &= \sum_e \operatorname{Re}\!\left(\nabla_\Gamma \mathcal{L} \cdot g_i^*\right)
+\end{align}
+
+where $g_i(m)$ is the interpolated function from the width table.
+
+\subsection{Gradient w.r.t.\ Normalization $N$}
+
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial N} = -\sum_e \frac{w_e \cdot P_e}{N^2 \cdot q_e}
+\end{equation}
+
+\section{Interpolation}
+
+Linear interpolation:
+
+\begin{equation}
+f(x) = f_l + (f_r - f_l) \frac{x - x_l}{\Delta x}
+\end{equation}
+
+\end{document}
