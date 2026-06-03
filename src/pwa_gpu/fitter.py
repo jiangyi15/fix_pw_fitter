@@ -178,13 +178,69 @@ class PWAFitter:
         return self._fitter
 
     def load_data(self, mass, q, angles, time_arr, frac, weights, bkg):
-        """Upload data to GPU."""
+        """Upload signal data to GPU. Returns PWAData object."""
         fitter = self._ensure_fitter()
         return PWAData(fitter, mass, q, angles, time_arr, frac, weights, bkg)
 
+    def load_phsp(self, mass, q, angles, time_arr, frac, phsp_weights=None):
+        """Upload phase-space data to GPU. Returns PWAData object (unit weights)."""
+        fitter = self._ensure_fitter()
+        n = len(mass)
+        if phsp_weights is not None:
+            w = phsp_weights
+        else:
+            w = np.ones(n)
+        t = time_arr if time_arr is not None else np.zeros(n)
+        f = frac if frac is not None else np.zeros(n)
+        return PWAData(fitter, mass, q, angles, t, f, w, np.zeros(n))
+
     # ------------------------------------------------------------------
-    # Compute via ConstraintMapper
+    # Full likelihood fit via ConstraintMapper
     # ------------------------------------------------------------------
+
+    def fit(self, data, phsp, params=None, N_phsp=None):
+        """
+        Compute full likelihood with normalization from phase space.
+        
+        Uses ConstraintMapper for all parameter transforms (constraints applied).
+        
+        Args:
+            data: PWAData for signal events
+            phsp: PWAData for phase-space events (normalization integral)
+            params: physical params dict (optional, uses self.params if None)
+            N_phsp: norm override. If None, computed as sum(|A|²)/N_phsp_events
+        
+        Returns:
+            (neg_log_likelihood, model_grads, norm_value)
+            where model_grads has constraints applied (fixed→0, equal→accumulated)
+        """
+        if params is None:
+            params = self.params
+        model_dict = self._build_model_dict(params)
+        cst = self._ensure_cst()
+        fitter = self._ensure_fitter()
+
+        # Step 1: compute normalization from phase space
+        ck, mk, gk, sc = cst.to_kernel(model_dict)
+        
+        if N_phsp is not None:
+            norm = N_phsp
+        else:
+            # Compute norm = Σ |A|² / N_phsp (chi-square mode on phsp)
+            q_phsp, _ = fitter.compute((ck, mk, gk, *sc), phsp, None)
+            n_phsp = phsp.n_events
+            norm = q_phsp / n_phsp if n_phsp > 0 else 1.0
+
+        # Step 2: compute NLL on data with normalization
+        # kernel does: q = -Σ w * log(p/N + bkg) with likelihood mode
+        q_data, grads_k = fitter.compute((ck, mk, gk, *sc), data, norm)
+
+        # Step 3: propagate gradients through constraints
+        grad_scalar = np.array([grads_k[k] for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
+        nll = -q_data  # negative log-likelihood
+        model_grads = cst.from_kernel(grads_k['ck'], grads_k['m0'], grads_k['g0'], grad_scalar)
+
+        return nll, model_grads, norm
 
     def compute(self, data, params=None, N=None):
         """
