@@ -18,9 +18,13 @@ from collections import OrderedDict
 def convert(config_path, out_dir='converted',
             n_data_max=None, n_phsp_max=None):
     """Load via config.get_data(), extract & save as .npz."""
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    sys.path.insert(0, config_dir)
     sys.path.insert(0, '/mnt/e/github/tf-pwa')
 
-    # ---- Register strip preprocessor (no-op stub) ----
+    # ---- Register project-specific models & preprocessors ----
+    import extra_amp  # registers gls_cpv_aabar etc.
+
     from tf_pwa.amp.preprocess import register_preprocessor, BasePreProcessor
     @register_preprocessor("strip")
     class _StripStub(BasePreProcessor):
