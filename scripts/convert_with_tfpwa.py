@@ -18,22 +18,15 @@ from collections import OrderedDict
 def convert(config_path, out_dir='converted',
             n_data_max=None, n_phsp_max=None):
     """Load via config.get_data(), extract & save as .npz."""
-    import importlib
-
-    config_dir = os.path.dirname(os.path.abspath(config_path))
-    sys.path.insert(0, config_dir)
     sys.path.insert(0, '/mnt/e/github/tf-pwa')
 
-    # ---- Register strip preprocessor if needed ----
-    try:
-        import create_simple_angles
-        importlib.reload(create_simple_angles)
-    except ImportError:
-        from tf_pwa.amp.preprocess import register_preprocessor, BasePreProcessor
-        @register_preprocessor("strip")
-        class _Strip(BasePreProcessor):
-            def call(self, x, **kwargs):
-                return x
+    # ---- Register strip preprocessor (no-op stub) ----
+    from tf_pwa.amp.preprocess import register_preprocessor, BasePreProcessor
+    @register_preprocessor("strip")
+    class _StripStub(BasePreProcessor):
+        """Minimal strip that keeps all data."""
+        def call(self, x, **kwargs):
+            return x
 
     from tf_pwa.config_loader import ConfigLoader
     from tf_pwa.data import data_to_numpy, data_shape, data_split, data_merge, data_index
