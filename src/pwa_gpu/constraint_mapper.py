@@ -198,6 +198,103 @@ class ConstraintMapper:
                     arr[idx] += grad_val
 
     # ------------------------------------------------------------------
+    # Parameter management (flat array interface for optimization)
+    # ------------------------------------------------------------------
+
+    def get_free_keys(self):
+        """Return list of free parameter keys (not constrained / not derived)."""
+        constrained = set(self._constraints.keys())
+        m = self.mapper
+        free = []
+        for k in m.totals: free.append(f'total/{k}')
+        for (dn, ls) in m.gls: free.append(f'g_ls/{dn}/{ls}')
+        for (dn, ls) in m.glsbar: free.append(f'g_lsbar/{dn}/{ls}')
+        for i in range(m.n_m0_phys): free.append(f'm0/{i}')
+        for i in range(m.n_g0_phys): free.append(f'g0/{i}')
+        for k in ['delta_m','delta_g','g','ap','lam','phi']: free.append(k)
+        return [k for k in free if k not in constrained]
+
+    def _is_complex_key(self, key):
+        """Check if a parameter key is complex-valued."""
+        return key.startswith('total/') or key.startswith('g_ls/') or key.startswith('g_lsbar/')
+
+    def pack(self, values_dict, keys=None):
+        """Pack selected parameter values into a flat float64 array.
+        
+        Complex → [re, im] pairs. Real → single value.
+        
+        Args:
+            values_dict: dict with keys like 'total', 'g_ls', etc. (arrays),
+                         or flat dict with keys like 'total/B->rhoA.rhoB'
+            keys: list of keys to pack (default: free keys)
+        Returns: flat float64 array
+        """
+        if keys is None:
+            keys = self.get_free_keys()
+        has_arrays = any(k in ('total','g_ls','g_lsbar','m0','g0') for k in values_dict)
+        vals = []
+        for k in keys:
+            if has_arrays:
+                v = self._get_from_array(values_dict, k)
+            else:
+                v = values_dict.get(k, 0)
+            if self._is_complex_key(k):
+                vals.extend([v.real, v.imag])
+            else:
+                vals.append(float(v))
+        return np.array(vals, dtype=np.float64)
+
+    def unpack(self, x, keys=None):
+        """Unpack flat array into model params dict.
+        
+        Args:
+            x: flat float64 array
+            keys: list of keys (default: free keys)
+        Returns: dict of {key: scalar_or_complex} for to_kernel()
+        """
+        if keys is None:
+            keys = self.get_free_keys()
+        d = {}
+        i = 0
+        for k in keys:
+            if self._is_complex_key(k):
+                d[k] = x[i] + 1j * x[i + 1]
+                i += 2
+            else:
+                d[k] = x[i]
+                i += 1
+        return d
+
+    def _get_from_array(self, arr_dict, key):
+        """Extract individual value from array-based grads_dict."""
+        m = self.mapper
+        if key.startswith('total/'):
+            return arr_dict['total'][m.totals.get(key[6:], 0)]
+        if key.startswith('g_ls/'):
+            p = key[5:].split('/')
+            if len(p) >= 2:
+                return arr_dict['g_ls'][m.gls.get((p[0], int(p[1])), 0)]
+        if key.startswith('g_lsbar/'):
+            p = key[8:].split('/')
+            if len(p) >= 2:
+                return arr_dict['g_lsbar'][m.glsbar.get((p[0], int(p[1])), 0)]
+        if key.startswith('m0/'):
+            idx = int(key[3:])
+            return arr_dict['m0'][idx] if idx < len(arr_dict['m0']) else 0.0
+        if key.startswith('g0/'):
+            idx = int(key[3:])
+            return arr_dict['g0'][idx] if idx < len(arr_dict['g0']) else 0.0
+        if key in arr_dict:
+            return arr_dict[key]
+        return 0.0
+
+    def get_free_values(self, model_dict=None):
+        """Get flat array of free parameter values from a model dict."""
+        if model_dict is None:
+            model_dict = {}
+        return self.pack(model_dict)
+
+    # ------------------------------------------------------------------
     # Full compute pipeline
     # ------------------------------------------------------------------
 
