@@ -316,6 +316,10 @@ class PWAFitter:
         keys = cst.get_free_keys()
         _n_calls = [0]
         _t_start = [time.time()]
+        # bg_frac from config: N_data * log(1-bg_frac) constant term
+        bg_frac = float(self._cfg.get('data', {}).get('bg_frac', 0.0))
+        n_data = data.n_events
+        bg_const = n_data * np.log(max(1 - bg_frac, 1e-15)) if bg_frac > 0 else 0.0
 
         def func(x):
             _n_calls[0] += 1
@@ -346,7 +350,7 @@ class PWAFitter:
                         if sk in grads_k and sk in grads_p:
                             grads_k[sk] = grads_k.get(sk, 0) + scale * grads_p.get(sk, 0)
 
-            nll = -q_data
+            nll = -q_data + bg_const
             grad_sc = np.array([-(grads_k[k] if k in grads_k and grads_k[k] is not None else 0)
                                 for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
             model_grads = cst.from_kernel(-grads_k['ck'], -grads_k['m0'], -grads_k['g0'], grad_sc)
