@@ -22,7 +22,7 @@ def compile_cuda():
     cmd = [
         'nvcc', '-shared', '-Xcompiler', '-fPIC',
         '-o', so_file, cu_file,
-        '-lcudart', '--ptxas-options=-v'
+        '-arch=sm_86', '-lcudart', '--ptxas-options=-v'
     ]
 
     print("Compiling CUDA code...")
