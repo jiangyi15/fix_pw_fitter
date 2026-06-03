@@ -47,16 +47,32 @@ ffi.cdef("""
 
     void pwa_grad_wrapper(
         void* ctx,
-        double* grad_p,
         double* grad_ck_re, double* grad_ck_im,
         double* grad_m0_out, double* grad_g0_out,
-        double* grad_delta_m_out, double* grad_delta_g_out, double* grad_g_out,
-        double* grad_ap_out, double* grad_lam_out, double* grad_phi_out,
-        double* grad_N_out,
+        double* grad_scalar_out,        // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
         const cuDoubleComplex* ck, const double* m0, const double* g0,
         double delta_m, double delta_g, double g_val,
         double ap, double lam, double phi,
         double N_val,
+        const double* weights, const double* bkg_arr,
+        int n_waves, int n_m0, int n_g0,
+        int n_res_per_wave, int n_decays_per_wave,
+        int n_bf_types, int n_basis, int n_ang_per_basis,
+        int n_gamma_points, int n_bf_points,
+        double g_min, double g_delta, double q_min, double q_delta
+    );
+
+    void pwa_compute_grad_wrapper(
+        void* ctx,
+        double* p_out, cuDoubleComplex* amp_p_out, cuDoubleComplex* amp_m_out,
+        double* grad_ck_re, double* grad_ck_im,
+        double* grad_m0_out, double* grad_g0_out,
+        double* grad_scalar_out,        // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
+        const cuDoubleComplex* ck, const double* m0, const double* g0,
+        double delta_m, double delta_g, double g_val,
+        double ap, double lam, double phi,
+        double N_val,
+        const double* weights, const double* bkg_arr,
         int n_waves, int n_m0, int n_g0,
         int n_res_per_wave, int n_decays_per_wave,
         int n_bf_types, int n_basis, int n_ang_per_basis,
@@ -286,65 +302,52 @@ class PWAGPU:
 
     def grad(self, params, N=None):
         """
-        Compute gradients for loaded data
+        Compute forward + gradients in one GPU call (no separate compute() needed).
 
         Args:
             params: (ck, m0, g0, delta_m, delta_g, g, ap, lam, phi)
-            N: normalization (from compute)
+            N: normalization (None for chi-square)
 
         Returns:
-            grads: tuple of gradients for each parameter
+            p: probability values (n_events,)
+            q_val: likelihood scalar
+            grads: tuple of gradients (grad_ck, grad_m0, grad_g0, grad_N, grad_delta_m, grad_delta_g, grad_g, grad_ap, grad_lam, grad_phi)
         """
-        if not hasattr(self, '_last_p'):
-            raise RuntimeError("Must call compute() first.")
-
         ck, m0, g0, delta_m, delta_g, g, ap, lam, phi = params
 
-        # Compute grad_p = w/(N*q)
-        if N is not None and N > 0:
-            q = self._last_p / N + self.bkg
-            grad_p = self.weights / (N * q)
-        else:
-            grad_p = self.weights
-
-        grad_p = np.ascontiguousarray(grad_p)
         ck_c = np.ascontiguousarray(ck.astype(np.complex128))
         m0 = np.ascontiguousarray(m0)
         g0 = np.ascontiguousarray(g0)
+        bkg_arr = np.ascontiguousarray(self.bkg, dtype=np.float64) if isinstance(self.bkg, np.ndarray) else np.full(self.n_events, self.bkg, dtype=np.float64)
 
-        # Output gradient arrays
+        # Output arrays
+        p_out = np.zeros(self.n_events, dtype=np.float64)
+        amp_p_out = np.zeros(self.n_events, dtype=np.complex128)
+        amp_m_out = np.zeros(self.n_events, dtype=np.complex128)
         grad_ck_re = np.zeros(self.n_waves, dtype=np.float64)
         grad_ck_im = np.zeros(self.n_waves, dtype=np.float64)
         grad_m0 = np.zeros(self.n_m0, dtype=np.float64)
         grad_g0 = np.zeros(self.n_g0, dtype=np.float64)
-        grad_delta_m = np.zeros(1, dtype=np.float64)
-        grad_delta_g = np.zeros(1, dtype=np.float64)
-        grad_g = np.zeros(1, dtype=np.float64)
-        grad_ap = np.zeros(1, dtype=np.float64)
-        grad_lam = np.zeros(1, dtype=np.float64)
-        grad_phi = np.zeros(1, dtype=np.float64)
-        grad_N = np.zeros(1, dtype=np.float64) if N is not None else None
+        grad_scalar = np.zeros(7, dtype=np.float64)  # [delta_m, delta_g, g, ap, lam, phi, N]
 
-        # Call gradient wrapper
-        self.lib.pwa_grad_wrapper(
+        # Combined forward + gradient in one GPU call
+        self.lib.pwa_compute_grad_wrapper(
             self._ctx,
-            ffi.cast("double*", grad_p.ctypes.data),
+            ffi.cast("double*", p_out.ctypes.data),
+            ffi.cast("cuDoubleComplex*", amp_p_out.ctypes.data),
+            ffi.cast("cuDoubleComplex*", amp_m_out.ctypes.data),
             ffi.cast("double*", grad_ck_re.ctypes.data),
             ffi.cast("double*", grad_ck_im.ctypes.data),
             ffi.cast("double*", grad_m0.ctypes.data),
             ffi.cast("double*", grad_g0.ctypes.data),
-            ffi.cast("double*", grad_delta_m.ctypes.data),
-            ffi.cast("double*", grad_delta_g.ctypes.data),
-            ffi.cast("double*", grad_g.ctypes.data),
-            ffi.cast("double*", grad_ap.ctypes.data),
-            ffi.cast("double*", grad_lam.ctypes.data),
-            ffi.cast("double*", grad_phi.ctypes.data),
-            ffi.cast("double*", grad_N.ctypes.data) if N is not None else ffi.NULL,
+            ffi.cast("double*", grad_scalar.ctypes.data),
             ffi.cast("cuDoubleComplex*", ck_c.ctypes.data),
             ffi.cast("double*", m0.ctypes.data),
             ffi.cast("double*", g0.ctypes.data),
             delta_m, delta_g, g, ap, lam, phi,
-            N if N is not None else 0.0,
+            N if N is not None else 1.0,
+            ffi.cast("double*", self.weights.ctypes.data),
+            ffi.cast("double*", bkg_arr.ctypes.data),
             self.n_waves, self.n_m0, self.n_g0,
             self.n_res_per_wave, self.n_decays_per_wave,
             self.n_bf_types, self.n_basis, self.n_ang_per_basis,
@@ -352,13 +355,27 @@ class PWAGPU:
             self.g_min, self.g_delta, self.q_min, self.q_delta
         )
 
+        # Compute q_val from p_out (on CPU, uses bkg which is CPU-side)
+        if N is not None and N > 0:
+            bkg_vals = self.bkg if isinstance(self.bkg, np.ndarray) else np.full(self.n_events, float(self.bkg))
+            q = p_out / N + bkg_vals
+            q_val = np.sum(self.weights * np.log(q))
+        else:
+            q_val = np.sum(self.weights * p_out)
+
         # Combine ck gradients
         grad_ck = grad_ck_re + 1j * grad_ck_im
 
-        return (grad_ck, grad_m0, grad_g0,
-                grad_N[0] if N is not None else None,
-                grad_delta_m[0], grad_delta_g[0], grad_g[0],
-                grad_ap[0], grad_lam[0], grad_phi[0])
+        grads = (grad_ck, grad_m0, grad_g0,
+                 grad_scalar[6],   # N
+                 grad_scalar[0],   # delta_m
+                 grad_scalar[1],   # delta_g
+                 grad_scalar[2],   # g
+                 grad_scalar[3],   # ap
+                 grad_scalar[4],   # lam
+                 grad_scalar[5])   # phi
+
+        return p_out, q_val, grads
 
     def __del__(self):
         """Cleanup GPU memory"""

@@ -283,7 +283,7 @@ def main():
     # Gradient comparison
     print("\n[7] Gradient comparison...")
     try:
-        grad_gpu = fitter_gpu.grad(params, N)
+        p_gpu, q_gpu, grad_gpu = fitter_gpu.grad(params, N)
         
         print(f"\n  Parameter gradients (GPU vs Numpy):")
         param_names = ['ck', 'm0', 'g0', 'N', 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
