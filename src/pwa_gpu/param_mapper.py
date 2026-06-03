@@ -433,12 +433,15 @@ def load_params(json_path, mapper, config_path=None):
             if i >= mapper.n_g0_phys:
                 break
             jkey = f'{rname}_width'
-            g0_arr[i] = data.get(jkey, w_val)
+            # For non-Flatte: gamma_table already contains full physical width
+            # g0 = 1.0 (no additional scaling). FlatteC handles separately below.
+            g0_arr[i] = 1.0
 
         for i, (k, v, rname) in enumerate(sorted(flatte_items)):
             idx = len(w_sorted) + i
             if idx < mapper.n_g0_phys:
                 jkey = f'{rname}_{k}'
+                # FlatteC: gamma_table stores i*q/m (kinematic only), g0 = coupling
                 g0_arr[idx] = data.get(jkey, v)
     else:
         for i, val in enumerate(sorted(set(v for k, v in data.items() if k.endswith('_mass')))):
