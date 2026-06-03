@@ -123,6 +123,67 @@ class PWAFitter:
             self._cst.clear()
         return self
 
+    def fix_2pi_resonances(self):
+        """Fix m0 and g0 for all ππ resonances (well-known masses/widths).
+        
+        A resonance is identified as 2π if it appears as a sub-decay
+        into two pions in the config's decay structure.
+        Uses the config.yml to find which resonances decay to finals.
+        """
+        import yaml
+        with open(self.config_path) as f:
+            ycfg = yaml.safe_load(f)
+        particle = ycfg.get('particle', {})
+        decay = ycfg.get('decay', {})
+        finals = set(ycfg.get('particle', {}).get('$finals', []))
+        top = ycfg.get('particle', {}).get('$top', 'B')
+
+        # Find all intermediate names that decay directly to 2 finals (ππ)
+        # and resolve them to actual resonance names
+        two_pi_resonances = set()
+        
+        def get_resonance_names(name, visited=None):
+            """Yield all resonance names from a particle/multiplet."""
+            if visited is None: visited = set()
+            if name in visited: return
+            visited.add(name)
+            props = particle.get(name)
+            if props is None: return
+            if isinstance(props, list):
+                for p in props:
+                    if isinstance(p, str):
+                        sub = particle.get(p, {})
+                        if isinstance(sub, dict) and 'J' in sub:
+                            yield p
+                        else:
+                            yield from get_resonance_names(p, visited)
+            elif isinstance(props, dict) and 'J' in props:
+                yield name
+
+        for dname, dlist in decay.items():
+            if dname == top:
+                continue
+            daughters = [x for x in dlist if isinstance(x, str)]
+            if len(daughters) == 2 and all(d in finals for d in daughters):
+                # This intermediate decays to 2 finals → 2π resonance(s)
+                for res in get_resonance_names(dname):
+                    two_pi_resonances.add(res)
+
+        # Fix their m0 and g0
+        cst = self._ensure_cst()
+        mapper = self.mapper
+        for res_name in two_pi_resonances:
+            if res_name in mapper._res_m0_map:
+                pi = mapper._res_m0_map[res_name]
+                cst.set_fixed(f'm0/{pi}')
+            if res_name in mapper._res_g0_map:
+                for pi in mapper._res_g0_map[res_name]:
+                    cst.set_fixed(f'g0/{pi}')
+
+        n = len(two_pi_resonances)
+        print(f"  Fixed {n} ππ resonances ({', '.join(sorted(two_pi_resonances)[:5])}...)")
+        return self
+
     # ------------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------------
