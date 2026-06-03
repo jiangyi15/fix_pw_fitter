@@ -77,26 +77,46 @@ __global__ void pwa_compute_kernel(
     int n_bf_types, int n_basis, int n_ang_per_basis,
     int n_gamma_points, int n_bf_points,
     int mass_stride, int q_stride, int ang_stride,
-    double g_min, double g_delta, double q_min, double q_delta
+    double g_min, double g_delta, double q_min, double q_delta,
+    // Scratch buffer for per-thread temporary arrays
+    char* __restrict__ scratch_buf,
+    size_t per_thread_size
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= n_events) return;
 
-    // Recompute forward pass (needed for gradients)
-    // [Same as compute kernel up to amp_p, amp_m]
+    // Setup per-thread scratch pointers
+    char* s = scratch_buf + e * per_thread_size;
+    size_t spos = 0;
+    int total_bw = n_waves * n_res_per_wave;
+    int total_bf = n_waves * n_decays_per_wave;
+    cdouble* bw = (cdouble*)(s + spos); spos += total_bw * sizeof(cdouble);
+    double* bf = (double*)(s + spos); spos += total_bf * sizeof(double);
+    cdouble* ag = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
+    cdouble* bwprod = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
+    double* bfprod = (double*)(s + spos); spos += n_waves * sizeof(double);
+    cdouble* inv_bwprod = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
+    cdouble* a_full = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
+    double* m_bw = (double*)(s + spos); spos += n_m0 * sizeof(double);
+    double* m_gamma_vals = (double*)(s + spos); spos += n_g0 * sizeof(double);
+    cdouble* gi = (cdouble*)(s + spos); spos += n_g0 * sizeof(cdouble);
+    cdouble* g_vals = (cdouble*)(s + spos); spos += n_g0 * sizeof(cdouble);
+    cdouble* gamma = (cdouble*)(s + spos); spos += n_m0 * sizeof(cdouble);
+    cdouble* bwall = (cdouble*)(s + spos); spos += n_m0 * sizeof(cdouble);
+    double* q_bf = (double*)(s + spos); spos += n_bf_types * sizeof(double);
+    double* bfall = (double*)(s + spos); spos += n_bf_types * sizeof(double);
+    double* ang_f = (double*)(s + spos);
 
-    double m_bw[16];
-    for (int i = 0; i < n_m0 && i < 16; i++) {
+    // ===== Forward pass =====
+    for (int i = 0; i < n_m0; i++) {
         m_bw[i] = mass_flat[e * mass_stride + bw_index[i]];
     }
 
-    double m_gamma_vals[16];
-    for (int i = 0; i < n_g0 && i < 16; i++) {
+    for (int i = 0; i < n_g0; i++) {
         m_gamma_vals[i] = mass_flat[e * mass_stride + gamma_index[i]];
     }
 
-    cdouble gi[16];
-    for (int i = 0; i < n_g0 && i < 16; i++) {
+    for (int i = 0; i < n_g0; i++) {
         double diff = (m_gamma_vals[i] - g_min) / g_delta;
         int idx = (int)diff;
         if (idx < 0) idx = 0;
@@ -107,34 +127,27 @@ __global__ void pwa_compute_kernel(
         gi[i] = cadd(fl, cscale(csub(fr, fl), delta));
     }
 
-    cdouble g_vals[16];
-    for (int i = 0; i < n_g0 && i < 16; i++) g_vals[i] = cscale(gi[i], g0[i]);
+    for (int i = 0; i < n_g0; i++) g_vals[i] = cscale(gi[i], g0[i]);
 
-    cdouble gamma[16];
-    for (int i = 0; i < n_m0 && i < 16; i++) {
+    for (int i = 0; i < n_m0; i++) {
         cdouble sum = make_c(0.0, 0.0);
-        for (int j = 0; j < n_g0 && j < 16; j++) {
+        for (int j = 0; j < n_g0; j++) {
             sum = cadd(sum, cscale(g_vals[j], matrix_gamma[i * n_g0 + j]));
         }
         gamma[i] = sum;
     }
 
-    cdouble bwall[16];
-    for (int i = 0; i < n_m0 && i < 16; i++) {
+    for (int i = 0; i < n_m0; i++) {
         bwall[i] = make_c(m0[i]*m0[i] - m_bw[i]*m_bw[i] + m0[i]*cuCimag(gamma[i]), -m0[i]*cuCreal(gamma[i]));
     }
 
-    cdouble bw[200];
-    int total_bw = n_waves * n_res_per_wave;
-    for (int i = 0; i < total_bw && i < 200; i++) bw[i] = bwall[bw_order[i]];
+    for (int i = 0; i < total_bw; i++) bw[i] = bwall[bw_order[i]];
 
-    double q_bf[16];
-    for (int i = 0; i < n_bf_types && i < 16; i++) {
+    for (int i = 0; i < n_bf_types; i++) {
         q_bf[i] = q_flat[e * q_stride + bf_index[i]];
     }
 
-    double bfall[16];
-    for (int i = 0; i < n_bf_types && i < 16; i++) {
+    for (int i = 0; i < n_bf_types; i++) {
         double diff = (q_bf[i] - q_min) / q_delta;
         int idx = (int)diff;
         if (idx < 0) idx = 0;
@@ -145,12 +158,9 @@ __global__ void pwa_compute_kernel(
         bfall[i] = fl + (fr - fl) * delta;
     }
 
-    double bf[300];
-    int total_bf = n_waves * n_decays_per_wave;
-    for (int i = 0; i < total_bf && i < 300; i++) bf[i] = bfall[bf_order[i]];
+    for (int i = 0; i < total_bf; i++) bf[i] = bfall[bf_order[i]];
 
-    double ang_f[16];
-    for (int b = 0; b < n_basis && b < 16; b++) {
+    for (int b = 0; b < n_basis; b++) {
         double prod = 1.0;
         for (int j = 0; j < n_ang_per_basis; j++) {
             int idx = ang_index[b * n_ang_per_basis + j];
@@ -161,34 +171,29 @@ __global__ void pwa_compute_kernel(
         ang_f[b] = prod;
     }
 
-    cdouble ag[100];
-    for (int w = 0; w < n_waves && w < 100; w++) {
+    for (int w = 0; w < n_waves; w++) {
         cdouble sum = make_c(0.0, 0.0);
-        for (int b = 0; b < n_basis && b < 16; b++) {
+        for (int b = 0; b < n_basis; b++) {
             sum = cadd(sum, cmul(matrix_ang[w * n_basis + b], make_c(ang_f[b], 0.0)));
         }
         ag[w] = sum;
     }
 
-    cdouble bwprod[100];
-    for (int w = 0; w < n_waves && w < 100; w++) {
+    for (int w = 0; w < n_waves; w++) {
         cdouble prod = make_c(1.0, 0.0);
         for (int r = 0; r < n_res_per_wave; r++) prod = cmul(prod, bw[w * n_res_per_wave + r]);
         bwprod[w] = prod;
     }
 
-    double bfprod[100];
-    for (int w = 0; w < n_waves && w < 100; w++) {
+    for (int w = 0; w < n_waves; w++) {
         double prod = 1.0;
         for (int d = 0; d < n_decays_per_wave; d++) prod *= bf[w * n_decays_per_wave + d];
         bfprod[w] = prod;
     }
 
-    cdouble inv_bwprod[100];
-    for (int w = 0; w < n_waves && w < 100; w++) inv_bwprod[w] = cdiv(make_c(1.0, 0.0), bwprod[w]);
+    for (int w = 0; w < n_waves; w++) inv_bwprod[w] = cdiv(make_c(1.0, 0.0), bwprod[w]);
 
-    cdouble a_full[100];
-    for (int w = 0; w < n_waves && w < 100; w++) {
+    for (int w = 0; w < n_waves; w++) {
         cdouble tmp = cmul(ck[w], inv_bwprod[w]);
         tmp = cscale(tmp, bfprod[w]);
         a_full[w] = cmul(tmp, ag[w]);
@@ -283,14 +288,10 @@ __global__ void pwa_compute_kernel(
     );
 
     // ---- Gradient w.r.t. ck ----
-    cdouble prefactor[16];
-    for (int w = 0; w < n_waves && w < 16; w++) {
-        prefactor[w] = cmul(cmul(inv_bwprod[w], make_c(bfprod[w], 0.0)), ag[w]);
-    }
-
-    for (int w = 0; w < n_waves && w < 16; w++) {
+    for (int w = 0; w < n_waves; w++) {
+        cdouble pref = cmul(cmul(inv_bwprod[w], make_c(bfprod[w], 0.0)), ag[w]);
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
-        cdouble grad_ck_val = cmul(grad_a, cconj(prefactor[w]));
+        cdouble grad_ck_val = cmul(grad_a, cconj(pref));
         atomicAdd(&(grad_ck_re[w]), cuCreal(grad_ck_val));
         atomicAdd(&(grad_ck_im[w]), cuCimag(grad_ck_val));
     }
@@ -299,7 +300,7 @@ __global__ void pwa_compute_kernel(
     // Through BW: d(D_BW)/dm0 = 2*m0 - i*gamma
     // Through inv_bwprod: d(inv_bwprod)/d(bw_i) = -inv_bwprod / bw_i
     // Practical gradient: ∇_{bw_i} J = ∇_{inv_bwprod} J * conj(-inv_bwprod / bw_i)
-    for (int w = 0; w < n_waves && w < 16; w++) {
+    for (int w = 0; w < n_waves; w++) {
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
         cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod[w], 0.0), ag[w]))));
 
@@ -317,7 +318,7 @@ __global__ void pwa_compute_kernel(
 
     // ---- Gradient w.r.t. g0 ----
     // Through BW: d(bwall)/d(gamma) when gamma is complex
-    for (int w = 0; w < n_waves && w < 16; w++) {
+    for (int w = 0; w < n_waves; w++) {
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
         cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod[w], 0.0), ag[w]))));
 
@@ -344,7 +345,7 @@ __global__ void pwa_compute_kernel(
 
             cdouble grad_gamma_complex = make_c(cuCreal(grad_gamma_val), cuCreal(cmul(grad_bw_i, cconj(dbwall_dIm_gamma))));
 
-            for (int j = 0; j < n_g0 && j < 16; j++) {
+            for (int j = 0; j < n_g0; j++) {
                 // grad_g_vals[j] += matrix_gamma[bw_idx][j] * grad_gamma_complex
                 cdouble grad_g_vals_j = cscale(grad_gamma_complex, matrix_gamma[bw_idx * n_g0 + j]);
                 // g_vals = g0 * gi
@@ -422,6 +423,10 @@ typedef struct {
     // Sizes
     int n_events;
     int mass_stride, q_stride, ang_stride;
+    // Pre-allocated scratch buffer for per-thread temp arrays
+    char* d_scratch;
+    size_t per_thread_size;
+    int max_batch_size;
 } PWAContext;
 // ============================================================
 // Host wrapper functions (called from Python via cffi)
@@ -507,6 +512,19 @@ void* pwa_create_context(
     cudaMemcpy(ctx->d_gamma_table, gamma_table, n_g0 * n_gamma_points * sizeof(cdouble), cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_bf_table, bf_table, n_bf_types * n_bf_points * sizeof(double), cudaMemcpyHostToDevice);
 
+    // Pre-allocate scratch buffer for per-thread temp arrays.
+    // Per thread: bw + bf + ag + bwprod + bfprod + inv_bwprod + a_full
+    //             + m_bw + m_gamma_vals + gi + g_vals + gamma + bwall + q_bf + bfall + ang_f
+    int total_bw = n_waves * n_res_per_wave;
+    int total_bf = n_waves * n_decays_per_wave;
+    ctx->per_thread_size = total_bw * (size_t)sizeof(cdouble) + total_bf * (size_t)sizeof(double)
+         + n_waves * 4 * (size_t)sizeof(cdouble) + n_waves * (size_t)sizeof(double)
+         + n_m0 * 2 * (size_t)sizeof(cdouble) + n_m0 * (size_t)sizeof(double)
+         + n_g0 * 2 * (size_t)sizeof(cdouble) + n_g0 * (size_t)sizeof(double)
+         + n_bf_types * 2 * (size_t)sizeof(double) + n_basis * (size_t)sizeof(double);
+    ctx->max_batch_size = 8192;
+    cudaMalloc(&ctx->d_scratch, ctx->max_batch_size * ctx->per_thread_size);
+
     return (void*)ctx;
 }
 void pwa_destroy_context(void* ctx_ptr) {
@@ -529,6 +547,7 @@ void pwa_destroy_context(void* ctx_ptr) {
     cudaFree(ctx->d_matrix_ang);
     cudaFree(ctx->d_gamma_table);
     cudaFree(ctx->d_bf_table);
+    cudaFree(ctx->d_scratch);
     free(ctx);
 }
 void pwa_compute_wrapper(
@@ -550,7 +569,6 @@ void pwa_compute_wrapper(
     PWAContext* ctx = (PWAContext*)ctx_ptr;
     int n_events = ctx->n_events;
     int threads = 256;
-    int blocks = (n_events + threads - 1) / threads;
     
     // Allocate device output arrays
     double *d_p_out, *d_m0, *d_g0;
@@ -563,34 +581,44 @@ void pwa_compute_wrapper(
     cudaMalloc(&d_m0, n_m0 * sizeof(double));
     cudaMalloc(&d_g0, n_g0 * sizeof(double));
     
-    // Copy parameters to device
+    // Copy parameters to device (same for all batches)
     cudaMemcpy(d_ck, ck, n_waves * sizeof(cdouble), cudaMemcpyHostToDevice);
     cudaMemcpy(d_m0, m0, n_m0 * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_g0, g0, n_g0 * sizeof(double), cudaMemcpyHostToDevice);
     
-    // Launch kernel (forward-only: NULL gradient inputs/outputs)
-    pwa_compute_kernel<<<blocks, threads>>>(
-        d_p_out, d_amp_p_out, d_amp_m_out,
-        NULL,  // grad_p = NULL (forward-only)
-        NULL, NULL, NULL, NULL,  // grad_ck_re, im, m0, g0
-        NULL, NULL, NULL,  // grad_delta_m, delta_g, g
-        NULL, NULL, NULL, NULL,  // grad_ap, lam, phi, N
-        d_ck, d_m0, d_g0,
-        delta_m, delta_g, g_val, ap, lam, phi, 0.0,  // N_val=0 (unused in forward)
-        ctx->d_mass_flat, ctx->d_q_flat, ctx->d_angles_flat,
-        ctx->d_time_arr, ctx->d_frac_arr,
-        ctx->d_bw_index, ctx->d_gamma_index, ctx->d_bw_order,
-        ctx->d_bf_index, ctx->d_bf_order,
-        ctx->d_ang_index, ctx->d_ang_k, ctx->d_ang_b,
-        ctx->d_matrix_gamma, ctx->d_matrix_ang,
-        ctx->d_gamma_table, ctx->d_bf_table,
-        n_events, n_waves, n_m0, n_g0,
-        n_res_per_wave, n_decays_per_wave,
-        n_bf_types, n_basis, n_ang_per_basis,
-        n_gamma_points, n_bf_points,
-        ctx->mass_stride, ctx->q_stride, ctx->ang_stride,
-        g_min, g_delta, q_min, q_delta
-    );
+    // Process events in batches (pre-allocated scratch from context)
+    for (int start = 0; start < n_events; start += ctx->max_batch_size) {
+        int batch_size = ctx->max_batch_size;
+        if (start + batch_size > n_events) batch_size = n_events - start;
+        int blocks = (batch_size + threads - 1) / threads;
+        
+        pwa_compute_kernel<<<blocks, threads>>>(
+            d_p_out + start, d_amp_p_out + start, d_amp_m_out + start,
+            NULL,  // grad_p = NULL (forward-only)
+            NULL, NULL, NULL, NULL,  // grad_ck_re, im, m0, g0
+            NULL, NULL, NULL,  // grad_delta_m, delta_g, g
+            NULL, NULL, NULL, NULL,  // grad_ap, lam, phi, N
+            d_ck, d_m0, d_g0,
+            delta_m, delta_g, g_val, ap, lam, phi, 0.0,  // N_val=0 (unused)
+            ctx->d_mass_flat + start * (size_t)ctx->mass_stride,
+            ctx->d_q_flat + start * (size_t)ctx->q_stride,
+            ctx->d_angles_flat + start * (size_t)ctx->ang_stride,
+            ctx->d_time_arr + start,
+            ctx->d_frac_arr + start,
+            ctx->d_bw_index, ctx->d_gamma_index, ctx->d_bw_order,
+            ctx->d_bf_index, ctx->d_bf_order,
+            ctx->d_ang_index, ctx->d_ang_k, ctx->d_ang_b,
+            ctx->d_matrix_gamma, ctx->d_matrix_ang,
+            ctx->d_gamma_table, ctx->d_bf_table,
+            batch_size, n_waves, n_m0, n_g0,
+            n_res_per_wave, n_decays_per_wave,
+            n_bf_types, n_basis, n_ang_per_basis,
+            n_gamma_points, n_bf_points,
+            ctx->mass_stride, ctx->q_stride, ctx->ang_stride,
+            g_min, g_delta, q_min, q_delta,
+            ctx->d_scratch, ctx->per_thread_size
+        );
+    }
     cudaDeviceSynchronize();
     
     // Copy results back
@@ -636,9 +664,8 @@ void pwa_grad_wrapper(
     PWAContext* ctx = (PWAContext*)ctx_ptr;
     int n_events = ctx->n_events;
     int threads = 256;
-    int blocks = (n_events + threads - 1) / threads;
     
-    // Allocate device memory (only gradient inputs/outputs, not forward outputs)
+    // Allocate device memory
     cdouble *d_ck;
     double *d_m0, *d_g0;
     double *d_grad_p;
@@ -648,7 +675,9 @@ void pwa_grad_wrapper(
     double *d_grad_ap_out, *d_grad_lam_out, *d_grad_phi_out;
     double *d_grad_N_out;
     
+    // Allocate grad_p for full n_events (upload once, used in batches by offset)
     cudaMalloc(&d_grad_p, n_events * sizeof(double));
+    cudaMemcpy(d_grad_p, grad_p, n_events * sizeof(double), cudaMemcpyHostToDevice);
     
     cudaMalloc(&d_grad_ck_re, n_waves * sizeof(double));
     cudaMalloc(&d_grad_ck_im, n_waves * sizeof(double));
@@ -666,7 +695,7 @@ void pwa_grad_wrapper(
     cudaMalloc(&d_m0, n_m0 * sizeof(double));
     cudaMalloc(&d_g0, n_g0 * sizeof(double));
     
-    // Initialize gradients to zero
+    // Zero accumulation buffers once
     cudaMemset(d_grad_ck_re, 0, n_waves * sizeof(double));
     cudaMemset(d_grad_ck_im, 0, n_waves * sizeof(double));
     cudaMemset(d_grad_m0_out, 0, n_m0 * sizeof(double));
@@ -679,38 +708,47 @@ void pwa_grad_wrapper(
     cudaMemset(d_grad_phi_out, 0, sizeof(double));
     cudaMemset(d_grad_N_out, 0, sizeof(double));
     
-    // Copy parameters to device (no forward results needed - recomputed in kernel)
-    cudaMemcpy(d_grad_p, grad_p, n_events * sizeof(double), cudaMemcpyHostToDevice);
+    // Copy parameters to device (same for all batches)
     cudaMemcpy(d_ck, ck, n_waves * sizeof(cdouble), cudaMemcpyHostToDevice);
     cudaMemcpy(d_m0, m0, n_m0 * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_g0, g0, n_g0 * sizeof(double), cudaMemcpyHostToDevice);
     
-    // Launch kernel (gradient mode: forward outputs NULL, gradient outputs provided)
-    pwa_compute_kernel<<<blocks, threads>>>(
-        NULL, NULL, NULL,  // p_out, amp_p_out, amp_m_out (forward outputs not needed)
-        d_grad_p,
-        d_grad_ck_re, d_grad_ck_im,
-        d_grad_m0_out, d_grad_g0_out,
-        d_grad_delta_m_out, d_grad_delta_g_out, d_grad_g_out,
-        d_grad_ap_out, d_grad_lam_out, d_grad_phi_out,
-        d_grad_N_out,
-        d_ck, d_m0, d_g0,
-        delta_m, delta_g, g_val, ap, lam, phi,
-        N_val,
-        ctx->d_mass_flat, ctx->d_q_flat, ctx->d_angles_flat,
-        ctx->d_time_arr, ctx->d_frac_arr,
-        ctx->d_bw_index, ctx->d_gamma_index, ctx->d_bw_order,
-        ctx->d_bf_index, ctx->d_bf_order,
-        ctx->d_ang_index, ctx->d_ang_k, ctx->d_ang_b,
-        ctx->d_matrix_gamma, ctx->d_matrix_ang,
-        ctx->d_gamma_table, ctx->d_bf_table,
-        n_events, n_waves, n_m0, n_g0,
-        n_res_per_wave, n_decays_per_wave,
-        n_bf_types, n_basis, n_ang_per_basis,
-        n_gamma_points, n_bf_points,
-        ctx->mass_stride, ctx->q_stride, ctx->ang_stride,
-        g_min, g_delta, q_min, q_delta
-    );
+    // Process events in batches, accumulating gradients
+    for (int start = 0; start < n_events; start += ctx->max_batch_size) {
+        int batch_size = ctx->max_batch_size;
+        if (start + batch_size > n_events) batch_size = n_events - start;
+        int blocks = (batch_size + threads - 1) / threads;
+        
+        pwa_compute_kernel<<<blocks, threads>>>(
+            NULL, NULL, NULL,  // p_out, amp_p_out, amp_m_out (forward outputs not needed)
+            d_grad_p + start,  // grad_p offset for this batch
+            d_grad_ck_re, d_grad_ck_im,
+            d_grad_m0_out, d_grad_g0_out,
+            d_grad_delta_m_out, d_grad_delta_g_out, d_grad_g_out,
+            d_grad_ap_out, d_grad_lam_out, d_grad_phi_out,
+            d_grad_N_out,
+            d_ck, d_m0, d_g0,
+            delta_m, delta_g, g_val, ap, lam, phi,
+            N_val,
+            ctx->d_mass_flat + start * (size_t)ctx->mass_stride,
+            ctx->d_q_flat + start * (size_t)ctx->q_stride,
+            ctx->d_angles_flat + start * (size_t)ctx->ang_stride,
+            ctx->d_time_arr + start,
+            ctx->d_frac_arr + start,
+            ctx->d_bw_index, ctx->d_gamma_index, ctx->d_bw_order,
+            ctx->d_bf_index, ctx->d_bf_order,
+            ctx->d_ang_index, ctx->d_ang_k, ctx->d_ang_b,
+            ctx->d_matrix_gamma, ctx->d_matrix_ang,
+            ctx->d_gamma_table, ctx->d_bf_table,
+            batch_size, n_waves, n_m0, n_g0,
+            n_res_per_wave, n_decays_per_wave,
+            n_bf_types, n_basis, n_ang_per_basis,
+            n_gamma_points, n_bf_points,
+            ctx->mass_stride, ctx->q_stride, ctx->ang_stride,
+            g_min, g_delta, q_min, q_delta,
+            ctx->d_scratch, ctx->per_thread_size
+        );
+    }
     cudaDeviceSynchronize();
     
     // Copy results back
