@@ -52,17 +52,21 @@ def get_data_files(config_path):
         if isinstance(val, str): return [resolve_path(val, config_dir)]
         return [resolve_path(v, config_dir) for v in val]
 
+    bg_frac = sec.get('bg_frac', 0.0)
+
     return dict(
-        p4_data      = get('data') or get('dataall'),
-        p4_phsp      = get('phsp'),
-        time_data    = get('data_time'),
-        time_phsp    = get('phsp_time'),
-        tag_data     = get('data_tag1'),
-        tag_phsp     = get('phsp_tag1'),
-        eta_data     = get('data_eta1'),
-        eta_phsp     = get('phsp_eta1'),
-        bkg_data     = get('data_bg_value'),
-        weight_phsp  = get('phsp_weight'),
+        p4_data        = get('data') or get('dataall'),
+        p4_phsp        = get('phsp'),
+        time_data      = get('data_time'),
+        time_phsp      = get('phsp_time'),
+        tag_data       = get('data_tag1'),
+        tag_phsp       = get('phsp_tag1'),
+        eta_data       = get('data_eta1'),
+        eta_phsp       = get('phsp_eta1'),
+        bkg_data       = get('data_bg_value'),
+        bkg_phsp       = get('phsp_bg_value'),
+        weight_phsp    = get('phsp_weight'),
+        bg_frac        = bg_frac,
     )
 
 
@@ -424,27 +428,57 @@ def convert(config_path, out_dir='converted',
         d = np.load(paths[0]).astype(np.float64)
         return d[:n] if len(d) > n else d
 
-    dt   = load_aux(files['time_data'], nd, 1.)
-    dtag = load_aux(files['tag_data'],  nd, 1.)
-    deta = load_aux(files['eta_data'],  nd, 0.5)
-    db   = load_aux(files['bkg_data'],  nd, 0.)
-    pt   = load_aux(files['time_phsp'], np_, 0.)
-    ptag = load_aux(files['tag_phsp'],  np_, 1.)
-    peta = load_aux(files['eta_phsp'],  np_, 0.5)
-    pw   = load_aux(files['weight_phsp'], np_, 1.)
+    dt    = load_aux(files['time_data'], nd, 1.)
+    dtag  = load_aux(files['tag_data'],  nd, 1.)
+    deta  = load_aux(files['eta_data'],  nd, 0.5)
+    dbraw = load_aux(files['bkg_data'],  nd, 0.)
+
+    pt    = load_aux(files['time_phsp'], np_, 0.)
+    ptag  = load_aux(files['tag_phsp'],  np_, 1.)
+    peta  = load_aux(files['eta_phsp'],  np_, 0.5)
+    pw    = load_aux(files['weight_phsp'], np_, 1.)
+    pbraw = load_aux(files['bkg_phsp'],   np_, 0.)
+
+    bg_frac = files['bg_frac']
+
+    # ---- frac: flavor-tag fraction ----
+    #   tag == 0   -> 0.5  (untagged)
+    #   tag >  0   -> 1 - eta  (B)
+    #   tag <  0   -> eta      (Bbar)
+    dfrac = np.where(dtag == 0, 0.5,
+                     np.where(dtag > 0, 1.0 - deta, deta))
+    pfrac = np.where(ptag == 0, 0.5,
+                     np.where(ptag > 0, 1.0 - peta, peta))
+
+    # ---- bkg: normalized background ----
+    # Nb = average background over phsp
+    if np_ > 0:
+        Nb = np.sum(pbraw * pw) / np_
+    else:
+        Nb = 1.0
+    # bkg = bkg_raw * bg_frac / (1 - bg_frac) / Nb
+    scale = bg_frac / max(1 - bg_frac, 1e-10) / max(Nb, 1e-30)
+    db = dbraw * scale
+    pb = pbraw * scale  # also compute for phsp (useful for validation)
+
+    print(f"\nAux computed:")
+    print(f"  bg_frac={bg_frac}, Nb={Nb:.6e}, scale={scale:.6e}")
+    print(f"  bkg range: data [{db.min():.4e}, {db.max():.4e}], "
+          f"phsp [{pb.min():.4e}, {pb.max():.4e}]")
 
     # ---- Save ----
     os.makedirs(out_dir, exist_ok=True)
     data_npz = os.path.join(out_dir, 'data_arrays.npz')
     np.savez(data_npz,
              mass=m_d, q=q_d, angles=a_d,
-             time=dt, tag=dtag, eta=deta, bkg=db)
+             time=dt, frac=dfrac, bkg=db)
     phsp_npz = os.path.join(out_dir, 'phsp_arrays.npz')
     np.savez(phsp_npz,
              mass=m_p, q=q_p, angles=a_p,
-             time=pt, tag=ptag, eta=peta, weight=pw)
+             time=pt, frac=pfrac, weight=pw, bkg=pb)
     meta = dict(n_m0=n_m0_base*n_perm, n_q=q_stride_base*n_perm,
                 n_angles=3, n_data=nd, n_phsp=np_,
+                bg_frac=bg_frac, Nb=float(Nb),
                 config_path=os.path.abspath(config_path))
     with open(os.path.join(out_dir, 'convert_meta.json'), 'w') as f:
         json.dump(meta, f, indent=2)
