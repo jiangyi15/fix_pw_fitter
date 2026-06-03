@@ -195,52 +195,39 @@ class PWAFitter:
         return PWAData(fitter, mass, q, angles, t, f, w, np.zeros(n))
 
     # ------------------------------------------------------------------
-    # Full likelihood fit via ConstraintMapper
+    # Full fit (optimization) via scipy
     # ------------------------------------------------------------------
 
-    def fit(self, data, phsp, params=None, N_phsp=None):
+    def fit(self, data, phsp, method='L-BFGS-B', options=None):
         """
-        Compute full likelihood with normalization from phase space.
+        Run full fit: minimize negative log-likelihood with scipy.
         
-        Uses ConstraintMapper for all parameter transforms (constraints applied).
+        Uses phase-space for normalization, ConstraintMapper for parameters.
         
         Args:
             data: PWAData for signal events
-            phsp: PWAData for phase-space events (normalization integral)
-            params: physical params dict (optional, uses self.params if None)
-            N_phsp: norm override. If None, computed as sum(|A|²)/N_phsp_events
+            phsp: PWAData for phase-space events
+            method: scipy optimization method (default: 'L-BFGS-B')
+            options: dict passed to scipy.optimize.minimize
         
         Returns:
-            (neg_log_likelihood, model_grads, norm_value)
-            where model_grads has constraints applied (fixed→0, equal→accumulated)
+            scipy.optimize.OptimizeResult with updated parameters
         """
-        if params is None:
-            params = self.params
-        model_dict = self._build_model_dict(params)
+        import scipy.optimize
+        f_fit = self.make_fit_func(data, phsp)
+        x0 = self.get_free_values()
+        if options is None:
+            options = {'disp': True, 'maxiter': 200}
+        result = scipy.optimize.minimize(f_fit, x0, jac=True,
+                                          method=method, options=options)
+        # Update stored params with fitted values
+        model_opt = self.unpack(result.x)
+        # Convert model → physical params dict
         cst = self._ensure_cst()
-        fitter = self._ensure_fitter()
-
-        # Step 1: compute normalization from phase space
-        ck, mk, gk, sc = cst.to_kernel(model_dict)
-        
-        if N_phsp is not None:
-            norm = N_phsp
-        else:
-            # Compute norm = Σ |A|² / N_phsp (chi-square mode on phsp)
-            q_phsp, _ = fitter.compute((ck, mk, gk, *sc), phsp, None)
-            n_phsp = phsp.n_events
-            norm = q_phsp / n_phsp if n_phsp > 0 else 1.0
-
-        # Step 2: compute NLL on data with normalization
-        # kernel does: q = -Σ w * log(p/N + bkg) with likelihood mode
-        q_data, grads_k = fitter.compute((ck, mk, gk, *sc), data, norm)
-
-        # Step 3: propagate gradients through constraints
-        grad_scalar = np.array([grads_k[k] for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
-        nll = -q_data  # negative log-likelihood
-        model_grads = cst.from_kernel(grads_k['ck'], grads_k['m0'], grads_k['g0'], grad_scalar)
-
-        return nll, model_grads, norm
+        phys = cst.get_physical(model_opt)
+        self._params = phys
+        result.phys_params = phys
+        return result
 
     # ------------------------------------------------------------------
     # Optimization interface (delegated to ConstraintMapper)
