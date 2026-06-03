@@ -1,12 +1,16 @@
 """
 Unified PWA fitter: wraps config loading, kernel setup, and parameter management.
 
+Internally uses ConstraintMapper (which wraps ParamMapper) for parameter transforms.
+Users can set constraints directly on the fitter.
+
 Usage:
     from pwa_gpu.fitter import PWAFitter
     
-    fitter = PWAFitter("config.yml")
-    fitter.build_tables()
+    fitter = PWAFitter("config.yml").auto_tables()
     fitter.load_params("a.json")
+    fitter.set_fixed('delta_m', 0.0)
+    fitter.set_equal('m0/1', 'm0/0')
     
     data = fitter.load_data(mass, q, angles, time, frac, weights, bkg)
     q_val, grads = fitter.compute(data, N=norm)
@@ -17,15 +21,17 @@ import numpy as np
 from pwa_gpu.parse_config import parse_config
 from pwa_gpu.build_tables import build_tables as _build_tables, load_tables as _load_tables, save_tables as _save_tables
 from pwa_gpu.param_mapper import ParamMapper
+from pwa_gpu.constraint_mapper import ConstraintMapper
 from pwa_gpu import PWAGPU, PWAData
 
 
 class PWAFitter:
     """
-    Single class wrapping the full PWA pipeline:
-      parse_config → build_tables → ParamMapper → PWAGPU → compute
+    Full PWA pipeline using ConstraintMapper for parameter transforms.
     
-    All methods are accessible directly on this object.
+    Physical params are loaded via load_params().
+    Constraints (fix, equal, linear) are applied on top via ConstraintMapper.
+    compute() goes through: model → constraints → physical → kernel → GPU → back.
     """
 
     def __init__(self, config_path):
@@ -34,49 +40,46 @@ class PWAFitter:
         self._pw_list = None
         self._kw_list = None
         self._mapper = None
+        self._cst = None  # ConstraintMapper
         self._fitter = None
-        self._params = None  # last loaded params
-
-        # Step 1: parse config
+        self._params = None  # last loaded physical params
         self.parse()
+
+    def _ensure_cst(self):
+        """Create ConstraintMapper if needed."""
+        if self._cst is None:
+            self._cst = ConstraintMapper(self.mapper)
+        return self._cst
 
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
 
     def parse(self):
-        """Parse the YAML config (called automatically on init)."""
         self._cfg, self._pw_list, self._kw_list = parse_config(self.config_path)
         return self
 
     def build_tables(self, save_path=None):
-        """Build gamma/bf interpolation tables. Optionally save to .npz."""
         if save_path:
             self.save_tables(save_path)
         self._cfg = _build_tables(self._cfg, self._pw_list, self._kw_list,
                                    self.config_path, save_path)
         self._mapper = ParamMapper(self._cfg)
+        self._cst = None  # reset
         return self
 
     def save_tables(self, path):
-        """Save gamma/bf tables to .npz file."""
         if self._cfg is not None and 'gamma_table' in self._cfg:
             _save_tables(self._cfg, path)
         return self
 
     def load_tables(self, path):
-        """Load gamma/bf tables from .npz file (skip building)."""
         _load_tables(self._cfg, path)
         self._mapper = ParamMapper(self._cfg)
+        self._cst = None
         return self
 
     def auto_tables(self, npz_path=None):
-        """
-        Load tables from .npz if it exists, otherwise build and save.
-        
-        Args:
-            npz_path: path to .npz file. If None, use config_path + '.tables.npz'
-        """
         if npz_path is None:
             npz_path = self.config_path + '.tables.npz'
         if os.path.exists(npz_path):
@@ -96,6 +99,31 @@ class PWAFitter:
         return self._mapper
 
     # ------------------------------------------------------------------
+    # Constraints (forwarded to ConstraintMapper)
+    # ------------------------------------------------------------------
+
+    def set_fixed(self, key, value=None):
+        """Fix a parameter. Removed from fit variables."""
+        self._ensure_cst().set_fixed(key, value)
+        return self
+
+    def set_equal(self, target, source):
+        """Make target equal to source (one fit variable)."""
+        self._ensure_cst().set_equal(target, source)
+        return self
+
+    def set_linear(self, target, sources):
+        """Linear combination: target = Σ coeff_i * source_i."""
+        self._ensure_cst().set_linear(target, sources)
+        return self
+
+    def clear_constraints(self):
+        """Remove all constraints."""
+        if self._cst:
+            self._cst.clear()
+        return self
+
+    # ------------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------------
 
@@ -104,11 +132,24 @@ class PWAFitter:
         self._params = self.mapper.load_params(json_path, self.config_path)
         return self._params
 
+    def _build_model_dict(self, phys_params=None):
+        """Build model params dict from physical params (one-to-one by default)."""
+        if phys_params is None:
+            phys_params = self.params
+        m = self.mapper
+        d = {}
+        for k in m.totals: d[f'total/{k}'] = phys_params['total'][m.totals[k]]
+        for (dn, ls), i in m.gls.items(): d[f'g_ls/{dn}/{ls}'] = phys_params['g_ls'][i]
+        for (dn, ls), i in m.glsbar.items(): d[f'g_lsbar/{dn}/{ls}'] = phys_params['g_lsbar'][i]
+        for i in range(m.n_m0_phys): d[f'm0/{i}'] = phys_params['m0'][i]
+        for i in range(m.n_g0_phys): d[f'g0/{i}'] = phys_params['g0'][i]
+        for k in ['delta_m','delta_g','g','ap','lam','phi']: d[k] = phys_params[k]
+        return d
+
     @property
     def params(self):
-        """Last loaded params dict, or random defaults."""
+        """Last loaded physical params dict."""
         if self._params is None:
-            # Generate random defaults
             mapper = self.mapper
             total = np.random.randn(len(mapper.totals)) + 1j * np.random.randn(len(mapper.totals))
             gls = np.random.randn(len(mapper.gls)) + 1j * np.random.randn(len(mapper.gls))
@@ -122,23 +163,6 @@ class PWAFitter:
                 'ap': 0.01, 'lam': 0.7, 'phi': 0.1,
             }
         return self._params
-
-    def params_from_kernel(self, ck, m0_k, g0_k):
-        """
-        Convert kernel arrays back to physical params.
-        Inverse of mapper.to_kernel (up to g_ls/g_lsbar ambiguity).
-        Only useful for m0/g0 which are just index maps.
-        """
-        mapper = self.mapper
-        # m0/g0: sum by phys index
-        m0_phys = np.zeros(mapper.n_m0_phys)
-        g0_phys = np.zeros(mapper.n_g0_phys)
-        for ki, pi in enumerate(mapper.m0_phys_index):
-            m0_phys[pi] = m0_k[ki]
-        for ki, pi in enumerate(mapper.g0_phys_index):
-            g0_phys[pi] = g0_k[ki]
-        return {'m0': m0_phys, 'g0': g0_phys,
-                'ck': ck, 'm0_k': m0_k, 'g0_k': g0_k}
 
     # ------------------------------------------------------------------
     # GPU setup
@@ -159,42 +183,43 @@ class PWAFitter:
         return PWAData(fitter, mass, q, angles, time_arr, frac, weights, bkg)
 
     # ------------------------------------------------------------------
-    # Compute
+    # Compute via ConstraintMapper
     # ------------------------------------------------------------------
-
-    def to_kernel(self, params=None):
-        """Convert physical params to kernel arrays."""
-        mapper = self.mapper
-        if params is None:
-            params = self.params
-        scalars = (params['delta_m'], params['delta_g'], params['g'],
-                   params['ap'], params['lam'], params['phi'])
-        return mapper.to_kernel(
-            params['total'], params['g_ls'], params['g_lsbar'],
-            params['m0'], params['g0'], scalars)
-
-    def from_kernel(self, grad_ck, grad_m0_k, grad_g0_k, grad_scalar):
-        """Convert kernel gradients to physical gradients."""
-        return self.mapper.from_kernel_cached(
-            grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
 
     def compute(self, data, params=None, N=None):
         """
-        Full forward+backward compute.
+        Full forward+backward compute via ConstraintMapper.
+        
+        Builds model params from physical params, applies constraints,
+        computes on GPU, and backpropagates gradients through constraints.
         
         Args:
             data: PWAData object
-            params: dict with 'total', 'g_ls', 'g_lsbar', 'm0', 'g0',
-                    'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi'
+            params: physical params dict (optional, uses self.params if None)
             N: normalization (None for chi-square)
         
         Returns:
-            q_val, grads_dict
+            q_val, grads_dict (model gradients, with constraints applied)
         """
         if params is None:
             params = self.params
+        model_dict = self._build_model_dict(params)
+        cst = self._ensure_cst()
         fitter = self._ensure_fitter()
-        return self.mapper.compute(fitter, data, params, N)
+        return cst.compute(fitter, data, model_dict, N)
+
+    def to_kernel(self, params=None):
+        """Convert physical params to kernel arrays (via ConstraintMapper)."""
+        if params is None:
+            params = self.params
+        model_dict = self._build_model_dict(params)
+        cst = self._ensure_cst()
+        return cst.to_kernel(model_dict)
+
+    def from_kernel(self, grad_ck, grad_m0_k, grad_g0_k, grad_scalar):
+        """Convert kernel gradients to physical then model gradients."""
+        cst = self._ensure_cst()
+        return cst.from_kernel(grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
 
     # ------------------------------------------------------------------
     # Info
@@ -217,3 +242,5 @@ class PWAFitter:
             print(f"totals:     {len(m.totals)}")
             print(f"g_ls:       {len(m.gls)}")
             print(f"g_lsbar:    {len(m.glsbar)}")
+        if self._cst:
+            print(f"Constraints: {len(self._cst._constraints)}")
