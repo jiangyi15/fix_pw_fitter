@@ -184,7 +184,7 @@ class PWAFitter:
     # Full fit (optimization) via scipy
     # ------------------------------------------------------------------
 
-    def fit(self, data, phsp, method='L-BFGS-B', options=None):
+    def fit(self, data, phsp, method='BFGS', options=None):
         """
         Run full fit: minimize negative log-likelihood with scipy.
         
