@@ -191,7 +191,8 @@ def main():
     # Load data to GPU
     print("\n[3] Loading data...")
     try:
-        fitter_gpu.load_data(data)
+        data_gpu = fitter_gpu.load_data(data)
+        print(f"Loaded {data_gpu.n_events} events to GPU")
     except Exception as e:
         print(f"    ERROR: Failed to load data to GPU: {e}")
         sys.exit(1)
@@ -199,7 +200,7 @@ def main():
     # Warmup run
     print("\n[4] Warmup run...")
     try:
-        p_gpu, q_gpu = fitter_gpu.compute(params, N)
+        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
         q_numpy, grad_numpy = fitter_numpy.compute(params, data, N)
         print("    Warmup completed successfully")
     except Exception as e:
@@ -220,7 +221,7 @@ def main():
     for i in range(n_runs):
         # GPU computation
         t0 = time.perf_counter()
-        p_gpu, q_gpu = fitter_gpu.compute(params, N)
+        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
         t_gpu = time.perf_counter() - t0
         gpu_times.append(t_gpu)
         
@@ -258,7 +259,7 @@ def main():
     # Try to compare p values by re-running and capturing
     print("\n[6] Detailed comparison of p values...")
     try:
-        p_gpu, q_gpu = fitter_gpu.compute(params, N)
+        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
         
         # For numpy, we need to extract p values
         # The numpy compute doesn't return p directly, but we can 
@@ -284,7 +285,7 @@ def main():
     print("\n[7] Gradient comparison...")
     param_names = ['ck', 'm0', 'g0', 'N', 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
     try:
-        p_gpu, q_gpu, grad_gpu = fitter_gpu.grad(params, N)
+        p_gpu, q_gpu, grad_gpu = fitter_gpu.grad(params, data_gpu, N)
         
         print(f"\n  Parameter gradients (GPU vs Numpy):")
         
@@ -309,7 +310,7 @@ def main():
     # Gradient comparison with N=None (chi-square mode)
     print("\n[8] Gradient comparison (N=None / chi-square mode)...")
     try:
-        p_gpu0, q_gpu0, grad_gpu0 = fitter_gpu.grad(params, None)
+        p_gpu0, q_gpu0, grad_gpu0 = fitter_gpu.grad(params, data_gpu, None)
         q_np0, grad_np0 = fitter_numpy.compute(params, data, None)
         
         print(f"  q_val GPU: {q_gpu0:.10f}, q_val NP: {q_np0:.10f}")
