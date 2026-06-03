@@ -521,10 +521,15 @@ def _load_params_impl(json_path, mapper, config_path=None):
         for i, (w_val, model, rname) in enumerate(w_sorted):
             if i >= mapper.n_g0_phys:
                 break
-            jkey = f'{rname}_width'
-            # For non-Flatte: gamma_table already contains full physical width
-            # g0 = 1.0 (no additional scaling). FlatteC handles separately below.
-            g0_arr[i] = 1.0
+            if model == 'one':
+                # model=one: gamma_table stores full shape (constant 1.0 amplitude)
+                # No physical width — g0 = 1.0 (no scaling)
+                g0_arr[i] = 1.0
+            else:
+                jkey = f'{rname}_width'
+                # gamma_table stores normalized shape (gamma/width).
+                # g0 = physical width value.
+                g0_arr[i] = data.get(jkey, w_val)
 
         for i, (k, v, rname) in enumerate(sorted(flatte_items)):
             idx = len(w_sorted) + i

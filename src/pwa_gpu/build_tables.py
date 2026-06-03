@@ -206,15 +206,20 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
                 base_gamma.append((1j * rho).astype(np.complex128))
 
         elif res.model == 'one':
+            # NR0: gamma = i*(1+m²-m0²)/m0, keep full shape (no width scaling)
+            # g0 = 1.0 (no physical width)
             amp = amp_constant(mass_grid, m0)
             base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
 
         elif res.model == 'Bugg':
+            # Bugg: gamma from inversion, normalize by natural width
             bugg_params = {k: v for k, v in (props.items() if isinstance(props, dict) else {})}
             amp = amp_Bugg(mass_grid, m0, bugg_params)
-            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
+            gamma = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
+            base_gamma.append(gamma / width)
 
         elif res.model == 'width_linear_npy' and 'file' in extra:
+            # width_linear_npy: gamma from file, normalize by resonance width
             fpath = os.path.join(cfg_dir, extra['file'])
             if os.path.exists(fpath):
                 data = np.load(fpath)
@@ -223,14 +228,17 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
                 amp = amp_from_file(mass_grid, m0, file_gamma, file_mass)
             else:
                 amp = amp_BW(mass_grid, m0, width)
-            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
+            gamma = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
+            base_gamma.append(gamma / width)
 
         else:
+            # BW/GS: gamma = width * shape(m), divide by width → shape only
             L = res.J if res.J > 0 else 0
             m1 = M_PI
             m2 = M_PI
             amp = amp_BW(mass_grid, m0, width, L, d=3.0, m1=m1, m2=m2)
-            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
+            gamma = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
+            base_gamma.append(gamma / width)
 
     # Tile by n_perm for identical particle permutations
     gamma_table = np.tile(np.array(base_gamma), (n_perm, 1))
