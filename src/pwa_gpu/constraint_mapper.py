@@ -201,6 +201,21 @@ class ConstraintMapper:
     # Parameter management (flat array interface for optimization)
     # ------------------------------------------------------------------
 
+    def build_model_dict(self, phys_params):
+        """Build model params dict (individual keys) from physical params dict (arrays).
+        
+        Inverse of get_physical(): phys_params → {key: value} for to_kernel().
+        """
+        m = self.mapper
+        d = {}
+        for k in m.totals: d[f'total/{k}'] = phys_params['total'][m.totals[k]]
+        for (dn, ls), i in m.gls.items(): d[f'g_ls/{dn}/{ls}'] = phys_params['g_ls'][i]
+        for (dn, ls), i in m.glsbar.items(): d[f'g_lsbar/{dn}/{ls}'] = phys_params['g_lsbar'][i]
+        for i in range(m.n_m0_phys): d[f'm0/{i}'] = phys_params['m0'][i]
+        for i in range(m.n_g0_phys): d[f'g0/{i}'] = phys_params['g0'][i]
+        for k in ['delta_m','delta_g','g','ap','lam','phi']: d[k] = phys_params[k]
+        return d
+
     def get_free_keys(self):
         """Return list of free parameter keys (not constrained / not derived)."""
         constrained = set(self._constraints.keys())

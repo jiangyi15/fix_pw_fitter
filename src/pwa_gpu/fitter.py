@@ -132,20 +132,6 @@ class PWAFitter:
         self._params = self.mapper.load_params(json_path, self.config_path)
         return self._params
 
-    def _build_model_dict(self, phys_params=None):
-        """Build model params dict from physical params (one-to-one by default)."""
-        if phys_params is None:
-            phys_params = self.params
-        m = self.mapper
-        d = {}
-        for k in m.totals: d[f'total/{k}'] = phys_params['total'][m.totals[k]]
-        for (dn, ls), i in m.gls.items(): d[f'g_ls/{dn}/{ls}'] = phys_params['g_ls'][i]
-        for (dn, ls), i in m.glsbar.items(): d[f'g_lsbar/{dn}/{ls}'] = phys_params['g_lsbar'][i]
-        for i in range(m.n_m0_phys): d[f'm0/{i}'] = phys_params['m0'][i]
-        for i in range(m.n_g0_phys): d[f'g0/{i}'] = phys_params['g0'][i]
-        for k in ['delta_m','delta_g','g','ap','lam','phi']: d[k] = phys_params[k]
-        return d
-
     @property
     def params(self):
         """Last loaded physical params dict."""
@@ -253,7 +239,7 @@ class PWAFitter:
         """
         if params_dict is None:
             params_dict = self.params
-        model_dict = self._build_model_dict(params_dict)
+        model_dict = self._ensure_cst().build_model_dict(params_dict)
         return self._ensure_cst().pack(model_dict)
 
     def make_fit_func(self, data, phsp, N_phsp=None):
@@ -302,7 +288,7 @@ class PWAFitter:
         """
         if params is None:
             params = self.params
-        model_dict = self._build_model_dict(params)
+        model_dict = self._ensure_cst().build_model_dict(params)
         cst = self._ensure_cst()
         fitter = self._ensure_fitter()
         return cst.compute(fitter, data, model_dict, N)
@@ -311,7 +297,7 @@ class PWAFitter:
         """Convert physical params to kernel arrays (via ConstraintMapper)."""
         if params is None:
             params = self.params
-        model_dict = self._build_model_dict(params)
+        model_dict = self._ensure_cst().build_model_dict(params)
         cst = self._ensure_cst()
         return cst.to_kernel(model_dict)
 
