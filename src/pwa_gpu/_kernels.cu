@@ -29,25 +29,28 @@ __device__ cdouble cexp_c(cdouble z) {
 extern "C"
 __global__ void pwa_compute_kernel(
     // Output
-    double* __restrict__ p_out,           // (n_events,)
-    cdouble* __restrict__ amp_p_out,      // (n_events,)
-    cdouble* __restrict__ amp_m_out,      // (n_events,)
+    double* __restrict__ p_out,           // (n_events,) or NULL
+    cdouble* __restrict__ amp_p_out,      // (n_events,) or NULL
+    cdouble* __restrict__ amp_m_out,      // (n_events,) or NULL
+    double* __restrict__ q_val_out,       // scalar, sum(w * log(q)) or NULL
     // Gradient outputs (only computed when weights != NULL)
     double* __restrict__ grad_ck_re,      // (n_waves,)
     double* __restrict__ grad_ck_im,      // (n_waves,)
     double* __restrict__ grad_m0_out,     // (n_m0,)
     double* __restrict__ grad_g0_out,     // (n_g0,)
     double* __restrict__ grad_scalar_out, // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
-    // Parameters + data for computing grad_p on the fly
-    const cdouble* __restrict__ ck,       // (n_waves,)
-    const double* __restrict__ m0,        // (n_m0,)
-    const double* __restrict__ g0,        // (n_g0,)
+    // Parameter arrays (uploaded per compute call)
+    const cdouble* __restrict__ ck,
+    const double* __restrict__ m0,
+    const double* __restrict__ g0,
     double delta_m, double delta_g, double g_val,
     double ap, double lam, double phi,
     double N_val,
-    const double* __restrict__ weights,   // (n_events,) or NULL → no gradient
-    const double* __restrict__ bkg_arr,   // (n_events,) background fraction
-        // Data
+    int do_likelihood,
+    // Weights + background (non-NULL = compute gradients)
+    const double* __restrict__ weights,
+    const double* __restrict__ bkg_arr,
+    // Data
     const double* __restrict__ mass_flat,
     const double* __restrict__ q_flat,
     const double* __restrict__ angles_flat,
@@ -233,11 +236,25 @@ __global__ void pwa_compute_kernel(
         amp_m_out[e] = amp_m;
     }
 
-    // Compute grad_p on the fly from weights + p_val (avoids CPU round-trip)
+    // Accumulate q_val on GPU (avoids CPU reduction, critical for large datasets)
+    // q_val = sum_e w[e] * (do_likelihood ? log(p/N + bkg) : p)
     bool do_grad = (weights != NULL);
+    if (q_val_out != NULL && do_grad) {
+        double contrib;
+        if (do_likelihood) {
+            double bkg_val = bkg_arr ? bkg_arr[e] : 0.0;
+            double q_val = p_val / N_val + bkg_val;
+            contrib = weights[e] * log(q_val);
+        } else {
+            contrib = weights[e] * p_val;
+        }
+        atomicAdd(q_val_out, contrib);
+    }
+
+    // Compute grad_p on the fly from weights + p_val (avoids CPU round-trip)
     double grad_p_val;
     if (do_grad) {
-        if (N_val > 0.0) {
+        if (do_likelihood) {
             // Likelihood mode: q = p/N + bkg, grad_p = w/(N*q)
             double bkg_val = bkg_arr ? bkg_arr[e] : 0.0;
             double q_val = p_val / N_val + bkg_val;
@@ -270,7 +287,7 @@ __global__ void pwa_compute_kernel(
     atomicAdd(&grad_scalar_out[3], grad_p_val * dp_dap);
 
     // --- Gradient w.r.t. N (normalization, only in likelihood mode) ---
-    if (N_val > 0.0) {
+    if (do_likelihood) {
         // grad_N = -grad_p_val * p_val / N
         // q = p/N + bkg, grad_p = w/(N*q)
         // dq_val/dN = -w * p / (N^2 * q) = -grad_p * p / N
@@ -593,13 +610,14 @@ void pwa_compute(
     void* cfg_ptr,
     void* data_ptr,
     double* p_out, cdouble* amp_p_out, cdouble* amp_m_out,
+    double* q_val_out,  // scalar: sum(w*log(q)) — NULL to skip
     double* grad_ck_re, double* grad_ck_im,
     double* grad_m0_out, double* grad_g0_out,
     double* grad_scalar_out,  // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
     const cdouble* ck, const double* m0, const double* g0,
     double delta_m, double delta_g, double g_val,
     double ap, double lam, double phi,
-    double N_val,
+    double N_val, int do_likelihood,
     const double* weights, const double* bkg_arr,
     int n_waves, int n_m0, int n_g0,
     int n_res_per_wave, int n_decays_per_wave,
@@ -615,6 +633,7 @@ void pwa_compute(
     // Allocate all device buffers (init NULL so cleanup labels are safe)
     double *d_p_out = NULL, *d_m0 = NULL, *d_g0 = NULL, *d_weights = NULL, *d_bkg_arr = NULL;
     cdouble *d_amp_p_out = NULL, *d_amp_m_out = NULL, *d_ck = NULL;
+    double *d_q_val_out = NULL;
     double *d_grad_ck_re = NULL, *d_grad_ck_im = NULL;
     double *d_grad_m0_out = NULL, *d_grad_g0_out = NULL;
     double *d_grad_scalar_out = NULL;
@@ -624,7 +643,8 @@ void pwa_compute(
     if (cudaMalloc(&d_p_out, n_events * sizeof(double)) != cudaSuccess) goto cleanup_ck;
     if (cudaMalloc(&d_amp_p_out, n_events * sizeof(cdouble)) != cudaSuccess) goto cleanup_p;
     if (cudaMalloc(&d_amp_m_out, n_events * sizeof(cdouble)) != cudaSuccess) goto cleanup_amp_p;
-    if (cudaMalloc(&d_ck, n_waves * sizeof(cdouble)) != cudaSuccess) goto cleanup_amp_m;
+    if (cudaMalloc(&d_q_val_out, sizeof(double)) != cudaSuccess) goto cleanup_amp_m;
+    if (cudaMalloc(&d_ck, n_waves * sizeof(cdouble)) != cudaSuccess) goto cleanup_q_val;
     if (cudaMalloc(&d_m0, n_m0 * sizeof(double)) != cudaSuccess) goto cleanup_ck_buf;
     if (cudaMalloc(&d_g0, n_g0 * sizeof(double)) != cudaSuccess) goto cleanup_m0;
     if (cudaMalloc(&d_weights, n_events * sizeof(double)) != cudaSuccess) goto cleanup_g0;
@@ -642,7 +662,8 @@ void pwa_compute(
     cudaMemcpy(d_weights, weights, n_events * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_bkg_arr, bkg_arr, n_events * sizeof(double), cudaMemcpyHostToDevice);
     
-    // Zero gradient accumulation buffers
+    // Zero accumulation buffers
+    cudaMemset(d_q_val_out, 0, sizeof(double));
     cudaMemset(d_grad_ck_re, 0, n_waves * sizeof(double));
     cudaMemset(d_grad_ck_im, 0, n_waves * sizeof(double));
     cudaMemset(d_grad_m0_out, 0, n_m0 * sizeof(double));
@@ -657,12 +678,13 @@ void pwa_compute(
         
         pwa_compute_kernel<<<blocks, threads>>>(
             d_p_out + start, d_amp_p_out + start, d_amp_m_out + start,
+            d_q_val_out,
             d_grad_ck_re, d_grad_ck_im,
             d_grad_m0_out, d_grad_g0_out,
             d_grad_scalar_out,
             d_ck, d_m0, d_g0,
-            delta_m, delta_g, g_val, ap, lam, phi, N_val,
-            d_weights, d_bkg_arr,
+            delta_m, delta_g, g_val, ap, lam, phi, N_val, do_likelihood,
+            d_weights + start, d_bkg_arr + start,
             data->d_mass_flat + start * (size_t)data->mass_stride,
             data->d_q_flat + start * (size_t)data->q_stride,
             data->d_angles_flat + start * (size_t)data->ang_stride,
@@ -698,6 +720,7 @@ void pwa_compute(
     cudaMemcpy(grad_m0_out, d_grad_m0_out, n_m0 * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_g0_out, d_grad_g0_out, n_g0 * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_scalar_out, d_grad_scalar_out, 7 * sizeof(double), cudaMemcpyDeviceToHost);
+    if (q_val_out) cudaMemcpy(q_val_out, d_q_val_out, sizeof(double), cudaMemcpyDeviceToHost);
     
     // Free all device memory (normal path)
     cudaFree(d_ck); cudaFree(d_m0); cudaFree(d_g0);
@@ -705,6 +728,7 @@ void pwa_compute(
     cudaFree(d_grad_ck_re); cudaFree(d_grad_ck_im);
     cudaFree(d_grad_m0_out); cudaFree(d_grad_g0_out);
     cudaFree(d_grad_scalar_out);
+    cudaFree(d_q_val_out);
     cudaFree(d_p_out); cudaFree(d_amp_p_out); cudaFree(d_amp_m_out);
     return;
     
@@ -718,6 +742,7 @@ cleanup_weights:  cudaFree(d_weights);
 cleanup_g0:       cudaFree(d_g0);
 cleanup_m0:       cudaFree(d_m0);
 cleanup_ck_buf:   cudaFree(d_ck);
+cleanup_q_val:    cudaFree(d_q_val_out);
 cleanup_amp_m:    cudaFree(d_amp_m_out);
 cleanup_amp_p:    cudaFree(d_amp_p_out);
 cleanup_p:        cudaFree(d_p_out);
@@ -912,9 +937,9 @@ int main() {
     /* ===== [1] Warmup ===== */
     print_sec("[1] Warmup");
     for (int i = 0; i < warmup; i++) {
-        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out,
+        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out, NULL,
             gcr, gci, gm0, gg0, gsc,
-            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val,
+            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val, 1,
             gpr, bkg_arr_h,
             cfg.n_waves, cfg.n_m0, cfg.n_g0,
             cfg.n_res_per_wave, cfg.n_decays_per_wave,
@@ -929,9 +954,9 @@ int main() {
     double fwd_e2e = 0;
     for (int r = 0; r < n_runs; r++) {
         cudaEventRecord(es);
-        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out,
+        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out, NULL,
             gcr, gci, gm0, gg0, gsc,
-            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val,
+            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val, 1,
             gpr, bkg_arr_h,
             cfg.n_waves, cfg.n_m0, cfg.n_g0,
             cfg.n_res_per_wave, cfg.n_decays_per_wave,
@@ -971,10 +996,10 @@ int main() {
             int bs = (s+maxb > ev) ? ev-s : maxb;
             int bl = (bs+255)/256;
             pwa_compute_kernel<<<bl,256>>>(
-                d_po+s, d_apo+s, d_amo+s,
+                d_po+s, d_apo+s, d_amo+s, NULL,
                 NULL, NULL, NULL, NULL, NULL,
                 d_ck, d_m0, d_g0,
-                delta_m, delta_g, g_val, ap, lam, phi, 0.0,
+                delta_m, delta_g, g_val, ap, lam, phi, 0.0, 0,
                 NULL, NULL,  // no weights, no bkg (forward-only)
                 pdata->d_mass_flat + s*(size_t)pdata->mass_stride,
                 pdata->d_q_flat + s*(size_t)pdata->q_stride,
@@ -1023,11 +1048,11 @@ int main() {
             int bs = (s+maxb > ev) ? ev-s : maxb;
             int bl = (bs+255)/256;
             pwa_compute_kernel<<<bl,256>>>(
-                NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL,
                 d_gcr, d_gci, d_gm0, d_gg0,
                 d_grad_scalar,
                 d_ck, d_m0, d_g0,
-                delta_m, delta_g, g_val, ap, lam, phi, N_val,
+                delta_m, delta_g, g_val, ap, lam, phi, N_val, 1,
                 d_weights, NULL,
                 pdata->d_mass_flat + s*(size_t)pdata->mass_stride,
                 pdata->d_q_flat + s*(size_t)pdata->q_stride,

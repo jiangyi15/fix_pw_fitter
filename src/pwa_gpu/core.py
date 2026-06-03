@@ -238,6 +238,7 @@ class PWAGPU:
         else:
             bkg_arr = np.full(data.n_events, data.bkg, dtype=np.float64)
 
+        q_val_out = np.zeros(1, dtype=np.float64)
         p_out = np.zeros(data.n_events, dtype=np.float64)
         amp_p_out = np.zeros(data.n_events, dtype=np.complex128)
         amp_m_out = np.zeros(data.n_events, dtype=np.complex128)
@@ -252,6 +253,7 @@ class PWAGPU:
             ffi.cast("double*", p_out.ctypes.data),
             ffi.cast("cuDoubleComplex*", amp_p_out.ctypes.data),
             ffi.cast("cuDoubleComplex*", amp_m_out.ctypes.data),
+            ffi.cast("double*", q_val_out.ctypes.data),
             ffi.cast("double*", grad_ck_re.ctypes.data),
             ffi.cast("double*", grad_ck_im.ctypes.data),
             ffi.cast("double*", grad_m0.ctypes.data),
@@ -261,7 +263,8 @@ class PWAGPU:
             ffi.cast("double*", m0.ctypes.data),
             ffi.cast("double*", g0.ctypes.data),
             delta_m, delta_g, g, ap, lam, phi,
-            N if N is not None else -1.0,
+            N if N is not None else 0.0,
+            1 if N is not None else 0,
             ffi.cast("double*", data.weights.ctypes.data),
             ffi.cast("double*", bkg_arr.ctypes.data),
             self.n_waves, self.n_m0, self.n_g0,
@@ -271,12 +274,7 @@ class PWAGPU:
             self.g_min, self.g_delta, self.q_min, self.q_delta
         )
 
-        if N is not None and N > 0:
-            bkg_vals = data.bkg if isinstance(data.bkg, np.ndarray) else np.full(data.n_events, data.bkg)
-            q = p_out / N + bkg_vals
-            q_val = np.sum(data.weights * np.log(q))
-        else:
-            q_val = np.sum(data.weights * p_out)
+        q_val = q_val_out[0]
 
         grad_ck = grad_ck_re + 1j * grad_ck_im
 
