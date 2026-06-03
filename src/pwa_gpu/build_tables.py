@@ -269,8 +269,12 @@ def compute_bf_table(cfg, pw_list, kw_list):
 # Main entry point
 # ====================================================================
 
-def build_tables(cfg, pw_list, kw_list, config_path=None):
-    """Build gamma_table and bf_table, add them to cfg."""
+def build_tables(cfg, pw_list, kw_list, config_path=None, save_path=None):
+    """
+    Build gamma_table and bf_table, add them to cfg.
+    
+    If save_path is given, also save to .npz for fast reloading.
+    """
     gamma_table, g_min, g_delta, n_gp = compute_gamma_table(cfg, pw_list, kw_list, config_path)
     bf_table, q_min, q_delta, n_bp = compute_bf_table(cfg, pw_list, kw_list)
 
@@ -286,6 +290,37 @@ def build_tables(cfg, pw_list, kw_list, config_path=None):
     print(f"  gamma_table: {gamma_table.shape}, g_min={g_min:.4f}, g_delta={g_delta:.6f}")
     print(f"  bf_table:    {bf_table.shape}, q_min={q_min:.4f}, q_delta={q_delta:.6f}")
 
+    if save_path:
+        save_tables(cfg, save_path)
+
+    return cfg
+
+
+def save_tables(cfg, path):
+    """Save gamma/bf tables to .npz file."""
+    np.savez_compressed(path,
+        gamma_table=cfg['gamma_table'],
+        bf_table=cfg['bf_table'],
+        g_min=cfg['g_min'], g_delta=cfg['g_delta'],
+        n_gamma_points=cfg['n_gamma_points'],
+        q_min=cfg['q_min'], q_delta=cfg['q_delta'],
+        n_bf_points=cfg['n_bf_points'],
+    )
+    print(f"  Saved tables to {path}")
+
+
+def load_tables(cfg, path):
+    """Load gamma/bf tables from .npz file into cfg."""
+    d = np.load(path)
+    cfg['gamma_table'] = d['gamma_table']
+    cfg['bf_table'] = d['bf_table']
+    cfg['g_min'] = float(d['g_min'])
+    cfg['g_delta'] = float(d['g_delta'])
+    cfg['n_gamma_points'] = int(d['n_gamma_points'])
+    cfg['q_min'] = float(d['q_min'])
+    cfg['q_delta'] = float(d['q_delta'])
+    cfg['n_bf_points'] = int(d['n_bf_points'])
+    print(f"  Loaded tables from {path}: gamma={cfg['gamma_table'].shape}, bf={cfg['bf_table'].shape}")
     return cfg
 
 
@@ -293,9 +328,8 @@ if __name__ == '__main__':
     import sys
     from pwa_gpu.parse_config import parse_config
     if len(sys.argv) < 2:
-        print("Usage: python -m pwa_gpu.build_tables <config.yml>")
+        print("Usage: python -m pwa_gpu.build_tables <config.yml> [save_path.npz]")
         sys.exit(1)
     cfg, pw_list, kw_list = parse_config(sys.argv[1])
-    cfg = build_tables(cfg, pw_list, kw_list, sys.argv[1])
-    print(f"  gamma_table[0,:3]: {cfg['gamma_table'][0,:3]}")
-    print(f"  bf_table[0,:3]:    {cfg['bf_table'][0,:3]}")
+    save_path = sys.argv[2] if len(sys.argv) > 2 else None
+    cfg = build_tables(cfg, pw_list, kw_list, sys.argv[1], save_path)

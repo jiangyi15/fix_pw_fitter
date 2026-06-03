@@ -15,7 +15,7 @@ Usage:
 import os
 import numpy as np
 from pwa_gpu.parse_config import parse_config
-from pwa_gpu.build_tables import build_tables as _build_tables
+from pwa_gpu.build_tables import build_tables as _build_tables, load_tables as _load_tables, save_tables as _save_tables
 from pwa_gpu.param_mapper import ParamMapper, load_params
 from pwa_gpu import PWAGPU, PWAData
 
@@ -49,10 +49,40 @@ class PWAFitter:
         self._cfg, self._pw_list, self._kw_list = parse_config(self.config_path)
         return self
 
-    def build_tables(self):
-        """Build gamma/bf interpolation tables."""
-        self._cfg = _build_tables(self._cfg, self._pw_list, self._kw_list, self.config_path)
+    def build_tables(self, save_path=None):
+        """Build gamma/bf interpolation tables. Optionally save to .npz."""
+        if save_path:
+            self.save_tables(save_path)
+        self._cfg = _build_tables(self._cfg, self._pw_list, self._kw_list,
+                                   self.config_path, save_path)
         self._mapper = ParamMapper(self._cfg)
+        return self
+
+    def save_tables(self, path):
+        """Save gamma/bf tables to .npz file."""
+        if self._cfg is not None and 'gamma_table' in self._cfg:
+            _save_tables(self._cfg, path)
+        return self
+
+    def load_tables(self, path):
+        """Load gamma/bf tables from .npz file (skip building)."""
+        _load_tables(self._cfg, path)
+        self._mapper = ParamMapper(self._cfg)
+        return self
+
+    def auto_tables(self, npz_path=None):
+        """
+        Load tables from .npz if it exists, otherwise build and save.
+        
+        Args:
+            npz_path: path to .npz file. If None, use config_path + '.tables.npz'
+        """
+        if npz_path is None:
+            npz_path = self.config_path + '.tables.npz'
+        if os.path.exists(npz_path):
+            self.load_tables(npz_path)
+        else:
+            self.build_tables(npz_path)
         return self
 
     @property
