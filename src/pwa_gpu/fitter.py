@@ -16,7 +16,7 @@ Usage:
     q_val, grads = fitter.compute(data, N=norm)
 """
 
-import os
+import os, time
 import numpy as np
 from pwa_gpu.parse_config import parse_config
 from pwa_gpu.build_tables import build_tables as _build_tables, load_tables as _load_tables, save_tables as _save_tables
@@ -314,8 +314,12 @@ class PWAFitter:
         cst = self.cst
         gpu = self._ensure_fitter()
         keys = cst.get_free_keys()
+        _n_calls = [0]
+        _t_start = [time.time()]
 
         def func(x):
+            _n_calls[0] += 1
+            t0 = time.time()
             model_dict = cst.unpack(x, keys)
             ck, mk, gk, sc = cst.to_kernel(model_dict)
 
@@ -332,8 +336,6 @@ class PWAFitter:
                 q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
 
                 # Step 3: combine gradients: ∂J/∂θ += ∂J/∂N * ∂N/∂θ
-                # ∂N/∂θ = (∂q_phsp/∂θ) / N_phsp  (norm = q_phsp / N_phsp)
-                # grad_N = ∂J/∂N from kernel (grad_scalar[6])
                 grad_N = grads_k.get('N', 0)
                 if abs(grad_N) > 0 and n_phsp > 0:
                     scale = grad_N / n_phsp
@@ -345,11 +347,15 @@ class PWAFitter:
                             grads_k[sk] = grads_k.get(sk, 0) + scale * grads_p.get(sk, 0)
 
             nll = -q_data
-            # Negate gradients: nll = -q_data, so ∇nll = -∇q_data
             grad_sc = np.array([-(grads_k[k] if k in grads_k and grads_k[k] is not None else 0)
                                 for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
             model_grads = cst.from_kernel(-grads_k['ck'], -grads_k['m0'], -grads_k['g0'], grad_sc)
             grad_flat = cst.pack(model_grads, keys)
+
+            dt = time.time() - t0
+            elapsed = time.time() - _t_start[0]
+            print(f"  [{_n_calls[0]}] nll={nll:.4f}  dt={dt:.2f}s  elapsed={elapsed:.1f}s",
+                  flush=True)
             return nll, grad_flat
 
         return func
