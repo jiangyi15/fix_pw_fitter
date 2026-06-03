@@ -42,6 +42,8 @@ class ConstraintMapper:
         self.mapper = mapper
         # Constraints: {key: {'fixed': val|True} | {'equal_to': key} | {'linear': [(k,c),...]}}
         self._constraints = {}
+        # Complex format: 'rect' (re, im) or 'polar' (mag, phase)
+        self._complex_format = 'rect'
 
     # ------------------------------------------------------------------
     # Setting constraints
@@ -55,6 +57,24 @@ class ConstraintMapper:
     def set_equal(self, target, source):
         """target = source (share one fit variable)."""
         self._constraints[target] = {'equal_to': source}
+        return self
+
+    def set_equal_group(self, keys):
+        """All keys share the same fit variable (first key is canonical).
+        
+        Matches same_params pattern from reference fit.
+        Usage: cst.set_equal_group(['m0/0', 'm0/1', 'm0/2'])
+        """
+        if not keys:
+            return self
+        target = keys[0]
+        for k in keys[1:]:
+            self._constraints[k] = {'equal_to': target}
+        return self
+
+    def set_scale(self, target, source, factor):
+        """target = factor * source. Uses set_linear internally."""
+        self._constraints[target] = {'linear': [(source, factor)]}
         return self
 
     def set_linear(self, target, sources):
@@ -216,6 +236,29 @@ class ConstraintMapper:
         for k in ['delta_m','delta_g','g','ap','lam','phi']: d[k] = phys_params[k]
         return d
 
+    def set_complex_format(self, fmt):
+        """Set complex parameter encoding: 'rect' (re, im) or 'polar' (mag, phase).
+        
+        'rect':  flat array stores [re, im, re, im, ...]
+        'polar': flat array stores [mag, phase, mag, phase, ...]
+        """
+        if fmt not in ('rect', 'polar'):
+            raise ValueError(f"Unknown format: {fmt}")
+        self._complex_format = fmt
+        return self
+
+    def _to_complex(self, a, b):
+        """Convert two floats to complex based on format."""
+        if self._complex_format == 'polar':
+            return a * np.exp(1j * b)
+        return a + 1j * b
+
+    def _from_complex(self, z):
+        """Convert complex to two floats based on format."""
+        if self._complex_format == 'polar':
+            return abs(z), np.angle(z)
+        return z.real, z.imag
+
     def get_free_keys(self):
         """Return list of free parameter keys (not constrained / not derived)."""
         constrained = set(self._constraints.keys())
@@ -254,13 +297,16 @@ class ConstraintMapper:
             else:
                 v = values_dict.get(k, 0)
             if self._is_complex_key(k):
-                vals.extend([v.real, v.imag])
+                a, b = self._from_complex(v)
+                vals.extend([a, b])
             else:
                 vals.append(float(v))
         return np.array(vals, dtype=np.float64)
 
     def unpack(self, x, keys=None):
         """Unpack flat array into model params dict.
+        
+        Supports both 'rect' (re, im) and 'polar' (mag, phase) formats.
         
         Args:
             x: flat float64 array
@@ -273,7 +319,7 @@ class ConstraintMapper:
         i = 0
         for k in keys:
             if self._is_complex_key(k):
-                d[k] = x[i] + 1j * x[i + 1]
+                d[k] = self._to_complex(x[i], x[i + 1])
                 i += 2
             else:
                 d[k] = x[i]
