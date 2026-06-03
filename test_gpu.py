@@ -76,8 +76,9 @@ def generate_test_config():
         'matrix_ang': (np.random.randn(n_waves, n_basis) + 
                        1j * np.random.randn(n_waves, n_basis)).astype(np.complex128),
         
-        # Interpolation tables (REAL - gamma is a real width parameter)
-        'gamma_table': np.random.randn(n_g0, n_gamma_points).astype(np.float64),
+        # Interpolation tables (gamma table is complex to test full pipeline)
+        'gamma_table': (np.random.randn(n_g0, n_gamma_points) +
+                        1j * np.random.randn(n_g0, n_gamma_points)).astype(np.complex128),
         'bf_table': np.exp(np.linspace(0, 1, n_bf_points).reshape(1, -1)).astype(np.float64),
         
         # Interpolation parameters

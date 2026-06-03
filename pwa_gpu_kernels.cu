@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <math.h>
+#include <stdio.h>
 
 typedef cuDoubleComplex cdouble;
 
@@ -80,12 +81,14 @@ __global__ void pwa_compute_kernel(
     if (e >= n_events) return;
 
     // Setup per-thread scratch pointers
+    // Align spos to 16 bytes before each cdouble cast to avoid misaligned access
     char* s = scratch_buf + e * per_thread_size;
     size_t spos = 0;
     int total_bw = n_waves * n_res_per_wave;
     int total_bf = n_waves * n_decays_per_wave;
     cdouble* bw = (cdouble*)(s + spos); spos += total_bw * sizeof(cdouble);
     double* bf = (double*)(s + spos); spos += total_bf * sizeof(double);
+    spos = (spos + 15) & ~15;
     cdouble* ag = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     cdouble* bwprod = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     double* bfprod = (double*)(s + spos); spos += n_waves * sizeof(double);
@@ -93,6 +96,7 @@ __global__ void pwa_compute_kernel(
     cdouble* a_full = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     double* m_bw = (double*)(s + spos); spos += n_m0 * sizeof(double);
     double* m_gamma_vals = (double*)(s + spos); spos += n_g0 * sizeof(double);
+    spos = (spos + 15) & ~15;
     cdouble* gi = (cdouble*)(s + spos); spos += n_g0 * sizeof(cdouble);
     cdouble* g_vals = (cdouble*)(s + spos); spos += n_g0 * sizeof(cdouble);
     cdouble* gamma = (cdouble*)(s + spos); spos += n_m0 * sizeof(cdouble);
@@ -503,13 +507,19 @@ void* pwa_create_config(
     cudaMemcpy(cfg->d_bf_table, bf_table, n_bf_types * n_bf_points * sizeof(double), cudaMemcpyHostToDevice);
 
     // Pre-allocate scratch buffer for per-thread temp arrays.
+    // Must match the kernel's layout including 16-byte alignment pads.
     int total_bw = n_waves * n_res_per_wave;
     int total_bf = n_waves * n_decays_per_wave;
+    // Starting estimate (non-interleaved, no padding)
     cfg->per_thread_size = total_bw * (size_t)sizeof(cdouble) + total_bf * (size_t)sizeof(double)
          + n_waves * 4 * (size_t)sizeof(cdouble) + n_waves * (size_t)sizeof(double)
          + n_m0 * 2 * (size_t)sizeof(cdouble) + n_m0 * (size_t)sizeof(double)
          + n_g0 * 2 * (size_t)sizeof(cdouble) + n_g0 * (size_t)sizeof(double)
          + n_bf_types * 2 * (size_t)sizeof(double) + n_basis * (size_t)sizeof(double);
+    // Add alignment overhead: two 16-byte alignment pads before cdouble sections
+    // (max 15 bytes each) + final round to 16.
+    cfg->per_thread_size += 48;
+    cfg->per_thread_size = (cfg->per_thread_size + 15) & ~15ULL;
     cfg->max_batch_size = 8192;
     cudaMalloc(&cfg->d_scratch, cfg->max_batch_size * cfg->per_thread_size);
 
@@ -602,26 +612,28 @@ void pwa_compute(
     int n_events = data->n_events;
     int threads = 256;
     
-    // Allocate all device buffers
-    double *d_p_out, *d_m0, *d_g0, *d_weights, *d_bkg_arr;
-    cdouble *d_amp_p_out, *d_amp_m_out, *d_ck;
-    double *d_grad_ck_re, *d_grad_ck_im;
-    double *d_grad_m0_out, *d_grad_g0_out;
-    double *d_grad_scalar_out;
+    // Allocate all device buffers (init NULL so cleanup labels are safe)
+    double *d_p_out = NULL, *d_m0 = NULL, *d_g0 = NULL, *d_weights = NULL, *d_bkg_arr = NULL;
+    cdouble *d_amp_p_out = NULL, *d_amp_m_out = NULL, *d_ck = NULL;
+    double *d_grad_ck_re = NULL, *d_grad_ck_im = NULL;
+    double *d_grad_m0_out = NULL, *d_grad_g0_out = NULL;
+    double *d_grad_scalar_out = NULL;
+    cudaError_t cuerr;
     
-    cudaMalloc(&d_p_out, n_events * sizeof(double));
-    cudaMalloc(&d_amp_p_out, n_events * sizeof(cdouble));
-    cudaMalloc(&d_amp_m_out, n_events * sizeof(cdouble));
-    cudaMalloc(&d_weights, n_events * sizeof(double));
-    cudaMalloc(&d_bkg_arr, n_events * sizeof(double));
-    cudaMalloc(&d_grad_ck_re, n_waves * sizeof(double));
-    cudaMalloc(&d_grad_ck_im, n_waves * sizeof(double));
-    cudaMalloc(&d_grad_m0_out, n_m0 * sizeof(double));
-    cudaMalloc(&d_grad_g0_out, n_g0 * sizeof(double));
-    cudaMalloc(&d_grad_scalar_out, 7 * sizeof(double));
-    cudaMalloc(&d_ck, n_waves * sizeof(cdouble));
-    cudaMalloc(&d_m0, n_m0 * sizeof(double));
-    cudaMalloc(&d_g0, n_g0 * sizeof(double));
+    // Allocate all temporary buffers; goto cleanup on any failure
+    if (cudaMalloc(&d_p_out, n_events * sizeof(double)) != cudaSuccess) goto cleanup_ck;
+    if (cudaMalloc(&d_amp_p_out, n_events * sizeof(cdouble)) != cudaSuccess) goto cleanup_p;
+    if (cudaMalloc(&d_amp_m_out, n_events * sizeof(cdouble)) != cudaSuccess) goto cleanup_amp_p;
+    if (cudaMalloc(&d_ck, n_waves * sizeof(cdouble)) != cudaSuccess) goto cleanup_amp_m;
+    if (cudaMalloc(&d_m0, n_m0 * sizeof(double)) != cudaSuccess) goto cleanup_ck_buf;
+    if (cudaMalloc(&d_g0, n_g0 * sizeof(double)) != cudaSuccess) goto cleanup_m0;
+    if (cudaMalloc(&d_weights, n_events * sizeof(double)) != cudaSuccess) goto cleanup_g0;
+    if (cudaMalloc(&d_bkg_arr, n_events * sizeof(double)) != cudaSuccess) goto cleanup_weights;
+    if (cudaMalloc(&d_grad_ck_re, n_waves * sizeof(double)) != cudaSuccess) goto cleanup_bkg;
+    if (cudaMalloc(&d_grad_ck_im, n_waves * sizeof(double)) != cudaSuccess) goto cleanup_grad_re;
+    if (cudaMalloc(&d_grad_m0_out, n_m0 * sizeof(double)) != cudaSuccess) goto cleanup_grad_im;
+    if (cudaMalloc(&d_grad_g0_out, n_g0 * sizeof(double)) != cudaSuccess) goto cleanup_grad_m0;
+    if (cudaMalloc(&d_grad_scalar_out, 7 * sizeof(double)) != cudaSuccess) goto cleanup_grad_g0;
     
     // Upload params + weights once
     cudaMemcpy(d_ck, ck, n_waves * sizeof(cdouble), cudaMemcpyHostToDevice);
@@ -671,24 +683,45 @@ void pwa_compute(
         );
     }
     cudaDeviceSynchronize();
+    cuerr = cudaGetLastError();
+    if (cuerr != cudaSuccess) {
+        fprintf(stderr, "CUDA error after pwa_compute_kernel: %s\n", cudaGetErrorString(cuerr));
+        goto cleanup_grad_g0;
+    }
     
     // Copy all results back (single sync point)
-    cudaMemcpy(p_out, d_p_out, n_events * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(amp_p_out, d_amp_p_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
-    cudaMemcpy(amp_m_out, d_amp_m_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
+    if (p_out) cudaMemcpy(p_out, d_p_out, n_events * sizeof(double), cudaMemcpyDeviceToHost);
+    if (amp_p_out) cudaMemcpy(amp_p_out, d_amp_p_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
+    if (amp_m_out) cudaMemcpy(amp_m_out, d_amp_m_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_ck_re, d_grad_ck_re, n_waves * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_ck_im, d_grad_ck_im, n_waves * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_m0_out, d_grad_m0_out, n_m0 * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_g0_out, d_grad_g0_out, n_g0 * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_scalar_out, d_grad_scalar_out, 7 * sizeof(double), cudaMemcpyDeviceToHost);
     
-    // Free all device memory
-    cudaFree(d_p_out); cudaFree(d_amp_p_out); cudaFree(d_amp_m_out);
+    // Free all device memory (normal path)
     cudaFree(d_ck); cudaFree(d_m0); cudaFree(d_g0);
     cudaFree(d_weights); cudaFree(d_bkg_arr);
     cudaFree(d_grad_ck_re); cudaFree(d_grad_ck_im);
     cudaFree(d_grad_m0_out); cudaFree(d_grad_g0_out);
     cudaFree(d_grad_scalar_out);
+    cudaFree(d_p_out); cudaFree(d_amp_p_out); cudaFree(d_amp_m_out);
+    return;
+    
+    // Error cleanup: free what was allocated, unwind in reverse
+cleanup_grad_g0:  cudaFree(d_grad_g0_out);
+cleanup_grad_m0:  cudaFree(d_grad_m0_out);
+cleanup_grad_im:  cudaFree(d_grad_ck_im);
+cleanup_grad_re:  cudaFree(d_grad_ck_re);
+cleanup_bkg:      cudaFree(d_bkg_arr);
+cleanup_weights:  cudaFree(d_weights);
+cleanup_g0:       cudaFree(d_g0);
+cleanup_m0:       cudaFree(d_m0);
+cleanup_ck_buf:   cudaFree(d_ck);
+cleanup_amp_m:    cudaFree(d_amp_m_out);
+cleanup_amp_p:    cudaFree(d_amp_p_out);
+cleanup_p:        cudaFree(d_p_out);
+cleanup_ck:       return;
 }
 
 }  // extern "C"
@@ -1146,7 +1179,7 @@ int main() {
     free(gcr); free(gci); free(gm0); free(gg0); free(gsc);
     void* all[] = {mf, qf, af, tarr, farr, bwi, gi, bwo, bfi, bfo, ai,
                    ak, ab, mg, ma, gt, bft, ck, m0h, g0h};
-    free_data(all, 20);
+    free_data(all, 19);
     printf("\nDone.\n");
     return 0;
 }

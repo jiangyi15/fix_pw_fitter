@@ -134,7 +134,10 @@ class PWAData:
         # Store CPU-side arrays
         self.weights = np.ascontiguousarray(weights, dtype=np.float64)
         if isinstance(bkg, np.ndarray):
-            self.bkg = np.ascontiguousarray(bkg, dtype=np.float64)
+            if bkg.ndim == 0 or bkg.size == 1:
+                self.bkg = float(bkg.item())
+            else:
+                self.bkg = np.ascontiguousarray(bkg, dtype=np.float64)
         else:
             self.bkg = float(bkg)
 
@@ -182,14 +185,12 @@ class PWAGPU:
         self.config = config
 
         # Compute dimensions from config
-        n_waves_from_br = len(config.get('bw_order', [])) // 2
-        if n_waves_from_br < 2:
-            n_waves_from_br = 2
-        self.n_waves = n_waves_from_br
+        # Use matrix_ang rows as authoritative n_waves (not bw_order length // 2)
+        self.n_waves = config['matrix_ang'].shape[0]
         self.n_m0 = len(config['bw_index'])
         self.n_g0 = len(config['gamma_index'])
-        self.n_res_per_wave = len(config['bw_order']) // n_waves_from_br
-        self.n_decays_per_wave = len(config['bf_order']) // n_waves_from_br
+        self.n_res_per_wave = len(config['bw_order']) // self.n_waves
+        self.n_decays_per_wave = len(config['bf_order']) // self.n_waves
         self.n_bf_types = len(config['bf_index'])
         self.n_basis = config['ang_index'].shape[0]
         self.n_ang_per_basis = config['ang_index'].shape[1]
@@ -211,12 +212,10 @@ class PWAGPU:
         ang_b = np.ascontiguousarray(config['ang_b'].flatten())
         matrix_gamma = np.ascontiguousarray(config['matrix_gamma'])
 
-        # Complex matrix_ang
+        # Complex matrix_ang — flatten to 1D contiguous
         matrix_ang = config['matrix_ang']
-        matrix_ang_c = np.zeros(len(matrix_ang.flat), dtype=np.complex128)
-        matrix_ang_c.real = matrix_ang.real.flatten()
-        matrix_ang_c.imag = matrix_ang.imag.flatten()
-        matrix_ang_c = np.ascontiguousarray(matrix_ang_c)
+        matrix_ang_c = np.ascontiguousarray(matrix_ang.astype(np.complex128).flatten())
+        self._matrix_ang_c = matrix_ang_c  # prevent GC
 
         # gamma_table - handle broadcasting
         gamma_table = np.ascontiguousarray(config['gamma_table'])
@@ -235,6 +234,18 @@ class PWAGPU:
             bf_table = np.ascontiguousarray(bf_table)
         bf_table = bf_table.reshape(-1)
         bf_table = np.ascontiguousarray(bf_table)
+        self._bf_table = bf_table  # prevent GC
+
+        # Keep all arrays alive until config is destroyed
+        self._bw_index = bw_index
+        self._gamma_index = gamma_index
+        self._bw_order = bw_order
+        self._bf_index = bf_index
+        self._bf_order = bf_order
+        self._ang_index = ang_index
+        self._ang_k = ang_k
+        self._ang_b = ang_b
+        self._matrix_gamma = matrix_gamma
 
         # Create CUDA config (indices, tables, scratch on GPU)
         self._cfg = self.lib.pwa_create_config(
