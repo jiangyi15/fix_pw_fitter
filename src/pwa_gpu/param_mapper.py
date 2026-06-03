@@ -22,7 +22,7 @@ class ParamMapper:
         grads = mapper.from_kernel_cached(grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
     """
 
-    def __init__(self, cfg, pw_list=None):
+    def __init__(self, cfg):
         wave_info = cfg.get('wave_info', [])
         n_perm = cfg.get('n_perm', 1)
 
@@ -62,7 +62,6 @@ class ParamMapper:
         self.n_waves = len(self.ck_formulas)
         self.n_m0 = len(self.m0_phys_index)
         self.n_g0 = len(self.g0_phys_index)
-        self._pw_list = pw_list
 
         print(f"  ParamMapper: {len(self.totals)} totals, {len(self.gls)} g_ls, "
               f"{len(self.glsbar)} g_lsbar, {self.n_m0_phys} m0_phys, {self.n_g0_phys} g0_phys")
@@ -335,93 +334,99 @@ def load_params(json_path, mapper, config_path=None):
                 glsbar_arr[gidx] = get_complex(f'{prefix}_g_lsbar_{ls_idx}')
                 break
 
-    # --- m0 (masses): from a.json, matched by (mass_val, model) order ---
-    # The parser's build_kernel_config groups by (mass_val, model) and assigns
-    # phys indices in sorted order. We replicate that ordering here.
+    # --- m0/g0 from config YAML particle section ---
     m0_arr = np.zeros(mapper.n_m0_phys, dtype=np.float64)
-    if hasattr(mapper, '_pw_list') and mapper._pw_list:
-        pw_list = mapper._pw_list
-        # Get unique (mass_val, model) keys from physical waves
-        seen = set()
+    g0_arr = np.zeros(mapper.n_g0_phys, dtype=np.float64)
+    if config_path:
+        with open(config_path) as f:
+            ycfg = yaml.safe_load(f)
+        particle = ycfg.get('particle', {})
+        decay = ycfg.get('decay', {})
+
+        def get_resonance_names(name, visited=None):
+            if visited is None: visited = set()
+            if name in visited: return
+            visited.add(name)
+            props = particle.get(name)
+            if props is None: return
+            if isinstance(props, list):
+                for p in props:
+                    if isinstance(p, str):
+                        sub = particle.get(p, {})
+                        if isinstance(sub, dict) and 'J' in sub:
+                            yield p
+                        else:
+                            yield from get_resonance_names(p, visited)
+            elif isinstance(props, dict) and 'J' in props:
+                yield name
+
+        used_resonances = set()
+        b_decay_lines = decay.get(ycfg.get('particle', {}).get('$top', 'B'), [])
+        for decay_line in b_decay_lines:
+            if isinstance(decay_line, list):
+                for item in decay_line:
+                    if isinstance(item, str):
+                        for rname in get_resonance_names(item):
+                            used_resonances.add(rname)
+
+        # --- m0 ---
         m0_keys = []
-        for pw in pw_list:
-            for res in pw.resonances:
-                key = (res.mass, res.model)
-                if key not in seen:
-                    seen.add(key)
-                    m0_keys.append(key)
-        # Assign phys indices in sorted order
-        for i, (m_val, model) in enumerate(sorted(m0_keys)):
+        for rname in used_resonances:
+            props = particle.get(rname, {})
+            if isinstance(props, dict) and 'J' in props:
+                m0_keys.append((props.get('mass', 0), props.get('model', 'BW'), rname))
+
+        seen = set()
+        m0_sorted = []
+        for m_val, model, rname in sorted(m0_keys, key=lambda x: (x[0], x[1])):
+            key = (m_val, model)
+            if key not in seen:
+                seen.add(key)
+                m0_sorted.append((m_val, model, rname))
+
+        for i, (m_val, model, rname) in enumerate(m0_sorted):
             if i >= mapper.n_m0_phys:
                 break
-            # Try to get the value from a.json
-            if model == 'one':
-                m0_arr[i] = m_val  # use config default for special models
-            else:
-                # Look up in a.json by matching resonance names with this (mass, model)
-                found = False
-                for pw in pw_list:
-                    for res in pw.resonances:
-                        if (res.mass, res.model) == (m_val, model):
-                            jkey = f'{res.name}_mass'
-                            if jkey in data:
-                                m0_arr[i] = data[jkey]
-                                found = True
-                                break
-                    if found:
-                        break
-                if not found:
-                    m0_arr[i] = m_val  # fallback to config value
+            jkey = f'{rname}_mass'
+            m0_arr[i] = data.get(jkey, m_val)
+
+        # --- g0 ---
+        width_keys = []
+        flatte_items = []
+        for rname in used_resonances:
+            props = particle.get(rname, {})
+            if isinstance(props, dict) and 'J' in props:
+                model = props.get('model', 'BW')
+                if model == 'FlatteC':
+                    for k, v in props.items():
+                        if k.startswith('g_') and v:
+                            flatte_items.append((k, v, rname))
+                elif props.get('width', 0) > 0:
+                    width_keys.append((props['width'], model, rname))
+
+        seen = set()
+        w_sorted = []
+        for w_val, model, rname in sorted(width_keys, key=lambda x: (x[0], x[1])):
+            key = (w_val, model)
+            if key not in seen:
+                seen.add(key)
+                w_sorted.append((w_val, model, rname))
+
+        for i, (w_val, model, rname) in enumerate(w_sorted):
+            if i >= mapper.n_g0_phys:
+                break
+            jkey = f'{rname}_width'
+            g0_arr[i] = data.get(jkey, w_val)
+
+        for i, (k, v, rname) in enumerate(sorted(flatte_items)):
+            idx = len(w_sorted) + i
+            if idx < mapper.n_g0_phys:
+                jkey = f'{rname}_{k}'
+                g0_arr[idx] = data.get(jkey, v)
     else:
         for i, val in enumerate(sorted(set(v for k, v in data.items() if k.endswith('_mass')))):
             if i < mapper.n_m0_phys:
                 m0_arr[i] = val
-
-    # --- g0 (widths + Flatte): from a.json, matched by (width_val, model) order ---
-    g0_arr = np.zeros(mapper.n_g0_phys, dtype=np.float64)
-    if hasattr(mapper, '_pw_list') and mapper._pw_list:
-        pw_list = mapper._pw_list
-        w_seen = set()
-        w_keys = []
-        flatte_items = []
-        for pw in pw_list:
-            for res in pw.resonances:
-                if res.model == 'FlatteC':
-                    if not flatte_items:
-                        for k, v in res.extra.items():
-                            if k.startswith('g_') and v != 0:
-                                flatte_items.append((k, v))
-                else:
-                    key = (res.width, res.model)
-                    if key not in w_seen:
-                        w_seen.add(key)
-                        w_keys.append(key)
-        for i, (w_val, model) in enumerate(sorted(w_keys)):
-            if i >= mapper.n_g0_phys:
-                break
-            found = False
-            for pw in pw_list:
-                for res in pw.resonances:
-                    if (res.width, res.model) == (w_val, model):
-                        jkey = f'{res.name}_width'
-                        if jkey in data:
-                            g0_arr[i] = data[jkey]
-                            found = True
-                            break
-                if found:
-                    break
-            if not found:
-                g0_arr[i] = w_val
-        for i, (k, v) in enumerate(sorted(flatte_items)):
-            idx = len(w_keys) + i
-            if idx < mapper.n_g0_phys:
-                # For Flatte g parameters, the JSON key depends on naming convention
-                # Try both naming patterns
-                jkey = f'f0(980)_{k}'  # e.g., f0(980)_g_0
-                if jkey not in data:
-                    jkey = f'f0(980)b_{k}'
-                g0_arr[idx] = data.get(jkey, v)
-    else:
         for i, val in enumerate(sorted(set(v for k, v in data.items() if k.endswith('_width')))):
             if i < mapper.n_g0_phys:
                 g0_arr[i] = val
