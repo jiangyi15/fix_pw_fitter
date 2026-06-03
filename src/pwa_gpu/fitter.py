@@ -169,16 +169,23 @@ class PWAFitter:
                 for res in get_resonance_names(dname):
                     two_pi_resonances.add(res)
 
-        # Fix their m0 and g0
+        # Fix their m0 and g0 (with current values from loaded params)
         cst = self._ensure_cst()
         mapper = self.mapper
+        phys = self.params
         for res_name in two_pi_resonances:
             if res_name in mapper._res_m0_map:
                 pi = mapper._res_m0_map[res_name]
-                cst.set_fixed(f'm0/{pi}')
+                if pi < len(phys['m0']):
+                    cst.set_fixed(f'm0/{pi}', float(phys['m0'][pi]))
+                else:
+                    cst.set_fixed(f'm0/{pi}')
             if res_name in mapper._res_g0_map:
                 for pi in mapper._res_g0_map[res_name]:
-                    cst.set_fixed(f'g0/{pi}')
+                    if pi < len(phys['g0']):
+                        cst.set_fixed(f'g0/{pi}', float(phys['g0'][pi]))
+                    else:
+                        cst.set_fixed(f'g0/{pi}')
 
         n = len(two_pi_resonances)
         print(f"  Fixed {n} ππ resonances ({', '.join(sorted(two_pi_resonances)[:5])}...)")
