@@ -22,7 +22,7 @@ class ParamMapper:
         grads = mapper.from_kernel_cached(grad_ck, grad_m0_k, grad_g0_k, grad_scalar)
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, pw_list=None):
         wave_info = cfg.get('wave_info', [])
         n_perm = cfg.get('n_perm', 1)
 
@@ -62,6 +62,7 @@ class ParamMapper:
         self.n_waves = len(self.ck_formulas)
         self.n_m0 = len(self.m0_phys_index)
         self.n_g0 = len(self.g0_phys_index)
+        self._pw_list = pw_list
 
         print(f"  ParamMapper: {len(self.totals)} totals, {len(self.gls)} g_ls, "
               f"{len(self.glsbar)} g_lsbar, {self.n_m0_phys} m0_phys, {self.n_g0_phys} g0_phys")
@@ -248,3 +249,218 @@ class ParamMapper:
 # Shorthand
 def create_mapper(cfg):
     return ParamMapper(cfg)
+
+
+# ====================================================================
+# Load parameters from a.json (fitted values)
+# ====================================================================
+
+def load_params(json_path, mapper, config_path=None):
+    """
+    Load fitted parameter values from a tf_pwa a.json into the params_dict
+    format expected by ParamMapper.compute().
+
+    a.json uses naming: {full_chain}_{param_type}_{idx}{r|i}
+    with complex stored as mag * exp(i * phase) where r=mag, i=phase.
+
+    Args:
+        json_path: path to a.json
+        mapper: ParamMapper instance
+        config_path: path to config.yml (for m0/g0 resonance matching)
+
+    Returns: dict with keys 'total', 'g_ls', 'g_lsbar', 'm0', 'g0',
+             and scalars 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi'
+    """
+    import json
+    import yaml
+    with open(json_path) as f:
+        data = json.load(f)
+
+    # Helper: get complex value from r/i pair
+    # JSON stores complex as: mag * exp(i * phase), where r=mag, i=phase
+    def get_complex(key):
+        mag = data.get(key + 'r', 0)
+        phase = data.get(key + 'i', 0)
+        return mag * np.exp(1j * phase)
+
+    # --- total couplings ---
+    # JSON: {B_decay_chain}_total_0{r|i} where B_decay_chain starts with
+    # 'B->{res1}.{B_level_daughter}' where res1 is the cascade resonance.
+    # The mapper uses 'B->{res1}.{res2}' with the sub-resonance.
+    # We match by the first resonance (res1) which is always the cascade
+    # resonance in the JSON key.
+    total_arr = np.zeros(len(mapper.totals), dtype=np.complex128)
+    for tname, tidx in mapper.totals.items():
+        # Get first resonance name (before first '.')
+        dot_pos = tname.find('.')
+        prefix = tname if dot_pos < 0 else tname[:dot_pos]
+        for jkey in data:
+            if jkey.startswith(prefix) and '_total_0' in jkey:
+                base_key = jkey[:-1]  # strip r or i
+                total_arr[tidx] = get_complex(base_key)
+                break
+
+    # --- g_ls ---
+    # JSON patterns:
+    #   B-level:   'B->{d1}.{d2}_g_ls_{idx}{r|i}'  → dname='B'
+    #   Sub-decay: '{parent}->{d1}.{d2}_g_ls_{idx}{r|i}' → dname='{parent}'
+    # We match by checking the decay parent name (before '->').
+    gls_arr = np.zeros(len(mapper.gls), dtype=np.complex128)
+    for (dname, ls_idx), gidx in mapper.gls.items():
+        pat = f'_g_ls_{ls_idx}'
+        for jkey in data:
+            if '_g_lsbar_' in jkey:
+                continue
+            if pat not in jkey:
+                continue
+            # Extract the decay parent from JSON key
+            prefix = jkey.split(pat)[0]
+            # prefix is like 'B->a2(1320)p.pim2' or 'a2(1320)p->rhoA.pip2'
+            # The decay parent is the part before '->' (or the whole string if no '->')
+            parent = prefix.split('->')[0] if '->' in prefix else prefix
+            if parent == dname:
+                gls_arr[gidx] = get_complex(f'{prefix}_g_ls_{ls_idx}')
+                break
+
+    # --- g_lsbar ---
+    glsbar_arr = np.zeros(len(mapper.glsbar), dtype=np.complex128)
+    for (dname, ls_idx), gidx in mapper.glsbar.items():
+        pat = f'_g_lsbar_{ls_idx}'
+        for jkey in data:
+            if pat not in jkey:
+                continue
+            prefix = jkey.split(pat)[0]
+            parent = prefix.split('->')[0] if '->' in prefix else prefix
+            if parent == dname:
+                glsbar_arr[gidx] = get_complex(f'{prefix}_g_lsbar_{ls_idx}')
+                break
+
+    # --- m0 (masses): from a.json, matched by (mass_val, model) order ---
+    # The parser's build_kernel_config groups by (mass_val, model) and assigns
+    # phys indices in sorted order. We replicate that ordering here.
+    m0_arr = np.zeros(mapper.n_m0_phys, dtype=np.float64)
+    if hasattr(mapper, '_pw_list') and mapper._pw_list:
+        pw_list = mapper._pw_list
+        # Get unique (mass_val, model) keys from physical waves
+        seen = set()
+        m0_keys = []
+        for pw in pw_list:
+            for res in pw.resonances:
+                key = (res.mass, res.model)
+                if key not in seen:
+                    seen.add(key)
+                    m0_keys.append(key)
+        # Assign phys indices in sorted order
+        for i, (m_val, model) in enumerate(sorted(m0_keys)):
+            if i >= mapper.n_m0_phys:
+                break
+            # Try to get the value from a.json
+            if model == 'one':
+                m0_arr[i] = m_val  # use config default for special models
+            else:
+                # Look up in a.json by matching resonance names with this (mass, model)
+                found = False
+                for pw in pw_list:
+                    for res in pw.resonances:
+                        if (res.mass, res.model) == (m_val, model):
+                            jkey = f'{res.name}_mass'
+                            if jkey in data:
+                                m0_arr[i] = data[jkey]
+                                found = True
+                                break
+                    if found:
+                        break
+                if not found:
+                    m0_arr[i] = m_val  # fallback to config value
+    else:
+        for i, val in enumerate(sorted(set(v for k, v in data.items() if k.endswith('_mass')))):
+            if i < mapper.n_m0_phys:
+                m0_arr[i] = val
+
+    # --- g0 (widths + Flatte): from a.json, matched by (width_val, model) order ---
+    g0_arr = np.zeros(mapper.n_g0_phys, dtype=np.float64)
+    if hasattr(mapper, '_pw_list') and mapper._pw_list:
+        pw_list = mapper._pw_list
+        w_seen = set()
+        w_keys = []
+        flatte_items = []
+        for pw in pw_list:
+            for res in pw.resonances:
+                if res.model == 'FlatteC':
+                    if not flatte_items:
+                        for k, v in res.extra.items():
+                            if k.startswith('g_') and v != 0:
+                                flatte_items.append((k, v))
+                else:
+                    key = (res.width, res.model)
+                    if key not in w_seen:
+                        w_seen.add(key)
+                        w_keys.append(key)
+        for i, (w_val, model) in enumerate(sorted(w_keys)):
+            if i >= mapper.n_g0_phys:
+                break
+            found = False
+            for pw in pw_list:
+                for res in pw.resonances:
+                    if (res.width, res.model) == (w_val, model):
+                        jkey = f'{res.name}_width'
+                        if jkey in data:
+                            g0_arr[i] = data[jkey]
+                            found = True
+                            break
+                if found:
+                    break
+            if not found:
+                g0_arr[i] = w_val
+        for i, (k, v) in enumerate(sorted(flatte_items)):
+            idx = len(w_keys) + i
+            if idx < mapper.n_g0_phys:
+                # For Flatte g parameters, the JSON key depends on naming convention
+                # Try both naming patterns
+                jkey = f'f0(980)_{k}'  # e.g., f0(980)_g_0
+                if jkey not in data:
+                    jkey = f'f0(980)b_{k}'
+                g0_arr[idx] = data.get(jkey, v)
+    else:
+        for i, val in enumerate(sorted(set(v for k, v in data.items() if k.endswith('_width')))):
+            if i < mapper.n_g0_phys:
+                g0_arr[i] = val
+
+    # --- scalars ---
+    # JSON: B_delta_m → delta_m, B_delta_gamma → delta_g, B_gamma → g
+    # B_poqr → lam, B_poqi → phi (imaginary), B_A_prod → ap
+    scalar_map = {
+        'B_delta_m': 'delta_m', 'B_delta_gamma': 'delta_g',
+        'B_gamma': 'g', 'B_poqr': 'lam', 'B_poqi': 'phi',
+        'B_A_prod': 'ap',
+    }
+    scalars = {}
+    for jkey, sname in scalar_map.items():
+        scalars[sname] = data.get(jkey, 0)
+
+    params = {
+        'total': total_arr, 'g_ls': gls_arr, 'g_lsbar': glsbar_arr,
+        'm0': m0_arr, 'g0': g0_arr,
+        **scalars,
+    }
+
+    # Print loaded stats
+    n_total = sum(1 for v in total_arr if abs(v) > 0)
+    n_gls = sum(1 for v in gls_arr if abs(v) > 0)
+    n_glsbar = sum(1 for v in glsbar_arr if abs(v) > 0)
+    n_m0 = sum(1 for v in m0_arr if v > 0)
+    n_g0 = sum(1 for v in g0_arr if v > 0)
+    print(f"  Loaded params: {n_total}/{len(total_arr)} total, "
+          f"{n_gls}/{len(gls_arr)} g_ls, {n_glsbar}/{len(glsbar_arr)} g_lsbar, "
+          f"{n_m0}/{mapper.n_m0_phys} m0, {n_g0}/{mapper.n_g0_phys} g0")
+
+    return params
+
+
+def load_params_file(json_path, cfg_or_mapper):
+    """Load params from a.json, creating a mapper if needed."""
+    if isinstance(cfg_or_mapper, ParamMapper):
+        mapper = cfg_or_mapper
+    else:
+        mapper = ParamMapper(cfg_or_mapper)
+    return load_params(json_path, mapper)
