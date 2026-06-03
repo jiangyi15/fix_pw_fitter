@@ -43,7 +43,7 @@ class ConstraintMapper:
         # Constraints: {key: {'fixed': val|True} | {'equal_to': key} | {'linear': [(k,c),...]}}
         self._constraints = {}
         # Complex format: 'rect' (re, im) or 'polar' (mag, phase)
-        self._complex_format = 'rect'
+        self._complex_format = 'polar'
 
     # ------------------------------------------------------------------
     # Setting constraints
