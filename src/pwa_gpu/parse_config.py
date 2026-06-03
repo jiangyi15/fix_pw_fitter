@@ -1025,45 +1025,122 @@ def build_kernel_config(pw_list, kw_list, cfg):
     q_stride_base = len(q_entries)
     q_stride = q_stride_base * n_perm
 
-    # --- phys indices (base values, same across perms) ---
-    m0_value_groups = OrderedDict()
+    # --- phys indices (base values, sorted for reproducibility) ---
+    # Collect all unique (mass, model) keys first, then sort and assign indices
+    m0_pk_set = set()
+    m0_pk_list = []
+    for key, idx in bwall_key_to_idx.items():
+        mk, m0_val, w_val, model = key
+        pk = (m0_val, model)
+        if pk not in m0_pk_set:
+            m0_pk_set.add(pk)
+            m0_pk_list.append(pk)
+    # Sort for deterministic ordering matching load_params
+    m0_pk_sorted = sorted(m0_pk_list)
+    m0_value_groups = {pk: i for i, pk in enumerate(m0_pk_sorted)}
+    n_m0_phys = len(m0_value_groups)
+
     m0_phys_base = np.zeros(n_m0_base, dtype=np.int32)
     for key, idx in bwall_key_to_idx.items():
         mk, m0_val, w_val, model = key
         pk = (m0_val, model)
-        if pk not in m0_value_groups: m0_value_groups[pk] = len(m0_value_groups)
         m0_phys_base[idx] = m0_value_groups[pk]
     m0_phys_index = np.tile(m0_phys_base, n_perm)
-    n_m0_phys = len(m0_value_groups)
 
-    g0_value_groups = OrderedDict()
-    g0_phys_base = np.zeros(n_g0_base, dtype=np.int32)
-    # Compute per-base-g0 phys index
-    gi = 0
+    # g0: same approach — collect and sort
+    # g0: standard widths first, then Flatte couplings (matching load_params order)
+    g0_std = []   # (w_val, model)
+    g0_flat = []  # ('g_{sub_g}', model) — sub_g for sorting
+    g0_seen = set()
     for res_name, bwall_idx in res_name_to_bwall.items():
+        if res_name in g0_seen:
+            continue
+        g0_seen.add(res_name)
         res = None
         for pw in pw_list:
             for r in pw.resonances:
                 if r.name == res_name: res = r; break
             if res: break
-        w_val = res.width if res else 0
         model = res.model if res else 'BW'
         if model == 'FlatteC':
             props = get_particle(cfg, res_name) if res else {}
             n_g = sum(1 for k in props if k.startswith('g_')) if isinstance(props, dict) else 4
             for sub_g in range(n_g):
-                # Each Flatte coupling is a separate physical parameter
-                pk = (f'g_{sub_g}', w_val, model)
-                if pk not in g0_value_groups: g0_value_groups[pk] = len(g0_value_groups)
-                g0_phys_base[gi] = g0_value_groups[pk]
+                g0_flat.append((sub_g, model, res_name))
+        else:
+            g0_std.append((res.width if res else 0, model, res_name))
+
+    # Sort: widths by (value, model), Flatte by (sub_g, model) — widths first
+    g0_std_sorted = sorted(g0_std, key=lambda x: (x[0], x[1]))
+    g0_flat_sorted = sorted(g0_flat)
+    # Build g0 phys index mapping
+    # Standard widths: deduplicate by (w_val, model) → phys_idx
+    # Flatte: each coupling gets its own sequential index after all widths
+    std_map = {}  # (w_val, model) → phys_idx
+    flat_map = {}  # (sub_g, model, name) → phys_idx
+    for w_val, model, _ in g0_std_sorted:
+        pk = (w_val, model)
+        if pk not in std_map:
+            std_map[pk] = len(std_map)
+    for sub_g, model, name in g0_flat_sorted:
+        pk = (sub_g, model, name)
+        flat_map[pk] = len(std_map) + len(flat_map)
+
+    n_g0_phys = len(std_map) + len(flat_map)
+
+    g0_phys_base = np.zeros(n_g0_base, dtype=np.int32)
+    gi = 0
+    g0_seen2 = set()
+    for res_name, bwall_idx in res_name_to_bwall.items():
+        if res_name in g0_seen2:
+            continue
+        g0_seen2.add(res_name)
+        res = None
+        for pw in pw_list:
+            for r in pw.resonances:
+                if r.name == res_name: res = r; break
+            if res: break
+        model = res.model if res else 'BW'
+        if model == 'FlatteC':
+            props = get_particle(cfg, res_name) if res else {}
+            n_g = sum(1 for k in props if k.startswith('g_')) if isinstance(props, dict) else 4
+            for sub_g in range(n_g):
+                pk = (sub_g, model, res_name)
+                g0_phys_base[gi] = flat_map[pk]
                 gi += 1
         else:
-            pk = (w_val, model)
-            if pk not in g0_value_groups: g0_value_groups[pk] = len(g0_value_groups)
-            g0_phys_base[gi] = g0_value_groups[pk]
+            pk = (res.width if res else 0, model)
+            g0_phys_base[gi] = std_map[pk]
             gi += 1
     g0_phys_index = np.tile(g0_phys_base, n_perm)
-    n_g0_phys = len(g0_value_groups)
+
+    # Store resonance name → phys index mappings
+    res_m0_map = {}
+    for res_name, bwall_idx in res_name_to_bwall.items():
+        pid = int(m0_phys_base[bwall_idx])
+        if res_name not in res_m0_map:
+            res_m0_map[res_name] = pid
+
+    res_g0_map = {}
+    gi = 0
+    for res_name, bwall_idx in res_name_to_bwall.items():
+        if res_name in res_g0_map:
+            continue
+        res = None
+        for pw in pw_list:
+            for r in pw.resonances:
+                if r.name == res_name: res = r; break
+            if res: break
+        model = res.model if res else 'BW'
+        n_g = 4 if model == 'FlatteC' else 1
+        plist = []
+        for sub_g in range(n_g):
+            plist.append(int(g0_phys_base[gi]))
+            gi += 1
+        res_g0_map[res_name] = plist
+
+    cfg['res_m0_map'] = res_m0_map
+    cfg['res_g0_map'] = res_g0_map
 
     # Non-standard lineshapes count
     n_special = 0
@@ -1308,6 +1385,8 @@ def build_kernel_config(pw_list, kw_list, cfg):
         'n_special': n_special,
         'n_m0_phys': n_m0_phys,
         'n_g0_phys': n_g0_phys,
+        'res_m0_map': res_m0_map,
+        'res_g0_map': res_g0_map,
         'n_res_per_wave': max_res,
         'n_decays_per_wave': max_decays,
         'n_bf_types': n_bf_types,

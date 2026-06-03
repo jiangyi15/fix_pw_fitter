@@ -62,6 +62,8 @@ class ParamMapper:
         self.n_waves = len(self.ck_formulas)
         self.n_m0 = len(self.m0_phys_index)
         self.n_g0 = len(self.g0_phys_index)
+        self._res_m0_map = cfg.get('res_m0_map', {})
+        self._res_g0_map = cfg.get('res_g0_map', {})
 
         print(f"  ParamMapper: {len(self.totals)} totals, {len(self.gls)} g_ls, "
               f"{len(self.glsbar)} g_lsbar, {self.n_m0_phys} m0_phys, {self.n_g0_phys} g0_phys")
@@ -259,132 +261,71 @@ class ParamMapper:
         """
         return _load_params_impl(json_path, self, config_path)
 
-    def save_params(self, json_path, params_dict, config_path=None):
+    def save_params(self, json_path, params_dict):
         """Save params dict to a.json format (mag*exp(i*phase) encoding).
+        
+        Uses resonance name → phys index mappings stored from build_kernel_config.
         
         Args:
             json_path: output path
-            params_dict: physical params dict (keys: total, g_ls, g_lsbar, m0, g0, scalars)
-            config_path: path to config.yml (needed for m0/g0 resonance names)
+            params_dict: physical params dict (total, g_ls, g_lsbar, m0, g0, scalars)
         """
-        import json, yaml
+        import json
         out = {}
 
-        # Build reverse alias from a.json names using load_params logic
-        # totals: match by first resonance prefix
-        for tname, tidx in self.totals.items():
+        m = self
+
+        # totals
+        for tname, tidx in m.totals.items():
             z = params_dict['total'][tidx]
             out[f'{tname}_total_0r'] = abs(z)
             out[f'{tname}_total_0i'] = np.angle(z)
 
-        # g_ls: parent name + _g_ls_{idx}
-        for (dname, ls), gidx in self.gls.items():
+        # g_ls
+        for (dname, ls), gidx in m.gls.items():
             z = params_dict['g_ls'][gidx]
             out[f'{dname}_g_ls_{ls}r'] = abs(z)
             out[f'{dname}_g_ls_{ls}i'] = np.angle(z)
 
         # g_lsbar
-        for (dname, ls), gidx in self.glsbar.items():
+        for (dname, ls), gidx in m.glsbar.items():
             z = params_dict['g_lsbar'][gidx]
             out[f'{dname}_g_lsbar_{ls}r'] = abs(z)
             out[f'{dname}_g_lsbar_{ls}i'] = np.angle(z)
 
         # Scalars
-        for jname, sname in [('B_delta_m', 'delta_m'), ('B_delta_gamma', 'delta_g'),
-                              ('B_gamma', 'g'), ('B_A_prod', 'ap'),
-                              ('B_poqr', 'lam'), ('B_poqi', 'phi')]:
+        scalar_map = {'B_delta_m': 'delta_m', 'B_delta_gamma': 'delta_g',
+                      'B_gamma': 'g', 'B_A_prod': 'ap',
+                      'B_poqr': 'lam', 'B_poqi': 'phi'}
+        for jname, sname in scalar_map.items():
             out[jname] = float(params_dict.get(sname, 0))
 
-        # m0/g0: need config_path for resonance names
-        if config_path:
-            with open(config_path) as f:
-                ycfg = yaml.safe_load(f)
-            particle = ycfg.get('particle', {})
-            decay = ycfg.get('decay', {})
-            finals = set(ycfg.get('particle', {}).get('$finals', []))
+        # m0: build (mass_val, model) → phys index from params_dict order
+        # The phys index is assigned by sorted (mass_val, model), matching load_params
+        m0_keys = sorted({(v, k) for k, v in m._res_m0_map.items()},  # Wrong!
+                         key=lambda x: x[0])  # Actually need grouping by (val, model)
+        # Rebuild: for each resonance, get its (mass_val, model) from config
+        # Since we don't have config here, use the stored mapping directly
+        seen_m0 = set()
+        for res_name, pidx in sorted(m._res_m0_map.items(), key=lambda x: x[1]):
+            # pidx is the phys index assigned by parser
+            if pidx < len(params_dict['m0']):
+                out[f'{res_name}_mass'] = float(params_dict['m0'][pidx])
 
-            # Resolve resonance names (same as _load_params_impl)
-            def resolve(name, visited=None):
-                if visited is None: visited = set()
-                if name in visited: return
-                visited.add(name)
-                p = particle.get(name)
-                if p is None: return
-                if isinstance(p, list):
-                    for sub in p:
-                        if isinstance(sub, str):
-                            sp = particle.get(sub, {})
-                            if isinstance(sp, dict) and 'J' in sp:
-                                yield sub
-                            else:
-                                yield from resolve(sub, visited)
-                elif isinstance(p, dict) and 'J' in p:
-                    yield name
-                dd = decay.get(name, [])
-                for item in dd:
-                    if isinstance(item, str) and item not in finals:
-                        yield from resolve(item, visited)
-
-            used = set()
-            for dl in decay.get(ycfg.get('particle', {}).get('$top', 'B'), []):
-                if isinstance(dl, list):
-                    for item in dl:
-                        if isinstance(item, str) and item not in finals:
-                            for rn in resolve(item):
-                                if rn not in finals:
-                                    used.add(rn)
-
-            # Map (mass, model) → phys index (same ordering as _load_params_impl)
-            m_keys = []
-            for rn in sorted(used):
-                props = particle.get(rn, {})
-                if isinstance(props, dict) and 'J' in props:
-                    m_keys.append((props.get('mass', 0), props.get('model', 'BW'), rn))
-
-            seen = set()
-            mi = 0
-            for m_val, model, rn in sorted(m_keys, key=lambda x: (x[0], x[1])):
-                key = (m_val, model)
-                if key not in seen:
-                    seen.add(key)
-                    if mi < len(params_dict['m0']):
-                        out[f'{rn}_mass'] = float(params_dict['m0'][mi])
-                    mi += 1
-
-            # g0: widths + Flatte
-            w_keys = []
-            flatte_items = []
-            for rn in sorted(used):
-                props = particle.get(rn, {})
-                if isinstance(props, dict) and 'J' in props:
-                    model = props.get('model', 'BW')
-                    if model == 'FlatteC':
-                        for k, v in props.items():
-                            if k.startswith('g_') and v:
-                                flatte_items.append((k, rn))
-                    elif props.get('width', 0) > 0:
-                        w_keys.append((props['width'], model, rn))
-
-            seen_w = set()
-            wi = 0
-            for w_val, model, rn in sorted(w_keys, key=lambda x: (x[0], x[1])):
-                key = (w_val, model)
-                if key not in seen_w:
-                    seen_w.add(key)
-                    out[f'{rn}_width'] = float(params_dict['g0'][wi])
-                    wi += 1
-                else:
-                    out[f'{rn}_width'] = float(params_dict['g0'][wi-1])
-
-            for k, rn in sorted(flatte_items):
-                if wi < len(params_dict['g0']):
-                    out[f'{rn}_{k}'] = float(params_dict['g0'][wi])
-                    wi += 1
+        # g0: use stored mapping, check if FlatteC (multiple g entries)
+        for res_name, pidx_list in m._res_g0_map.items():
+            is_flatte = len(pidx_list) > 1
+            for i, pidx in enumerate(pidx_list):
+                if pidx < len(params_dict['g0']):
+                    val = float(params_dict['g0'][pidx])
+                    if is_flatte:
+                        out[f'{res_name}_g_{i}'] = val
+                    elif i == 0:
+                        out[f'{res_name}_width'] = val
 
         with open(json_path, 'w') as f:
             json.dump(out, f, indent=2)
         print(f"  Saved {len(out)} params to {json_path}")
-
         return out
 
 
