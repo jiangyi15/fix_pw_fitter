@@ -242,6 +242,159 @@ class PWAFitter:
 
         return nll, model_grads, norm
 
+    # ------------------------------------------------------------------
+    # Optimization interface (scipy.optimize.minimize compatible)
+    # ------------------------------------------------------------------
+    # Free parameters: all keys that are NOT targets of any constraint.
+    # The fit function takes a flat array x of free param values,
+    # returns (neg_log_likelihood, gradient_array).
+
+    def get_free_keys(self):
+        """Return list of free parameter keys (not constrained)."""
+        mapper = self.mapper
+        cst = self._ensure_cst()
+        constrained = set(cst._constraints.keys())
+        free = []
+        # All physical param keys
+        for k in mapper.totals: free.append(f'total/{k}')
+        for (dn, ls) in mapper.gls: free.append(f'g_ls/{dn}/{ls}')
+        for (dn, ls) in mapper.glsbar: free.append(f'g_lsbar/{dn}/{ls}')
+        for i in range(mapper.n_m0_phys): free.append(f'm0/{i}')
+        for i in range(mapper.n_g0_phys): free.append(f'g0/{i}')
+        for k in ['delta_m','delta_g','g','ap','lam','phi']: free.append(k)
+        # Remove constrained keys
+        free = [k for k in free if k not in constrained]
+        return free
+
+    def _get_from_grads(self, grads_dict, key):
+        """Extract a value from grads_dict (which has array keys like 'total')."""
+        mapper = self.mapper
+        if key.startswith('total/'):
+            name = key[6:]
+            return grads_dict['total'][mapper.totals.get(name, 0)]
+        elif key.startswith('g_ls/'):
+            parts = key[5:].split('/')
+            if len(parts) >= 2:
+                return grads_dict['g_ls'][mapper.gls.get((parts[0], int(parts[1])), 0)]
+        elif key.startswith('g_lsbar/'):
+            parts = key[8:].split('/')
+            if len(parts) >= 2:
+                return grads_dict['g_lsbar'][mapper.glsbar.get((parts[0], int(parts[1])), 0)]
+        elif key.startswith('m0/'):
+            idx = int(key[3:])
+            return grads_dict['m0'][idx] if idx < len(grads_dict['m0']) else 0.0
+        elif key.startswith('g0/'):
+            idx = int(key[3:])
+            return grads_dict['g0'][idx] if idx < len(grads_dict['g0']) else 0.0
+        elif key in grads_dict:
+            return grads_dict[key]
+        return 0.0
+
+    def pack(self, params_dict, keys=None):
+        """Pack a subset of params into a flat numpy array.
+        Args:
+            params_dict: dict with keys like 'total', 'g_ls', etc. (arrays)
+                        OR flat dict with keys like 'total/B->rhoA.rhoB'
+            keys: list of keys to pack (default: free keys)
+        Returns: flat float64 array (complex→[re, im] pairs)
+        """
+        if keys is None:
+            keys = self.get_free_keys()
+        # Detect format: array-based or key-based
+        has_arrays = any(k in ('total','g_ls','g_lsbar','m0','g0') for k in params_dict)
+        vals = []
+        for k in keys:
+            if has_arrays:
+                v = self._get_from_grads(params_dict, k)
+            else:
+                v = params_dict.get(k, 0)
+            if isinstance(v, (complex, np.complexfloating)):
+                vals.extend([v.real, v.imag])
+            else:
+                vals.append(float(v))
+        return np.array(vals, dtype=np.float64)
+
+    def unpack(self, x, keys=None):
+        """Unpack flat array into model params dict (individual keys).
+        Args:
+            x: flat numpy array
+            keys: list of keys (default: free keys)
+        Returns: dict of {key: value} for constraint_mapper.to_kernel()
+        """
+        if keys is None:
+            keys = self.get_free_keys()
+        d = {}
+        i = 0
+        for k in keys:
+            orig = self._get_original_type(k)
+            if orig == 'complex':
+                d[k] = x[i] + 1j * x[i+1]
+                i += 2
+            else:
+                d[k] = x[i]
+                i += 1
+        return d
+
+    def _get_original_type(self, key):
+        """Check if a parameter is complex."""
+        mapper = self.mapper
+        if key.startswith('total/') or key.startswith('g_ls/') or key.startswith('g_lsbar/'):
+            return 'complex'
+        return 'real'
+
+    def get_free_values(self, params_dict=None):
+        """Get flat initial values for free parameters.
+        Args:
+            params_dict: source params (default: self.params)
+        Returns: flat float64 array
+        """
+        if params_dict is None:
+            params_dict = self.params
+        model_dict = self._build_model_dict(params_dict)
+        return self.pack(model_dict)
+
+    def make_fit_func(self, data, phsp, N_phsp=None):
+        """
+        Create a callable for scipy.optimize.minimize.
+        
+        Returns: fun(x) → (neg_log_likelihood, gradient_array)
+        """
+        fitter = self
+        mapper = self.mapper
+        cst = self._ensure_cst()
+        keys = self.get_free_keys()
+
+        def func(x):
+            # Unpack x → model dict
+            model_dict = fitter.unpack(x, keys)
+            # Forward: model → kernel
+            ck, mk, gk, sc = cst.to_kernel(model_dict)
+            gpu = fitter._ensure_fitter()
+
+            # Norm from phsp
+            if N_phsp is not None:
+                norm = N_phsp
+            else:
+                q_phsp, _ = gpu.compute((ck, mk, gk, *sc), phsp, None)
+                n_phsp = phsp.n_events
+                norm = q_phsp / n_phsp if n_phsp > 0 else 1.0
+
+            # NLL on data
+            q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
+            nll = -q_data
+
+            # Gradients through constraints
+            grad_scalar = np.array([grads_k[k] for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
+            model_grads = cst.from_kernel(
+                grads_k['ck'], grads_k['m0'], grads_k['g0'], grad_scalar)
+
+            # Pack gradients into flat array (same order as x)
+            grad_flat = fitter.pack(model_grads, keys)
+
+            return nll, grad_flat
+
+        return func
+
     def compute(self, data, params=None, N=None):
         """
         Full forward+backward compute via ConstraintMapper.
