@@ -163,20 +163,21 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
     
     Returns (gamma_table, g_min, g_delta, n_gamma_points).
     """
-    n_g0 = cfg['n_g0']
+    n_perm = cfg.get('n_perm', 1)
     mass_grid = np.linspace(G_MIN, G_MAX, N_GAMMA_POINTS)
     g_delta = (G_MAX - G_MIN) / (N_GAMMA_POINTS - 1)
     cfg_dir = os.path.dirname(os.path.abspath(config_path)) if config_path else "."
     from pwa_gpu.parse_config import get_particle
 
-    # Build resonance info
+    # Build resonance info (base, before permutation expansion)
     res_info = OrderedDict()
     for pw in pw_list:
         for res in pw.resonances:
             if res.name not in res_info:
                 res_info[res.name] = res
 
-    gamma_table = np.zeros((n_g0, N_GAMMA_POINTS), dtype=np.complex128)
+    # Compute base gamma_table, then tile for permutations
+    base_gamma = []  # list of rows
     gi = 0
 
     for res_name, res in res_info.items():
@@ -186,31 +187,32 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
         width = res.width if res.width > 0 else 0.1
 
         if res.model == 'FlatteC':
+            # Flatte: gamma_table stores rho_i(m) (phase space factor per channel).
+            # g0[i] = g_i (coupling constant from config) — these are separate fit params.
+            # Kernel: gamma = sum_i g0[i] * gamma_table[i](m) = sum_i g_i * rho_i(m)
             mass_list = props.get('mass_list', [[M_PI, M_PI]] * 4) if isinstance(props, dict) else [[M_PI, M_PI]] * 4
-            g_vals = []
-            for i in range(4):
-                gk = props.get(f'g_{i}', 0.0) if isinstance(props, dict) else 0.0
-                g_vals.append(gk)
-            for sub_g in range(4):
-                # For Flatte, each coupling g_i contributes to the total width
-                # We create separate g0 entries per channel, each with its own rho_i(m)
-                g_only = [0]*4
-                g_only[sub_g] = g_vals[sub_g]
-                amp = amp_Flatte(mass_grid, m0, g_only, mass_list)
-                gamma_val = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
-                gamma_table[gi] = gamma_val
-                gi += 1
+            for sub_g in range(min(len(mass_list), 4)):
+                m1, m2 = mass_list[sub_g]
+                # Complex breakup momentum (real above threshold, imag below)
+                q = breakup_momentum(mass_grid, m1, m2)
+                rho = q / np.maximum(mass_grid, 1e-10)
+                # Flatte: gamma = i * sum(g_i * q_i/m)  (from gamma = 1j*(1/amp + m² - m0²)/m0)
+                # So gamma_table stores i * rho_i(m), then kernel does:
+                #   g_vals = g0 * gamma_table
+                #   gamma = sum g_vals = sum g_i * i * rho_i = i * sum g_i * rho_i
+                #   bwall = m0² - m² + m0*Im(gamma) - i*m0*Re(gamma)
+                #        = m0² - m² + m0*sum(g_i*Re(rho_i)) + i*m0*sum(g_i*Im(rho_i))  [since gamma=i*g*rho]
+                #        = m0² - m² + m0*sum(g_i*q_i/m)  ✓ (matches Flatte formula)
+                base_gamma.append((1j * rho).astype(np.complex128))
 
         elif res.model == 'one':
             amp = amp_constant(mass_grid, m0)
-            gamma_table[gi] = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
-            gi += 1
+            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
 
         elif res.model == 'Bugg':
             bugg_params = {k: v for k, v in (props.items() if isinstance(props, dict) else {})}
             amp = amp_Bugg(mass_grid, m0, bugg_params)
-            gamma_table[gi] = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
-            gi += 1
+            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
 
         elif res.model == 'width_linear_npy' and 'file' in extra:
             fpath = os.path.join(cfg_dir, extra['file'])
@@ -221,18 +223,17 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
                 amp = amp_from_file(mass_grid, m0, file_gamma, file_mass)
             else:
                 amp = amp_BW(mass_grid, m0, width)
-            gamma_table[gi] = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
-            gi += 1
+            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
 
         else:
-            # Default: mass-dependent BW with L from the particle's J
             L = res.J if res.J > 0 else 0
-            m1 = M_PI  # assume ππ decay
+            m1 = M_PI
             m2 = M_PI
             amp = amp_BW(mass_grid, m0, width, L, d=3.0, m1=m1, m2=m2)
-            gamma_table[gi] = 1j * (1.0/amp + mass_grid**2 - m0**2) / m0
-            gi += 1
+            base_gamma.append(1j * (1.0/amp + mass_grid**2 - m0**2) / m0)
 
+    # Tile by n_perm for identical particle permutations
+    gamma_table = np.tile(np.array(base_gamma), (n_perm, 1))
     return gamma_table, G_MIN, g_delta, N_GAMMA_POINTS
 
 
