@@ -244,6 +244,21 @@ class ParamMapper:
 
         return q_val, phys_grads
 
+    # ------------------------------------------------------------------
+    # Load parameters from a.json
+    # ------------------------------------------------------------------
+
+    def load_params(self, json_path, config_path=None):
+        """Load fitted values from a.json into a params dict.
+
+        Args:
+            json_path: path to a.json
+            config_path: path to config.yml (for m0/g0 resonance matching)
+
+        Returns: params_dict for mapper.to_kernel() or ConstraintMapper
+        """
+        return _load_params_impl(json_path, self, config_path)
+
 
 # Shorthand
 def create_mapper(cfg):
@@ -255,6 +270,11 @@ def create_mapper(cfg):
 # ====================================================================
 
 def load_params(json_path, mapper, config_path=None):
+    """Standalone: load fitted values from a.json (calls mapper.load_params)."""
+    return mapper.load_params(json_path, config_path)
+
+
+def _load_params_impl(json_path, mapper, config_path=None):
     """
     Load fitted parameter values from a tf_pwa a.json into the params_dict
     format expected by ParamMapper.compute().

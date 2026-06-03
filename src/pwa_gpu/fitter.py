@@ -16,7 +16,7 @@ import os
 import numpy as np
 from pwa_gpu.parse_config import parse_config
 from pwa_gpu.build_tables import build_tables as _build_tables, load_tables as _load_tables, save_tables as _save_tables
-from pwa_gpu.param_mapper import ParamMapper, load_params
+from pwa_gpu.param_mapper import ParamMapper
 from pwa_gpu import PWAGPU, PWAData
 
 
@@ -101,7 +101,7 @@ class PWAFitter:
 
     def load_params(self, json_path):
         """Load fitted parameters from a.json into the mapper."""
-        self._params = load_params(json_path, self.mapper, self.config_path)
+        self._params = self.mapper.load_params(json_path, self.config_path)
         return self._params
 
     @property
