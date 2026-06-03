@@ -94,8 +94,6 @@ __global__ void pwa_compute_kernel(
     spos = (spos + 15) & ~15;
     cdouble* ag = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     cdouble* bwprod = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
-    double* bfprod = (double*)(s + spos); spos += n_waves * sizeof(double);
-    cdouble* inv_bwprod = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     cdouble* a_full = (cdouble*)(s + spos); spos += n_waves * sizeof(cdouble);
     double* m_bw = (double*)(s + spos); spos += n_m0 * sizeof(double);
     double* m_gamma_vals = (double*)(s + spos); spos += n_g0 * sizeof(double);
@@ -126,9 +124,8 @@ __global__ void pwa_compute_kernel(
         cdouble fl = gamma_table[i * n_gamma_points + idx];
         cdouble fr = gamma_table[i * n_gamma_points + idx + 1];
         gi[i] = cadd(fl, cscale(csub(fr, fl), delta));
+        g_vals[i] = cscale(gi[i], g0[i]);
     }
-
-    for (int i = 0; i < n_g0; i++) g_vals[i] = cscale(gi[i], g0[i]);
 
     for (int i = 0; i < n_m0; i++) {
         cdouble sum = make_c(0.0, 0.0);
@@ -187,17 +184,10 @@ __global__ void pwa_compute_kernel(
     }
 
     for (int w = 0; w < n_waves; w++) {
-        double prod = 1.0;
-        for (int d = 0; d < n_decays_per_wave; d++) prod *= bf[w * n_decays_per_wave + d];
-        bfprod[w] = prod;
-    }
-
-    for (int w = 0; w < n_waves; w++) inv_bwprod[w] = cdiv(make_c(1.0, 0.0), bwprod[w]);
-
-    for (int w = 0; w < n_waves; w++) {
-        cdouble tmp = cmul(ck[w], inv_bwprod[w]);
-        tmp = cscale(tmp, bfprod[w]);
-        a_full[w] = cmul(tmp, ag[w]);
+        double bfprod_w = 1.0;
+        for (int d = 0; d < n_decays_per_wave; d++) bfprod_w *= bf[w * n_decays_per_wave + d];
+        cdouble inv_bwprod_w = cdiv(make_c(1.0, 0.0), bwprod[w]);
+        a_full[w] = cmul(cscale(cmul(ck[w], inv_bwprod_w), bfprod_w), ag[w]);
     }
 
     cdouble amp0 = make_c(0.0, 0.0);
@@ -319,11 +309,21 @@ __global__ void pwa_compute_kernel(
 
     // ---- Gradient w.r.t. ck ----
     for (int w = 0; w < n_waves; w++) {
-        cdouble pref = cmul(cmul(inv_bwprod[w], make_c(bfprod[w], 0.0)), ag[w]);
+        double bfprod_w = 1.0;
+        for (int d = 0; d < n_decays_per_wave; d++) bfprod_w *= bf[w * n_decays_per_wave + d];
+        cdouble pref = cmul(cmul(cdiv(make_c(1.0, 0.0), bwprod[w]), make_c(bfprod_w, 0.0)), ag[w]);
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
         cdouble grad_ck_val = cmul(grad_a, cconj(pref));
-        atomicAdd(&(grad_ck_re[w]), cuCreal(grad_ck_val));
-        atomicAdd(&(grad_ck_im[w]), cuCimag(grad_ck_val));
+        double r = cuCreal(grad_ck_val);
+        double i = cuCimag(grad_ck_val);
+        for (int off = 16; off > 0; off >>= 1) {
+            r += __shfl_down_sync(0xffffffff, r, off);
+            i += __shfl_down_sync(0xffffffff, i, off);
+        }
+        if ((threadIdx.x & 31) == 0) {
+            atomicAdd(&(grad_ck_re[w]), r);
+            atomicAdd(&(grad_ck_im[w]), i);
+        }
     }
 
     // ---- Gradient w.r.t. m0 ----
@@ -332,12 +332,15 @@ __global__ void pwa_compute_kernel(
     // Practical gradient: ∇_{bw_i} J = ∇_{inv_bwprod} J * conj(-inv_bwprod / bw_i)
     for (int w = 0; w < n_waves; w++) {
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
-        cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod[w], 0.0), ag[w]))));
+        double bfprod_w = 1.0;
+        for (int d = 0; d < n_decays_per_wave; d++) bfprod_w *= bf[w * n_decays_per_wave + d];
+        cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod_w, 0.0), ag[w]))));
+        cdouble inv_bwprod_w = cdiv(make_c(1.0, 0.0), bwprod[w]);
 
         for (int r = 0; r < n_res_per_wave; r++) {
             int bw_idx = bw_order[w * n_res_per_wave + r];
             cdouble bw_i = bw[w * n_res_per_wave + r];
-            cdouble grad_bw_i = cmul(cscale(grad_inv, -1.0), cconj(cdiv(inv_bwprod[w], bw_i)));
+            cdouble grad_bw_i = cmul(cscale(grad_inv, -1.0), cconj(cdiv(inv_bwprod_w, bw_i)));
 
             // d(bwall)/dm0 = 2*m0 + Im(gamma) - i*Re(gamma)
             cdouble dbwall_dm0 = make_c(2.0 * m0[bw_idx] + cuCimag(gamma[bw_idx]), -cuCreal(gamma[bw_idx]));
@@ -350,12 +353,15 @@ __global__ void pwa_compute_kernel(
     // Through BW: d(bwall)/d(gamma) when gamma is complex
     for (int w = 0; w < n_waves; w++) {
         cdouble grad_a = (w < half_waves) ? grad_amp0 : grad_amp1;
-        cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod[w], 0.0), ag[w]))));
+        double bfprod_w = 1.0;
+        for (int d = 0; d < n_decays_per_wave; d++) bfprod_w *= bf[w * n_decays_per_wave + d];
+        cdouble grad_inv = cmul(grad_a, cconj(cmul(ck[w], cmul(make_c(bfprod_w, 0.0), ag[w]))));
+        cdouble inv_bwprod_w = cdiv(make_c(1.0, 0.0), bwprod[w]);
 
         for (int r = 0; r < n_res_per_wave; r++) {
             int bw_idx = bw_order[w * n_res_per_wave + r];
             cdouble bw_i = bw[w * n_res_per_wave + r];
-            cdouble grad_bw_i = cmul(cscale(grad_inv, -1.0), cconj(cdiv(inv_bwprod[w], bw_i)));
+            cdouble grad_bw_i = cmul(cscale(grad_inv, -1.0), cconj(cdiv(inv_bwprod_w, bw_i)));
 
             // bwall = (m0² - m² + m0*Im(gamma)) + i*(-m0*Re(gamma))
             // d(bwall)/d(Re(gamma)) = -i*m0
@@ -381,7 +387,10 @@ __global__ void pwa_compute_kernel(
                 // g_vals = g0 * gi
                 // grad_g0[j] += Re(grad_g_vals_j * conj(gi[j]))
                 double grad_g0_val = cuCreal(cmul(grad_g_vals_j, cconj(gi[j])));
-                atomicAdd(&(grad_g0_out[j]), grad_g0_val);
+                for (int off = 16; off > 0; off >>= 1)
+                    grad_g0_val += __shfl_down_sync(0xffffffff, grad_g0_val, off);
+                if ((threadIdx.x & 31) == 0)
+                    atomicAdd(&(grad_g0_out[j]), grad_g0_val);
             }
         }
     }
@@ -528,8 +537,11 @@ void* pwa_create_config(
     int total_bw = n_waves * n_res_per_wave;
     int total_bf = n_waves * n_decays_per_wave;
     // Starting estimate (non-interleaved, no padding)
+    // Removed bfprod (n_waves*double) and inv_bwprod (n_waves*cdouble)
+    // Current layout: bw(cd), bf(d), pad, ag(cd), bwprod(cd), a_full(cd), m_bw(d),
+    //   m_gamma_vals(d), pad, gi(cd), g_vals(cd), gamma(cd), bwall(cd), q_bf(d), bfall(d), ang_f(d)
     cfg->per_thread_size = total_bw * (size_t)sizeof(cdouble) + total_bf * (size_t)sizeof(double)
-         + n_waves * 4 * (size_t)sizeof(cdouble) + n_waves * (size_t)sizeof(double)
+         + n_waves * 3 * (size_t)sizeof(cdouble)
          + n_m0 * 2 * (size_t)sizeof(cdouble) + n_m0 * (size_t)sizeof(double)
          + n_g0 * 2 * (size_t)sizeof(cdouble) + n_g0 * (size_t)sizeof(double)
          + n_bf_types * 2 * (size_t)sizeof(double) + n_basis * (size_t)sizeof(double);
