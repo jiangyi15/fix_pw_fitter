@@ -345,7 +345,7 @@ class PWAGPU:
             ffi.cast("double*", m0.ctypes.data),
             ffi.cast("double*", g0.ctypes.data),
             delta_m, delta_g, g, ap, lam, phi,
-            N if N is not None else 1.0,
+            N if N is not None else -1.0,  # -1 signals chi-square mode to kernel
             ffi.cast("double*", self.weights.ctypes.data),
             ffi.cast("double*", bkg_arr.ctypes.data),
             self.n_waves, self.n_m0, self.n_g0,
@@ -367,7 +367,7 @@ class PWAGPU:
         grad_ck = grad_ck_re + 1j * grad_ck_im
 
         grads = (grad_ck, grad_m0, grad_g0,
-                 grad_scalar[6],   # N
+                 grad_scalar[6] if N is not None else None,   # N (None in chi-square mode)
                  grad_scalar[0],   # delta_m
                  grad_scalar[1],   # delta_g
                  grad_scalar[2],   # g

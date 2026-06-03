@@ -282,11 +282,11 @@ def main():
     
     # Gradient comparison
     print("\n[7] Gradient comparison...")
+    param_names = ['ck', 'm0', 'g0', 'N', 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
     try:
         p_gpu, q_gpu, grad_gpu = fitter_gpu.grad(params, N)
         
         print(f"\n  Parameter gradients (GPU vs Numpy):")
-        param_names = ['ck', 'm0', 'g0', 'N', 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
         
         for i, (name, gg, gn) in enumerate(zip(param_names, grad_gpu, grad_numpy)):
             if gg is None or gn is None:
@@ -303,6 +303,27 @@ def main():
             
     except Exception as e:
         print(f"    ERROR during gradient comparison: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Gradient comparison with N=None (chi-square mode)
+    print("\n[8] Gradient comparison (N=None / chi-square mode)...")
+    try:
+        p_gpu0, q_gpu0, grad_gpu0 = fitter_gpu.grad(params, None)
+        q_np0, grad_np0 = fitter_numpy.compute(params, data, None)
+        
+        print(f"  q_val GPU: {q_gpu0:.10f}, q_val NP: {q_np0:.10f}")
+        for name, gg, gn in zip(param_names, grad_gpu0, grad_np0):
+            if gg is None and gn is None:
+                print(f"  {name:12s}: skipped (None)")
+                continue
+            gg_flat = np.atleast_1d(gg).flatten()
+            gn_flat = np.atleast_1d(gn).flatten()
+            abs_diff = np.max(np.abs(gg_flat - gn_flat))
+            rel_diff = abs_diff / (np.max(np.abs(gn_flat)) + 1e-10)
+            print(f"  {name:12s}: max_abs={abs_diff:.6e}, max_rel={rel_diff:.6e}")
+    except Exception as e:
+        print(f"    ERROR: {e}")
         import traceback
         traceback.print_exc()
     

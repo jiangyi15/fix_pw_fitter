@@ -233,9 +233,15 @@ __global__ void pwa_compute_kernel(
     bool do_grad = (weights != NULL);
     double grad_p_val;
     if (do_grad) {
-        double bkg_val = bkg_arr ? bkg_arr[e] : 0.0;
-        double q_val = p_val / N_val + bkg_val;
-        grad_p_val = weights[e] / (N_val * q_val);
+        if (N_val > 0.0) {
+            // Likelihood mode: q = p/N + bkg, grad_p = w/(N*q)
+            double bkg_val = bkg_arr ? bkg_arr[e] : 0.0;
+            double q_val = p_val / N_val + bkg_val;
+            grad_p_val = weights[e] / (N_val * q_val);
+        } else {
+            // Chi-square mode: q = p, grad_p = w
+            grad_p_val = weights[e];
+        }
     }
 
     // ---- Gradient computation (only when weights are provided) ----
@@ -259,11 +265,13 @@ __global__ void pwa_compute_kernel(
     double dp_dap = -(1.0 - f) * pt_p + f * pt_m;
     atomicAdd(&grad_scalar_out[3], grad_p_val * dp_dap);
 
-    // --- Gradient w.r.t. N (normalization) ---
-    // grad_N = -grad_p_val * p_val / N
-    // q = p/N + bkg, grad_p = w/(N*q)
-    // dq_val/dN = -w * p / (N^2 * q) = -grad_p * p / N
-    atomicAdd(&grad_scalar_out[6], -grad_p_val * p_val / N_val);
+    // --- Gradient w.r.t. N (normalization, only in likelihood mode) ---
+    if (N_val > 0.0) {
+        // grad_N = -grad_p_val * p_val / N
+        // q = p/N + bkg, grad_p = w/(N*q)
+        // dq_val/dN = -w * p / (N^2 * q) = -grad_p * p / N
+        atomicAdd(&grad_scalar_out[6], -grad_p_val * p_val / N_val);
+    }
 
     // ---- Gradient w.r.t. lam ----
     // dJ/d(lam) = Re(grad_pq * exp(-i*phi))
