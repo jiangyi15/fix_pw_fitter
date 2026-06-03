@@ -47,53 +47,7 @@ ffi.cdef("""
     );
     void pwa_destroy_data(void* data);
 
-    void* pwa_create_context(
-        const double* mass_flat, const double* q_flat, const double* angles_flat,
-        const double* time_arr, const double* frac_arr,
-        const int* bw_index, const int* gamma_index, const int* bw_order,
-        const int* bf_index, const int* bf_order, const int* ang_index,
-        const double* ang_k, const double* ang_b,
-        const double* matrix_gamma, const cuDoubleComplex* matrix_ang,
-        const cuDoubleComplex* gamma_table, const double* bf_table,
-        int n_events, int n_waves, int n_m0, int n_g0,
-        int n_res_per_wave, int n_decays_per_wave,
-        int n_bf_types, int n_basis, int n_ang_per_basis,
-        int n_gamma_points, int n_bf_points,
-        int mass_stride, int q_stride, int ang_stride
-    );
-    void pwa_destroy_context(void* ctx);
-
-    void pwa_compute_wrapper(
-        void* cfg, void* data,
-        double* p_out, cuDoubleComplex* amp_p_out, cuDoubleComplex* amp_m_out,
-        const cuDoubleComplex* ck, const double* m0, const double* g0,
-        double delta_m, double delta_g, double g_val,
-        double ap, double lam, double phi,
-        int n_waves, int n_m0, int n_g0,
-        int n_res_per_wave, int n_decays_per_wave,
-        int n_bf_types, int n_basis, int n_ang_per_basis,
-        int n_gamma_points, int n_bf_points,
-        double g_min, double g_delta, double q_min, double q_delta
-    );
-
-    void pwa_grad_wrapper(
-        void* cfg, void* data,
-        double* grad_ck_re, double* grad_ck_im,
-        double* grad_m0_out, double* grad_g0_out,
-        double* grad_scalar_out,
-        const cuDoubleComplex* ck, const double* m0, const double* g0,
-        double delta_m, double delta_g, double g_val,
-        double ap, double lam, double phi,
-        double N_val,
-        const double* weights, const double* bkg_arr,
-        int n_waves, int n_m0, int n_g0,
-        int n_res_per_wave, int n_decays_per_wave,
-        int n_bf_types, int n_basis, int n_ang_per_basis,
-        int n_gamma_points, int n_bf_points,
-        double g_min, double g_delta, double q_min, double q_delta
-    );
-
-    void pwa_compute_grad_wrapper(
+    void pwa_compute(
         void* cfg, void* data,
         double* p_out, cuDoubleComplex* amp_p_out, cuDoubleComplex* amp_m_out,
         double* grad_ck_re, double* grad_ck_im,
@@ -210,15 +164,15 @@ class PWAGPU:
     GPU-accelerated PWA fitter.
 
     Holds configuration (indices, tables, matrixes) on GPU.
-    Data is passed in via PWAData objects for each compute/grad call.
+    Data is passed in via PWAData objects for each compute call.
+    Forward pass and gradients are always computed together in one GPU call.
 
     Usage:
         fitter = PWAGPU(config)
         data1 = PWAData(fitter, mass1, q1, angles1, time1, frac1, w1, b1)
         data2 = PWAData(fitter, mass2, q2, angles2, time2, frac2, w2, b2)
 
-        p, q = fitter.compute(params, data1, N)
-        p, q, grads = fitter.grad(params, data2, N)
+        p, q, grads = fitter.compute(params, data1, N)
     """
 
     def __init__(self, config, device_id=0):
@@ -318,67 +272,35 @@ class PWAGPU:
         """
         return PWAData(self, *data)
 
+    @property
+    def last_p(self):
+        """Per-event probabilities from the most recent compute() call."""
+        return getattr(self, '_last_p', None)
+
     def compute(self, params, data, N=None):
         """
-        Compute probability and likelihood.
+        Compute q_val + gradients in one GPU call.
+
+        Per-event probabilities are cached in ``self.last_p``.
 
         Args:
             params: (ck, m0, g0, delta_m, delta_g, g, ap, lam, phi)
             data: PWAData object
-            N: normalization (None for chi-square)
+            N: normalization (None for chi-square mode, gradients always computed)
 
         Returns:
-            p_val: probability values (n_events,)
             q_val: likelihood scalar
-        """
-        ck, m0, g0, delta_m, delta_g, g, ap, lam, phi = params
-
-        ck_c = np.ascontiguousarray(ck.astype(np.complex128))
-        m0 = np.ascontiguousarray(m0)
-        g0 = np.ascontiguousarray(g0)
-
-        p_out = np.zeros(data.n_events, dtype=np.float64)
-        amp_p_out = np.zeros(data.n_events, dtype=np.complex128)
-        amp_m_out = np.zeros(data.n_events, dtype=np.complex128)
-
-        self.lib.pwa_compute_wrapper(
-            self._cfg, data._ptr,
-            ffi.cast("double*", p_out.ctypes.data),
-            ffi.cast("cuDoubleComplex*", amp_p_out.ctypes.data),
-            ffi.cast("cuDoubleComplex*", amp_m_out.ctypes.data),
-            ffi.cast("cuDoubleComplex*", ck_c.ctypes.data),
-            ffi.cast("double*", m0.ctypes.data),
-            ffi.cast("double*", g0.ctypes.data),
-            delta_m, delta_g, g, ap, lam, phi,
-            self.n_waves, self.n_m0, self.n_g0,
-            self.n_res_per_wave, self.n_decays_per_wave,
-            self.n_bf_types, self.n_basis, self.n_ang_per_basis,
-            self.n_gamma_points, self.n_bf_points,
-            self.g_min, self.g_delta, self.q_min, self.q_delta
-        )
-
-        if N is not None and N > 0:
-            bkg_vals = data.bkg if isinstance(data.bkg, np.ndarray) else np.full(data.n_events, data.bkg)
-            q = p_out / N + bkg_vals
-            q_val = np.sum(data.weights * np.log(q))
-        else:
-            q_val = np.sum(data.weights * p_out)
-
-        return p_out, q_val
-
-    def grad(self, params, data, N=None):
-        """
-        Compute forward + gradients in one GPU call.
-
-        Args:
-            params: (ck, m0, g0, delta_m, delta_g, g, ap, lam, phi)
-            data: PWAData object
-            N: normalization (None for chi-square)
-
-        Returns:
-            p: probability values (n_events,)
-            q_val: likelihood scalar
-            grads: tuple of gradients
+            grads: dict with keys:
+                'ck'      — gradient w.r.t. complex couplings (n_waves,)
+                'm0'      — gradient w.r.t. resonance masses (n_m0,)
+                'g0'      — gradient w.r.t. widths (n_g0,)
+                'N'       — gradient w.r.t. norm, or None for chi-square
+                'delta_m' — gradient w.r.t. mass diff
+                'delta_g' — gradient w.r.t. width diff
+                'g'       — gradient w.r.t. avg width
+                'ap'      — gradient w.r.t. CP asymmetry
+                'lam'     — gradient w.r.t. |lambda|
+                'phi'     — gradient w.r.t. CP phase
         """
         ck, m0, g0, delta_m, delta_g, g, ap, lam, phi = params
 
@@ -400,7 +322,7 @@ class PWAGPU:
         grad_g0 = np.zeros(self.n_g0, dtype=np.float64)
         grad_scalar = np.zeros(7, dtype=np.float64)
 
-        self.lib.pwa_compute_grad_wrapper(
+        self.lib.pwa_compute(
             self._cfg, data._ptr,
             ffi.cast("double*", p_out.ctypes.data),
             ffi.cast("cuDoubleComplex*", amp_p_out.ctypes.data),
@@ -433,12 +355,21 @@ class PWAGPU:
 
         grad_ck = grad_ck_re + 1j * grad_ck_im
 
-        grads = (grad_ck, grad_m0, grad_g0,
-                 grad_scalar[6] if N is not None else None,
-                 grad_scalar[0], grad_scalar[1], grad_scalar[2],
-                 grad_scalar[3], grad_scalar[4], grad_scalar[5])
+        grads = {
+            'ck':      grad_ck,
+            'm0':      grad_m0,
+            'g0':      grad_g0,
+            'N':       grad_scalar[6] if N is not None else None,
+            'delta_m': grad_scalar[0],
+            'delta_g': grad_scalar[1],
+            'g':       grad_scalar[2],
+            'ap':      grad_scalar[3],
+            'lam':     grad_scalar[4],
+            'phi':     grad_scalar[5],
+        }
 
-        return p_out, q_val, grads
+        self._last_p = p_out
+        return q_val, grads
 
     def __del__(self):
         """Cleanup GPU config"""
@@ -458,14 +389,14 @@ def compare_with_numpy(fitter_gpu, fitter_numpy, params, data, N=None):
     """Compare GPU and numpy results"""
     data_gpu = fitter_gpu.load_data(data)
     t0 = time.time()
-    p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
+    q_gpu, _ = fitter_gpu.compute(params, data_gpu, N)
     t_gpu = time.time() - t0
 
     t0 = time.time()
     q_numpy, grad_numpy = fitter_numpy.compute(params, data, N)
     t_numpy = time.time() - t0
 
-    max_diff = np.max(np.abs(p_gpu - fitter_numpy._last_p))
+    max_diff = np.max(np.abs(fitter_gpu.last_p - fitter_numpy._last_p))
 
     print(f"GPU time: {t_gpu*1000:.2f} ms")
     print(f"Numpy time: {t_numpy*1000:.2f} ms")

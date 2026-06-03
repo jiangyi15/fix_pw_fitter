@@ -447,9 +447,6 @@ typedef struct {
 // Host wrapper functions (called from Python via cffi)
 // ============================================================
 extern "C" {
-// Forward declarations for destroy functions (used by legacy pwa_create_context)
-void pwa_destroy_config(void* cfg_ptr);
-void pwa_destroy_data(void* data_ptr);
 
 void* pwa_create_config(
     // Config (host pointers)
@@ -553,46 +550,6 @@ void* pwa_create_data(
 
     return (void*)data;
 }
-
-// Legacy convenience: creates both config and data in one call
-void* pwa_create_context(
-    const double* mass_flat, const double* q_flat, const double* angles_flat,
-    const double* time_arr, const double* frac_arr,
-    const int* bw_index, const int* gamma_index, const int* bw_order,
-    const int* bf_index, const int* bf_order, const int* ang_index,
-    const double* ang_k, const double* ang_b,
-    const double* matrix_gamma, const cdouble* matrix_ang,
-    const cdouble* gamma_table, const double* bf_table,
-    int n_events, int n_waves, int n_m0, int n_g0,
-    int n_res_per_wave, int n_decays_per_wave,
-    int n_bf_types, int n_basis, int n_ang_per_basis,
-    int n_gamma_points, int n_bf_points,
-    int mass_stride, int q_stride, int ang_stride
-) {
-    // Create config
-    void* cfg = pwa_create_config(
-        bw_index, gamma_index, bw_order,
-        bf_index, bf_order, ang_index,
-        ang_k, ang_b, matrix_gamma, matrix_ang,
-        gamma_table, bf_table,
-        n_waves, n_m0, n_g0,
-        n_res_per_wave, n_decays_per_wave,
-        n_bf_types, n_basis, n_ang_per_basis,
-        n_gamma_points, n_bf_points);
-    if (!cfg) return NULL;
-
-    // Create data and pack both into a combined struct
-    void* d = pwa_create_data(
-        mass_flat, q_flat, angles_flat, time_arr, frac_arr,
-        n_events, mass_stride, q_stride, ang_stride);
-    if (!d) { pwa_destroy_config(cfg); return NULL; }
-
-    // Pack both pointers into a single allocation for backward compatibility
-    void** combo = (void**)malloc(2 * sizeof(void*));
-    combo[0] = cfg;
-    combo[1] = d;
-    return (void*)combo;
-}
 void pwa_destroy_config(void* cfg_ptr) {
     if (!cfg_ptr) return;
     PWAConfig* cfg = (PWAConfig*)cfg_ptr;
@@ -621,216 +578,8 @@ void pwa_destroy_data(void* data_ptr) {
     cudaFree(data->d_frac_arr);
     free(data);
 }
-void pwa_destroy_context(void* ctx_ptr) {
-    if (!ctx_ptr) return;
-    void** combo = (void**)ctx_ptr;
-    pwa_destroy_config(combo[0]);
-    pwa_destroy_data(combo[1]);
-    free(combo);
-}
-void pwa_compute_wrapper(
-    void* cfg_ptr,
-    void* data_ptr,
-    double* p_out,
-    cdouble* amp_p_out,
-    cdouble* amp_m_out,
-    const cdouble* ck,
-    const double* m0,
-    const double* g0,
-    double delta_m, double delta_g, double g_val,
-    double ap, double lam, double phi,
-    int n_waves, int n_m0, int n_g0,
-    int n_res_per_wave, int n_decays_per_wave,
-    int n_bf_types, int n_basis, int n_ang_per_basis,
-    int n_gamma_points, int n_bf_points,
-    double g_min, double g_delta, double q_min, double q_delta
-) {
-    PWAConfig* cfg = (PWAConfig*)cfg_ptr;
-    PWAData* data = (PWAData*)data_ptr;
-    int n_events = data->n_events;
-    int threads = 256;
-    
-    // Allocate device output arrays
-    double *d_p_out, *d_m0, *d_g0;
-    cdouble *d_amp_p_out, *d_amp_m_out, *d_ck;
-    
-    cudaMalloc(&d_p_out, n_events * sizeof(double));
-    cudaMalloc(&d_amp_p_out, n_events * sizeof(cdouble));
-    cudaMalloc(&d_amp_m_out, n_events * sizeof(cdouble));
-    cudaMalloc(&d_ck, n_waves * sizeof(cdouble));
-    cudaMalloc(&d_m0, n_m0 * sizeof(double));
-    cudaMalloc(&d_g0, n_g0 * sizeof(double));
-    
-    // Copy parameters to device (same for all batches)
-    cudaMemcpy(d_ck, ck, n_waves * sizeof(cdouble), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_m0, m0, n_m0 * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_g0, g0, n_g0 * sizeof(double), cudaMemcpyHostToDevice);
-    
-    // Process events in batches (pre-allocated scratch from config)
-    for (int start = 0; start < n_events; start += cfg->max_batch_size) {
-        int batch_size = cfg->max_batch_size;
-        if (start + batch_size > n_events) batch_size = n_events - start;
-        int blocks = (batch_size + threads - 1) / threads;
-        
-        pwa_compute_kernel<<<blocks, threads>>>(
-            d_p_out + start, d_amp_p_out + start, d_amp_m_out + start,
-            NULL, NULL, NULL, NULL, NULL,  // grad outputs (not computed)
-            d_ck, d_m0, d_g0,
-            delta_m, delta_g, g_val, ap, lam, phi, 0.0,
-            NULL, NULL,  // weights=NULL → no gradient
-            data->d_mass_flat + start * (size_t)data->mass_stride,
-            data->d_q_flat + start * (size_t)data->q_stride,
-            data->d_angles_flat + start * (size_t)data->ang_stride,
-            data->d_time_arr + start,
-            data->d_frac_arr + start,
-            cfg->d_bw_index, cfg->d_gamma_index, cfg->d_bw_order,
-            cfg->d_bf_index, cfg->d_bf_order,
-            cfg->d_ang_index, cfg->d_ang_k, cfg->d_ang_b,
-            cfg->d_matrix_gamma, cfg->d_matrix_ang,
-            cfg->d_gamma_table, cfg->d_bf_table,
-            batch_size, n_waves, n_m0, n_g0,
-            n_res_per_wave, n_decays_per_wave,
-            n_bf_types, n_basis, n_ang_per_basis,
-            n_gamma_points, n_bf_points,
-            data->mass_stride, data->q_stride, data->ang_stride,
-            g_min, g_delta, q_min, q_delta,
-            cfg->d_scratch, cfg->per_thread_size
-        );
-    }
-    cudaDeviceSynchronize();
-    
-    // Copy results back
-    cudaMemcpy(p_out, d_p_out, n_events * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(amp_p_out, d_amp_p_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
-    cudaMemcpy(amp_m_out, d_amp_m_out, n_events * sizeof(cdouble), cudaMemcpyDeviceToHost);
-    
-    // Free device output arrays
-    cudaFree(d_p_out);
-    cudaFree(d_amp_p_out);
-    cudaFree(d_amp_m_out);
-    cudaFree(d_ck);
-    cudaFree(d_m0);
-    cudaFree(d_g0);
-}
-
-void pwa_grad_wrapper(
-    void* cfg_ptr,
-    void* data_ptr,
-    double* grad_ck_re,
-    double* grad_ck_im,
-    double* grad_m0_out,
-    double* grad_g0_out,
-    double* grad_scalar_out,  // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
-    const cdouble* ck,
-    const double* m0,
-    const double* g0,
-    double delta_m, double delta_g, double g_val,
-    double ap, double lam, double phi,
-    double N_val,
-    const double* weights, const double* bkg_arr,
-    int n_waves, int n_m0, int n_g0,
-    int n_res_per_wave, int n_decays_per_wave,
-    int n_bf_types, int n_basis, int n_ang_per_basis,
-    int n_gamma_points, int n_bf_points,
-    double g_min, double g_delta, double q_min, double q_delta
-) {
-    PWAConfig* cfg = (PWAConfig*)cfg_ptr;
-    PWAData* data = (PWAData*)data_ptr;
-    int n_events = data->n_events;
-    int threads = 256;
-    
-    // Allocate device memory
-    cdouble *d_ck;
-    double *d_m0, *d_g0;
-    double *d_weights, *d_bkg_arr;
-    double *d_grad_ck_re, *d_grad_ck_im;
-    double *d_grad_m0_out, *d_grad_g0_out;
-    double *d_grad_scalar_out;  // [7]
-    
-    cudaMalloc(&d_weights, n_events * sizeof(double));
-    cudaMalloc(&d_bkg_arr, n_events * sizeof(double));
-    cudaMemcpy(d_weights, weights, n_events * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_bkg_arr, bkg_arr, n_events * sizeof(double), cudaMemcpyHostToDevice);
-    
-    cudaMalloc(&d_grad_ck_re, n_waves * sizeof(double));
-    cudaMalloc(&d_grad_ck_im, n_waves * sizeof(double));
-    cudaMalloc(&d_grad_m0_out, n_m0 * sizeof(double));
-    cudaMalloc(&d_grad_g0_out, n_g0 * sizeof(double));
-    cudaMalloc(&d_grad_scalar_out, 7 * sizeof(double));
-    
-    cudaMalloc(&d_ck, n_waves * sizeof(cdouble));
-    cudaMalloc(&d_m0, n_m0 * sizeof(double));
-    cudaMalloc(&d_g0, n_g0 * sizeof(double));
-    
-    // Zero accumulation buffers once
-    cudaMemset(d_grad_ck_re, 0, n_waves * sizeof(double));
-    cudaMemset(d_grad_ck_im, 0, n_waves * sizeof(double));
-    cudaMemset(d_grad_m0_out, 0, n_m0 * sizeof(double));
-    cudaMemset(d_grad_g0_out, 0, n_g0 * sizeof(double));
-    cudaMemset(d_grad_scalar_out, 0, 7 * sizeof(double));
-    
-    // Copy parameters to device (same for all batches)
-    cudaMemcpy(d_ck, ck, n_waves * sizeof(cdouble), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_m0, m0, n_m0 * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_g0, g0, n_g0 * sizeof(double), cudaMemcpyHostToDevice);
-    
-    // Process events in batches, accumulating gradients
-    for (int start = 0; start < n_events; start += cfg->max_batch_size) {
-        int batch_size = cfg->max_batch_size;
-        if (start + batch_size > n_events) batch_size = n_events - start;
-        int blocks = (batch_size + threads - 1) / threads;
-        
-        pwa_compute_kernel<<<blocks, threads>>>(
-            NULL, NULL, NULL,  // p_out, amp_p_out, amp_m_out (not stored in grad-only)
-            d_grad_ck_re, d_grad_ck_im,
-            d_grad_m0_out, d_grad_g0_out,
-            d_grad_scalar_out,  // [7] = {delta_m, delta_g, g, ap, lam, phi, N}
-            d_ck, d_m0, d_g0,
-            delta_m, delta_g, g_val, ap, lam, phi,
-            N_val,
-            d_weights, d_bkg_arr,  // compute grad_p on GPU
-            data->d_mass_flat + start * (size_t)data->mass_stride,
-            data->d_q_flat + start * (size_t)data->q_stride,
-            data->d_angles_flat + start * (size_t)data->ang_stride,
-            data->d_time_arr + start,
-            data->d_frac_arr + start,
-            cfg->d_bw_index, cfg->d_gamma_index, cfg->d_bw_order,
-            cfg->d_bf_index, cfg->d_bf_order,
-            cfg->d_ang_index, cfg->d_ang_k, cfg->d_ang_b,
-            cfg->d_matrix_gamma, cfg->d_matrix_ang,
-            cfg->d_gamma_table, cfg->d_bf_table,
-            batch_size, n_waves, n_m0, n_g0,
-            n_res_per_wave, n_decays_per_wave,
-            n_bf_types, n_basis, n_ang_per_basis,
-            n_gamma_points, n_bf_points,
-            data->mass_stride, data->q_stride, data->ang_stride,
-            g_min, g_delta, q_min, q_delta,
-            cfg->d_scratch, cfg->per_thread_size
-        );
-    }
-    cudaDeviceSynchronize();
-    
-    // Copy results back
-    cudaMemcpy(grad_ck_re, d_grad_ck_re, n_waves * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(grad_ck_im, d_grad_ck_im, n_waves * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(grad_m0_out, d_grad_m0_out, n_m0 * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(grad_g0_out, d_grad_g0_out, n_g0 * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(grad_scalar_out, d_grad_scalar_out, 7 * sizeof(double), cudaMemcpyDeviceToHost);
-    
-    // Free device memory
-    cudaFree(d_weights); cudaFree(d_bkg_arr);
-    cudaFree(d_grad_ck_re);
-    cudaFree(d_grad_ck_im);
-    cudaFree(d_grad_m0_out);
-    cudaFree(d_grad_g0_out);
-    cudaFree(d_grad_scalar_out);
-    cudaFree(d_ck);
-    cudaFree(d_m0);
-    cudaFree(d_g0);
-}
-
 // Combined forward + gradient: one kernel launch, one set of transfers
-void pwa_compute_grad_wrapper(
+void pwa_compute(
     void* cfg_ptr,
     void* data_ptr,
     double* p_out, cdouble* amp_p_out, cdouble* amp_m_out,
@@ -1094,18 +843,22 @@ int main() {
     double delta_m=0.5065, delta_g=0.001, g_val=0.657;
     double ap=0.01, lam=0.75, phi=0.15, N_val=50000;
 
-    void* ctx = pwa_create_context(mf, qf, af, tarr, farr,
+    void* cfg_p = pwa_create_config(
         bwi, gi, bwo, bfi, bfo, ai,
         ak, ab, mg, ma, gt, bft,
-        cfg.n_events, cfg.n_waves, cfg.n_m0, cfg.n_g0,
+        cfg.n_waves, cfg.n_m0, cfg.n_g0,
         cfg.n_res_per_wave, cfg.n_decays_per_wave,
         cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
-        cfg.n_gamma_points, cfg.n_bf_points,
-        cfg.mass_stride, cfg.q_stride, cfg.ang_stride);
-    if (!ctx) { fprintf(stderr,"Context failed\n"); return 1; }
-    PWAContext* pctx = (PWAContext*)ctx;
-    printf("Context: batch=%d, scratch=%zu bytes\n",
-           pctx->max_batch_size, pctx->per_thread_size);
+        cfg.n_gamma_points, cfg.n_bf_points);
+    if (!cfg_p) { fprintf(stderr,"Config failed\n"); return 1; }
+    void* data_p = pwa_create_data(
+        mf, qf, af, tarr, farr,
+        cfg.n_events, cfg.mass_stride, cfg.q_stride, cfg.ang_stride);
+    if (!data_p) { pwa_destroy_config(cfg_p); return 1; }
+    PWAConfig* pcfg = (PWAConfig*)cfg_p;
+    PWAData* pdata = (PWAData*)data_p;
+    printf("Config: batch=%d, scratch=%zu bytes\n",
+           pcfg->max_batch_size, pcfg->per_thread_size);
 
     double* p_out    = (double*)malloc(cfg.n_events*sizeof(double));
     cdouble* ap_out  = (cdouble*)malloc(cfg.n_events*sizeof(cdouble));
@@ -1126,14 +879,8 @@ int main() {
     /* ===== [1] Warmup ===== */
     print_sec("[1] Warmup");
     for (int i = 0; i < warmup; i++) {
-        pwa_compute_wrapper(ctx, p_out, ap_out, am_out,
-            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi,
-            cfg.n_waves, cfg.n_m0, cfg.n_g0,
-            cfg.n_res_per_wave, cfg.n_decays_per_wave,
-            cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
-            cfg.n_gamma_points, cfg.n_bf_points,
-            cfg.g_min, cfg.g_delta, cfg.q_min, cfg.q_delta);
-        pwa_grad_wrapper(ctx, gcr, gci, gm0, gg0, gsc,
+        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out,
+            gcr, gci, gm0, gg0, gsc,
             ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val,
             gpr, bkg_arr_h,
             cfg.n_waves, cfg.n_m0, cfg.n_g0,
@@ -1144,13 +891,15 @@ int main() {
     }
     printf("Warmup done\n");
 
-    /* ===== [2] Forward e2e ===== */
-    print_sec("[2] Forward End-to-End (pwa_compute_wrapper)");
+    /* ===== [2] Combined e2e (forward+gradient) ===== */
+    print_sec("[2] Combined End-to-End (pwa_compute)");
     double fwd_e2e = 0;
     for (int r = 0; r < n_runs; r++) {
         cudaEventRecord(es);
-        pwa_compute_wrapper(ctx, p_out, ap_out, am_out,
-            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi,
+        pwa_compute(cfg_p, data_p, p_out, ap_out, am_out,
+            gcr, gci, gm0, gg0, gsc,
+            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val,
+            gpr, bkg_arr_h,
             cfg.n_waves, cfg.n_m0, cfg.n_g0,
             cfg.n_res_per_wave, cfg.n_decays_per_wave,
             cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
@@ -1164,31 +913,13 @@ int main() {
     fwd_e2e /= n_runs;
     printf("  Avg: %8.3f ms\n", fwd_e2e);
 
-    /* ===== [3] Gradient e2e ===== */
-    print_sec("[3] Gradient End-to-End (pwa_grad_wrapper)");
-    double grad_e2e = 0;
-    for (int r = 0; r < n_runs; r++) {
-        cudaEventRecord(es);
-        pwa_grad_wrapper(ctx, gcr, gci, gm0, gg0, gsc,
-            ck, m0h, g0h, delta_m, delta_g, g_val, ap, lam, phi, N_val,
-            gpr, 0.0,
-            cfg.n_waves, cfg.n_m0, cfg.n_g0,
-            cfg.n_res_per_wave, cfg.n_decays_per_wave,
-            cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
-            cfg.n_gamma_points, cfg.n_bf_points,
-            cfg.g_min, cfg.g_delta, cfg.q_min, cfg.q_delta);
-        cudaEventRecord(ee);
-        double t = elapsed_ms(es, ee);
-        grad_e2e += t;
-        printf("  Run %2d: %8.3f ms\n", r+1, t);
-    }
-    grad_e2e /= n_runs;
-    printf("  Avg: %8.3f ms\n", grad_e2e);
+    /* ===== [3] Combined e2e (identical to [2]) ===== */
+    double grad_e2e = fwd_e2e;
 
     /* ===== [4] Kernel-only timing ===== */
     print_sec("[4] Kernel-Only Timing");
 
-    int ev = cfg.n_events, w = cfg.n_waves, maxb = pctx->max_batch_size;
+    int ev = cfg.n_events, w = cfg.n_waves, maxb = pcfg->max_batch_size;
     cdouble *d_ck;   cudaMalloc(&d_ck, w*sizeof(cdouble));
     double *d_m0;    cudaMalloc(&d_m0, cfg.n_m0*sizeof(double));
     double *d_g0;    cudaMalloc(&d_g0, cfg.n_g0*sizeof(double));
@@ -1212,22 +943,22 @@ int main() {
                 d_ck, d_m0, d_g0,
                 delta_m, delta_g, g_val, ap, lam, phi, 0.0,
                 NULL, NULL,  // no weights, no bkg (forward-only)
-                pctx->d_mass_flat + s*(size_t)pctx->mass_stride,
-                pctx->d_q_flat + s*(size_t)pctx->q_stride,
-                pctx->d_angles_flat + s*(size_t)pctx->ang_stride,
-                pctx->d_time_arr + s, pctx->d_frac_arr + s,
-                pctx->d_bw_index, pctx->d_gamma_index, pctx->d_bw_order,
-                pctx->d_bf_index, pctx->d_bf_order,
-                pctx->d_ang_index, pctx->d_ang_k, pctx->d_ang_b,
-                pctx->d_matrix_gamma, pctx->d_matrix_ang,
-                pctx->d_gamma_table, pctx->d_bf_table,
+                pdata->d_mass_flat + s*(size_t)pdata->mass_stride,
+                pdata->d_q_flat + s*(size_t)pdata->q_stride,
+                pdata->d_angles_flat + s*(size_t)pdata->ang_stride,
+                pdata->d_time_arr + s, pdata->d_frac_arr + s,
+                pcfg->d_bw_index, pcfg->d_gamma_index, pcfg->d_bw_order,
+                pcfg->d_bf_index, pcfg->d_bf_order,
+                pcfg->d_ang_index, pcfg->d_ang_k, pcfg->d_ang_b,
+                pcfg->d_matrix_gamma, pcfg->d_matrix_ang,
+                pcfg->d_gamma_table, pcfg->d_bf_table,
                 bs, w, cfg.n_m0, cfg.n_g0,
                 cfg.n_res_per_wave, cfg.n_decays_per_wave,
                 cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
                 cfg.n_gamma_points, cfg.n_bf_points,
-                pctx->mass_stride, pctx->q_stride, pctx->ang_stride,
+                pdata->mass_stride, pdata->q_stride, pdata->ang_stride,
                 cfg.g_min, cfg.g_delta, cfg.q_min, cfg.q_delta,
-                pctx->d_scratch, pctx->per_thread_size);
+                pcfg->d_scratch, pcfg->per_thread_size);
         }
         cudaDeviceSynchronize();
         cudaEventRecord(ee);
@@ -1265,22 +996,22 @@ int main() {
                 d_ck, d_m0, d_g0,
                 delta_m, delta_g, g_val, ap, lam, phi, N_val,
                 d_weights, NULL,
-                pctx->d_mass_flat + s*(size_t)pctx->mass_stride,
-                pctx->d_q_flat + s*(size_t)pctx->q_stride,
-                pctx->d_angles_flat + s*(size_t)pctx->ang_stride,
-                pctx->d_time_arr + s, pctx->d_frac_arr + s,
-                pctx->d_bw_index, pctx->d_gamma_index, pctx->d_bw_order,
-                pctx->d_bf_index, pctx->d_bf_order,
-                pctx->d_ang_index, pctx->d_ang_k, pctx->d_ang_b,
-                pctx->d_matrix_gamma, pctx->d_matrix_ang,
-                pctx->d_gamma_table, pctx->d_bf_table,
+                pdata->d_mass_flat + s*(size_t)pdata->mass_stride,
+                pdata->d_q_flat + s*(size_t)pdata->q_stride,
+                pdata->d_angles_flat + s*(size_t)pdata->ang_stride,
+                pdata->d_time_arr + s, pdata->d_frac_arr + s,
+                pcfg->d_bw_index, pcfg->d_gamma_index, pcfg->d_bw_order,
+                pcfg->d_bf_index, pcfg->d_bf_order,
+                pcfg->d_ang_index, pcfg->d_ang_k, pcfg->d_ang_b,
+                pcfg->d_matrix_gamma, pcfg->d_matrix_ang,
+                pcfg->d_gamma_table, pcfg->d_bf_table,
                 bs, w, cfg.n_m0, cfg.n_g0,
                 cfg.n_res_per_wave, cfg.n_decays_per_wave,
                 cfg.n_bf_types, cfg.n_basis, cfg.n_ang_per_basis,
                 cfg.n_gamma_points, cfg.n_bf_points,
-                pctx->mass_stride, pctx->q_stride, pctx->ang_stride,
+                pdata->mass_stride, pdata->q_stride, pdata->ang_stride,
                 cfg.g_min, cfg.g_delta, cfg.q_min, cfg.q_delta,
-                pctx->d_scratch, pctx->per_thread_size);
+                pcfg->d_scratch, pcfg->per_thread_size);
         }
         cudaDeviceSynchronize();
         cudaEventRecord(ee);
@@ -1350,7 +1081,7 @@ int main() {
     /* ===== [6] Memory transfer ===== */
     print_sec("[6] Memory Transfer Bandwidth");
     size_t pbytes = (size_t)w*sizeof(cdouble)+(size_t)cfg.n_m0*sizeof(double)+(size_t)cfg.n_g0*sizeof(double);
-    size_t dbytes = (size_t)ev*(size_t)(pctx->mass_stride+pctx->q_stride+pctx->ang_stride+2)*sizeof(double);
+    size_t dbytes = (size_t)ev*(size_t)(pdata->mass_stride+pdata->q_stride+pdata->ang_stride+2)*sizeof(double);
     size_t rbytes = (size_t)ev*(sizeof(double)+2*sizeof(cdouble));
     double h2dp=0, h2dd=0, d2hr=0;
     for (int r = 0; r < 10; r++) {
@@ -1403,16 +1134,16 @@ int main() {
     else if (h2d_d2h > 0.2*fwd_e2e) printf("TRANSFER SIGNIFICANT (%.0f%%)\n", 100*h2d_d2h/fwd_e2e);
     else printf("Balanced (kernel=%.0f%%, alloc=%.0f%%, transfer=%.0f%%)\n",
            100*fwd_ker/fwd_e2e, 100*alloc_free/fwd_e2e, 100*h2d_d2h/fwd_e2e);
-    printf("  Scratch buf:  %.1f MB\n", (double)(pctx->max_batch_size*pctx->per_thread_size)/1e6);
+    printf("  Scratch buf:  %.1f MB\n", (double)(pcfg->max_batch_size*pcfg->per_thread_size)/1e6);
 
     /* Cleanup */
     cudaFree(d_po); cudaFree(d_apo); cudaFree(d_amo);
     cudaFree(d_ck); cudaFree(d_m0); cudaFree(d_g0);
     cudaEventDestroy(es); cudaEventDestroy(ee);
-    pwa_destroy_context(ctx);
+    pwa_destroy_data(data_p);
+    pwa_destroy_config(cfg_p);
     free(p_out); free(ap_out); free(am_out); free(gpr);
-    free(gcr); free(gci); free(gm0); free(gg0);
-    free(gdm); free(gdg); free(ggv); free(gap); free(glm); free(gph); free(gnv);
+    free(gcr); free(gci); free(gm0); free(gg0); free(gsc);
     void* all[] = {mf, qf, af, tarr, farr, bwi, gi, bwo, bfi, bfo, ai,
                    ak, ab, mg, ma, gt, bft, ck, m0h, g0h};
     free_data(all, 20);

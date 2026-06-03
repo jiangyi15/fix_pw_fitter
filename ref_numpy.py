@@ -336,10 +336,21 @@ class PWAFitter:
         else:
             grad_N = None
 
-        grad = (grad_ck, grad_m0, grad_g0, grad_N, grad_delta_m, grad_delta_g,
-                grad_g, grad_ap, grad_lam, grad_phi)
+        grads = {
+            'ck':      grad_ck,
+            'm0':      grad_m0,
+            'g0':      grad_g0,
+            'N':       grad_N,
+            'delta_m': grad_delta_m,
+            'delta_g': grad_delta_g,
+            'g':       grad_g,
+            'ap':      grad_ap,
+            'lam':     grad_lam,
+            'phi':     grad_phi,
+        }
 
-        return q_val, grad
+        self._last_p = p
+        return q_val, grads
 
     def interp(self, tables, value, x_min, delta_x):
         # tables  (N_types, interp_points)
@@ -560,7 +571,9 @@ def test_gradients():
     print("=" * 60)
 
     all_passed = True
-    for i, (name, ga, gn) in enumerate(zip(param_names, grad_analytical, grad_numerical)):
+    for i, name in enumerate(param_names):
+        ga = grad_analytical[name]
+        gn = grad_numerical[i]
         if ga is None or gn is None:
             print(f"{name}: skipped (None)")
             continue
@@ -674,7 +687,9 @@ def test_gradients():
     print("=" * 60)
 
     all_passed = True
-    for i, (name, ga, gn) in enumerate(zip(param_names, grad_analytical, grad_numerical)):
+    for i, name in enumerate(param_names):
+        ga = grad_analytical[name]
+        gn = grad_numerical[i]
         if ga is None or gn is None:
             print(f"{name}: skipped (None)")
             continue

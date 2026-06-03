@@ -200,7 +200,7 @@ def main():
     # Warmup run
     print("\n[4] Warmup run...")
     try:
-        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
+        q_gpu, _ = fitter_gpu.compute(params, data_gpu, N)
         q_numpy, grad_numpy = fitter_numpy.compute(params, data, N)
         print("    Warmup completed successfully")
     except Exception as e:
@@ -219,13 +219,13 @@ def main():
     q_diffs = []
     
     for i in range(n_runs):
-        # GPU computation
+        # GPU computation (forward + gradient combined)
         t0 = time.perf_counter()
-        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
+        q_gpu, _ = fitter_gpu.compute(params, data_gpu, N)
         t_gpu = time.perf_counter() - t0
         gpu_times.append(t_gpu)
         
-        # Numpy computation
+        # Numpy computation (forward + gradient)
         t0 = time.perf_counter()
         q_numpy, grad_numpy = fitter_numpy.compute(params, data, N)
         t_numpy = time.perf_counter() - t0
@@ -259,13 +259,10 @@ def main():
     # Try to compare p values by re-running and capturing
     print("\n[6] Detailed comparison of p values...")
     try:
-        p_gpu, q_gpu = fitter_gpu.compute(params, data_gpu, N)
+        q_gpu, _ = fitter_gpu.compute(params, data_gpu, N)
         
-        # For numpy, we need to extract p values
-        # The numpy compute doesn't return p directly, but we can 
-        # call it separately to get intermediate values
-        # Actually, looking at ref_numpy.py, it computes p internally
-        # We'll need to modify PWAFitter to return p or reconstruct it
+        # For numpy, we can access last_p after compute
+        q_numpy, _ = fitter_numpy.compute(params, data, N)
         
         # For now, let's just report that comparison requires modification
         print("    Note: Direct p-value comparison requires extracting intermediate")
@@ -285,11 +282,13 @@ def main():
     print("\n[7] Gradient comparison...")
     param_names = ['ck', 'm0', 'g0', 'N', 'delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
     try:
-        p_gpu, q_gpu, grad_gpu = fitter_gpu.grad(params, data_gpu, N)
+        q_gpu, grad_gpu = fitter_gpu.compute(params, data_gpu, N)
         
         print(f"\n  Parameter gradients (GPU vs Numpy):")
         
-        for i, (name, gg, gn) in enumerate(zip(param_names, grad_gpu, grad_numpy)):
+        for i, name in enumerate(param_names):
+            gg = grad_gpu[name]
+            gn = grad_numpy[name]
             if gg is None or gn is None:
                 print(f"  {name:12s}: skipped")
                 continue
@@ -310,11 +309,13 @@ def main():
     # Gradient comparison with N=None (chi-square mode)
     print("\n[8] Gradient comparison (N=None / chi-square mode)...")
     try:
-        p_gpu0, q_gpu0, grad_gpu0 = fitter_gpu.grad(params, data_gpu, None)
+        q_gpu0, grad_gpu0 = fitter_gpu.compute(params, data_gpu, None)
         q_np0, grad_np0 = fitter_numpy.compute(params, data, None)
         
         print(f"  q_val GPU: {q_gpu0:.10f}, q_val NP: {q_np0:.10f}")
-        for name, gg, gn in zip(param_names, grad_gpu0, grad_np0):
+        for i, name in enumerate(param_names):
+            gg = grad_gpu0[name]
+            gn = grad_np0[name]
             if gg is None and gn is None:
                 print(f"  {name:12s}: skipped (None)")
                 continue
