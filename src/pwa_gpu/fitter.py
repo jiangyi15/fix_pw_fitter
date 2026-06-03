@@ -253,14 +253,34 @@ class PWAFitter:
 
             if N_phsp is not None:
                 norm = N_phsp
+                q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
             else:
-                q_phsp, _ = gpu.compute((ck, mk, gk, *sc), phsp, None)
-                norm = q_phsp / phsp.n_events if phsp.n_events > 0 else 1.0
+                # Step 1: compute norm + gradients from phsp
+                q_phsp, grads_p = gpu.compute((ck, mk, gk, *sc), phsp, None)
+                n_phsp = phsp.n_events
+                norm = q_phsp / n_phsp if n_phsp > 0 else 1.0
 
-            q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
+                # Step 2: compute NLL on data with normalization
+                q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
+
+                # Step 3: combine gradients: ∂J/∂θ += ∂J/∂N * ∂N/∂θ
+                # ∂N/∂θ = (∂q_phsp/∂θ) / N_phsp  (norm = q_phsp / N_phsp)
+                # grad_N = ∂J/∂N from kernel (grad_scalar[6])
+                grad_N = grads_k.get('N', 0)
+                if abs(grad_N) > 0 and n_phsp > 0:
+                    scale = grad_N / n_phsp
+                    grads_k['ck']   += scale * grads_p['ck']
+                    grads_k['m0']   += scale * grads_p['m0']
+                    grads_k['g0']   += scale * grads_p['g0']
+                    for sk in ['delta_m','delta_g','g','ap','lam','phi']:
+                        if sk in grads_k and sk in grads_p:
+                            grads_k[sk] = grads_k.get(sk, 0) + scale * grads_p.get(sk, 0)
+
             nll = -q_data
-            grad_sc = np.array([grads_k[k] for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
-            model_grads = cst.from_kernel(grads_k['ck'], grads_k['m0'], grads_k['g0'], grad_sc)
+            # Negate gradients: nll = -q_data, so ∇nll = -∇q_data
+            grad_sc = np.array([-(grads_k[k] if k in grads_k and grads_k[k] is not None else 0)
+                                for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
+            model_grads = cst.from_kernel(-grads_k['ck'], -grads_k['m0'], -grads_k['g0'], grad_sc)
             grad_flat = cst.pack(model_grads, keys)
             return nll, grad_flat
 
