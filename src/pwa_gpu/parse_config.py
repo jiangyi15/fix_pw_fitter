@@ -989,10 +989,11 @@ def build_kernel_config(pw_list, kw_list, cfg):
         n_perm = 1
         for g in perm_groups:
             n_perm *= len(g)
-    # Each permutation creates independent copies of ALL entries:
-    n_m0 = n_m0_base * n_perm
-    bw_index = np.arange(n_m0, dtype=np.int32)  # identity, permuted blocks
-    n_mass_columns = n_m0
+    # n_m0: number of bwall entries (resonance types × perms × cp)
+    n_cp = 2
+    n_m0 = n_m0_base * n_perm * n_cp
+    n_mass_columns = 48  # 3×4×2×2 = 48 mass columns
+    bw_index = np.arange(n_m0, dtype=np.int32) % n_mass_columns  # map to [0,48)
 
     # --- gamma_index & n_g0: count all g0 parameters per perm ---
     g0_base = []
