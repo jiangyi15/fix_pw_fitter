@@ -23,13 +23,17 @@ from collections import OrderedDict
 # ====================================================================
 
 def blatt_weisskopf(q, L, d=3.0):
-    """Blatt-Weisskopf barrier factor for orbital angular momentum L."""
+    """Blatt-Weisskopf barrier factor F_L(q) = sqrt(P_L(0) / P_L(z)), z = (q*d)².
+    
+    Normalized so F_L(0) = 1.0 for all L (standard convention).
+    P_L polynomials from PDG: P_0=1, P_1=1+z, P_2=9+3z+z², P_3=225+45z+6z²+z³, ...
+    """
     z = (q * d) ** 2
     if L == 0: return 1.0
     if L == 1: return np.sqrt(np.maximum(0., 1.0 / (1.0 + z)))
-    if L == 2: return np.sqrt(np.maximum(0., 1.0 / (z**2 + 3.0*z + 9.0)))
-    if L == 3: return np.sqrt(np.maximum(0., 1.0 / (z**3 + 6.0*z**2 + 45.0*z + 225.0)))
-    if L == 4: return np.sqrt(np.maximum(0., 1.0 / (z**4 + 10.0*z**3 + 135.0*z**2 + 1575.0*z + 11025.0)))
+    if L == 2: return np.sqrt(np.maximum(0., 9.0 / (9.0 + 3.0*z + z**2)))
+    if L == 3: return np.sqrt(np.maximum(0., 225.0 / (225.0 + 45.0*z + 6.0*z**2 + z**3)))
+    if L == 4: return np.sqrt(np.maximum(0., 11025.0 / (11025.0 + 1575.0*z + 135.0*z**2 + 10.0*z**3 + z**4)))
     return 1.0
 
 
@@ -250,7 +254,12 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
 # ====================================================================
 
 def compute_bf_table(cfg, pw_list, kw_list):
-    """Barrier factor interpolation for each bf_type."""
+    """Barrier factor interpolation for each bf_type.
+    
+    Stores BF(q) — the raw Blatt-Weisskopf barrier factor.
+    The BF(q₀) normalization is applied as a g_ls scaling factor
+    (1/BF(q₀) per decay) since tf_pwa's fitted couplings include it.
+    """
     n_bf_types = cfg['n_bf_types']
     n_bf_points = 500
     q_grid = np.linspace(0.0, 3.0, n_bf_points)
