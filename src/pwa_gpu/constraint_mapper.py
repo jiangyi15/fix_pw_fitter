@@ -356,8 +356,22 @@ class ConstraintMapper:
         return [k for k in free if k not in constrained]
 
     def _is_complex_key(self, key):
-        """Check if a parameter key is complex-valued."""
-        return key.startswith('total/') or key.startswith('g_ls/') or key.startswith('g_lsbar/')
+        """Check if a parameter key is complex-valued (a.json naming)."""
+        m = self.mapper
+        # Check against known complex parameter types
+        if key.endswith('_total_0') or '_g_ls_' in key or '_g_lsbar_' in key:
+            return True
+        # Fallback: check against mapper's known keys
+        for k in m.totals:
+            if key == f'{k}_total_0' or key.startswith(k):
+                return True
+        for (dn, ls) in m.gls:
+            if key == f'{dn}_g_ls_{ls}':
+                return True
+        for (dn, ls) in m.glsbar:
+            if key == f'{dn}_g_lsbar_{ls}':
+                return True
+        return False
 
     def pack(self, values_dict, keys=None):
         """Pack selected parameter values into a flat float64 array.
