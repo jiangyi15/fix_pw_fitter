@@ -190,6 +190,7 @@ def convert(config_path, out_dir='converted'):
         p=os.path.normpath(os.path.join(config_dir,p))
         return np.load(p).astype(np.float64)[:n]
     dt=_arr('data_time',nd,1.); dtag=_arr('data_tag1',nd,1.); deta=_arr('data_eta1',nd,0.5); db=_arr('data_bg_value',nd,0.)
+    dw=_arr('data_weight',nd,1.)
     pt=_arr('phsp_time',np_,0.); ptag=_arr('phsp_tag1',np_,1.); peta=_arr('phsp_eta1',np_,0.5)
     pw=_arr('phsp_weight',np_,1.); pb=_arr('phsp_bg_value',np_,0.)
     dfrac=np.where(dtag==0,0.5,np.where(dtag>0,1-deta,deta))
@@ -198,8 +199,8 @@ def convert(config_path, out_dir='converted'):
     os.makedirs(out_dir,exist_ok=True)
     # Save RAW bkg (no purity scaling — done at load time via load_data)
     np.savez(os.path.join(out_dir,'data_arrays.npz'),mass=m_d,q=q_d,angles=a_d,
-             time=dt.ravel(),frac=dfrac.ravel(),bkg_raw=db.ravel(),
-             purity=float(bg_frac),Nb=float(Nb))
+             time=dt.ravel(),frac=dfrac.ravel(),weight=dw.ravel(),
+             bkg_raw=db.ravel(),purity=float(bg_frac),Nb=float(Nb))
     if np_:
         np.savez(os.path.join(out_dir,'phsp_arrays.npz'),mass=m_p,q=q_p,angles=a_p,
                  time=pt.ravel(),frac=pfrac.ravel(),weight=pw.ravel(),
