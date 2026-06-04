@@ -176,16 +176,19 @@ class PWAFitter:
         for res_name in two_pi_resonances:
             if res_name in mapper._res_m0_map:
                 pi = mapper._res_m0_map[res_name]
+                key = f'{res_name}_mass'
                 if pi < len(phys['m0']):
-                    cst.set_fixed(f'm0/{pi}', float(phys['m0'][pi]))
+                    cst.set_fixed(key, float(phys['m0'][pi]))
                 else:
-                    cst.set_fixed(f'm0/{pi}')
+                    cst.set_fixed(key)
             if res_name in mapper._res_g0_map:
-                for pi in mapper._res_g0_map[res_name]:
+                plist = mapper._res_g0_map[res_name]
+                for gi, pi in enumerate(plist):
+                    key = f'{res_name}_width' if len(plist) == 1 else f'{res_name}_g_{gi}'
                     if pi < len(phys['g0']):
-                        cst.set_fixed(f'g0/{pi}', float(phys['g0'][pi]))
+                        cst.set_fixed(key, float(phys['g0'][pi]))
                     else:
-                        cst.set_fixed(f'g0/{pi}')
+                        cst.set_fixed(key)
 
         n = len(two_pi_resonances)
         print(f"  Fixed {n} ππ resonances ({', '.join(sorted(two_pi_resonances)[:5])}...)")
@@ -350,7 +353,7 @@ class PWAFitter:
                         if sk in grads_k and sk in grads_p:
                             grads_k[sk] = grads_k.get(sk, 0) + scale * grads_p.get(sk, 0)
 
-            nll = -q_data + bg_const
+            nll = -q_data - bg_const
             grad_sc = np.array([-(grads_k[k] if k in grads_k and grads_k[k] is not None else 0)
                                 for k in ['delta_m','delta_g','g','ap','lam','phi','N']])
             model_grads = cst.from_kernel(-grads_k['ck'], -grads_k['m0'], -grads_k['g0'], grad_sc)

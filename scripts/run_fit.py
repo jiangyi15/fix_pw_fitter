@@ -71,21 +71,29 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
 
     # Fix reference total and first LS to 1+0j (normalization convention)
     mapper = fitter.mapper
-    for key, n in [('total/0', len(mapper.totals)), ('g_ls/0', len(mapper.gls))]:
-        idx = int(key.split('/')[1])
-        if idx < n:
-            fitter.set_fixed(key, 1.0 + 0.0j)
-            print(f"  Fixed {key} = 1+0j", flush=True)
+    cst = fitter.cst
+    keys = cst.get_free_keys()
+    total_keys = [k for k in keys if k.endswith('_total_0')]
+    if total_keys:
+        fitter.set_fixed(total_keys[0], 1.0 + 0.0j)
+        print(f"  Fixed {total_keys[0]} = 1+0j", flush=True)
+    gls_keys = [k for k in keys if '_g_ls_' in k and '_g_lsbar_' not in k]
+    if gls_keys:
+        fitter.set_fixed(gls_keys[0], 1.0 + 0.0j)
+        print(f"  Fixed {gls_keys[0]} = 1+0j", flush=True)
 
-    # Print free parameters for user reference
+    # Print free parameters for user reference (descriptive names)
     cst = fitter.cst
     free = cst.get_free_keys()
     print(f"  Free parameters: {len(free)}", flush=True)
-    # Print parameter categories
     for cat in ['total', 'g_ls', 'g_lsbar', 'm0', 'g0']:
         cat_keys = [k for k in free if k.startswith(cat+'/')]
         if cat_keys:
-            print(f"    {cat}: {len(cat_keys)}  ({min(cat_keys)}..{max(cat_keys)})", flush=True)
+            print(f"    {cat} ({len(cat_keys)}):")
+            for k in cat_keys[:8]:
+                print(f"      {k}")
+            if len(cat_keys) > 8:
+                print(f"      ... ({len(cat_keys)-8} more)")
     scalar_keys = [k for k in free if not any(k.startswith(p+'/') for p in ['total','g_ls','g_lsbar','m0','g0'])]
     if scalar_keys:
         print(f"    scalars: {scalar_keys}", flush=True)

@@ -114,21 +114,33 @@ class ConstraintMapper:
                     arr[i] = self._resolve(kidx, model_params)
             return arr
 
-        total = phys_arr('total', len(m.totals), lambda i: f'total/{list(m.totals.keys())[i]}')
-        gls = phys_arr('g_ls', len(m.gls), lambda i: f'g_ls/{list(m.gls.keys())[i][0]}/{list(m.gls.keys())[i][1]}')
-        glsbar = phys_arr('g_lsbar', len(m.glsbar), lambda i: f'g_lsbar/{list(m.glsbar.keys())[i][0]}/{list(m.glsbar.keys())[i][1]}')
-        m0 = phys_arr('m0', m.n_m0_phys, lambda i: f'm0/{i}')
-        g0 = phys_arr('g0', m.n_g0_phys, lambda i: f'g0/{i}')
+        total = phys_arr('total', len(m.totals), lambda i: self._total_key(list(m.totals.keys())[i]))
+        gls = phys_arr('g_ls', len(m.gls), lambda i: self._gls_key(*list(m.gls.keys())[i]))
+        glsbar = phys_arr('g_lsbar', len(m.glsbar), lambda i: self._glsbar_key(*list(m.glsbar.keys())[i]))
+        m0_key_to_idx = {}
+        for rname, pidx in m._res_m0_map.items():
+            key = self._m0_key(rname)
+            if key not in m0_key_to_idx: m0_key_to_idx[key] = pidx
+        g0_key_to_idx = {}
+        for rname, plist in m._res_g0_map.items():
+            for gi, pidx in enumerate(plist):
+                key = self._g0_key(rname, plist, gi)
+                if key not in g0_key_to_idx: g0_key_to_idx[key] = pidx
+        m0_keys_list = list(m0_key_to_idx.keys())
+        g0_keys_list = list(g0_key_to_idx.keys())
+        m0 = phys_arr('m0', m.n_m0_phys, lambda i: m0_keys_list[i] if i < len(m0_keys_list) else f'm0_{i}')
+        g0 = phys_arr('g0', m.n_g0_phys, lambda i: g0_keys_list[i] if i < len(g0_keys_list) else f'g0_{i}')
 
+        # a.json scalar key pattern: {top}_{scalar}  (top='B' by convention)
+        _scalar_map = [('B_delta_m', 'delta_m'), ('B_delta_gamma', 'delta_g'),
+                       ('B_gamma', 'g'), ('B_A_prod', 'ap'),
+                       ('B_poqr', 'lam'), ('B_poqi', 'phi')]
+        s = {}
+        for ajkey, skey in _scalar_map:
+            s[skey] = self._resolve(ajkey, model_params)
         return {
             'total': total, 'g_ls': gls, 'g_lsbar': glsbar,
-            'm0': m0, 'g0': g0,
-            'delta_m': self._resolve('delta_m', model_params),
-            'delta_g': self._resolve('delta_g', model_params),
-            'g': self._resolve('g', model_params),
-            'ap': self._resolve('ap', model_params),
-            'lam': self._resolve('lam', model_params),
-            'phi': self._resolve('phi', model_params),
+            'm0': m0, 'g0': g0, **s,
         }
 
     def to_kernel(self, model_params):
@@ -162,11 +174,20 @@ class ConstraintMapper:
             arr = np.zeros_like(phys_grads[ptype])
 
             for i in range(size):
-                # Build the constraint key
-                if ptype == 'total': key = f'total/{list(m.totals.keys())[i]}'
-                elif ptype == 'g_ls': key = f'g_ls/{list(m.gls.keys())[i][0]}/{list(m.gls.keys())[i][1]}'
-                elif ptype == 'g_lsbar': key = f'g_lsbar/{list(m.glsbar.keys())[i][0]}/{list(m.glsbar.keys())[i][1]}'
-                elif ptype in ('m0', 'g0'): key = f'{ptype}/{i}'
+                if ptype == 'total': key = self._total_key(list(m.totals.keys())[i])
+                elif ptype == 'g_ls': key = self._gls_key(*list(m.gls.keys())[i])
+                elif ptype == 'g_lsbar': key = self._glsbar_key(*list(m.glsbar.keys())[i])
+                elif ptype == 'm0':
+                    rname = next((rn for rn, p in m._res_m0_map.items() if p == i), None)
+                    key = self._m0_key(rname) if rname else f'm0_{i}'
+                elif ptype == 'g0':
+                    rname = next((rn for rn, pl in m._res_g0_map.items() if i in pl), None)
+                    if rname:
+                        plist = m._res_g0_map.get(rname, [])
+                        gi = plist.index(i) if i in plist else 0
+                        key = self._g0_key(rname, plist, gi)
+                    else:
+                        key = f'g0_{i}'
                 else: key = ''
 
                 c = self._constraints.get(key, {})
@@ -186,10 +207,12 @@ class ConstraintMapper:
 
             model_grads[ptype] = arr
 
-        # Scalars pass through (unless fixed)
-        for sname in ['delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']:
-            c = self._constraints.get(sname, {})
-            model_grads[sname] = 0 if 'fixed' in c else phys_grads.get(sname, 0)
+        # Scalars: a.json keys {B_delta_m, ...} → model grads
+        _skeys = ['B_delta_m', 'B_delta_gamma', 'B_gamma', 'B_A_prod', 'B_poqr', 'B_poqi']
+        _mnames = ['delta_m', 'delta_g', 'g', 'ap', 'lam', 'phi']
+        for ajkey, mname in zip(_skeys, _mnames):
+            c = self._constraints.get(ajkey, {})
+            model_grads[mname] = 0 if 'fixed' in c else phys_grads.get(mname, 0)
 
         model_grads['N'] = phys_grads.get('N', 0)
 
@@ -197,25 +220,29 @@ class ConstraintMapper:
 
     def _add_to(self, target_key, grad_val, arr, ptype, m):
         """Add a gradient contribution to the appropriate array slot."""
-        parts = target_key.split('/')
         if ptype == 'total':
-            if parts[0] == 'total' and parts[1] in m.totals:
-                arr[m.totals[parts[1]]] += grad_val
+            # key is {name}_total_0
+            for k, v in m.totals.items():
+                if target_key.startswith(f'{k}_total_'):
+                    arr[v] += grad_val; break
         elif ptype == 'g_ls':
-            if len(parts) >= 3:
-                dname, ls = parts[1], int(parts[2])
-                if (dname, ls) in m.gls:
-                    arr[m.gls[(dname, ls)]] += grad_val
+            for (dn, ls), v in m.gls.items():
+                if target_key == f'{dn}_g_ls_{ls}':
+                    arr[v] += grad_val; break
         elif ptype == 'g_lsbar':
-            if len(parts) >= 3:
-                dname, ls = parts[1], int(parts[2])
-                if (dname, ls) in m.glsbar:
-                    arr[m.glsbar[(dname, ls)]] += grad_val
-        elif ptype in ('m0', 'g0'):
-            if len(parts) >= 2:
-                idx = int(parts[1])
-                if idx < len(arr):
-                    arr[idx] += grad_val
+            for (dn, ls), v in m.glsbar.items():
+                if target_key == f'{dn}_g_lsbar_{ls}':
+                    arr[v] += grad_val; break
+        elif ptype == 'm0':
+            for rn, pidx in m._res_m0_map.items():
+                if target_key == f'{rn}_mass':
+                    if pidx < len(arr): arr[pidx] += grad_val; break
+        elif ptype == 'g0':
+            for rn, plist in m._res_g0_map.items():
+                for gi, pidx in enumerate(plist):
+                    expected = f'{rn}_width' if len(plist) == 1 else f'{rn}_g_{gi}'
+                    if target_key == expected:
+                        if pidx < len(arr): arr[pidx] += grad_val; break
 
     # ------------------------------------------------------------------
     # Parameter management (flat array interface for optimization)
@@ -228,13 +255,46 @@ class ConstraintMapper:
         """
         m = self.mapper
         d = {}
-        for k in m.totals: d[f'total/{k}'] = phys_params['total'][m.totals[k]]
-        for (dn, ls), i in m.gls.items(): d[f'g_ls/{dn}/{ls}'] = phys_params['g_ls'][i]
-        for (dn, ls), i in m.glsbar.items(): d[f'g_lsbar/{dn}/{ls}'] = phys_params['g_lsbar'][i]
-        for i in range(m.n_m0_phys): d[f'm0/{i}'] = phys_params['m0'][i]
-        for i in range(m.n_g0_phys): d[f'g0/{i}'] = phys_params['g0'][i]
-        for k in ['delta_m','delta_g','g','ap','lam','phi']: d[k] = phys_params[k]
+        for k in m.totals: d[self._total_key(k)] = phys_params['total'][m.totals[k]]
+        for (dn, ls), i in m.gls.items(): d[self._gls_key(dn, ls)] = phys_params['g_ls'][i]
+        for (dn, ls), i in m.glsbar.items(): d[self._glsbar_key(dn, ls)] = phys_params['g_lsbar'][i]
+        for rname, pidx in m._res_m0_map.items():
+            key = self._m0_key(rname)
+            if key not in d and pidx < len(phys_params['m0']):
+                d[key] = phys_params['m0'][pidx]
+        for rname, plist in m._res_g0_map.items():
+            for gi, pidx in enumerate(plist):
+                key = self._g0_key(rname, plist, gi)
+                if key not in d and pidx < len(phys_params['g0']):
+                    d[key] = phys_params['g0'][pidx]
+        for k, sk in [('B_delta_m','delta_m'),('B_delta_gamma','delta_g'),('B_gamma','g'),
+                       ('B_A_prod','ap'),('B_poqr','lam'),('B_poqi','phi')]:
+            d[k] = phys_params[sk]
         return d
+
+    # ------------------------------------------------------------------
+    # Key naming (a.json convention from save_params)
+    # ------------------------------------------------------------------
+
+    def _total_key(self, name):
+        """a.json key for total coupling: {wave_name}_total_0"""
+        return f'{name}_total_0'
+
+    def _gls_key(self, dname, ls):
+        """a.json key for g_ls: {decay_name}_g_ls_{ls}"""
+        return f'{dname}_g_ls_{ls}'
+
+    def _glsbar_key(self, dname, ls):
+        """a.json key for g_lsbar: {decay_name}_g_lsbar_{ls}"""
+        return f'{dname}_g_lsbar_{ls}'
+
+    def _m0_key(self, res_name):
+        """a.json key for mass: {res_name}_mass"""
+        return f'{res_name}_mass'
+
+    def _g0_key(self, res_name, plist, gi=0):
+        """a.json key for width: {res_name}_width or {res_name}_g_{gi} (Flatte)"""
+        return f'{res_name}_width' if len(plist) == 1 else f'{res_name}_g_{gi}'
 
     def set_complex_format(self, fmt):
         """Set complex parameter encoding: 'rect' (re, im) or 'polar' (mag, phase).
@@ -260,16 +320,39 @@ class ConstraintMapper:
         return z.real, z.imag
 
     def get_free_keys(self):
-        """Return list of free parameter keys (not constrained / not derived)."""
+        """Return list of free parameter keys matching a.json naming.
+        
+        Keys match the save_params output format:
+            {wave_name}_total_0         — production coupling
+            {decay_name}_g_ls_{ls}       — B helicity coupling
+            {decay_name}_g_lsbar_{ls}    — Bbar helicity coupling
+            {res_name}_mass              — resonance mass
+            {res_name}_width             — resonance width
+            {res_name}_g_{i}             — FlatteC coupling
+            B_delta_m, B_delta_gamma, ... — scalars
+        """
         constrained = set(self._constraints.keys())
         m = self.mapper
         free = []
-        for k in m.totals: free.append(f'total/{k}')
-        for (dn, ls) in m.gls: free.append(f'g_ls/{dn}/{ls}')
-        for (dn, ls) in m.glsbar: free.append(f'g_lsbar/{dn}/{ls}')
-        for i in range(m.n_m0_phys): free.append(f'm0/{i}')
-        for i in range(m.n_g0_phys): free.append(f'g0/{i}')
-        for k in ['delta_m','delta_g','g','ap','lam','phi']: free.append(k)
+        for k in m.totals: free.append(self._total_key(k))
+        for (dn, ls) in m.gls: free.append(self._gls_key(dn, ls))
+        for (dn, ls) in m.glsbar: free.append(self._glsbar_key(dn, ls))
+        m0_keys = {}
+        for rname, pidx in m._res_m0_map.items():
+            if pidx not in m0_keys:
+                m0_keys[pidx] = self._m0_key(rname)
+        for pidx in sorted(m0_keys):
+            free.append(m0_keys[pidx])
+        g0_keys = {}
+        for rname, plist in m._res_g0_map.items():
+            for gi, pidx in enumerate(plist):
+                key = self._g0_key(rname, plist, gi)
+                if pidx not in g0_keys:
+                    g0_keys[pidx] = key
+        for pidx in sorted(g0_keys):
+            free.append(g0_keys[pidx])
+        for k in ['B_delta_m', 'B_delta_gamma', 'B_gamma', 'B_A_prod', 'B_poqr', 'B_poqi']:
+            free.append(k)
         return [k for k in free if k not in constrained]
 
     def _is_complex_key(self, key):
@@ -327,24 +410,35 @@ class ConstraintMapper:
         return d
 
     def _get_from_array(self, arr_dict, key):
-        """Extract individual value from array-based grads_dict."""
+        """Extract individual value from array-based grads_dict.
+        
+        Keys follow a.json convention:
+            {name}_total_0, {dname}_g_ls_{ls}, {rname}_mass, ...
+        """
         m = self.mapper
-        if key.startswith('total/'):
-            return arr_dict['total'][m.totals.get(key[6:], 0)]
-        if key.startswith('g_ls/'):
-            p = key[5:].split('/')
-            if len(p) >= 2:
-                return arr_dict['g_ls'][m.gls.get((p[0], int(p[1])), 0)]
-        if key.startswith('g_lsbar/'):
-            p = key[8:].split('/')
-            if len(p) >= 2:
-                return arr_dict['g_lsbar'][m.glsbar.get((p[0], int(p[1])), 0)]
-        if key.startswith('m0/'):
-            idx = int(key[3:])
-            return arr_dict['m0'][idx] if idx < len(arr_dict['m0']) else 0.0
-        if key.startswith('g0/'):
-            idx = int(key[3:])
-            return arr_dict['g0'][idx] if idx < len(arr_dict['g0']) else 0.0
+        for k, v in m.totals.items():
+            if key == f'{k}_total_0':
+                return arr_dict['total'][v]
+        for (dn, ls), v in m.gls.items():
+            if key == f'{dn}_g_ls_{ls}':
+                return arr_dict['g_ls'][v]
+        for (dn, ls), v in m.glsbar.items():
+            if key == f'{dn}_g_lsbar_{ls}':
+                return arr_dict['g_lsbar'][v]
+        for rn, pidx in m._res_m0_map.items():
+            if key == f'{rn}_mass':
+                return arr_dict['m0'][pidx] if pidx < len(arr_dict['m0']) else 0.0
+        for rn, plist in m._res_g0_map.items():
+            for gi, pidx in enumerate(plist):
+                expected = f'{rn}_width' if len(plist) == 1 else f'{rn}_g_{gi}'
+                if key == expected:
+                    return arr_dict['g0'][pidx] if pidx < len(arr_dict['g0']) else 0.0
+        # Scalars: map B_delta_m → delta_m, etc.
+        _scalar_map = {'B_delta_m': 'delta_m', 'B_delta_gamma': 'delta_g',
+                       'B_gamma': 'g', 'B_A_prod': 'ap',
+                       'B_poqr': 'lam', 'B_poqi': 'phi'}
+        if key in _scalar_map and _scalar_map[key] in arr_dict:
+            return arr_dict[_scalar_map[key]]
         if key in arr_dict:
             return arr_dict[key]
         return 0.0
