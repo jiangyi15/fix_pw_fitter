@@ -69,18 +69,47 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         print("Fixing 2π resonances...", flush=True)
         fitter.fix_2pi_resonances()
 
-    # Fix reference total and first LS to 1+0j (normalization convention)
+    # ---- Reference constraints (pw_cfit5_td6_fix29.py) ----
     mapper = fitter.mapper
     cst = fitter.cst
     keys = cst.get_free_keys()
-    total_keys = [k for k in keys if k.endswith('_total_0')]
-    if total_keys:
-        fitter.set_fixed(total_keys[0], 1.0 + 0.0j)
-        print(f"  Fixed {total_keys[0]} = 1+0j", flush=True)
-    gls_keys = [k for k in keys if '_g_ls_' in k and '_g_lsbar_' not in k]
-    if gls_keys:
-        fitter.set_fixed(gls_keys[0], 1.0 + 0.0j)
-        print(f"  Fixed {gls_keys[0]} = 1+0j", flush=True)
+
+    # Fix reference total and first LS to 1+0j
+    for pref, klist in [('total', [k for k in keys if k.endswith('_total_0')]),
+                        ('g_ls', [k for k in keys if k.endswith('_g_ls_0') and '_g_lsbar_' not in k])]:
+        if klist:
+            fitter.set_fixed(klist[0], 1.0 + 0.0j)
+            print(f"  Fixed {klist[0]} = 1+0j", flush=True)
+
+    # Equalize mirror pairs: aX(m) ↔ aX(p) g_ls (CP symmetry)
+    mirror_gls_pairs = [
+        ('a1(1260)m', 'a1(1260)p'), ('a1(1640)m', 'a1(1640)p'),
+        ('a2(1320)m', 'a2(1320)p'), ('pi2(1670)m', 'pi2(1670)p'),
+        ('pi1300m', 'pi1300p'), ('pi1600m', 'pi1600p'),
+        ('pi1(1600)m', 'pi1(1600)p')]
+    for rm, rp in mirror_gls_pairs:
+        for kp in keys:
+            if kp.startswith(f'{rp}->') and '_g_ls_' in kp and '_g_lsbar_' not in kp:
+                km = kp.replace(rp, rm)
+                if km in keys and kp in keys:
+                    # km = -1 * kp (CP sign convention from reference)
+                    cst.set_linear(km, [(kp, -1.0)])
+                    print(f"  Set {kp} = {km} with scale=-1", flush=True)
+
+    # Equalize KMA↔KMB pole/prod parameters
+    for kk in list(keys):
+        if 'KMA_' in kk:
+            kmb = kk.replace('KMA_', 'KMB_')
+            if kmb in keys:
+                fitter.set_equal(kmb, kk)
+                print(f"  Set {kmb} = {kk}", flush=True)
+
+    # Fix K-matrix pole/prod indices 3-5 to 0
+    for fix_key in list(keys):
+        for suffix in ['_pole_3', '_pole_4', '_pole_5', '_prod_3', '_prod_4', '_prod_5']:
+            if suffix in fix_key and ('KMA_' in fix_key or 'KMB_' in fix_key or 'KMC_' in fix_key or 'KM2_' in fix_key):
+                fitter.set_fixed(fix_key, 0.0 + 0.0j)
+                print(f"  Fixed {fix_key} = 0+0j", flush=True)
 
     # Print free parameters for user reference (a.json format)
     cst = fitter.cst
