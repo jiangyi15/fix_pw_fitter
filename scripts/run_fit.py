@@ -243,7 +243,7 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     with open(config_path) as f:
         import yaml; ycfg = yaml.safe_load(f)
     purity = float(ycfg.get('data', {}).get('bg_frac', 1.0))
-    Nb = float(np.sum(phsp_bkg * phsp_w) / max(len(phsp_bkg), 1)) if len(phsp_bkg) > 0 else 1.0
+    Nb = float(np.sum(phsp_bkg * phsp_w) / max(np.sum(phsp_w), 1)) if len(phsp_bkg) > 0 else 1.0
     bg_fraction = max(1.0 - purity, 1e-10)
     bkg_scaled = bkg_raw.astype(np.float64) * (bg_fraction / max(purity, 1e-10) / max(Nb, 1e-30))
 
