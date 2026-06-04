@@ -396,9 +396,26 @@ def expand_physical_waves(cfg):
             pw.chain = [b_step] + full_chain
             pw.resonances = all_resonances
 
-            # Build name
-            res_names = [r.name for r in pw.resonances]
-            pw.name = "B->" + ".".join(res_names)
+            # Build B-level name: for each B daughter, if it has a resonance
+            # use the first resonance name, otherwise use the B daughter name.
+            # This matches a.json convention: "B->{res1}.{res2}" or "B->{res}.{final}".
+            b_level_names = []
+            for bi, d_chain in enumerate(combo):
+                bd_name = b_daughters[bi] if bi < len(b_daughters) else f"d{bi}"
+                if isinstance(d_chain, list) and len(d_chain) > 0:
+                    # Find first non-final entry's resonance name
+                    b_res = None
+                    for entry in d_chain:
+                        en, _, efin = entry[:3] if len(entry) >= 3 else ("", [], True)
+                        if not efin:
+                            b_res = en
+                            break
+                    b_level_names.append(b_res or bd_name)
+                else:
+                    # Final state particle (tuple) - use its name
+                    en = d_chain[0] if isinstance(d_chain, tuple) else bd_name
+                    b_level_names.append(str(en))
+            pw.name = "B->" + ".".join(b_level_names)
 
             # Classify topology
             pw.topology = classify_topology(pw.chain, finals)
