@@ -1232,39 +1232,55 @@ def build_kernel_config(pw_list, kw_list, cfg):
                 if key not in global_terms:
                     global_terms[key] = len(global_terms)
 
-    n_basis = len(global_terms)
+    n_basis_unique = len(global_terms)
     n_angles = 3
+    n_topo = 24  # 3 chains × 4 perms × 2 cp
 
-    # Build shared ang_k, ang_b, ang_index
-    ang_k = np.zeros((n_basis, 3), dtype=np.float64)
-    ang_b = np.zeros((n_basis, 3), dtype=np.float64)
-    # ang_index[i][j]: which angles_flat column for angle j of basis i
-    # We use 3 fixed columns: θ₁=0, θ₂=1, φ=2
-    ang_index = np.tile(np.array([0, 1, 2], dtype=np.int32), (n_basis, 1))
+    # Replicate basis for each topology: each has its own angle columns
+    n_basis = n_basis_unique * n_topo
+    ang_k = np.zeros((n_basis, n_angles), dtype=np.float64)
+    ang_b = np.zeros((n_basis, n_angles), dtype=np.float64)
+    ang_index = np.zeros((n_basis, n_angles), dtype=np.int32)
 
     for (k1, k2, k3, b1, b2, b3), idx in global_terms.items():
-        ang_k[idx] = [k1, k2, k3]
-        ang_b[idx] = [b1, b2, b3]
+        for topo in range(n_topo):
+            dst = topo * n_basis_unique + idx
+            ang_k[dst] = [k1, k2, k3]
+            ang_b[dst] = [b1, b2, b3]
+            ang_index[dst] = [topo * 3, topo * 3 + 1, topo * 3 + 2]
 
-    # Build matrix_ang by mapping per-wave basis terms to global indices
+    # Build matrix_ang: each wave writes to its topology's basis block
     matrix_ang = np.zeros((n_waves, n_basis), dtype=np.complex128)
+    # Determine wave count per bar group for perm/cp indexing
+    n_b = sum(1 for kk in kw_list if not kk.is_bar)
+    n_bar = sum(1 for kk in kw_list if kk.is_bar)
+    cnt = {'b': 0, 'bar': 0}
 
     for kw in kw_list:
         pw = next((p for p in pw_list if p.id == kw.pw_id), None)
         if not pw or pw.topology_key not in formula_bases:
-            continue
+            if kw.is_bar: cnt['bar'] += 1; continue
+            cnt['b'] += 1; continue
         basis = formula_bases[pw.topology_key]
+        is_bar = kw.is_bar
+        idx_in_group = cnt['bar'] if is_bar else cnt['b']
+        perm_idx = idx_in_group // (n_bar if is_bar else n_b)
+        topo = 0  # chain (simplified: all treated as chain 0)
+        cp_idx = 1 if is_bar else 0
+        topo_idx = topo * 8 + perm_idx * 2 + cp_idx
+        topo_off = topo_idx * n_basis_unique
 
-        # If kw has explicit ag_matrix_entry (per-LS basis terms), use them
         if kw.ag_matrix_entry:
             for local_idx, coeff in kw.ag_matrix_entry:
-                # Map local term index to global index
                 if local_idx < len(basis.terms):
                     ks, bs, _ = basis.terms[local_idx]
                     gkey = (ks[0], ks[1], ks[2], bs[0], bs[1], bs[2])
                     gidx = global_terms.get(gkey, None)
                     if gidx is not None:
-                        matrix_ang[kw.id, gidx] = coeff
+                        matrix_ang[kw.id, topo_off + gidx] = coeff
+
+        if is_bar: cnt['bar'] += 1
+        else: cnt['b'] += 1
 
     # --- matrix_gamma: width mixing (n_m0 × n_g0) ---
     # Identity per permutation block, repeated n_perm times
@@ -1392,27 +1408,10 @@ def build_kernel_config(pw_list, kw_list, cfg):
             for wi in wi_bar:
                 w = dict(wi); w['perm'] = perm; wave_info.append(w)
 
-        ang_stride_total = 3 * n_perm
-        n_waves = len(wave_info)
-        n_bf_types = len(bf_index)
+        ang_stride_total = n_topo * 3
+
     else:
-        bw_order = bw_order_base
-        bf_order_arr = bf_order
-        ang_index_arr = ang_index
-        wi_b = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
-                 'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                 'ck_formula': kw.ck_formula,
-                 'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
-                 'ag_nnz': len(kw.ag_matrix_entry)}
-                for kw in kw_b]
-        wi_bar = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
-                   'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                   'ck_formula': kw.ck_formula,
-                   'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
-                   'ag_nnz': len(kw.ag_matrix_entry)}
-                  for kw in kw_bar]
-        wave_info = wi_b + wi_bar
-        ang_stride_total = 3
+        ang_stride_total = n_topo * 3
         n_waves = n_waves_base
 
     config = {
