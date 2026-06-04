@@ -35,18 +35,21 @@ class ParamMapper:
 
         for w in wave_info:
             formula = []
-            for typ, name, ls_idx in w['ck_formula']:
+            full_keys = w.get('ck_full_keys',
+                              [name for typ, name, _ in w['ck_formula']])
+            for fi, (typ, name, ls_idx) in enumerate(w['ck_formula']):
+                full_key = full_keys[fi] if fi < len(full_keys) else name
                 if typ == 'total':
-                    if name not in self.totals:
-                        self.totals[name] = len(self.totals)
-                    formula.append(('total', self.totals[name]))
+                    if full_key not in self.totals:
+                        self.totals[full_key] = len(self.totals)
+                    formula.append(('total', self.totals[full_key]))
                 elif typ == 'g_ls':
-                    key = (name, ls_idx)
+                    key = (full_key, ls_idx)
                     if key not in self.gls:
                         self.gls[key] = len(self.gls)
                     formula.append(('g_ls', self.gls[key]))
                 elif typ == 'g_lsbar':
-                    key = (name, ls_idx)
+                    key = (full_key, ls_idx)
                     if key not in self.glsbar:
                         self.glsbar[key] = len(self.glsbar)
                     formula.append(('g_lsbar', self.glsbar[key]))
@@ -372,56 +375,29 @@ def _load_params_impl(json_path, mapper, config_path=None):
         return mag * np.exp(1j * phase)
 
     # --- total couplings ---
-    # JSON: {B_decay_chain}_total_0{r|i} where B_decay_chain starts with
-    # 'B->{res1}.{B_level_daughter}' where res1 is the cascade resonance.
-    # The mapper uses 'B->{res1}.{res2}' with the sub-resonance.
-    # We match by the first resonance (res1) which is always the cascade
-    # resonance in the JSON key.
+    # mapper.totals keys are now the full chain name (e.g.
+    # "B->rhoA.rhoBrhoA->pip1.pim1rhoB->pip2.pim2"), matching a.json exactly.
     total_arr = np.zeros(len(mapper.totals), dtype=np.complex128)
     for tname, tidx in mapper.totals.items():
-        # Get first resonance name (before first '.')
-        dot_pos = tname.find('.')
-        prefix = tname if dot_pos < 0 else tname[:dot_pos]
-        for jkey in data:
-            if jkey.startswith(prefix) and '_total_0' in jkey:
-                base_key = jkey[:-1]  # strip r or i
-                total_arr[tidx] = get_complex(base_key)
-                break
+        base_key = f'{tname}_total_0'
+        if base_key + 'r' in data:
+            total_arr[tidx] = get_complex(base_key)
 
     # --- g_ls ---
-    # JSON patterns:
-    #   B-level:   'B->{d1}.{d2}_g_ls_{idx}{r|i}'  → dname='B'
-    #   Sub-decay: '{parent}->{d1}.{d2}_g_ls_{idx}{r|i}' → dname='{parent}'
-    # We match by checking the decay parent name (before '->').
+    # mapper.gls keys are now the full prefix (e.g. "B->rhoA.rhoB" for B-level
+    # or "rhoA->pip1.pim1" for sub-decay), matching a.json exactly.
     gls_arr = np.zeros(len(mapper.gls), dtype=np.complex128)
-    for (dname, ls_idx), gidx in mapper.gls.items():
-        pat = f'_g_ls_{ls_idx}'
-        for jkey in data:
-            if '_g_lsbar_' in jkey:
-                continue
-            if pat not in jkey:
-                continue
-            # Extract the decay parent from JSON key
-            prefix = jkey.split(pat)[0]
-            # prefix is like 'B->a2(1320)p.pim2' or 'a2(1320)p->rhoA.pip2'
-            # The decay parent is the part before '->' (or the whole string if no '->')
-            parent = prefix.split('->')[0] if '->' in prefix else prefix
-            if parent == dname:
-                gls_arr[gidx] = get_complex(f'{prefix}_g_ls_{ls_idx}')
-                break
+    for (full_prefix, ls_idx), gidx in mapper.gls.items():
+        base_key = f'{full_prefix}_g_ls_{ls_idx}'
+        if base_key + 'r' in data:
+            gls_arr[gidx] = get_complex(base_key)
 
     # --- g_lsbar ---
     glsbar_arr = np.zeros(len(mapper.glsbar), dtype=np.complex128)
-    for (dname, ls_idx), gidx in mapper.glsbar.items():
-        pat = f'_g_lsbar_{ls_idx}'
-        for jkey in data:
-            if pat not in jkey:
-                continue
-            prefix = jkey.split(pat)[0]
-            parent = prefix.split('->')[0] if '->' in prefix else prefix
-            if parent == dname:
-                glsbar_arr[gidx] = get_complex(f'{prefix}_g_lsbar_{ls_idx}')
-                break
+    for (full_prefix, ls_idx), gidx in mapper.glsbar.items():
+        base_key = f'{full_prefix}_g_lsbar_{ls_idx}'
+        if base_key + 'r' in data:
+            glsbar_arr[gidx] = get_complex(base_key)
 
     # --- m0/g0 from config YAML particle section ---
     m0_arr = np.zeros(mapper.n_m0_phys, dtype=np.float64)

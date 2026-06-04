@@ -1308,6 +1308,56 @@ def build_kernel_config(pw_list, kw_list, cfg):
     kw_b = [kw for kw in kw_list if not kw.is_bar]
     kw_bar = [kw for kw in kw_list if kw.is_bar]
 
+    # --- Helper: compute full a.json-style keys for a kernel wave ---
+    def _compute_ck_full_keys(kw, pw_list):
+        """Build full a.json prefix for each ck_formula entry.
+        
+        For a physical wave pw with chain:
+          [B→[rhoA, rhoB], rhoA→[pip1, pim1], rhoB→[pip2, pim2]]
+        and pw.name = "B->rhoA.rhoB":
+        
+        Full chain name (for total):
+          "B->rhoA.rhoB" + "rhoA->pip1.pim1" + "rhoB->pip2.pim2"
+          = "B->rhoA.rhoBrhoA->pip1.pim1rhoB->pip2.pim2"
+        
+        B-level g_ls prefix = pw.name = "B->rhoA.rhoB"
+        Sub-decay g_ls prefix = f'{parent}->{d1}.{d2}' = "rhoA->pip1.pim1"
+        """
+        pw = next((p for p in pw_list if p.id == kw.pw_id), None)
+        if pw is None:
+            return [name for typ, name, _ in kw.ck_formula]
+        
+        # Build full chain name (for total coupling)
+        chain_parts = [pw.name]
+        for step in pw.chain[1:]:
+            if step.daughters:
+                chain_parts.append(f'{step.parent}->{".".join(step.daughters)}')
+        full_name = ''.join(chain_parts)
+        
+        # Build sub-decay prefixes: parent -> f'{parent}->{d1}.{d2}'
+        sub_prefixes = {}
+        for step in pw.chain[1:]:
+            if step.daughters:
+                sub_prefixes[step.parent] = f'{step.parent}->{".".join(step.daughters)}'
+        
+        top_name = pw.chain[0].parent if pw.chain else 'B'
+        
+        full_keys = []
+        for typ, name, ls_idx in kw.ck_formula:
+            if typ == 'total':
+                full_keys.append(full_name)
+            elif typ in ('g_ls', 'g_lsbar'):
+                if name == top_name:
+                    # B-level: use the B-chain prefix
+                    full_keys.append(pw.name)
+                elif name in sub_prefixes:
+                    full_keys.append(sub_prefixes[name])
+                else:
+                    full_keys.append(name)
+            else:
+                full_keys.append(name)
+        return full_keys
+
     if n_perm > 1:
         def shift_bw(x, perm): return x + perm * n_m0_base
         def shift_bf(x, perm): return x + perm * n_bf_types_base
@@ -1324,11 +1374,15 @@ def build_kernel_config(pw_list, kw_list, cfg):
         # wave_info: group by B/Bbar then by perm
         wi_b = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
                  'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                 'ck_formula': kw.ck_formula, 'ag_nnz': len(kw.ag_matrix_entry)}
+                 'ck_formula': kw.ck_formula,
+                 'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
+                 'ag_nnz': len(kw.ag_matrix_entry)}
                 for kw in kw_b]
         wi_bar = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
                    'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                   'ck_formula': kw.ck_formula, 'ag_nnz': len(kw.ag_matrix_entry)}
+                   'ck_formula': kw.ck_formula,
+                   'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
+                   'ag_nnz': len(kw.ag_matrix_entry)}
                   for kw in kw_bar]
         wave_info = []
         for perm in range(n_perm):
@@ -1347,11 +1401,15 @@ def build_kernel_config(pw_list, kw_list, cfg):
         ang_index_arr = ang_index
         wi_b = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
                  'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                 'ck_formula': kw.ck_formula, 'ag_nnz': len(kw.ag_matrix_entry)}
+                 'ck_formula': kw.ck_formula,
+                 'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
+                 'ag_nnz': len(kw.ag_matrix_entry)}
                 for kw in kw_b]
         wi_bar = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),
                    'pw_id': kw.pw_id, 'is_bar': kw.is_bar,
-                   'ck_formula': kw.ck_formula, 'ag_nnz': len(kw.ag_matrix_entry)}
+                   'ck_formula': kw.ck_formula,
+                   'ck_full_keys': _compute_ck_full_keys(kw, pw_list),
+                   'ag_nnz': len(kw.ag_matrix_entry)}
                   for kw in kw_bar]
         wave_info = wi_b + wi_bar
         ang_stride_total = 3

@@ -82,19 +82,33 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         fitter.set_fixed(gls_keys[0], 1.0 + 0.0j)
         print(f"  Fixed {gls_keys[0]} = 1+0j", flush=True)
 
-    # Print free parameters for user reference (descriptive names)
+    # Print free parameters for user reference (a.json format)
     cst = fitter.cst
     free = cst.get_free_keys()
     print(f"  Free parameters: {len(free)}", flush=True)
+
+    def _categorize(key):
+        if key.endswith('_total_0'):
+            return 'total'
+        if '_g_lsbar_' in key:
+            return 'g_lsbar'
+        if '_g_ls_' in key:
+            return 'g_ls'
+        if key.endswith('_mass'):
+            return 'm0'
+        if key.endswith('_width') or '_g_' in key:
+            return 'g0'
+        return 'scalar'
+
     for cat in ['total', 'g_ls', 'g_lsbar', 'm0', 'g0']:
-        cat_keys = [k for k in free if k.startswith(cat+'/')]
+        cat_keys = [k for k in free if _categorize(k) == cat]
         if cat_keys:
             print(f"    {cat} ({len(cat_keys)}):")
             for k in cat_keys[:8]:
                 print(f"      {k}")
             if len(cat_keys) > 8:
                 print(f"      ... ({len(cat_keys)-8} more)")
-    scalar_keys = [k for k in free if not any(k.startswith(p+'/') for p in ['total','g_ls','g_lsbar','m0','g0'])]
+    scalar_keys = [k for k in free if _categorize(k) == 'scalar']
     if scalar_keys:
         print(f"    scalars: {scalar_keys}", flush=True)
 
