@@ -250,7 +250,14 @@ def compute_gamma_table(cfg, pw_list, kw_list, config_path):
 # ====================================================================
 
 def compute_bf_table(cfg, pw_list, kw_list):
-    """Barrier factor interpolation for each bf_type."""
+    """Barrier factor interpolation for each bf_type.
+    
+    Stores q^L / √P_L(z) = q^L × BF(q) where BF(q) is the raw
+    Blatt-Weisskopf penetrability. The q^L factor accounts for the
+    centrifugal barrier, matching tf_pwa's barrier_factor convention:
+        barrier = q^L × Bprime(L, q, q0, d)
+    where Bprime = √(P_L(z₀)/P_L(z)).
+    """
     n_bf_types = cfg['n_bf_types']
     n_bf_points = 500
     q_grid = np.linspace(0.0, 3.0, n_bf_points)
@@ -268,7 +275,8 @@ def compute_bf_table(cfg, pw_list, kw_list):
     for bf_idx in range(n_bf_types):
         base_idx = bf_idx % (max(bf_type_to_L.keys()) + 1) if bf_type_to_L else 0
         L = bf_type_to_L.get(base_idx, 0)
-        bf_table[bf_idx] = blatt_weisskopf(q_grid, L, 3.0)
+        # q^L * BF(q) where BF(q) = 1/√P_L(z)
+        bf_table[bf_idx] = q_grid**L * blatt_weisskopf(q_grid, L, 3.0)
 
     return bf_table, 0.0, q_delta, n_bf_points
 
