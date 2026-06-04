@@ -214,9 +214,9 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     n_free = len(x0)
 
     # Print initial parameter values
-    print(f"\nInitial parameters ({n_free} free params, {len(free_keys)} keys):", flush=True)
+    print(f"\nInitial parameters ({n_free} free components, {len(free_keys)} keys):", flush=True)
     idx = 0
-    for ki, key in enumerate(free_keys[:20]):  # first 20 keys
+    for ki, key in enumerate(free_keys):
         if cst._is_complex_key(key):
             z = cst._to_complex(x0[idx], x0[idx+1])
             print(f"  {key:55s} = {abs(z):.4f} * exp({np.angle(z):.4f}i)",
@@ -225,8 +225,6 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         else:
             print(f"  {key:55s} = {x0[idx]:.6f}", flush=True)
             idx += 1
-    if len(free_keys) > 20:
-        print(f"  ... ({len(free_keys)-20} more)", flush=True)
 
     def nll_wrapped(x):
         """Apply boundary transforms before calling the GPU fit function."""
