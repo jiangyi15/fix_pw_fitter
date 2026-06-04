@@ -336,16 +336,16 @@ class PWAFitter:
             else:
                 # Step 1: compute norm + gradients from phsp
                 q_phsp, grads_p = gpu.compute((ck, mk, gk, *sc), phsp, None)
-                n_phsp = phsp.n_events
-                norm = q_phsp / n_phsp if n_phsp > 0 else 1.0
+                sum_w = float(np.sum(phsp.weights)) if hasattr(phsp, 'weights') else phsp.n_events
+                norm = q_phsp / sum_w if sum_w > 0 else 1.0
 
                 # Step 2: compute NLL on data with normalization
                 q_data, grads_k = gpu.compute((ck, mk, gk, *sc), data, norm)
 
                 # Step 3: combine gradients: ∂J/∂θ += ∂J/∂N * ∂N/∂θ
                 grad_N = grads_k.get('N', 0)
-                if abs(grad_N) > 0 and n_phsp > 0:
-                    scale = grad_N / n_phsp
+                if abs(grad_N) > 0 and sum_w > 0:
+                    scale = grad_N / sum_w
                     grads_k['ck']   += scale * grads_p['ck']
                     grads_k['m0']   += scale * grads_p['m0']
                     grads_k['g0']   += scale * grads_p['g0']

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Convert data via tf_pwa's config loader — uses config.get_data(name).
+Convert raw 4‑momenta → pwa_gpu arrays via tf_pwa.
 
-Reads data file paths from config.yml, loads/preprocesses via
-ConfigLoader, extracts masses/q/angles from the preprocessed data dict
-using tensor.numpy(), saves .npz for the GPU pipeline.
+Uses ConfigLoader for model init (extra_amp, strip preprocessor),
+then loads raw .npy 4‑momenta in batches and calls
+cal_angle_from_momentum + data_to_numpy per batch to avoid OOM.
 
 Usage:
     python convert_with_tfpwa.py config_angle.yml --out converted/
@@ -16,44 +16,42 @@ from collections import OrderedDict
 
 
 def convert(config_path, out_dir='converted',
-            n_data_max=None, n_phsp_max=None):
-    """Load via config.get_data(), extract & save as .npz."""
+            n_data_max=None, n_phsp_max=None, batch_size=10000):
+    """Load 4‑momenta in batches → extract arrays → save .npz."""
+
     config_dir = os.path.dirname(os.path.abspath(config_path))
     sys.path.insert(0, config_dir)
     sys.path.insert(0, '/mnt/e/github/tf-pwa')
 
-    # ---- Register project-specific models & preprocessors ----
     import extra_amp  # registers gls_cpv_aabar etc.
-
     from tf_pwa.amp.preprocess import register_preprocessor, BasePreProcessor
     @register_preprocessor("strip")
     class _StripStub(BasePreProcessor):
-        """Minimal strip that keeps all data."""
-        def call(self, x, **kwargs):
-            return x
+        def call(self, x, **kwargs): return x
 
     from tf_pwa.config_loader import ConfigLoader
-    from tf_pwa.data import data_to_numpy, data_shape, data_split, data_merge, data_index
+    from tf_pwa.cal_angle import cal_angle_from_momentum
+    from tf_pwa.data import data_to_numpy, data_shape
+    from tf_pwa.particle import BaseParticle
     import tensorflow as tf
 
-    # ---- Parse YAML & pwa_gpu structure ----
+    # ---- Parse YAML & structure ----
     with open(config_path) as f:
         ycfg = yaml.safe_load(f)
 
     from pwa_gpu.parse_config import (
         parse_config, get_finals, get_top, get_mass_key
     )
-    finals_list = get_finals(ycfg)
-    finals_set  = set(finals_list)
-    top_name    = get_top(ycfg)
-    dat_order   = ycfg.get('data', {}).get('dat_order', finals_list)
+    finals_list = get_finals(ycfg); finals_set = set(finals_list)
+    top_name = get_top(ycfg)
+    dat_order = ycfg.get('data', {}).get('dat_order', finals_list)
     ident_particles = ycfg.get('data', {}).get('identical_particles', [])
-    bg_frac     = ycfg.get('data', {}).get('bg_frac', 0.0)
-    data_sec    = ycfg.get('data', {})
+    bg_frac = ycfg.get('data', {}).get('bg_frac', 0.0)
+    data_sec = ycfg.get('data', {})
 
     cfg, pw_list, kw_list = parse_config(config_path)
 
-    # ---- Permutations from config ----
+    # ---- Permutations ----
     perms = [{}]
     if ident_particles:
         groups = [list(itertools.permutations(g)) for g in ident_particles]
@@ -65,50 +63,41 @@ def convert(config_path, out_dir='converted',
             if swap: perms.append(swap)
     n_perm = len(perms)
 
-    # ---- Column mapping (matching build_kernel_config) ----
+    # ---- Column mapping ----
     res_name_to_bwall = OrderedDict()
-    bwall_key_to_idx  = OrderedDict()
     for pw in pw_list:
         for res in pw.resonances:
             if res.name in res_name_to_bwall: continue
             mk = get_mass_key(res.name, pw, finals_set, ident_groups=None)
-            key = (mk, res.mass, res.width, res.model)
-            if key not in bwall_key_to_idx:
-                bwall_key_to_idx[key] = len(bwall_key_to_idx)
-            res_name_to_bwall[res.name] = bwall_key_to_idx[key]
-    n_m0_base = len(bwall_key_to_idx)
+            res_name_to_bwall[res.name] = len(res_name_to_bwall)
+    n_m0_base = len(res_name_to_bwall)
 
     q_entries = OrderedDict()
     for pw in pw_list:
         for step in pw.chain:
             if step.daughters:
-                qkey = (step.parent, tuple(sorted(step.daughters)))
-                if qkey not in q_entries:
-                    q_entries[qkey] = len(q_entries)
+                q_entries[(step.parent, tuple(sorted(step.daughters)))] = \
+                    len(q_entries)
     q_stride_base = len(q_entries)
 
-    print(f"n_m0={n_m0_base}×{n_perm}={n_m0_base*n_perm}, "
-          f"n_q={q_stride_base}×{n_perm}={q_stride_base*n_perm}", flush=True)
+    print(f"n_m0={n_m0_base}*{n_perm}={n_m0_base*n_perm}, "
+          f"n_q={q_stride_base}*{n_perm}={q_stride_base*n_perm}", flush=True)
 
-    # ---- Resonance → final-daughters map ----
-    particle_sec = ycfg.get('particle', {})
-    decay_sec    = ycfg.get('decay', {})
-
+    # ---- Resonance → final-daughters ----
     def get_final_daus(name, visited=None):
         if visited is None: visited = set()
         if name in visited or name in finals_set:
             return [name] if name in finals_set else []
         visited.add(name)
-        if name in decay_sec:
-            daus = [x for x in decay_sec[name] if isinstance(x, str)]
-            if daus:
-                out = []
-                for d in daus: out.extend(get_final_daus(d, visited))
-                return out
+        daus = [x for x in ycfg['decay'].get(name, []) if isinstance(x, str)]
+        if daus:
+            out = []
+            for d in daus: out.extend(get_final_daus(d, visited))
+            return out
         return []
 
     inter_of_res = {}
-    for name, props in particle_sec.items():
+    for name, props in ycfg.get('particle', {}).items():
         if isinstance(props, list):
             for p in props:
                 if isinstance(p, str): inter_of_res[p] = name
@@ -118,185 +107,182 @@ def convert(config_path, out_dir='converted',
         for res in pw.resonances:
             if res.name in res_daughters: continue
             inter = inter_of_res.get(res.name)
-            src = inter or res.name
-            fd = get_final_daus(src)
+            fd = get_final_daus(inter or res.name)
             if fd: res_daughters[res.name] = sorted(set(fd))
 
-    # ---- Build tf_pwa name -> our resonance map ----
-    # tf_pwa composites: "(d1, d2, ...)" with sorted daughters
+    # ---- tf_pwa composite name → our resonance ----
     tfname_to_res = {}
     for rname, fd in res_daughters.items():
         tfname_to_res["(" + ", ".join(sorted(fd)) + ")"] = rname
-    for f in finals_list:
-        tfname_to_res[f] = f
+    for f in finals_list: tfname_to_res[f] = f
     tfname_to_res[top_name] = top_name
 
-    # ---- Initialize ConfigLoader (this loads data) ----
+    # ---- Initialize ConfigLoader & get decay_group ----
     print("Initializing ConfigLoader...", flush=True)
     t0 = time.time()
-    # Use CPU for large datasets
-    with tf.device('cpu'):
-        config = ConfigLoader(config_path)
+    config = ConfigLoader(config_path)
+    decay_group = config.get_decay()
     print(f"  ready ({time.time()-t0:.1f}s)", flush=True)
 
-    # ---- Extract arrays from tf_pwa data dict ----
-    def extract_arrays(np_data, n_ev):
-        """Return (mass_block, q_block, angles_block) from tf_pwa data."""
-
-        # mass_flat: match composite particle keys
-        m_block = np.zeros((n_ev, n_m0_base), dtype=np.float64)
+    # ---- Extract arrays from a single batch ----
+    def extract_from_batch(np_data, n_ev):
+        """Return (mass_block, q_block, angles_block) from one batch."""
+        m = np.zeros((n_ev, n_m0_base), dtype=np.float64)
         for pk in np_data.get('particle', {}):
             pname = str(pk)
             if pname in tfname_to_res:
-                rname = tfname_to_res[pname]
-                if rname in res_name_to_bwall:
-                    col = res_name_to_bwall[rname]
-                    m_block[:, col] = np.asarray(
-                        np_data['particle'][pk]['m']).ravel()
+                rn = tfname_to_res[pname]
+                if rn in res_name_to_bwall:
+                    m[:, res_name_to_bwall[rn]] = \
+                        np.asarray(np_data['particle'][pk]['m']).ravel()
 
-        # q_flat: match by daughter set
-        q_block = np.zeros((n_ev, q_stride_base), dtype=np.float64)
+        q = np.zeros((n_ev, q_stride_base), dtype=np.float64)
         for (parent, daughters), col in q_entries.items():
-            dau_set = frozenset(daughters)
-            for dc_val in np_data.get('decay', {}).values():
-                for dec_key, dec_val in dc_val.items():
-                    if frozenset(str(o) for o in dec_key.outs) == dau_set \
-                       and '|q|2' in dec_val:
-                        q2 = np.asarray(dec_val['|q|2']).ravel()
-                        q_block[:, col] = np.sqrt(np.clip(q2, 0, None))
+            ds = frozenset(daughters)
+            for dc in np_data.get('decay', {}).values():
+                for dk, dv in dc.items():
+                    if frozenset(str(o) for o in dk.outs) == ds \
+                       and '|q|2' in dv:
+                        q[:, col] = np.sqrt(np.clip(
+                            np.asarray(dv['|q|2']).ravel(), 0, None))
                         break
                 else: continue
                 break
 
-        # angles: helicity angles from sub-decay daughters
-        ab_pairs = []
-        for dc_val in np_data.get('decay', {}).values():
-            for dec_key, dec_val in dc_val.items():
-                out0 = dec_key.outs[0]
-                if out0 in dec_val and isinstance(dec_val[out0], dict) \
-                   and 'ang' in dec_val[out0]:
-                    ang = dec_val[out0]['ang']
-                    a = np.asarray(ang['alpha']).ravel()
-                    b = np.asarray(ang['beta']).ravel()
+        ab = []
+        for dc in np_data.get('decay', {}).values():
+            for dk, dv in dc.items():
+                o0 = dk.outs[0]
+                if o0 in dv and isinstance(dv[o0], dict) and 'ang' in dv[o0]:
+                    a = np.asarray(dv[o0]['ang']['alpha']).ravel()
+                    b = np.asarray(dv[o0]['ang']['beta']).ravel()
                     if a.size == n_ev and b.size == n_ev:
-                        ab_pairs.append((a, b))
+                        ab.append((a, b))
 
-        theta1 = np.zeros(n_ev)
-        theta2 = np.zeros(n_ev)
-        phi    = np.zeros(n_ev)
+        t1 = np.zeros(n_ev); t2 = np.zeros(n_ev); ph = np.zeros(n_ev)
+        if len(ab) >= 4: i1, i2 = 2, 3
+        elif len(ab) >= 2: i1, i2 = 0, 1
+        else: return m, q, np.zeros((n_ev, 3))
+        t1[:] = ab[i1][1]; t2[:] = ab[i2][1]
+        p = ab[i1][0] - ab[i2][0]
+        ph[:] = np.arctan2(np.sin(p), np.cos(p))
+        return m, q, np.column_stack([t1, t2, ph])
 
-        # Sub-decay angles are usually at indices 2/3 (after B→S1, B→S2)
-        if len(ab_pairs) >= 4:
-            i1, i2 = 2, 3
-        elif len(ab_pairs) >= 2:
-            i1, i2 = 0, 1
-        else:
-            return m_block, q_block, np.zeros((n_ev, 3))
+    # ---- Load & process one dataset ----
+    def process_dataset(field, n_max):
+        """Load raw .npy files, batch through cal_angle_from_momentum."""
+        flist = data_sec.get(field) or data_sec.get(
+            field.replace('data','dataall'), [])
+        if isinstance(flist, str): flist = [flist]
 
-        theta1 = ab_pairs[i1][1]
-        theta2 = ab_pairs[i2][1]
-        p_diff = ab_pairs[i1][0] - ab_pairs[i2][0]
-        phi    = np.arctan2(np.sin(p_diff), np.cos(p_diff))
+        p4_data = None
+        for fn in flist:
+            fn = os.path.normpath(os.path.join(config_dir, fn))
+            p4 = np.load(fn).astype(np.float64)
+            if p4.ndim == 3 and p4.shape[1] == len(dat_order):
+                d = {n: p4[:, i, :] for i, n in enumerate(dat_order)}
+            else:
+                raise ValueError(f"Bad shape {p4.shape}")
+            if p4_data is None: p4_data = d
+            else:
+                for k in d: p4_data[k] = np.concatenate([p4_data[k], d[k]])
 
-        return m_block, q_block, np.column_stack([theta1, theta2, phi])
-
-    # ---- Load data via config.get_data() ----
-    def load_from_config(name, n_max):
-        """Use config.get_data() to load and preprocess."""
-        print(f"\nLoading '{name}' via config.get_data()...", flush=True)
-        t0 = time.time()
-        data_list = config.get_data(name)
-        print(f"  got {len(data_list)} files, "
-              f"converting to numpy ({time.time()-t0:.1f}s)", flush=True)
-
-        n_total = sum(data_shape(d) for d in data_list)
+        n_total = len(p4_data[dat_order[0]])
         if n_max and n_total > n_max:
-            # Take first n_max events
-            all_splits = []
-            remaining = n_max
-            for d in data_list:
-                n = data_shape(d)
-                if n <= remaining:
-                    all_splits.append(d)
-                    remaining -= n
-                else:
-                    all_splits.extend(data_split(d)[:remaining])
-                    break
-            data_merged = data_merge(*all_splits) if len(all_splits) > 1 else all_splits[0]
+            for k in p4_data: p4_data[k] = p4_data[k][:n_max]
             n_total = n_max
-        else:
-            data_merged = data_merge(*data_list) if len(data_list) > 1 else data_list[0]
 
-        # Convert to numpy (this calls .numpy() on all tensors)
-        print(f"  converting to numpy ({n_total} events)...", flush=True)
-        t1 = time.time()
-        np_data = data_to_numpy(data_merged)
-        print(f"  numpy conversion: {time.time()-t1:.1f}s", flush=True)
+        n_perm = len(perms)
+        print(f"\n{field}: {n_total} events, {n_perm} permutations, "
+              f"batch={batch_size}...", flush=True)
 
-        print(f"  extracting arrays ({time.time()-t0:.1f}s)...", flush=True)
-        m, q, a = extract_arrays(np_data, n_total)
+        m_all, q_all, a_all = [], [], []
+        # Aux accumulators for raw file data
+        aux_raw = {k: [] for k in
+                   (f'{field}_time', f'{field}_tag1', f'{field}_eta1',
+                    f'{field}_bg_value', f'{field}_weight')}
 
-        # ---- Extract aux arrays via data_index ----
-        aux = {}
-        for aux_key in ('time', 'tag', 'eta1', 'bg_value', 'weight'):
-            try:
-                idx = data_index(np_data, (aux_key,))
-                arr = np.asarray(idx).ravel()
-                if len(arr) > n_total: arr = arr[:n_total]
-                aux[aux_key] = arr
-            except Exception:
-                aux[aux_key] = None
+        # Process in batches
+        for start in range(0, n_total, batch_size):
+            end = min(start + batch_size, n_total)
+            t1 = time.time()
 
-        print(f"  done ({time.time()-t0:.1f}s)", flush=True)
-        return m, q, a, n_total, aux
+            batch_p4 = {k: v[start:end] for k, v in p4_data.items()}
+            p4_tf = {BaseParticle(k): np.ascontiguousarray(v)
+                     for k, v in batch_p4.items()}
 
-    # Load signal
-    m_d, q_d, a_d, nd, aux_d = load_from_config('data', n_data_max)
-    # Load phsp
-    m_p, q_p, a_p, np_, aux_p = load_from_config('phsp', n_phsp_max)
+            with tf.device('cpu'):
+                result = cal_angle_from_momentum(
+                    p4_tf, decay_group, center_mass=True, r_boost=True,
+                    random_z=True, align_ref='center_mass',
+                )
+            np_batch = data_to_numpy(result)
+            n_b = data_shape(result)
 
-    # ---- Handle id_swap and cp_swap also ----
-    # For identical particles, each permutation gives the same physical
-    # masses/q/angles but swapped columns. We replicate the blocks.
+            m_b, q_b, a_b = extract_from_batch(np_batch, n_b)
+            m_all.append(m_b); q_all.append(q_b); a_all.append(a_b)
 
-    def replicate_blocks(m, q, a):
-        """Replicate arrays for n_perm identical blocks."""
-        if m is None: return None, None, None
-        return (np.tile(m, (1, n_perm)),
-                np.tile(q, (1, n_perm)),
-                a)  # angles same for all perms
+            # Also accumulate aux from raw files (time, tag, etc.)
+            # These are loaded separately below
+            print(f"  [{start}:{end}] {time.time()-t1:.1f}s "
+                  f"({n_b/max(time.time()-t1,0.01):.0f} ev/s)", flush=True)
 
-    m_d, q_d, a_d = replicate_blocks(m_d, q_d, a_d)
-    m_p, q_p, a_p = replicate_blocks(m_p, q_p, a_p)
+        # Permutation replication: tile mass and q blocks
+        mass   = np.tile(np.concatenate(m_all, axis=0), (1, n_perm))
+        q_arr  = np.tile(np.concatenate(q_all, axis=0), (1, n_perm))
+        angles = np.concatenate(a_all, axis=0)
 
-    # ---- Assemble aux arrays ----
-    dt    = np.asarray(aux_d.get('time', np.ones(nd))).ravel()[:nd] if nd else np.ones(0)
-    dtag  = np.asarray(aux_d.get('tag',  np.ones(nd))).ravel()[:nd] if nd else np.ones(0)
-    deta  = np.asarray(aux_d.get('eta1', np.full(nd, 0.5))).ravel()[:nd] if nd else np.ones(0)
-    dbraw = np.asarray(aux_d.get('bg_value', np.zeros(nd))).ravel()[:nd] if nd else np.zeros(0)
+        return mass, q_arr, angles, n_total
 
-    pt    = np.asarray(aux_p.get('time', np.zeros(np_))).ravel()[:np_] if np_ else np.zeros(0)
-    ptag  = np.asarray(aux_p.get('tag',  np.ones(np_))).ravel()[:np_] if np_ else np.ones(0)
-    peta  = np.asarray(aux_p.get('eta1', np.full(np_, 0.5))).ravel()[:np_] if np_ else np.ones(0)
-    pw    = np.asarray(aux_p.get('weight', np.ones(np_))).ravel()[:np_] if np_ else np.ones(0)
-    pbraw = np.asarray(aux_p.get('bg_value', np.zeros(np_))).ravel()[:np_] if np_ else np.zeros(0)
+    # ---- Process signal & phsp ----
+    data_files = {}
+    for key, field in [('p4_data', 'data'), ('p4_phsp', 'phsp')]:
+        flist = data_sec.get(field) or data_sec.get(
+            field.replace('data','dataall'), [])
+        if isinstance(flist, str): flist = [flist]
+        data_files[key] = [os.path.normpath(os.path.join(config_dir, f))
+                           for f in flist]
+
+    m_d, q_d, a_d, nd = process_dataset('data', n_data_max)
+    if data_files.get('p4_phsp'):
+        m_p, q_p, a_p, np_ = process_dataset('phsp', n_phsp_max)
+    else:
+        m_p = q_p = a_p = None; np_ = 0
+
+    # ---- Aux arrays from raw files ----
+    def load_raw(key_fragment, n, default):
+        path = data_sec.get(key_fragment)
+        if not path: return np.full(n, default, dtype=np.float64)
+        if isinstance(path, list): path = path[0]
+        path = os.path.normpath(os.path.join(config_dir, path))
+        d = np.load(path).astype(np.float64)
+        return d[:n] if len(d) > n else d
+
+    dt    = load_raw('data_time',    nd, 1.)
+    dtag  = load_raw('data_tag1',    nd, 1.)
+    deta  = load_raw('data_eta1',    nd, 0.5)
+    dbraw = load_raw('data_bg_value', nd, 0.)
+
+    pt    = load_raw('phsp_time',    np_, 0.) if np_ else np.ones(0)
+    ptag  = load_raw('phsp_tag1',    np_, 1.) if np_ else np.ones(0)
+    peta  = load_raw('phsp_eta1',    np_, 0.5) if np_ else np.ones(0)
+    pw    = load_raw('phsp_weight',  np_, 1.) if np_ else np.ones(0)
+    pbraw = load_raw('phsp_bg_value', np_, 0.) if np_ else np.zeros(0)
 
     # ---- frac ----
     dfrac = np.where(dtag == 0, 0.5,
                      np.where(dtag > 0, 1.0 - deta, deta))
     pfrac = np.where(ptag == 0, 0.5,
-                     np.where(ptag > 0, 1.0 - peta, peta))
+                     np.where(ptag > 0, 1.0 - peta, peta)) if np_ else np.ones(0)
 
-    # ---- bkg normalization ----
+    # ---- bkg ----
     Nb = np.sum(pbraw * pw) / max(np_, 1) if np_ > 0 else 1.0
     scale = bg_frac / max(1 - bg_frac, 1e-10) / max(Nb, 1e-30)
     db = dbraw * scale
-    pb = pbraw * scale
+    pb = pbraw * scale if np_ else np.zeros(0)
 
     print(f"\nAux: bg_frac={bg_frac}, Nb={Nb:.6e}, scale={scale:.6e}",
           flush=True)
-    print(f"  bkg: data [{db.min():.4e},{db.max():.4e}]  "
-          f"phsp [{pb.min():.4e},{pb.max():.4e}]", flush=True)
 
     # ---- Save ----
     os.makedirs(out_dir, exist_ok=True)
@@ -304,8 +290,13 @@ def convert(config_path, out_dir='converted',
     np.savez(data_npz, mass=m_d, q=q_d, angles=a_d,
              time=dt, frac=dfrac, bkg=db)
     phsp_npz = os.path.join(out_dir, 'phsp_arrays.npz')
-    np.savez(phsp_npz, mass=m_p, q=q_p, angles=a_p,
-             time=pt, frac=pfrac, weight=pw, bkg=pb)
+    if np_:
+        np.savez(phsp_npz, mass=m_p, q=q_p, angles=a_p,
+                 time=pt, frac=pfrac, weight=pw, bkg=pb)
+    else:
+        np.savez(phsp_npz, mass=np.zeros((0,1)), q=np.zeros((0,1)),
+                 angles=np.zeros((0,3)))
+
     meta = dict(n_m0=n_m0_base*n_perm, n_q=q_stride_base*n_perm,
                 n_angles=3, n_data=nd, n_phsp=np_,
                 bg_frac=bg_frac, Nb=float(Nb),
@@ -324,6 +315,8 @@ if __name__ == '__main__':
     p.add_argument('--out', default='converted')
     p.add_argument('--data-max', type=int)
     p.add_argument('--phsp-max', type=int)
+    p.add_argument('--batch', type=int, default=10000)
     args = p.parse_args()
     convert(config_path=args.config, out_dir=args.out,
-            n_data_max=args.data_max, n_phsp_max=args.phsp_max)
+            n_data_max=args.data_max, n_phsp_max=args.phsp_max,
+            batch_size=args.batch)
