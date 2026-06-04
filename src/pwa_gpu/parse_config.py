@@ -1006,6 +1006,9 @@ def build_kernel_config(pw_list, kw_list, cfg):
         n_perm = 1
         for g in perm_groups:
             n_perm *= len(g)
+    # n_waves expanded by permutation count
+    n_waves = len(kw_list) * n_perm
+
     # n_m0: number of bwall entries (resonance types × perms × cp)
     n_cp = 2
     n_m0 = n_m0_base * n_perm * n_cp
@@ -1266,38 +1269,28 @@ def build_kernel_config(pw_list, kw_list, cfg):
             ang_b[dst] = [b1, b2, b3]
             ang_index[dst] = [topo * 3, topo * 3 + 1, topo * 3 + 2]
 
-    # Build matrix_ang: each wave writes to its topology's basis block
+    # Build matrix_ang: each (wave × perm) writes to its perm's topology block
     matrix_ang = np.zeros((n_waves, n_basis), dtype=np.complex128)
-    # Determine wave count per bar group for perm/cp indexing
-    n_b = sum(1 for kk in kw_list if not kk.is_bar)
-    n_bar = sum(1 for kk in kw_list if kk.is_bar)
-    cnt = {'b': 0, 'bar': 0}
-
+    wave_out_idx = 0
     for kw in kw_list:
         pw = next((p for p in pw_list if p.id == kw.pw_id), None)
         if not pw or pw.topology_key not in formula_bases:
-            if kw.is_bar: cnt['bar'] += 1; continue
-            cnt['b'] += 1; continue
+            wave_out_idx += n_perm
+            continue
         basis = formula_bases[pw.topology_key]
-        is_bar = kw.is_bar
-        idx_in_group = cnt['bar'] if is_bar else cnt['b']
-        perm_idx = idx_in_group // (n_bar if is_bar else n_b)
-        topo = 0  # chain (simplified: all treated as chain 0)
-        cp_idx = 1 if is_bar else 0
-        topo_idx = topo * 8 + perm_idx * 2 + cp_idx
-        topo_off = topo_idx * n_basis_unique
-
-        if kw.ag_matrix_entry:
-            for local_idx, coeff in kw.ag_matrix_entry:
-                if local_idx < len(basis.terms):
-                    ks, bs, _ = basis.terms[local_idx]
-                    gkey = (ks[0], ks[1], ks[2], bs[0], bs[1], bs[2])
-                    gidx = global_terms.get(gkey, None)
-                    if gidx is not None:
-                        matrix_ang[kw.id, topo_off + gidx] = coeff
-
-        if is_bar: cnt['bar'] += 1
-        else: cnt['b'] += 1
+        cp_idx = 1 if kw.is_bar else 0
+        for perm in range(n_perm):
+            topo_idx = perm * 2 + cp_idx  # chain=0, topo=0*8+perm*2+cp
+            topo_off = topo_idx * n_basis_unique
+            if kw.ag_matrix_entry:
+                for local_idx, coeff in kw.ag_matrix_entry:
+                    if local_idx < len(basis.terms):
+                        ks, bs, _ = basis.terms[local_idx]
+                        gkey = (ks[0], ks[1], ks[2], bs[0], bs[1], bs[2])
+                        gidx = global_terms.get(gkey, None)
+                        if gidx is not None:
+                            matrix_ang[wave_out_idx, topo_off + gidx] = coeff
+            wave_out_idx += 1
 
     # --- matrix_gamma: width mixing (n_m0 × n_g0) ---
     # Identity per permutation block, repeated n_perm times
@@ -1402,7 +1395,7 @@ def build_kernel_config(pw_list, kw_list, cfg):
         bf_order_arr = split_and_tile(bf_order, max_decays, shift_bf)
         bf_index = split_and_tile(bf_index, 1, shift_q)
         ang_index_arr = split_and_tile(ang_index, n_angles, shift_ang)
-        matrix_ang = split_and_tile(matrix_ang, matrix_ang.shape[1], same)
+        # NOTE: matrix_ang is already built with perm expansion above — do NOT tile
 
         # wave_info: group by B/Bbar then by perm
         wi_b = [{'name': next((p.name for p in pw_list if p.id == kw.pw_id), "?"),

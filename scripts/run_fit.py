@@ -176,17 +176,17 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
                         cst.set_fixed(fix_key, 0.0 + 0.0j)
                         break
 
-    # Step 6: Fix time parameters the reference keeps fixed.
+    # Step 6: Fix scalar parameters the reference keeps fixed.
     # The reference (pw_cfit5_td6_fix29.py lines 19-28) has:
     #   fix_time_params = ["A_prod", "delta_gamma", "delta_m", "poqr", "poqi"]
     #   free_time_params = ["gamma"]
-    ref_fixed_scalars = ['B_A_prod', 'B_delta_gamma', 'B_delta_m', 'B_poqr', 'B_poqi']
+    # Fix to their LOADED values by resolving from the current model dict.
+    # set_fixed(k) without value stores True → unpack returns 0 — wrong!
+    model_all = cst.build_model_dict(fitter.params)
     for k in list(cst.get_free_keys()):
-        if k in ref_fixed_scalars:
-            cst.set_fixed(k, 0.0)
-        elif not cst._is_complex_key(k) and k != 'B_gamma':
-            # Fix all other real params (masses, widths, couplings)
-            cst.set_fixed(k, 0.0)
+        if not cst._is_complex_key(k) and k != 'B_gamma':
+            val = cst._resolve(k, model_all)
+            cst.set_fixed(k, val)
 
     # Print free parameters for user reference (a.json format)
     cst = fitter.cst
