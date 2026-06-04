@@ -40,10 +40,17 @@ class ConstraintMapper:
 
     def __init__(self, mapper):
         self.mapper = mapper
-        # Constraints: {key: {'fixed': val|True} | {'equal_to': key} | {'linear': [(k,c),...]}}
         self._constraints = {}
-        # Complex format: 'rect' (re, im) or 'polar' (mag, phase)
         self._complex_format = 'polar'
+        # Pre-compute set of complex keys for O(1) lookup
+        self._complex_keys = set()
+        m = self.mapper
+        for k in m.totals:
+            self._complex_keys.add(f'{k}_total_0')
+        for (dn, ls) in m.gls:
+            self._complex_keys.add(f'{dn}_g_ls_{ls}')
+        for (dn, ls) in m.glsbar:
+            self._complex_keys.add(f'{dn}_g_lsbar_{ls}')
 
     # ------------------------------------------------------------------
     # Setting constraints
@@ -356,22 +363,8 @@ class ConstraintMapper:
         return [k for k in free if k not in constrained]
 
     def _is_complex_key(self, key):
-        """Check if a parameter key is complex-valued (a.json naming)."""
-        m = self.mapper
-        # Check against known complex parameter types
-        if key.endswith('_total_0') or '_g_ls_' in key or '_g_lsbar_' in key:
-            return True
-        # Fallback: check against mapper's known keys
-        for k in m.totals:
-            if key == f'{k}_total_0' or key.startswith(k):
-                return True
-        for (dn, ls) in m.gls:
-            if key == f'{dn}_g_ls_{ls}':
-                return True
-        for (dn, ls) in m.glsbar:
-            if key == f'{dn}_g_lsbar_{ls}':
-                return True
-        return False
+        """O(1) check using pre-computed set of complex keys."""
+        return key in self._complex_keys
 
     def pack(self, values_dict, keys=None):
         """Pack selected parameter values into a flat float64 array.
