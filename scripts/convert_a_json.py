@@ -19,16 +19,13 @@ import numpy as np
 
 
 def blatt_weisskopf(q, L, d=3.0):
-    """Blatt-Weisskopf barrier factor F_L(q) = sqrt(P_L(0) / P_L(z)), z=(q*d)².
-    
-    Normalized so F_L(0) = 1.0 for all L.
-    """
+    """Blatt-Weisskopf barrier factor."""
     z = (q * d) ** 2
     if L == 0: return 1.0
     if L == 1: return np.sqrt(max(0., 1.0 / (1.0 + z)))
-    if L == 2: return np.sqrt(max(0., 9.0 / (9.0 + 3.0*z + z**2)))
-    if L == 3: return np.sqrt(max(0., 225.0 / (225.0 + 45.0*z + 6.0*z**2 + z**3)))
-    if L == 4: return np.sqrt(max(0., 11025.0 / (11025.0 + 1575.0*z + 135.0*z**2 + 10.0*z**3 + z**4)))
+    if L == 2: return np.sqrt(max(0., 1.0 / (z**2 + 3.0*z + 9.0)))
+    if L == 3: return np.sqrt(max(0., 1.0 / (z**3 + 6.0*z**2 + 45.0*z + 225.0)))
+    if L == 4: return np.sqrt(max(0., 1.0 / (z**4 + 10.0*z**3 + 135.0*z**2 + 1575.0*z + 11025.0)))
     return 1.0
 
 
