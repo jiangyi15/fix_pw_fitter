@@ -195,7 +195,11 @@ def convert(config_path, out_dir='converted'):
     dfrac=np.where(dtag==0,0.5,np.where(dtag>0,1-deta,deta))
     pfrac=np.where(ptag==0,0.5,np.where(ptag>0,1-peta,peta)) if np_ else np.ones(0)
     Nb=np.sum(pb*pw)/max(np_,1) if np_>0 else 1.
-    scale=bg_frac/max(1-bg_frac,1e-10)/max(Nb,1e-30)
+    # bg_frac in config is actually SIGNAL PURITY (reference: purity = config_amp["data"]["bg_frac"])
+    purity = bg_frac
+    bg_fraction = max(1.0 - purity, 1e-10)
+    # bkg in kernel = p/N + bkg; need bkg = (1-purity)/purity * data_bg/Nb to match reference
+    scale = bg_fraction / max(purity, 1e-10) / max(Nb, 1e-30)
     os.makedirs(out_dir,exist_ok=True)
     np.savez(os.path.join(out_dir,'data_arrays.npz'),mass=m_d,q=q_d,angles=a_d,
              time=dt.ravel(),frac=dfrac.ravel(),bkg=(db*scale).ravel())

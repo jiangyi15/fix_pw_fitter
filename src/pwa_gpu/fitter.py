@@ -320,9 +320,11 @@ class PWAFitter:
         _n_calls = [0]
         _t_start = [time.time()]
         # bg_frac from config: N_data * log(1-bg_frac) constant term
-        bg_frac = float(self._cfg.get('data', {}).get('bg_frac', 0.0))
+        # bg_frac in config is SIGNAL PURITY (reference: purity = config_amp["data"]["bg_frac"])
+        purity = float(self._cfg.get('data', {}).get('bg_frac', 1.0))
         n_data = data.n_events
-        bg_const = n_data * np.log(max(1 - bg_frac, 1e-15)) if bg_frac > 0 else 0.0
+        # L_kernel = p/N + bkg = L_ref/purity  →  nll = -Σlog(L_ref) + N·log(purity)
+        bg_const = n_data * np.log(max(purity, 1e-15)) if purity < 1.0 else 0.0
 
         def func(x):
             _n_calls[0] += 1
