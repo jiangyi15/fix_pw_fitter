@@ -142,21 +142,41 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     print(f"  Signal: {d['mass'].shape[0]} events")
     print(f"  Phsp:   {p['mass'].shape[0]} events")
 
-    # ---- 6. Boundary transforms for time parameters ----
-    # Following pw_cfit5_td6_fix29.py conventions
-    time_bounds = {
-        'delta_m': [0.3, 0.8],
-        'delta_g': [-0.3, 0.3],
-        'g': [-0.3, 0.3],
-        'phi': [-np.pi, np.pi],
-        'ap': [-0.5, 0.5],
-        'lam': [0.0, 2.0],
+    # ---- 6. Boundary transforms ----
+    # Load config for nominal mass/width values
+    import yaml
+    with open(config_path) as f:
+        ycfg = yaml.safe_load(f)
+    particle_sec = ycfg.get('particle', {})
+
+    # Bounds for scalars (following pw_cfit5_td6_fix29.py)
+    phys_bounds = {
+        'B_delta_m': [0.3, 0.8],
+        'B_delta_gamma': [-0.3, 0.3],
+        'B_gamma': [-0.3, 0.3],
+        'B_poqi': [-np.pi, np.pi],
+        'B_A_prod': [-0.5, 0.5],
+        'B_poqr': [0.0, 2.0],
     }
+    # Mass bounds: ±50% around nominal value;  width bounds: +200%/-90% (positive, not zero)
+    for rname, props in particle_sec.items():
+        if isinstance(props, dict) and 'J' in props:
+            nom_mass = props.get('mass', 0)
+            if nom_mass > 0:
+                phys_bounds[f'{rname}_mass'] = [nom_mass * 0.5, nom_mass * 1.5]
+            nom_width = props.get('width', 0)
+            if nom_width > 0:
+                phys_bounds[f'{rname}_width'] = [max(nom_width * 0.1, 0.001), nom_width * 3.0]
+            # FlatteC couplings
+            for k, v in props.items():
+                if k.startswith('g_') and isinstance(v, (int, float)) and v > 0:
+                    phys_bounds[f'{rname}_{k}'] = [v * 0.1, v * 3.0]
+
     free_keys = fitter.get_free_keys()
     bound_trans = {}
     for ki, key in enumerate(free_keys):
-        if key in time_bounds:
-            a, b = time_bounds[key]
+        if key in phys_bounds:
+            a, b = phys_bounds[key]
             bound_trans[ki] = Trans(a, b)
 
     # ---- 7. Build fit function with boundary transforms ----
