@@ -234,19 +234,8 @@ class PWAFitter:
             self._fitter = PWAGPU(self._cfg)
         return self._fitter
 
-    def load_data(self, mass, q, angles, time_arr, frac, weights, bkg,
-                  purity=None, Nb=None):
-        """Upload signal data to GPU. Returns PWAData object.
-        
-        If bkg is raw (unscaled), provide purity and Nb to scale it at
-        load time: bkg_scaled = bkg_raw * (1-purity)/purity / Nb.
-        If purity/Nb not given, bkg is used as-is (already scaled).
-        """
-        _purity = float(self._cfg.get('data', {}).get('bg_frac', 1.0)) if purity is None else purity
-        _Nb = float(Nb) if Nb is not None else 1.0
-        if isinstance(bkg, np.ndarray) and purity is not None and Nb is not None:
-            bg_fraction = max(1.0 - _purity, 1e-10)
-            bkg = bkg.astype(np.float64) * (bg_fraction / max(_purity, 1e-10) / max(_Nb, 1e-30))
+    def load_data(self, mass, q, angles, time_arr, frac, weights, bkg):
+        """Upload signal data to GPU. Returns PWAData object."""
         fitter = self._ensure_fitter()
         return PWAData(fitter, mass, q, angles, time_arr, frac, weights, bkg)
 

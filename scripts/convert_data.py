@@ -197,14 +197,14 @@ def convert(config_path, out_dir='converted'):
     pfrac=np.where(ptag==0,0.5,np.where(ptag>0,1-peta,peta)) if np_ else np.ones(0)
     Nb=np.sum(pb*pw)/max(np_,1) if np_>0 else 1.
     os.makedirs(out_dir,exist_ok=True)
-    # Save RAW bkg (no purity scaling — done at load time via load_data)
+    # Save raw arrays (no purity/Nb — scaling done by caller at load time)
     np.savez(os.path.join(out_dir,'data_arrays.npz'),mass=m_d,q=q_d,angles=a_d,
              time=dt.ravel(),frac=dfrac.ravel(),weight=dw.ravel(),
-             bkg_raw=db.ravel(),purity=float(bg_frac),Nb=float(Nb))
+             bkg_raw=db.ravel())
     if np_:
         np.savez(os.path.join(out_dir,'phsp_arrays.npz'),mass=m_p,q=q_p,angles=a_p,
                  time=pt.ravel(),frac=pfrac.ravel(),weight=pw.ravel(),
-                 bkg_raw=pb.ravel(),purity=float(bg_frac),Nb=float(Nb))
+                 bkg_raw=pb.ravel())
     print(f"Saved: {out_dir}",flush=True)
 
 if __name__=='__main__':

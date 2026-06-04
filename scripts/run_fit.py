@@ -236,19 +236,25 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     d = np.load(data_npz)
     p = np.load(phsp_npz)
     
-    # Load with raw bkg and purity scaling (moved to load time)
-    bkg_key = 'bkg_raw' if 'bkg_raw' in d else 'bkg'
-    Nb_val = d.get('Nb', 1.0)
+    # Load raw arrays and compute scaled bkg
+    bkg_raw = d['bkg_raw'] if 'bkg_raw' in d else d['bkg']
+    phsp_bkg = p['bkg_raw'] if 'bkg_raw' in p else p.get('bkg', np.zeros(len(p['mass'])))
+    phsp_w = p.get('weight', np.ones(len(p['mass'])))
+    with open(config_path) as f:
+        import yaml; ycfg = yaml.safe_load(f)
+    purity = float(ycfg.get('data', {}).get('bg_frac', 1.0))
+    Nb = float(np.sum(phsp_bkg * phsp_w) / max(len(phsp_bkg), 1)) if len(phsp_bkg) > 0 else 1.0
+    bg_fraction = max(1.0 - purity, 1e-10)
+    bkg_scaled = bkg_raw.astype(np.float64) * (bg_fraction / max(purity, 1e-10) / max(Nb, 1e-30))
+
     data = fitter.load_data(
         mass=d['mass'], q=d['q'], angles=d['angles'],
         time_arr=d['time'], frac=d['frac'],
-        weights=np.ones(len(d['mass'])), bkg=d[bkg_key],
-        purity=None if bkg_key == 'bkg' else float(d.get('purity', d.get('bg_frac', 0.914))),
-        Nb=Nb_val if bkg_key != 'bkg' else None)
+        weights=np.ones(len(d['mass'])), bkg=bkg_scaled)
     phsp = fitter.load_phsp(
         mass=p['mass'], q=p['q'], angles=p['angles'],
         time_arr=p['time'], frac=p['frac'],
-        phsp_weights=p.get('weight', np.ones(len(p['mass']))))
+        phsp_weights=phsp_w)
     
     print(f"  Signal: {d['mass'].shape[0]} events")
     print(f"  Phsp:   {p['mass'].shape[0]} events")
