@@ -72,44 +72,121 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     # ---- Reference constraints (pw_cfit5_td6_fix29.py) ----
     mapper = fitter.mapper
     cst = fitter.cst
-    keys = cst.get_free_keys()
 
-    # Fix reference total and first LS to 1+0j
-    for pref, klist in [('total', [k for k in keys if k.endswith('_total_0')]),
-                        ('g_ls', [k for k in keys if k.endswith('_g_ls_0') and '_g_lsbar_' not in k])]:
-        if klist:
-            fitter.set_fixed(klist[0], 1.0 + 0.0j)
-            print(f"  Fixed {klist[0]} = 1+0j", flush=True)
+    # Snapshot all parameter keys (including those about to be fixed)
+    all_known_keys = set(cst.get_free_keys())
 
-    # Equalize mirror pairs: aX(m) ↔ aX(p) g_ls (CP symmetry)
-    mirror_gls_pairs = [
-        ('a1(1260)m', 'a1(1260)p'), ('a1(1640)m', 'a1(1640)p'),
-        ('a2(1320)m', 'a2(1320)p'), ('pi2(1670)m', 'pi2(1670)p'),
-        ('pi1300m', 'pi1300p'), ('pi1600m', 'pi1600p'),
-        ('pi1(1600)m', 'pi1(1600)p')]
-    for rm, rp in mirror_gls_pairs:
-        for kp in keys:
-            if kp.startswith(f'{rp}->') and '_g_ls_' in kp and '_g_lsbar_' not in kp:
-                km = kp.replace(rp, rm)
-                if km in keys and kp in keys:
-                    # km = -1 * kp (CP sign convention from reference)
-                    cst.set_linear(km, [(kp, -1.0)])
-                    print(f"  Set {kp} = {km} with scale=-1", flush=True)
+    # Step 1: Fix g_ls_0 that the reference keeps fixed.
+    # Ref initially fixes ALL g_ls_0 (line 40), then cascade loop (lines 63-90)
+    # selectively unfixes some. Here we fix only the ones that STAY fixed.
+    all_keys = all_known_keys.copy()
 
-    # Equalize KMA↔KMB pole/prod parameters
-    for kk in list(keys):
-        if 'KMA_' in kk:
-            kmb = kk.replace('KMA_', 'KMB_')
-            if kmb in keys:
-                fitter.set_equal(kmb, kk)
-                print(f"  Set {kmb} = {kk}", flush=True)
+    # 1a: B-level g_ls_0 — ALL fixed
+    for k in all_keys:
+        if k.startswith('B->') and k.endswith('_g_ls_0') and '_g_lsbar_' not in k:
+            cst.set_fixed(k, 1.0 + 0.0j)
 
-    # Fix K-matrix pole/prod indices 3-5 to 0
-    for fix_key in list(keys):
-        for suffix in ['_pole_3', '_pole_4', '_pole_5', '_prod_3', '_prod_4', '_prod_5']:
-            if suffix in fix_key and ('KMA_' in fix_key or 'KMB_' in fix_key or 'KMC_' in fix_key or 'KM2_' in fix_key):
-                fitter.set_fixed(fix_key, 0.0 + 0.0j)
-                print(f"  Fixed {fix_key} = 0+0j", flush=True)
+    # 1b: VV sub-decay g_ls_0 (rhoA, rhoB, f0(500), f0(980), NR0 → finals)
+    for k in all_keys:
+        vv_daughters = ['rhoA->', 'rhoB->', 'f0(500)->', 'f0(980)->', 'NR0->',
+                        'f2(1270)->']  # f2 is cascade sub-sub-decay
+        if any(k.startswith(d) for d in vv_daughters):
+            if k.endswith('_g_ls_0'):
+                cst.set_fixed(k, 1.0 + 0.0j)
+
+    # 1c: First cascade coupling g_ls per resonance (rhoA LS=0, m+p versions)
+    cascade_resonances = [
+        "a1(1260)", "a1(1640)", "a2(1320)", "pi1300", "pi1600",
+        "pi2(1670)", "pi1(1600)"]
+    for r1 in cascade_resonances:
+        for key in [f"{r1}m->rhoA.pim2_g_ls_0", f"{r1}p->rhoA.pip2_g_ls_0"]:
+            if key in all_keys:
+                cst.set_fixed(key, 1.0 + 0.0j)
+
+    # 1d: Pole.0 and prod.0 (ref line 42-43)
+    for k in all_keys:
+        if k.endswith('_pole_0') or k.endswith('_prod_0'):
+            cst.set_fixed(k, 1.0 + 0.0j)
+
+    # Step 2: Fix VV rhoA.rhoB total (ref line 51-53)
+    fix_total = "B->rhoA.rhoBrhoA->pip1.pim1rhoB->pip2.pim2_total_0"
+    if fix_total in cst.get_free_keys():
+        cst.set_fixed(fix_total, 1.0 + 0.0j)
+        print(f"  Fixed {fix_total} = 1+0j", flush=True)
+
+    # Step 3: Cascade constraints (ref lines 63-90)
+    # For each resonance, first g_ls stays fixed, rest get same_params mirror.
+    # rhoA modes get scale_factor -1 (CP sign) → set_linear(p, [(m, -1.0)])
+    # Non-rhoA modes get p = m → set_equal(p, m)
+    sub_modes = ["rhoA", "f0(500)", "f0(980)", "f2(1270)"]
+    # Swap resonance charge AND daughter final state (pip2↔pim2 only;
+    # pip1/pim1 are always the identical π⁺/π⁻ and should NOT be swapped)
+    swp = lambda k, src, dst: (
+        k.replace(src, dst)
+         .replace('pip2', 'P2').replace('pim2', 'pip2').replace('P2', 'pim2'))
+
+    for r1 in cascade_resonances:
+        fixed_first = True  # ref line 66
+        p_totals, m_totals = [], []
+        for r2 in sub_modes:
+            # Total names
+            name_p = f"B->{r1}p.pim2{r1}p->{r2}.pip2{r2}->pip1.pim1_total_0"
+            name_m = swp(name_p, f'{r1}p', f'{r1}m')
+            for k in [name_p, name_m]:
+                if k in cst.get_free_keys():
+                    (p_totals if 'p.pim2' in k else m_totals).append(k)
+            # Sub-decay g_ls: ref checks key_m existence in all_params, not free-ness
+            for idx in range(3):
+                key_m = f"{r1}m->{r2}.pim2_g_ls_{idx}"
+                key_p = f"{r1}p->{r2}.pip2_g_ls_{idx}"
+                if key_m not in all_known_keys and key_p not in all_known_keys:
+                    continue  # not a parameter at all
+                if fixed_first:
+                    fixed_first = False  # first g_ls per resonance stays fixed
+                else:
+                    if key_m in cst.get_free_keys() and key_p in cst.get_free_keys():
+                        if r2 == "rhoA":
+                            # CP-odd: p = -1 × m (scale_params[m] = -1 in ref)
+                            cst.set_linear(key_p, [(key_m, -1.0)])
+                        else:
+                            cst.set_equal(key_p, key_m)
+        # Equate totals across sub-decay modes (ref lines 89-90):
+        # only rhoA version stays free for each charge
+        for totals in [p_totals, m_totals]:
+            if len(totals) > 1:
+                for t in totals[1:]:
+                    cst.set_equal(t, totals[0])
+
+    # Step 4: KMA = KMB (ref lines 101-104)
+    for kk in list(cst.get_free_keys()):
+        for j in ['pole', 'prod']:
+            for i in range(3):
+                suf = f"{j}_{i}"
+                if f'KMA_{suf}' in kk:
+                    kmb = kk.replace(f'KMA_{suf}', f'KMB_{suf}')
+                    if kmb in cst.get_free_keys():
+                        cst.set_equal(kmb, kk)
+
+    # Step 5: Fix K-matrix high indices (ref lines 105-110)
+    for fix_key in list(cst.get_free_keys()):
+        for j in ['pole', 'prod']:
+            for i in range(3, 5):
+                for prefix in ['KMA_', 'KMB_', 'KMC_', 'KM2_']:
+                    if f"{prefix}{j}_{i}" in fix_key:
+                        cst.set_fixed(fix_key, 0.0 + 0.0j)
+                        break
+
+    # Step 6: Fix time parameters the reference keeps fixed.
+    # The reference (pw_cfit5_td6_fix29.py lines 19-28) has:
+    #   fix_time_params = ["A_prod", "delta_gamma", "delta_m", "poqr", "poqi"]
+    #   free_time_params = ["gamma"]
+    ref_fixed_scalars = ['B_A_prod', 'B_delta_gamma', 'B_delta_m', 'B_poqr', 'B_poqi']
+    for k in list(cst.get_free_keys()):
+        if k in ref_fixed_scalars:
+            cst.set_fixed(k, 0.0)
+        elif not cst._is_complex_key(k) and k != 'B_gamma':
+            # Fix all other real params (masses, widths, couplings)
+            cst.set_fixed(k, 0.0)
 
     # Print free parameters for user reference (a.json format)
     cst = fitter.cst
