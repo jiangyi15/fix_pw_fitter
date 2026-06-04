@@ -236,10 +236,15 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     d = np.load(data_npz)
     p = np.load(phsp_npz)
     
+    # Load with raw bkg and purity scaling (moved to load time)
+    bkg_key = 'bkg_raw' if 'bkg_raw' in d else 'bkg'
+    Nb_val = d.get('Nb', 1.0)
     data = fitter.load_data(
         mass=d['mass'], q=d['q'], angles=d['angles'],
         time_arr=d['time'], frac=d['frac'],
-        weights=np.ones(len(d['mass'])), bkg=d['bkg'])
+        weights=np.ones(len(d['mass'])), bkg=d[bkg_key],
+        purity=None if bkg_key == 'bkg' else float(d.get('purity', d.get('bg_frac', 0.914))),
+        Nb=Nb_val if bkg_key != 'bkg' else None)
     phsp = fitter.load_phsp(
         mass=p['mass'], q=p['q'], angles=p['angles'],
         time_arr=p['time'], frac=p['frac'],
@@ -419,6 +424,10 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
 
     # ── Build value dict ──
     value = {}
+    # Time-param name mapping (used throughout)
+    time_name_map = {'B_gamma': 'gamma', 'B_A_prod': 'A_prod',
+                     'B_delta_gamma': 'delta_gamma', 'B_delta_m': 'delta_m',
+                     'B_poqr': 'poqr', 'B_poqi': 'poqi'}
     # 1. Free complex: mag/phase from x_phys (in polar)
     #    Reference: x is [mag1, phase1, mag2, phase2, ...] in polar
     #    Our x_phys is also [mag1, phase1, ...] from free_flat_from_phys → unpack
@@ -429,8 +438,10 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         value[f"{k}r"] = abs(val)
         value[f"{k}i"] = cmath.phase(val)
 
-    # 2. Free real:
+    # 2. Free real: skip time-mapped keys (written in step 7 with ref names)
     for k in free_real:
+        if k in time_name_map:
+            continue  # handled in step 7 with reference name
         value[k] = float(model_all.get(k, 0))
 
     # 3. Bound-transformed values (reference applies forward transform to value)
@@ -447,26 +458,31 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
                     raw = result.x[idx_in_flat[0]]
                     value[name] = tr(raw)
 
-    # 4. Fixed params: write as mag/phase
-    for j, jv in ref_fixed.items():
-        value[f"{j}r"] = abs(complex(jv))
-        value[f"{j}i"] = cmath.phase(complex(jv))
-
-    # 5. Aliased params: copy from source (reference new_name)
-    for j, jv in ref_new_name.items():
-        value[f"{j}r"] = value.get(f"{jv}r", 0)
-        value[f"{j}i"] = value.get(f"{jv}i", 0)
-
-    # 6. Scale params: multiply r-component by scale factor
-    for j, jv in ref_scale_params.items():
-        value[f"{j}r"] = jv * value.get(f"{j}r", 0)
-
-    # 7. Time params (reference fix_time_params + free gamma)
-    #    Reference names: gamma, A_prod, delta_gamma, delta_m, poqr, poqi
-    #    Our names: B_gamma, B_A_prod, B_delta_gamma, B_delta_m, B_poqr, B_poqi
+    # 4. Fixed params: complex → mag/phase, real → plain value
     time_name_map = {'B_gamma': 'gamma', 'B_A_prod': 'A_prod',
                      'B_delta_gamma': 'delta_gamma', 'B_delta_m': 'delta_m',
                      'B_poqr': 'poqr', 'B_poqi': 'poqi'}
+    for j, jv in ref_fixed.items():
+        if cst._is_complex_key(j):
+            value[f"{j}r"] = abs(complex(jv))
+            value[f"{j}i"] = cmath.phase(complex(jv))
+        else:
+            # Real scalar: use reference time-param name if mapped
+            out_name = time_name_map.get(j, j)
+            value[out_name] = float(jv)
+
+    # 5. Aliased params: copy from source (reference new_name).
+    #    Only complex keys get r/i pairs; skip scalar aliases.
+    for j, jv in ref_new_name.items():
+        if cst._is_complex_key(j):
+            value[f"{j}r"] = value.get(f"{jv}r", 0)
+            value[f"{j}i"] = value.get(f"{jv}i", 0)
+
+    # 6. Scale params: multiply r-component by scale factor (complex only)
+    for j, jv in ref_scale_params.items():
+        value[f"{j}r"] = jv * value.get(f"{j}r", 0)
+
+    # 7. Ensure time params are written with reference names
     for our_key, ref_key in time_name_map.items():
         val = model_all.get(our_key, 0)
         value[ref_key] = float(val)
