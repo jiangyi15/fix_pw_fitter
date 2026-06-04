@@ -9,7 +9,7 @@ Usage:
     python run_fit.py config_angle.yml --out fit_results
 """
 
-import os, sys, json, time, argparse
+import os, sys, json, time, argparse, cmath
 import numpy as np
 
 
@@ -359,56 +359,184 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
     result = best_result
     # fit_time was set in the loop for the best result
 
-    # ---- 9. Extract results with transforms ----
-    # Physical parameter values (applying reverse transform)
+    # ---- 9. Build reference-format JSON output ----
+    # Reference (pw_cfit5_td6_fix29.py lines 809-850):
+    #   {"value": {param_name: float, ...},
+    #    "error": {param_name: float, ...},
+    #    "status": {NLL, Ndf, jac, success, message, rhorho}}
+    # Complex params stored as {name}r = magnitude, {name}i = phase (POLAR).
+    # Real scalars stored as plain name.
+    # Fixed, aliased (new_name), and scaled params all written to value dict.
     x_phys = result.x.copy()
     for ki, tr in bound_trans.items():
         x_phys[ki] = tr(result.x[ki])
 
-    model_opt = fitter.unpack(x_phys)
-    cst = fitter.cst
+    # ── Build model dict from fitted result ──
+    model_opt = cst.unpack(x_phys, free_keys)
     phys = cst.get_physical(model_opt)
     fitter._params = phys
+    # Full model dict including fixed/aliased/scaled params
+    model_all = cst.build_model_dict(phys)
 
-    # Save params to a.json format
-    params_path = os.path.join(out_dir, 'final_params.json')
-    fitter.mapper.save_params(params_path, phys)
-    print(f"  Params saved: {params_path}", flush=True)
+    # ── Collect constraint metadata (mirrors ref's fixed_params/new_name/scale_params) ──
+    # We need: which params are fixed, which are aliased, which have linear scaling.
+    # These are stored in cst._constraints.
+    ref_fixed = {}        # {name: complex_value}  — fixed params
+    ref_new_name = {}     # {alias_name: source_name} — aliased params
+    ref_scale_params = {} # {name: scale_factor} — linear scale on r-component
 
-    # Build result dict
-    result_dict = {
-        'success': result.success,
-        'status': result.status,
-        'fun': float(result.fun),
-        'nfev': result.nfev,
-        'nit': result.nit,
-        'n_free_params': len(result.x),
-        'x_opt': x_phys.tolist(),
-        'x_raw': result.x.tolist(),
-        'free_keys': free_keys,
-        'message': str(result.message),
-    }
+    for key, cinfo in cst._constraints.items():
+        if 'fixed' in cinfo:
+            val = cinfo['fixed']
+            if isinstance(val, bool):
+                # True = fixed to current model value
+                ref_fixed[key] = model_all.get(key, 0)
+            elif isinstance(val, (int, float)):
+                # Real scalar fixed to a value
+                ref_fixed[key] = val
+            else:
+                ref_fixed[key] = val
+        elif 'equal_to' in cinfo:
+            ref_new_name[key] = cinfo['equal_to']
+        elif 'linear' in cinfo:
+            src, coeff = cinfo['linear'][0]
+            ref_scale_params[key] = coeff
+            ref_new_name[key] = src
 
-    # Hessian inverse with boundary propagation
+    # ── Build params_order: flat index → param name (mirroring ref) ──
+    # Free complex params first (2 indices each: {name}r, {name}i),
+    # then free real scalars.
+    free_keys = cst.get_free_keys()
+    free_complex = [k for k in free_keys if cst._is_complex_key(k)]
+    free_real    = [k for k in free_keys if not cst._is_complex_key(k)]
+    params_order = {}
+    for i, k in enumerate(free_complex):
+        params_order[2*i]     = f"{k}r"
+        params_order[2*i+1]   = f"{k}i"
+    offset = len(free_complex) * 2
+    for i, k in enumerate(free_real):
+        params_order[offset + i] = k
+
+    # ── Build value dict ──
+    value = {}
+    # 1. Free complex: mag/phase from x_phys (in polar)
+    #    Reference: x is [mag1, phase1, mag2, phase2, ...] in polar
+    #    Our x_phys is also [mag1, phase1, ...] from free_flat_from_phys → unpack
+    #    Actually our unpack returns model dict with complex values.
+    #    We need to map free_keys → polar pairs.
+    for i, k in enumerate(free_complex):
+        val = model_all.get(k, 0+0j)
+        value[f"{k}r"] = abs(val)
+        value[f"{k}i"] = cmath.phase(val)
+
+    # 2. Free real:
+    for k in free_real:
+        value[k] = float(model_all.get(k, 0))
+
+    # 3. Bound-transformed values (reference applies forward transform to value)
+    for ki, tr in bound_trans.items():
+        name = params_order[ki]
+        # Only apply if name ends with r,i (complex) — transform raw value
+        if name in value:
+            value[name] = tr(x_phys[ki] if 'i' not in name else 0)
+        else:
+            # Real scalar with bound
+            if name in params_order.values():
+                idx_in_flat = [ki2 for ki2, n2 in params_order.items() if n2 == name]
+                if idx_in_flat:
+                    raw = result.x[idx_in_flat[0]]
+                    value[name] = tr(raw)
+
+    # 4. Fixed params: write as mag/phase
+    for j, jv in ref_fixed.items():
+        value[f"{j}r"] = abs(complex(jv))
+        value[f"{j}i"] = cmath.phase(complex(jv))
+
+    # 5. Aliased params: copy from source (reference new_name)
+    for j, jv in ref_new_name.items():
+        value[f"{j}r"] = value.get(f"{jv}r", 0)
+        value[f"{j}i"] = value.get(f"{jv}i", 0)
+
+    # 6. Scale params: multiply r-component by scale factor
+    for j, jv in ref_scale_params.items():
+        value[f"{j}r"] = jv * value.get(f"{j}r", 0)
+
+    # 7. Time params (reference fix_time_params + free gamma)
+    #    Reference names: gamma, A_prod, delta_gamma, delta_m, poqr, poqi
+    #    Our names: B_gamma, B_A_prod, B_delta_gamma, B_delta_m, B_poqr, B_poqi
+    time_name_map = {'B_gamma': 'gamma', 'B_A_prod': 'A_prod',
+                     'B_delta_gamma': 'delta_gamma', 'B_delta_m': 'delta_m',
+                     'B_poqr': 'poqr', 'B_poqi': 'poqi'}
+    for our_key, ref_key in time_name_map.items():
+        val = model_all.get(our_key, 0)
+        value[ref_key] = float(val)
+
+    # ── Build error dict from Hessian ──
+    errors = {}
     if hasattr(result, 'hess_inv'):
         try:
             h = result.hess_inv
             if hasattr(h, 'todense'):
                 h = h.todense()
             h = np.asarray(h)
-            # Propagate through boundary transforms: H_ij → g_i * H_ij * g_j
+            # Propagate boundary transforms
             g_vec = np.ones(n_free)
             for ki, tr in bound_trans.items():
                 g_vec[ki] = tr.grad(result.x[ki])
             hess_phys = g_vec[:, None] * h * g_vec[None, :]
-            result_dict['hess_inv'] = hess_phys.tolist()
-            result_dict['errors'] = {free_keys[i]: float(np.sqrt(max(hess_phys[i,i], 0)))
-                                      for i in range(n_free)}
+            for i, k in enumerate(free_complex):
+                errors[f"{k}r"] = float(np.sqrt(max(hess_phys[2*i, 2*i], 0)))
+                errors[f"{k}i"] = float(np.sqrt(max(hess_phys[2*i+1, 2*i+1], 0)))
+            for i, k in enumerate(free_real):
+                idx = offset + i
+                err = float(np.sqrt(max(hess_phys[idx, idx], 0)))
+                # Propagate through bound transform if applicable
+                for ki, tr in bound_trans.items():
+                    if params_order.get(ki) == k:
+                        x_val = value.get(k, 0)
+                        err = tr.trans_err(tr.inv(x_val), err)
+                errors[k] = err
         except Exception as e:
-            print(f"  Could not save hess_inv: {e}", flush=True)
-            result_dict['hess_inv'] = None
+            print(f"  Hessian error: {e}", flush=True)
 
-    # Save phys params
+    # ── Build status dict ──
+    corr_name = [[i, n] for i, n in params_order.items()
+                 if 'B->rhoA.rhoB' in n]
+    corr_idx = np.array([i[0] for i in corr_name], dtype=int)
+    corr_order = [i[1] for i in corr_name]
+    if hasattr(result, 'hess_inv'):
+        try:
+            h = result.hess_inv
+            if hasattr(h, 'todense'):
+                h = h.todense()
+            h = np.asarray(h)
+            corr_mat = h[corr_idx][:, corr_idx]
+        except Exception:
+            corr_mat = None
+    else:
+        corr_mat = None
+
+    final_params = {
+        'value': value,
+        'error': errors,
+        'status': {
+            'NLL': float(result.fun),
+            'Ndf': len(result.x),
+            'jac': list(result.jac) if result.jac is not None else [],
+            'success': bool(result.success),
+            'message': str(result.message),
+            'rhorho': [corr_order, corr_mat.tolist() if corr_mat is not None else []],
+        }
+    }
+
+    # ── Save reference-format JSON ──
+    params_path = os.path.join(out_dir, 'final_params.json')
+    with open(params_path, 'w') as f:
+        json.dump(final_params, f, indent=2)
+    print(f"  Reference-format JSON: {params_path}", flush=True)
+
+    # Also save .npz for convenience
+    result_npz = os.path.join(out_dir, 'fit_results.npz')
     phys_arrs = {}
     for k, v in phys.items():
         if isinstance(v, np.ndarray):
@@ -416,20 +544,8 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         elif isinstance(v, complex):
             phys_arrs[k + '_re'] = np.array([v.real])
             phys_arrs[k + '_im'] = np.array([v.imag])
-
-    result_npz = os.path.join(out_dir, 'fit_results.npz')
-    np.savez(result_npz, **result_dict, **phys_arrs)
-    print(f"  Results saved: {result_npz}", flush=True)
-
-    # Summary JSON
-    meta_out = os.path.join(out_dir, 'fit_meta.json')
-    with open(meta_out, 'w') as f:
-        json.dump({'success': result.success, 'status': result.status,
-                   'fun': float(result.fun), 'nfev': result.nfev,
-                   'nit': result.nit, 'n_free': n_free,
-                   'message': str(result.message),
-                   'errors': result_dict.get('errors')},
-                  f, indent=2)
+    np.savez(result_npz, **phys_arrs)
+    print(f"  Results NPZ: {result_npz}", flush=True)
 
     print(f"\n{'='*50}", flush=True)
     print(f"Fit {'SUCCEEDED' if result.success else 'FAILED'}", flush=True)
