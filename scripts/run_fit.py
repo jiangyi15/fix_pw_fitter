@@ -64,10 +64,31 @@ def run_fit(config_path, out_dir='fit_results', method='BFGS', maxiter=200,
         print("No a.json found, using random params", flush=True)
     fitter.summary()
 
-    # ---- 4. Set constraints ----
+    # ---- 4. Set constraints (following pw_cfit5_td6_fix29.py conventions) ----
     if fix_2pi:
         print("Fixing 2π resonances...", flush=True)
         fitter.fix_2pi_resonances()
+
+    # Fix reference total and first LS to 1+0j (normalization convention)
+    mapper = fitter.mapper
+    for key, n in [('total/0', len(mapper.totals)), ('g_ls/0', len(mapper.gls))]:
+        idx = int(key.split('/')[1])
+        if idx < n:
+            fitter.set_fixed(key, 1.0 + 0.0j)
+            print(f"  Fixed {key} = 1+0j", flush=True)
+
+    # Print free parameters for user reference
+    cst = fitter.cst
+    free = cst.get_free_keys()
+    print(f"  Free parameters: {len(free)}", flush=True)
+    # Print parameter categories
+    for cat in ['total', 'g_ls', 'g_lsbar', 'm0', 'g0']:
+        cat_keys = [k for k in free if k.startswith(cat+'/')]
+        if cat_keys:
+            print(f"    {cat}: {len(cat_keys)}  ({min(cat_keys)}..{max(cat_keys)})", flush=True)
+    scalar_keys = [k for k in free if not any(k.startswith(p+'/') for p in ['total','g_ls','g_lsbar','m0','g0'])]
+    if scalar_keys:
+        print(f"    scalars: {scalar_keys}", flush=True)
 
     # ---- 5. Load data ----
     data_dir = os.path.dirname(os.path.abspath(config_path))
