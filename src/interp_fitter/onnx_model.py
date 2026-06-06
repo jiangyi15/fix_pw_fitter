@@ -70,9 +70,9 @@ class GraphBuilder:
         return name
 
     def int_scalar(self, tag: str, val: int) -> str:
-        """Scalar int64 constant (for Gather indices etc.)."""
+        """Scalar int32 constant (for Gather indices etc.)."""
         name = self._uid(tag)
-        self.const(name, np.array(val, dtype=np.int64))
+        self.const(name, np.array(val, dtype=np.int32))
         return name
 
     # -- unary ops ----------------------------------------------------------
@@ -258,8 +258,8 @@ def _interp_real(g: GraphBuilder, x: str,
     """Linear interpolation for a real table. Returns interpolant."""
     diff = g.div(g.sub(x, xmin_name), xdelta_name)
     xbin = g.floor(diff)
-    xbin_i = g.cast(xbin, TensorProto.INT64)
-    t1d = g.unsqueeze(g.cast(types_name, TensorProto.INT64), [0])
+    xbin_i = g.cast(xbin, TensorProto.INT32)
+    t1d = g.unsqueeze(g.cast(types_name, TensorProto.INT32), [0])
     off = g.mul(t1d, g.int_scalar("nir", n_int))
     flat_idx = g.add(off, xbin_i)
 
@@ -276,17 +276,16 @@ def _interp_real(g: GraphBuilder, x: str,
 # ---------------------------------------------------------------------------
 
 def build_onnx_model(config: dict, with_norm: bool = True,
-                     opset: int = 11) -> onnx.ModelProto:
+                     opset: int = 11, nevt: int | None = None) -> onnx.ModelProto:
     """Build an ONNX model for ``Kernel.compute(...)``.
 
     Parameters
     ----------
-    with_norm : bool
-        If True, ``norm`` is an input and ``Q = -Σ w·log(P/norm + bkg)``.
-        If False, no ``norm`` input and ``Q = Σ w·P``.
-    opset : int
-        ONNX opset version.  Use 11 for maximum CANN / Ascend
-        compatibility;  Use 13 / 17 for more recent runtimes.
+    nevt : int or None
+        If given, all shapes are static (fixed batch size).
+        If ``None``, the batch dimension is symbolic (``"nevt"``).
+
+    For other parameters see :func:`export_to_onnx`.
 
     Inputs (all ``FLOAT``):
       ck_re (nwaves,), ck_im (nwaves,), m0 (n_m0,), g0 (n_g0,),
@@ -299,11 +298,16 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     """
     g = GraphBuilder("Kernel", opset=opset)
 
-    # -- static dimensions --------------------------------------------------
     cfg = config
+
+    # inner dims (always concrete — derived from config)
+    ndim_mass = int(max(np.max(cfg["gamma_index"]), np.max(cfg["bw_index"])) + 1)
+    ndim_q    = int(np.max(cfg["q_index"]) + 1)
+    ndim_angle = int(np.max(cfg["angle_index"]) + 1)
     n_int_g = cfg["gamma_table"].shape[-1]
     n_int_f = cfg["fl_table"].shape[-1]
     n_gamma = len(cfg["g0_index"])
+    n_g0 = int(np.max(cfg["g0_index"]) + 1)
     n_m0 = cfg["matrix_gamma"].shape[0]
     n_bw = len(cfg["m0_index"])
     nwaves = cfg["matrix_ang"].shape[-1]
@@ -311,21 +315,28 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     ndec = len(cfg["fl_order"]) // nwaves
     nbasis = cfg["ang_order"].shape[0]
 
+    # batch dim
+    _N = nevt if nevt else "nevt"
+
+    def RS(*dims: int) -> list[int]:
+        """Reshape shape — replace ``0`` with *nevt* when static."""
+        return [nevt if d == 0 else d for d in dims] if nevt else list(dims)
+
     F = TensorProto.FLOAT
 
-    # ---- inputs -----------------------------------------------------------
-    ck_re = g.input("ck_re", F, ("nwaves",))
-    ck_im = g.input("ck_im", F, ("nwaves",))
-    m0_in = g.input("m0", F, ("n_m0",))
-    g0_in = g.input("g0", F, ("n_g0",))
+    # ---- inputs (all concrete for small dims) -----------------------------
+    ck_re = g.input("ck_re", F, (nwaves,))
+    ck_im = g.input("ck_im", F, (nwaves,))
+    m0_in = g.input("m0", F, (n_m0,))
+    g0_in = g.input("g0", F, (n_g0,))
     tp_in = g.input("time_params", F, (6,))
-    mass = g.input("mass", F, ("nevt", "ndim_mass"))
-    q_in = g.input("q", F, ("nevt", "ndim_q"))
-    angle = g.input("angle", F, ("nevt", "ndim_angle"))
-    time = g.input("time", F, ("nevt",))
-    weight = g.input("weight", F, ("nevt",))
-    frac = g.input("frac", F, ("nevt",))
-    bkg = g.input("bkg", F, ("nevt",))
+    mass = g.input("mass", F, (_N, ndim_mass))
+    q_in = g.input("q", F, (_N, ndim_q))
+    angle = g.input("angle", F, (_N, ndim_angle))
+    time = g.input("time", F, (_N,))
+    weight = g.input("weight", F, (_N,))
+    frac = g.input("frac", F, (_N,))
+    bkg = g.input("bkg", F, (_N,))
     if with_norm:
         norm = g.input("norm", F, ())
 
@@ -344,11 +355,11 @@ def build_onnx_model(config: dict, with_norm: bool = True,
                  "m0_index", "bw_index", "bw_gamma_index", "bw_order",
                  "q_index", "fl_type", "fl_order",
                  "angle_index"):
-        g.const(name, np.asarray(cfg[name], dtype=np.int64))
+        g.const(name, np.asarray(cfg[name], dtype=np.int32))
 
     # ang_order flattened
     g.const("ang_order_f",
-            np.asarray(cfg["ang_order"], dtype=np.int64).ravel())
+            np.asarray(cfg["ang_order"], dtype=np.int32).ravel())
 
     for name in ("gamma_min", "gamma_delta", "fl_min", "fl_delta"):
         g.const(name, np.array(cfg[name], dtype=np.float32))
@@ -361,8 +372,8 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     def interp_c(xx, tbl_re, tbl_im, types_name, n_int, xmin_n, xdelta_n):
         diff = g.div(g.sub(xx, xmin_n), xdelta_n)
         xbin = g.floor(diff)
-        xbin_i = g.cast(xbin, TensorProto.INT64)
-        t1d = g.unsqueeze(g.cast(types_name, TensorProto.INT64), [0])
+        xbin_i = g.cast(xbin, TensorProto.INT32)
+        t1d = g.unsqueeze(g.cast(types_name, TensorProto.INT32), [0])
         off = g.mul(t1d, g.int_scalar("nc", n_int))
         flat_idx = g.add(off, xbin_i)
 
@@ -409,8 +420,8 @@ def build_onnx_model(config: dict, with_norm: bool = True,
 
     # Product over resonances per wave
     bw_ord_r, bw_ord_i = g.c_gather(bw_r, bw_i, "bw_order", axis=1)
-    bw_rsh_r = g.reshape(bw_ord_r, [0, nwaves, nres])
-    bw_rsh_i = g.reshape(bw_ord_i, [0, nwaves, nres])
+    bw_rsh_r = g.reshape(bw_ord_r, RS(0, nwaves, nres))
+    bw_rsh_i = g.reshape(bw_ord_i, RS(0, nwaves, nres))
     bwa_r, bwa_i = g.c_prod_seq(bw_rsh_r, bw_rsh_i, nres, dim=2)
 
     # ---- 3) Form factors ------------------------------------------------
@@ -418,7 +429,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     fl = _interp_real(g, fl_q, "ft", n_int_f,
                       "fl_type", "fl_min", "fl_delta")       # (nevt, n_fl)
     fl_ord = g.gather(fl, "fl_order", axis=1)                # (nevt, Nw*ndec)
-    fl_rsh = g.reshape(fl_ord, [0, nwaves, ndec])
+    fl_rsh = g.reshape(fl_ord, RS(0, nwaves, ndec))
     fla = g.reduce_prod(fl_rsh, [2])                          # (nevt, nwaves)
 
     # ---- 4) Angular basis -----------------------------------------------
@@ -428,7 +439,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     cos_ord = g.gather(cosang, "ang_order_f", axis=1)        # (nevt, Nb*n_per)
     nbasis = int(cfg["ang_order"].shape[0])
     n_per = int(cfg["ang_order"].shape[1])
-    cos_rsh = g.reshape(cos_ord, [0, nbasis, n_per])
+    cos_rsh = g.reshape(cos_ord, RS(0, nbasis, n_per))
     cosa = g.reduce_prod(cos_rsh, [2])                        # (nevt, nbasis)
 
     # fa = cosa @ matrix_ang  (complex)
@@ -448,8 +459,8 @@ def build_onnx_model(config: dict, with_norm: bool = True,
 
     # Split into 2 CP groups
     n_per_group = nwaves // 2
-    aw_rsh_r = g.reshape(aw_r, [0, 2, n_per_group])
-    aw_rsh_i = g.reshape(aw_i, [0, 2, n_per_group])
+    aw_rsh_r = g.reshape(aw_r, RS(0, 2, n_per_group))
+    aw_rsh_i = g.reshape(aw_i, RS(0, 2, n_per_group))
 
     idx0 = g.int_scalar("i0", 0)
     idx1 = g.int_scalar("i1", 1)
@@ -517,15 +528,31 @@ def build_onnx_model(config: dict, with_norm: bool = True,
 
     g.node("Identity", [P], ["P"])
     g.node("Identity", [Q], ["Q"])
-    g.output("P", F, ("nevt",))
+    g.output("P", F, (_N,))
     g.output("Q", F, ())
     return g.build()
 
 
 def export_to_onnx(config: dict, onnx_path: str, with_norm: bool = True,
-                   opset: int = 11):
-    """Build, check, and save the ONNX model."""
-    model = build_onnx_model(config, with_norm=with_norm, opset=opset)
+                   opset: int = 11, nevt: int | None = None):
+    """Build, check, and save the ONNX model.
+
+    Parameters
+    ----------
+    config : dict
+        Kernel config dict.
+    onnx_path : str
+        Output path.
+    with_norm : bool
+        If True, include ``norm`` input and ``Q = -Σ w·log(P/norm + bkg)``.
+    opset : int
+        ONNX opset version.  Use 11 for CANN / Ascend compatibility.
+    nevt : int or None
+        If given, all shapes are fixed (static batch dimension).
+        If ``None``, the batch dimension is symbolic.
+    """
+    model = build_onnx_model(config, with_norm=with_norm, opset=opset,
+                             nevt=nevt)
     onnx.checker.check_model(model)
     onnx.save(model, onnx_path)
     return model

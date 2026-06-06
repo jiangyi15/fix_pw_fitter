@@ -48,7 +48,7 @@ def test_onnx_matches_numpy():
     # --- numpy reference ---
     k = Kernel(config)
     data = {
-        "mass": np.ones((nevt, 2)) * 0.5,
+        "mass": np.ones((nevt, 1)) * 0.5,
         "q": np.ones((nevt, 1)) * 0.5,
         "angle": np.ones((nevt, 1)) * 0.5,
         "time": np.ones(nevt) * 0.1,
@@ -96,7 +96,7 @@ def test_onnx_no_norm():
 
     k = Kernel(config)
     data = {
-        "mass": np.ones((nevt, 2)) * 0.5,
+        "mass": np.ones((nevt, 1)) * 0.5,
         "q": np.ones((nevt, 1)) * 0.5,
         "angle": np.ones((nevt, 1)) * 0.5,
         "time": np.ones(nevt) * 0.1,
