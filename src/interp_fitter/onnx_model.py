@@ -540,6 +540,18 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     #  8) Gradients
     # ================================================================
 
+    # shared constants
+    _h = g.scalar("_h", 0.5)
+    _t = g.scalar("_t", 2.0)
+    _f = g.scalar("_f", 4.0)
+    _o = one
+    _no = g.neg(_o)
+
+    # shared subexpressions
+    _1mf = g.sub(_o, frac)
+    _1ma = g.sub(_o, ap)
+    _1pa = g.add(_o, ap)
+
     # --- dQ_dP --------------------------------------------------------
     if with_norm:
         dQ_dP_norm = g.neg(g.div(weight, Pnorm))
@@ -556,8 +568,8 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     def _adj(r, i, coeff):
         return g.mul(coeff, r), g.mul(coeff, i)
 
-    adjX_r, adjX_i = _adj(cX_r, cX_i, g.mul(g.sub(one, frac), g.sub(one, ap)))
-    adjY_r, adjY_i = _adj(cY_r, cY_i, g.mul(frac, g.add(one, ap)))
+    adjX_r, adjX_i = _adj(cX_r, cX_i, g.mul(_1mf, _1ma))
+    adjY_r, adjY_i = _adj(cY_r, cY_i, g.mul(frac, _1pa))
 
     dX_r = g.mul(dQ_dP, adjX_r)
     dX_i = g.mul(dQ_dP, adjX_i)
@@ -574,21 +586,26 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     u_r, u_i = g.c_mul(dY_r, dY_i, ep_r, ep_i)
     dA1_r, dA1_i = g.c_add(t_r, t_i, u_r, u_i)
 
-    # scatter → (nevt, nwaves) — unsqueeze each 1D column first
-    dAw_pairs = [(dA0_r, dA0_i)] * n_per_group + [(dA1_r, dA1_i)] * n_per_group
-    dAw_r = g.concat(
-        [g.reshape(r, RS(0, 1)) for r, _ in dAw_pairs], axis=1)
-    dAw_i = g.concat(
-        [g.reshape(i, RS(0, 1)) for _, i in dAw_pairs], axis=1)
+    # scatter → (nevt, nwaves) via Tile (avoids 400 individual Reshape)
+    dA0_2d_r = g.reshape(dA0_r, RS(0, 1))                       # (nevt, 1)
+    dA0_2d_i = g.reshape(dA0_i, RS(0, 1))
+    dA1_2d_r = g.reshape(dA1_r, RS(0, 1))
+    dA1_2d_i = g.reshape(dA1_i, RS(0, 1))
+    reps = g.const(g._uid("dawr"), np.array([1, n_per_group], dtype=np.int64))
+    daw0_r = g.node("Tile", [dA0_2d_r, reps], [g._uid("tle")])
+    daw0_i = g.node("Tile", [dA0_2d_i, reps], [g._uid("tle")])
+    daw1_r = g.node("Tile", [dA1_2d_r, reps], [g._uid("tle")])
+    daw1_i = g.node("Tile", [dA1_2d_i, reps], [g._uid("tle")])
+    dAw_r = g.concat([daw0_r, daw1_r], axis=1)                  # (nevt, nwaves)
+    dAw_i = g.concat([daw0_i, daw1_i], axis=1)
 
     # --- grad ck -------------------------------------------------------
     td_r, td_i = g.c_mul(dAw_r, dAw_i, T_r, T_i)
     dck_w_r = g.reduce_sum(td_r, [0])
     dck_w_i = g.reduce_sum(td_i, [0])
     dck_cr, dck_ci = g.c_conj(dck_w_r, dck_w_i)
-    two_f = g.scalar("tcf", 2.0)
-    grad_ck_re = g.mul(two_f, dck_cr)
-    grad_ck_im = g.mul(two_f, dck_ci)
+    grad_ck_re = g.mul(_t, dck_cr)
+    grad_ck_im = g.mul(_t, dck_ci)
 
     # --- grad m0 -------------------------------------------------------
     # Backprop: amp_waves → T → bwa → bw → m0a → m0
@@ -649,8 +666,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # dbw/dm0a = -bw² * (2*m0a - i*Γ)
     # (2*m0a - i*Γ) = (2*m0a + Im(Γ)) + i*(-Re(Γ))
     bw2_r, bw2_i = g.c_pow2(bw_r, bw_i)
-    two_m0a = g.mul(g.scalar("tm", 2.0), m0a)
-    num_r = g.add(two_m0a, gbw_i)
+    num_r = g.add(g.mul(_t, m0a), gbw_i)
     num_i = g.neg(gbw_r)
     t_r, t_i = g.c_mul(bw2_r, bw2_i, num_r, num_i)
     dbw_dm0a_r = g.neg(t_r)
@@ -660,7 +676,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # The real part of the complex product is Re(dQ_dbw * dbw/dm0a)
     prod_r = g.sub(g.mul(dQ_dbw_r, dbw_dm0a_r), g.mul(dQ_dbw_i, dbw_dm0a_i))
     sum_r = g.reduce_sum(prod_r, [0])
-    grad_m0a = g.mul(two_f, sum_r)  # 2 * Re(Σ)
+    grad_m0a = g.mul(_t, sum_r)  # 2 * Re(Σ)
 
     # scatter m0a → m0
     scatter_m0 = np.zeros((n_bw, n_m0), dtype=np.float32)
@@ -689,10 +705,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     #          = i*(bw_r² - bw_i²) - 2*bw_r*bw_i
     #          = -2*bw_r*bw_i + i*(bw_r² - bw_i²)
     bw2_r, bw2_i = g.c_pow2(bw_r, bw_i)   # already computed above
-    # i * bw²:
-    ibw2_r = g.neg(g.mul(g.scalar("t", 2.0), g.mul(bw_r, bw_i)))  # = -2*bw_r*bw_i
-    # Wait, I already have bw2_r = bw_r² - bw_i², bw2_i = 2*bw_r*bw_i
-    # i * bw² = -bw2_i + i*bw2_r
+    # i * bw² = -bw2_i + i*bw2_r  (bw2 = bw_r² - bw_i² + i·2·bw_r·bw_i)
     ibw2_r = g.neg(bw2_i)
     ibw2_i = bw2_r
     # dbw/dΓ = m0a * i * bw²
@@ -735,7 +748,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # Real part = dG_val_r * gi_r - dG_val_i * gi_i
     g0a_prod_r = g.sub(g.mul(dG_val_r, gi_r), g.mul(dG_val_i, gi_i))
     g0a_sum = g.reduce_sum(g0a_prod_r, [0])
-    grad_g0a = g.mul(two_f, g0a_sum)                              # (n_gamma,)
+    grad_g0a = g.mul(_t, g0a_sum)                              # (n_gamma,)
 
     # scatter g0a → g0 via g0_index
     scatter_g0 = np.zeros((n_gamma, n_g0), dtype=np.float32)
@@ -748,22 +761,18 @@ def build_onnx_model(config: dict, with_norm: bool = True,
 
     # --- grad time_params ---------------------------------------------
     # Derivatives of eL, eH
-    deL_dgt = g.c_rmul(g.neg(g.div(time, two_f)), eL_r, eL_i)
-    deH_dgt = g.c_rmul(g.neg(g.div(time, two_f)), eH_r, eH_i)
-    deL_ddg = g.c_rmul(g.neg(g.div(time, g.scalar("f4", 4.0))), eL_r, eL_i)
-    deH_ddg = g.c_rmul(g.div(time, g.scalar("f4b", 4.0)), eH_r, eH_i)
-    deL_ddm = g.c_rmul(g.neg(g.mul(time, half)), eL_r, eL_i)
-    deH_ddm = g.c_rmul(g.mul(time, half), eH_r, eH_i)
-
-    half_f = g.scalar("hf", 0.5)
-    dep_dgt = (g.c_rmul(half_f, *deL_dgt), g.c_rmul(half_f, *deH_dgt))
-    # Hmm, this is getting messy with tuple unpacking. Let me use a helper.
+    deL_dgt = g.c_rmul(g.neg(g.div(time, _t)), eL_r, eL_i)
+    deH_dgt = g.c_rmul(g.neg(g.div(time, _t)), eH_r, eH_i)
+    deL_ddg = g.c_rmul(g.neg(g.div(time, _f)), eL_r, eL_i)
+    deH_ddg = g.c_rmul(g.div(time, _f), eH_r, eH_i)
+    deL_ddm = g.c_rmul(g.neg(g.mul(time, _h)), eL_r, eL_i)
+    deH_ddm = g.c_rmul(g.mul(time, _h), eH_r, eH_i)
 
     def _c_avg(a_r, a_i, b_r, b_i):
-        return g.c_rmul(half_f, *g.c_add(a_r, a_i, b_r, b_i))
+        return g.c_rmul(_h, *g.c_add(a_r, a_i, b_r, b_i))
 
     def _c_diff(a_r, a_i, b_r, b_i):
-        return g.c_rmul(half_f, *g.c_sub(a_r, a_i, b_r, b_i))
+        return g.c_rmul(_h, *g.c_sub(a_r, a_i, b_r, b_i))
 
     dep_dgt_r, dep_dgt_i = _c_avg(*deL_dgt, *deH_dgt)
     dem_dgt_r, dem_dgt_i = _c_diff(*deL_dgt, *deH_dgt)
@@ -795,7 +804,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
         """2 * Re(Σ dQ_dX*dx + dQ_dY*dy)"""
         p_r = g.add(g.sub(g.mul(dX_r, dx_r), g.mul(dX_i, dx_i)),
                     g.sub(g.mul(dY_r, dy_r), g.mul(dY_i, dy_i)))
-        return g.mul(two_f, g.reduce_sum(p_r, [0]))
+        return g.mul(_t, g.reduce_sum(p_r, [0]))
 
     dx_dgt_r, dx_dgt_i, dy_dgt_r, dy_dgt_i = _dXdY(
         dep_dgt_r, dep_dgt_i, dem_dgt_r, dem_dgt_i)
@@ -860,7 +869,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     dY_poqr_r = g.neg(g.mul(t_r, amp0_r))  # Wait, this is wrong. t_r * amp0_r doesn't respect complex mult.
     # Actually: (-em/poq * dpoq/poq) * amp0
     # Let me do: c_mul(c_mul(-one, c_mul(em_poq, dpoq_poq)), amp0)
-    neg_em_poq_r, neg_em_poq_i = g.c_rmul(g.neg(one), em_poq_r, em_poq_i)
+    neg_em_poq_r, neg_em_poq_i = g.c_rmul(_no, em_poq_r, em_poq_i)
     t_r, t_i = g.c_mul(neg_em_poq_r, neg_em_poq_i, dpoq_dpoqr_poq_r, dpoq_dpoqr_poq_i)
     dY_poqr_r, dY_poqr_i = g.c_mul(t_r, t_i, amp0_r, amp0_i)
 
