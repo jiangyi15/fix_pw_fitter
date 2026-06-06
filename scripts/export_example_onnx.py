@@ -16,7 +16,8 @@ from interp_fitter.onnx_model import build_onnx_model, export_to_onnx
 def make_benchmark_config(nwaves=200, n_m0=50, n_g0=50,
                           n_gamma=200, n_bw=400, nres=2,
                           n_fl=50, ndec=2,
-                          nbasis=50, n_ang=50, n_per=3):
+                          nbasis=50, n_ang=50, n_per=3,
+                          ndim_mass=32, ndim_q=56, ndim_angle=72):
     """Create a config dict with given dimensions."""
 
     n_int = 200  # interpolation table size
@@ -32,28 +33,40 @@ def make_benchmark_config(nwaves=200, n_m0=50, n_g0=50,
         "matrix_gamma": np.ones((n_m0, n_gamma), dtype=float),
         "matrix_ang":   np.ones((nbasis, nwaves), dtype=complex),
 
-        # -- gamma indexers (map to distinct g0/m0 params) --
+        # -- gamma indexers --
         "gamma_type":  np.zeros(n_gamma, dtype=int),
-        "gamma_index": np.zeros(n_gamma, dtype=int),
+        "gamma_index": np.concatenate([
+            rng.integers(0, ndim_mass, size=n_gamma - 1),
+            [ndim_mass - 1],  # ensure max is reached
+        ]).astype(np.int32),
         "gamma_min":   0.0,
         "gamma_delta": 0.01,
         "g0_index": rng.integers(0, n_g0, size=n_gamma).astype(np.int32),
 
         # -- BW indexers --
         "m0_index":       rng.integers(0, n_m0, size=n_bw).astype(np.int32),
-        "bw_index":       rng.integers(0, max(n_gamma, n_bw), size=n_bw).astype(np.int32),
+        "bw_index":       np.concatenate([
+            rng.integers(0, ndim_mass, size=n_bw - 1),
+            [ndim_mass - 1],
+        ]).astype(np.int32),
         "bw_gamma_index": rng.integers(0, n_m0, size=n_bw).astype(np.int32),
         "bw_order":       rng.integers(0, n_bw, size=nwaves * nres).astype(np.int64),
 
         # -- form factor indexers --
-        "q_index":  np.zeros(n_fl, dtype=int),
+        "q_index":  np.concatenate([
+            rng.integers(0, ndim_q, size=n_fl - 1),
+            [ndim_q - 1],
+        ]).astype(np.int32),
         "fl_type":  np.zeros(n_fl, dtype=int),
         "fl_min":   0.0,
         "fl_delta": 0.01,
         "fl_order": np.zeros(nwaves * ndec, dtype=int),
 
         # -- angular indexers --
-        "angle_index": np.arange(n_ang, dtype=int),
+        "angle_index": np.concatenate([
+            rng.integers(0, ndim_angle, size=n_ang - 1),
+            [ndim_angle - 1],
+        ]).astype(np.int32),
         "angle_k":     np.ones(n_ang, dtype=float),
         "angle_b":     np.zeros(n_ang, dtype=float),
         "ang_order":   np.tile(np.arange(n_ang), (nbasis, n_per))[:, :n_per],
