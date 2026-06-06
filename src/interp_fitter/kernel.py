@@ -24,30 +24,32 @@ Objective:
 class Kernel:
     def __init__(self, config):
         self.config = config
-        # Expected config keys (set by subclass/loader):
-        # gamma_table     (gamma_types, n_int) complex
-        # fl_table        (fl_types, n_int) real
-        # matrix_gamma    (n_m0, n_gamma) real
-        # matrix_ang      (nbasis, nwaves) complex
-        # g0_index        (n_gamma,) int
-        # gamma_index     (n_gamma,) int
-        # gamma_type      (n_gamma,) int
-        # gamma_min       scalar
-        # gamma_delta     scalar
-        # m0_index        (n_bw,) int
-        # bw_index        (n_bw,) int
-        # bw_gamma_index  (n_bw,) int
-        # bw_order        (nwaves * nres,) int
-        # q_index         (n_fl,) int
-        # fl_type         (n_fl,) int
-        # fl_min          scalar
-        # fl_delta        scalar
-        # fl_order        (nwaves * ndecays,) int
-        # angle_index     (n_ang,) int
-        # angle_k         (n_ang,) real
-        # angle_b         (n_ang,) real
-        # ang_order       (nbasis, n_per_basis) int
-        ...
+        self.gamma_table = np.asarray(config["gamma_table"])
+        self.fl_table = np.asarray(config["fl_table"])
+        self.matrix_gamma = np.asarray(config["matrix_gamma"], dtype=float)
+        self.matrix_ang = np.asarray(config["matrix_ang"], dtype=complex)
+
+        self.g0_index = np.asarray(config["g0_index"], dtype=int)
+        self.gamma_index = np.asarray(config["gamma_index"], dtype=int)
+        self.gamma_type = np.asarray(config["gamma_type"], dtype=int)
+        self.gamma_min = float(config["gamma_min"])
+        self.gamma_delta = float(config["gamma_delta"])
+
+        self.m0_index = np.asarray(config["m0_index"], dtype=int)
+        self.bw_index = np.asarray(config["bw_index"], dtype=int)
+        self.bw_gamma_index = np.asarray(config["bw_gamma_index"], dtype=int)
+        self.bw_order = np.asarray(config["bw_order"], dtype=int)
+
+        self.q_index = np.asarray(config["q_index"], dtype=int)
+        self.fl_type = np.asarray(config["fl_type"], dtype=int)
+        self.fl_min = float(config["fl_min"])
+        self.fl_delta = float(config["fl_delta"])
+        self.fl_order = np.asarray(config["fl_order"], dtype=int)
+
+        self.angle_index = np.asarray(config["angle_index"], dtype=int)
+        self.angle_k = np.asarray(config["angle_k"], dtype=float)
+        self.angle_b = np.asarray(config["angle_b"], dtype=float)
+        self.ang_order = np.asarray(config["ang_order"], dtype=int)
 
     def compute(self, params, data, norm=None):
         ck = params["ck"]                          # (nwaves,) complex
