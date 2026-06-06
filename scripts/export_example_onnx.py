@@ -70,6 +70,7 @@ def main():
     p.add_argument("--waves", type=int, default=200)
     p.add_argument("--events", type=int, default=1000)
     p.add_argument("--output", default="kernel.onnx")
+    p.add_argument("--opset", type=int, default=11, help="ONNX opset (11 for CANN compat)")
     args = p.parse_args()
 
     print(f"Building config: nwaves={args.waves}, nbasis=50, n_bw=400, n_m0=50, n_fl=50")
@@ -80,7 +81,7 @@ def main():
     for variant, label in [("with_norm", True), ("no_norm", False)]:
         out = f"{base}_{variant}{ext}"
         print(f"Building {variant} …")
-        model = build_onnx_model(config, with_norm=label)
+        model = build_onnx_model(config, with_norm=label, opset=args.opset)
         with open(out, "wb") as f:
             f.write(model.SerializeToString())
         size_mb = os.path.getsize(out) / 1e6

@@ -16,10 +16,19 @@ from onnx import helper, TensorProto, numpy_helper
 # ---------------------------------------------------------------------------
 
 class GraphBuilder:
-    """Accumulates ONNX nodes and tracks tensor / initializer names."""
+    """Accumulates ONNX nodes and tracks tensor / initializer names.
 
-    def __init__(self, name: str = "Kernel"):
+    Parameters
+    ----------
+    opset : int
+        Target ONNX opset version.  Squeeze / Unsqueeze / ReduceSum
+        use attribute-based axes when ``opset <= 12`` (opset 11
+        compatible), and tensor-based axes otherwise (opset 13+).
+    """
+
+    def __init__(self, name: str = "Kernel", opset: int = 11):
         self.name = name
+        self.opset = opset
         self._inputs: list[helper.ValueInfoProto] = []
         self._outputs: list[helper.ValueInfoProto] = []
         self._init: list[TensorProto] = []
@@ -103,6 +112,9 @@ class GraphBuilder:
     # -- reductions ---------------------------------------------------------
 
     def reduce_sum(self, x: str, axes: list[int], keepdims: int = 0) -> str:
+        if self.opset <= 12:
+            return self.node("ReduceSum", [x], [self._uid("rsum")],
+                             axes=axes, keepdims=keepdims)
         ax_name = self._uid("rsax")
         self.const(ax_name, np.array(axes, dtype=np.int64))
         return self.node("ReduceSum", [x, ax_name], [self._uid("rsum")],
@@ -122,11 +134,15 @@ class GraphBuilder:
         return self.node("Reshape", [x, shape], [self._uid("rs")])
 
     def unsqueeze(self, x: str, axes: list[int]) -> str:
+        if self.opset <= 12:
+            return self.node("Unsqueeze", [x], [self._uid("unsq")], axes=axes)
         ax_name = self._uid("uax")
         self.const(ax_name, np.array(axes, dtype=np.int64))
         return self.node("Unsqueeze", [x, ax_name], [self._uid("unsq")])
 
     def squeeze(self, x: str, axes: list[int]) -> str:
+        if self.opset <= 12:
+            return self.node("Squeeze", [x], [self._uid("sq")], axes=axes)
         ax_name = self._uid("sax")
         self.const(ax_name, np.array(axes, dtype=np.int64))
         return self.node("Squeeze", [x, ax_name], [self._uid("sq")])
@@ -227,7 +243,7 @@ class GraphBuilder:
                                   self._inputs, self._outputs, self._init)
         model = helper.make_model(graph, producer_name="interp_fitter",
                                   opset_imports=[
-                                      helper.make_operatorsetid("", 17)])
+                                      helper.make_operatorsetid("", self.opset)])
         return model
 
 
@@ -259,7 +275,8 @@ def _interp_real(g: GraphBuilder, x: str,
 #  Builder — full model
 # ---------------------------------------------------------------------------
 
-def build_onnx_model(config: dict, with_norm: bool = True) -> onnx.ModelProto:
+def build_onnx_model(config: dict, with_norm: bool = True,
+                     opset: int = 11) -> onnx.ModelProto:
     """Build an ONNX model for ``Kernel.compute(...)``.
 
     Parameters
@@ -267,6 +284,9 @@ def build_onnx_model(config: dict, with_norm: bool = True) -> onnx.ModelProto:
     with_norm : bool
         If True, ``norm`` is an input and ``Q = -Σ w·log(P/norm + bkg)``.
         If False, no ``norm`` input and ``Q = Σ w·P``.
+    opset : int
+        ONNX opset version.  Use 11 for maximum CANN / Ascend
+        compatibility;  Use 13 / 17 for more recent runtimes.
 
     Inputs (all ``FLOAT``):
       ck_re (nwaves,), ck_im (nwaves,), m0 (n_m0,), g0 (n_g0,),
@@ -277,7 +297,7 @@ def build_onnx_model(config: dict, with_norm: bool = True) -> onnx.ModelProto:
 
     Outputs: P (nevt,), Q ()
     """
-    g = GraphBuilder("Kernel")
+    g = GraphBuilder("Kernel", opset=opset)
 
     # -- static dimensions --------------------------------------------------
     cfg = config
@@ -502,9 +522,10 @@ def build_onnx_model(config: dict, with_norm: bool = True) -> onnx.ModelProto:
     return g.build()
 
 
-def export_to_onnx(config: dict, onnx_path: str, with_norm: bool = True):
+def export_to_onnx(config: dict, onnx_path: str, with_norm: bool = True,
+                   opset: int = 11):
     """Build, check, and save the ONNX model."""
-    model = build_onnx_model(config, with_norm=with_norm)
+    model = build_onnx_model(config, with_norm=with_norm, opset=opset)
     onnx.checker.check_model(model)
     onnx.save(model, onnx_path)
     return model
