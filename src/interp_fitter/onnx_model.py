@@ -259,14 +259,21 @@ def _interp_real(g: GraphBuilder, x: str,
 #  Builder — full model
 # ---------------------------------------------------------------------------
 
-def build_onnx_model(config: dict) -> onnx.ModelProto:
+def build_onnx_model(config: dict, with_norm: bool = True) -> onnx.ModelProto:
     """Build an ONNX model for ``Kernel.compute(...)``.
+
+    Parameters
+    ----------
+    with_norm : bool
+        If True, ``norm`` is an input and ``Q = -Σ w·log(P/norm + bkg)``.
+        If False, no ``norm`` input and ``Q = Σ w·P``.
 
     Inputs (all ``FLOAT``):
       ck_re (nwaves,), ck_im (nwaves,), m0 (n_m0,), g0 (n_g0,),
       time_params (6,),
       mass (nevt, ndim_mass), q (nevt, ndim_q), angle (nevt, ndim_angle),
-      time (nevt,), weight (nevt,), frac (nevt,), bkg (nevt,), norm ()
+      time (nevt,), weight (nevt,), frac (nevt,), bkg (nevt,)
+      norm ()                                          — only if *with_norm*
 
     Outputs: P (nevt,), Q ()
     """
@@ -299,7 +306,8 @@ def build_onnx_model(config: dict) -> onnx.ModelProto:
     weight = g.input("weight", F, ("nevt",))
     frac = g.input("frac", F, ("nevt",))
     bkg = g.input("bkg", F, ("nevt",))
-    norm = g.input("norm", F, ())
+    if with_norm:
+        norm = g.input("norm", F, ())
 
     # ---- constants --------------------------------------------------------
     gt = np.asarray(cfg["gamma_table"], dtype=np.complex64)
@@ -481,10 +489,12 @@ def build_onnx_model(config: dict) -> onnx.ModelProto:
     )
 
     # ---- 7) Objective ---------------------------------------------------
-    Pnorm = g.add(g.div(P, norm), bkg)
-    Q = g.neg(g.reduce_sum(g.mul(weight, g.log(Pnorm)), [0]))
+    if with_norm:
+        Pnorm = g.add(g.div(P, norm), bkg)
+        Q = g.neg(g.reduce_sum(g.mul(weight, g.log(Pnorm)), [0]))
+    else:
+        Q = g.reduce_sum(g.mul(weight, P), [0])
 
-    # Identity nodes to give graph outputs the expected names
     g.node("Identity", [P], ["P"])
     g.node("Identity", [Q], ["Q"])
     g.output("P", F, ("nevt",))
@@ -492,9 +502,9 @@ def build_onnx_model(config: dict) -> onnx.ModelProto:
     return g.build()
 
 
-def export_to_onnx(config: dict, onnx_path: str):
+def export_to_onnx(config: dict, onnx_path: str, with_norm: bool = True):
     """Build, check, and save the ONNX model."""
-    model = build_onnx_model(config)
+    model = build_onnx_model(config, with_norm=with_norm)
     onnx.checker.check_model(model)
     onnx.save(model, onnx_path)
     return model

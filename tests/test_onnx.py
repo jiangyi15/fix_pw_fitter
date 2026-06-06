@@ -112,7 +112,7 @@ def test_onnx_no_norm():
     }
     P_ref, Q_ref, _ = k.compute(params, data, norm=None)
 
-    model = build_onnx_model(config)
+    model = build_onnx_model(config, with_norm=False)
     sess = ort.InferenceSession(model.SerializeToString())
 
     inputs = {
@@ -128,13 +128,10 @@ def test_onnx_no_norm():
         "weight": data["weight"].astype(np.float32),
         "frac": np.zeros(nevt, dtype=np.float32),
         "bkg": np.zeros(nevt, dtype=np.float32),
-        "norm": np.array(1.0, dtype=np.float32),
     }
-    P_onnx, Q_onnx_onx = sess.run(["P", "Q"], inputs)
-    # ONNX always computes Q = -Σ w*log(P/norm + bkg)
-    # With norm=1, bkg=0, this should match Q from kernel with norm=1
-    _, Q_with_norm, _ = k.compute(params, data, norm=1.0)
-    np.testing.assert_allclose(Q_onnx_onx, Q_with_norm, rtol=1e-5)
+    P_onnx, Q_onnx = sess.run(["P", "Q"], inputs)
+    np.testing.assert_allclose(P_onnx, P_ref, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(Q_onnx, Q_ref, rtol=1e-5, atol=1e-5)
 
 
 def test_save_and_reload(tmp_path):

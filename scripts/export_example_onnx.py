@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse
+import os
 import numpy as np
 import sys
 sys.path.insert(0, "src")
@@ -74,16 +75,16 @@ def main():
     print(f"Building config: nwaves={args.waves}, nbasis=50, n_bw=400, n_m0=50, n_fl=50")
     config = make_benchmark_config(nwaves=args.waves)
 
-    print("Building ONNX model …")
-    model = build_onnx_model(config)
+    base, ext = os.path.splitext(args.output)
 
-    print(f"Saving to {args.output} …")
-    with open(args.output, "wb") as f:
-        f.write(model.SerializeToString())
-
-    import os
-    size_mb = os.path.getsize(args.output) / 1e6
-    print(f"Done — {len(model.graph.node)} nodes, {size_mb:.1f} MB")
+    for variant, label in [("with_norm", True), ("no_norm", False)]:
+        out = f"{base}_{variant}{ext}"
+        print(f"Building {variant} …")
+        model = build_onnx_model(config, with_norm=label)
+        with open(out, "wb") as f:
+            f.write(model.SerializeToString())
+        size_mb = os.path.getsize(out) / 1e6
+        print(f"  → {out}  ({len(model.graph.node)} nodes, {size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
