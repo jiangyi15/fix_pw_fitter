@@ -21,6 +21,8 @@ def make_benchmark_config(nwaves=200, n_m0=50, n_g0=50,
 
     n_int = 200  # interpolation table size
 
+    rng = np.random.default_rng(0)
+
     config = {
         # -- tables --
         "gamma_table": np.ones((n_gamma, n_int), dtype=complex),
@@ -28,21 +30,20 @@ def make_benchmark_config(nwaves=200, n_m0=50, n_g0=50,
 
         # -- mapping matrices --
         "matrix_gamma": np.ones((n_m0, n_gamma), dtype=float),
-        # (nbasis, nwaves) — must match nwaves
-        "matrix_ang": np.ones((nbasis, nwaves), dtype=complex),
+        "matrix_ang":   np.ones((nbasis, nwaves), dtype=complex),
 
-        # -- gamma indexers --
+        # -- gamma indexers (map to distinct g0/m0 params) --
         "gamma_type":  np.zeros(n_gamma, dtype=int),
         "gamma_index": np.zeros(n_gamma, dtype=int),
         "gamma_min":   0.0,
         "gamma_delta": 0.01,
-        "g0_index":    np.zeros(n_gamma, dtype=int),
+        "g0_index": rng.integers(0, n_g0, size=n_gamma).astype(np.int32),
 
         # -- BW indexers --
-        "m0_index":       np.zeros(n_bw, dtype=int),
-        "bw_index":       np.zeros(n_bw, dtype=int),
-        "bw_gamma_index": np.zeros(n_bw, dtype=int),
-        "bw_order":       np.tile(np.arange(n_bw), nwaves * nres // n_bw + 1)[:nwaves * nres],
+        "m0_index":       rng.integers(0, n_m0, size=n_bw).astype(np.int32),
+        "bw_index":       rng.integers(0, max(n_gamma, n_bw), size=n_bw).astype(np.int32),
+        "bw_gamma_index": rng.integers(0, n_m0, size=n_bw).astype(np.int32),
+        "bw_order":       rng.integers(0, n_bw, size=nwaves * nres).astype(np.int64),
 
         # -- form factor indexers --
         "q_index":  np.zeros(n_fl, dtype=int),
@@ -57,10 +58,6 @@ def make_benchmark_config(nwaves=200, n_m0=50, n_g0=50,
         "angle_b":     np.zeros(n_ang, dtype=float),
         "ang_order":   np.tile(np.arange(n_ang), (nbasis, n_per))[:, :n_per],
     }
-
-    # Ensure bw_order is within bounds
-    config["bw_order"] = np.random.default_rng(0).integers(0, n_bw,
-                                                           size=nwaves * nres).astype(np.int64)
 
     return config
 
@@ -84,7 +81,7 @@ def main():
         out = f"{base}_{variant}{ext}"
         print(f"Building {variant} …")
         model = build_onnx_model(config, with_norm=label, opset=args.opset,
-                                 nevt=args.nevt)
+                                 nevt=args.nevt, with_gradients=True)
         with open(out, "wb") as f:
             f.write(model.SerializeToString())
         size_mb = os.path.getsize(out) / 1e6
