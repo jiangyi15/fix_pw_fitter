@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ref_numpy import Kernel
+from interp_fitter.kernel import Kernel
 
 
 def make_mini_kernel():
