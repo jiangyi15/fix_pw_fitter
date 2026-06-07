@@ -72,6 +72,17 @@ def _expand_half_angle(sin_pow: int, cos_pow: int):
 #  Wigner-d weights → Fourier basis immediately
 # ============================================================================
 
+def _group_like_terms(terms: list[AmpTerm]) -> list[AmpTerm]:
+    """Sum coefficients of AmpTerms that share the same factor basis."""
+    from collections import defaultdict
+    groups: dict[tuple, sp.Expr] = defaultdict(lambda: sp.Integer(0))
+    for t in terms:
+        key = tuple(sorted((f.name, f.func, f.k) for f in t.factors))
+        groups[key] += t.coeff
+    return [AmpTerm(coeff=c, factors=[Factor(n, f, k) for n, f, k in k])
+            for k, c in groups.items() if c != 0]
+
+
 def _wd_fourier(J: float, m1: float, m2: float, var_idx: int):
     """Wigner-d^J_{m1,m2}(θ) → list of AmpTerm in cos(kθ/2)/sin(kθ/2) basis."""
     twoJ = round(2 * J)
@@ -111,7 +122,7 @@ def _wd_fourier(J: float, m1: float, m2: float, var_idx: int):
             if kk > 0:
                 factors.append(Factor(f"theta_{var_idx}", func, kk))
             terms.append(AmpTerm(coeff=wd_coeff * frac, factors=factors))
-    return terms
+    return _group_like_terms(terms)
 
 
 # ============================================================================
@@ -159,4 +170,4 @@ def _vertex_terms(Ja, Jb, Jc, la, lb, lc, L, S, theta_idx, phi_idx):
                 coeff=base * wt.coeff * pt.coeff,
                 factors=wt.factors + pt.factors,
             ))
-    return result
+    return _group_like_terms(result)
