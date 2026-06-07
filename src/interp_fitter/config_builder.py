@@ -128,20 +128,27 @@ class DecayChain:
         return tuple(sorted(tm[r] for r in self.resonances))
 
     @property
-    def g_ls_list(self) -> list[str]:
-        """All ``g_ls`` parameter names across every decay in the chain."""
-        result: list[str] = []
-        for d in self.decays:
-            result.extend(d.get_g_ls())
-        return result
+    def ls_combinations(self) -> list[tuple[tuple[int, float], ...]]:
+        """Cartesian product of (L, S) pairs across all decays.
+
+        Each element is a tuple of ``(L, S)`` pairs, one per decay
+        in the chain.
+        """
+        lists = [d.get_ls_list() for d in self.decays]
+        if not lists:
+            return []
+        return [combo for combo in iproduct(*lists)]
 
     @property
-    def ls_list(self) -> list[tuple[int, float]]:
-        """All (L, S) pairs across every decay in the chain."""
-        result: list[tuple[int, float]] = []
-        for d in self.decays:
-            result.extend(d.get_ls_list())
-        return result
+    def g_ls_combinations(self) -> list[tuple[str, ...]]:
+        """Cartesian product of ``g_ls`` names across all decays.
+
+        Each element is a tuple of parameter names, one per decay.
+        """
+        lists = [d.get_g_ls() for d in self.decays]
+        if not lists:
+            return []
+        return [combo for combo in iproduct(*lists)]
 
     @property
     def topo_map(self) -> dict[str, tuple[str, ...]]:
