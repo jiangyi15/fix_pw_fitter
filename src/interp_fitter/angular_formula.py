@@ -116,7 +116,8 @@ def wigner_d_weights(J: float, m1: float, m2: float):
         g = math.gcd(p, denom)
         p //= g; denom //= g
 
-        coeff = sign * p * math.sqrt(r) / denom
+        import sympy as _sp3
+        coeff = _sp3.Rational(sign * p, denom) * _sp3.sqrt(r)
         weights.append((coeff, L, twoJ - L))
 
     return weights
@@ -126,38 +127,37 @@ def wigner_d_weights(J: float, m1: float, m2: float):
 #  Half-angle Fourier expansion
 # ============================================================================
 
-def expand_half_angle(sp: int, cp: int):
-    """Expand sin(θ/2)^sp · cos(θ/2)^cp into `{("cos"/"sin", k): Fraction}`.
+def expand_half_angle(sin_pow: int, cos_pow: int):
+    """Expand sin(θ/2)^n · cos(θ/2)^m into ``{("cos"/"sin", k): sympy Rational}``."""
+    import sympy as _sp
+    result: dict[tuple[str, int], _sp.Rational] = {}
+    denom = 2 ** (cos_pow + sin_pow)
+    sm4 = sin_pow % 4
 
-    Result terms are ``Fraction * cos(k·θ/2)`` or ``Fraction * sin(k·θ/2)``.
-    """
-    result: dict[tuple[str, int], Fraction] = {}
-    denom = 2 ** (cp + sp)
-    sp_mod4 = sp % 4
-
-    for k1 in range(cp + 1):
-        for k2 in range(sp + 1):
-            c = _comb(cp, k1) * _comb(sp, k2)
+    for k1 in range(cos_pow + 1):
+        for k2 in range(sin_pow + 1):
+            c = _comb(cos_pow, k1) * _comb(sin_pow, k2)
             if c == 0: continue
             if k2 % 2 == 1: c = -c
 
-            n = cp + sp - 2 * k1 - 2 * k2
+            n = cos_pow + sin_pow - 2 * k1 - 2 * k2
             k = abs(n)
-            r_factor = [1, 0, -1, 0][sp_mod4]
-            i_factor = [0, 1, 0, -1][sp_mod4]
+            r_factor = [1, 0, -1, 0][sm4]
+            i_factor = [0, 1, 0, -1][sm4]
 
             if k == 0:
                 if r_factor != 0:
-                    result[("cos", 0)] = result.get(("cos", 0), Fraction(0, 1)) + Fraction(c * r_factor, denom)
+                    result[("cos", 0)] = result.get(("cos", 0), _sp.Integer(0)) + _sp.Rational(c * r_factor, denom)
                 continue
 
             if r_factor != 0:
-                result[("cos", k)] = result.get(("cos", k), Fraction(0, 1)) + Fraction(c * r_factor, denom)
+                result[("cos", k)] = result.get(("cos", k), _sp.Integer(0)) + _sp.Rational(c * r_factor, denom)
 
             if i_factor != 0:
-                coeff = Fraction(c * i_factor, denom)
-                if n < 0: coeff = -coeff
-                result[("sin", k)] = result.get(("sin", k), Fraction(0, 1)) + coeff
+                coeff = _sp.Rational(c * i_factor, denom)
+                if n < 0:
+                    coeff = -coeff
+                result[("sin", k)] = result.get(("sin", k), _sp.Integer(0)) + coeff
 
     return result
 
@@ -188,7 +188,9 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
     if abs(cg2) < 1e-15:
         return []
 
-    ls_factor = math.sqrt((2 * L + 1) / (2 * round(Ja) + 1))
+    import sympy as _sp4
+    ls_factor = _sp4.sqrt(
+        _sp4.Rational(2 * L + 1, 2 * round(Ja) + 1))
     base = cg1 * cg2 * ls_factor
     wd = wigner_d_weights(Ja, la, delta)
 
@@ -248,8 +250,9 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
     result: list[FourierTerm] = []
 
     for term in terms:
-        expansions: list[tuple[list[Factor], float]] \
-            = [([], 1.0)]
+        import sympy as _sp2
+        expansions: list[tuple[list[Factor], _sp2.Expr]] \
+            = [([], _sp2.Integer(1))]
 
         # ── Expand theta power factors ──
         for var_idx, sp, cp in term.theta_power:
@@ -260,7 +263,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
                     if frac == 0:
                         continue
                     new_factors = factors + [Factor(var_idx, "theta", func, k)]
-                    new_exp.append((new_factors, c * float(frac)))
+                    new_exp.append((new_factors, c * _sp2.Rational(frac.numerator, frac.denominator)))
             expansions = new_exp
 
         # ── Phi product-to-sum ──
@@ -269,14 +272,14 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
             phi_by_idx.setdefault(f.var_idx, []).append(f)
 
         for idx, phis in phi_by_idx.items():
-            products: list[tuple[str, int, float]] = \
-                [(phis[0].func, phis[0].k, 1.0)]
+            products: list[tuple[str, int, _sp2.Expr]] = \
+                [(phis[0].func, phis[0].k, _sp2.Integer(1))]
             for pf in phis[1:]:
                 new_prods = []
                 for func1, k1, c1 in products:
                     for res in _phi_product(func1, k1, pf.func, pf.k):
                         pfunc, pk, frac_str = res
-                        new_prods.append((pfunc, pk, c1 * float(Fraction(frac_str))))
+                        new_prods.append((pfunc, pk, c1 * _sp2.Rational(frac_str)))
                 products = new_prods
             new_exp = []
             for factors, c in expansions:
@@ -290,7 +293,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
 
         # ── Build output FourierTerms ──
         for factors, c in expansions:
-            if abs(c) < 1e-15:
+            if c == 0:
                 continue
             result.append(FourierTerm(
                 coeff=term.coeff * c,
