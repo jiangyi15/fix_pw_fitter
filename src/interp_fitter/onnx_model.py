@@ -802,8 +802,9 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     #   dep/dγ = (-t/2)·ep,  dem/dγ = (-t/2)·em    (→ dX/dγ = (-t/2)·X)
     #   dep/dΔγ = (-t/4)·em,  dem/dΔγ = (-t/4)·ep
     #   dep/dΔm = (-i·t/2)·em,  dem/dΔm = (-i·t/2)·ep
-    dX_dgamma_r, dX_dgamma_i = g.c_rmul(g.neg(g.div(time, _t)), X_r, X_i)
-    dY_dgamma_r, dY_dgamma_i = g.c_rmul(g.neg(g.div(time, _t)), Y_r, Y_i)
+    ng = g.reshape(g.neg(g.div(time, _t)), RS(0, 1))     # (nevt, 1)
+    dX_dgamma_r, dX_dgamma_i = g.c_rmul(ng, X_r, X_i)
+    dY_dgamma_r, dY_dgamma_i = g.c_rmul(ng, Y_r, Y_i)
 
     def _dXdY(dep_r, dep_i, dem_r, dem_i):
         # dep/dem are (nevt,), unsqueeze for helicity broadcasting
