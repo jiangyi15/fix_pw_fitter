@@ -241,9 +241,13 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
         vertex_data.append(hel_terms)
         helicity_lists.append((hels_a, hels_b, hels_c))
 
+    # Get root helicity from first vertex
+    root_helicities = helicity_lists[0][0]
+
     def _cascade(v_idx: int, parent_lb: float | None,
                  prev_terms: list[AmpTerm] | None,
-                 prev_hkey: str, prev_lskey: str):
+                 prev_hkey: str, prev_lskey: str,
+                 root_la: float | None = None):
         """Recursively combine vertices, matching helicities."""
         if v_idx >= len(vertex_data):
             return {prev_hkey: {prev_lskey: prev_terms}}
@@ -258,6 +262,7 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
 
             if prev_terms is None:
                 new_terms = terms
+                rla = la  # capture root la
             else:
                 new_terms = []
                 for pt in prev_terms:
@@ -267,12 +272,18 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
                             factors=pt.factors + ct.factors,
                         ))
                 new_terms = _group_like_terms(new_terms)
+                rla = root_la
 
-            new_hkey = prev_hkey + "," + lb_str + "," + lc_str
+            if prev_hkey:
+                new_hkey = prev_hkey + "," + lb_str + "," + lc_str
+            else:
+                # First vertex: key includes root la, then lb, lc
+                new_hkey = f"{la_str},{lb_str},{lc_str}"
+
             new_lskey = prev_lskey + f";{L},{S}" if prev_lskey else f"{L},{S}"
 
-            sub = _cascade(v_idx + 1, lb, new_terms, new_hkey, new_lskey)
-            # Merge sub into result
+            sub = _cascade(v_idx + 1, lb, new_terms, new_hkey, new_lskey,
+                          root_la=rla)
             for hk, ls_dict in sub.items():
                 if hk not in result:
                     result[hk] = {}
@@ -282,7 +293,6 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
                     result[hk][lsk].extend(term_list)
         return result
 
-    # Start recursion: first vertex
     raw = _cascade(0, None, None, "", "")
 
     # Post-process: group like terms in each (hk, lsk) cell
