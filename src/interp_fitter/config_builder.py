@@ -43,15 +43,15 @@ class Decay:
         )
 
     def get_gls(self) -> list[str]:
-        """Generate coupling parameter names for each (L, S).
+        """List of ``(parent, L, S)`` keys, one per valid (L, S) pair.
 
-        Returns a list of strings ``\"{parent}_g_ls_{idx}\"`` where
-        ``idx`` indexes into ``get_ls_list()``.  Example::
+        Each entry is ``\"{parent}\"`` — grouped under the decay name.
+        Example::
 
             Decay A -> B + C  with LS = [(1, 1.0), (3, 1.0)]
-            →  [\"A_g_ls_0\", \"A_g_ls_1\"]
+            →  [\"A\", \"A\"]
         """
-        return [f"{self.parent}_g_ls_{i}" for i in range(len(self.get_ls_list()))]
+        return [self.parent] * len(self.get_ls_list())
         """Return valid (L, S) pairs for this two-body decay.
 
         Requires exactly two children and that the ``parent_particle``
