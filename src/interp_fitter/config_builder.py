@@ -114,7 +114,7 @@ class DecayChain:
             result: list[str] = []
             for c in children_of[name]:
                 result.extend(_resolve(c))
-            memo[name] = tuple(result)
+            memo[name] = tuple(sorted(result))
             return memo[name]
 
         for p in all_parts:
@@ -134,16 +134,14 @@ class PhysicsModel:
         """Validate that all chains share the same top and finals."""
         if not self.decay_chains:
             return
-        top_sets = set()
-        for dc in self.decay_chains:
-            tm = dc.topo_map
-            top_sets.add(frozenset(tm.get(self.top, ())))
-        if len(top_sets) != 1:
-            raise ValueError(
-                f"Inconsistent top decay: {self.top} → "
-                f"{[sorted(s) for s in top_sets]}. "
-                "All DecayChains must produce the same set of final states."
-            )
+        ref = self.decay_chains[0].topo_map.get(self.top, ())
+        for dc in self.decay_chains[1:]:
+            other = dc.topo_map.get(self.top, ())
+            if other != ref:
+                raise ValueError(
+                    f"Inconsistent top decay: {self.top} → {ref} vs {other}. "
+                    "All DecayChains must map the top to the same finals."
+                )
 
 
 # ---------------------------------------------------------------------------
