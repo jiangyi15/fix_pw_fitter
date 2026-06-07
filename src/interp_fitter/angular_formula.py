@@ -58,19 +58,21 @@ def _comb(n: int, k: int) -> int:
 #  Using Racah formula with exact integer arithmetic
 # ============================================================================
 
-def cg_coeff(j1: float, m1: float, j2: float, m2: float,
-             J: float, M: float):
+def cg_coeff(j1, m1, j2, m2, J, M):
     """Clebsch-Gordan coefficient ``⟨j1 m1 j2 m2 | J M⟩``.
 
-    Returns a ``sympy`` expression (exact symbolic).
-    Raises ``ImportError`` if sympy is not installed.
+    Returns an exact sympy expression (no floats).
+    All arguments are converted via ``sp.Rational`` for exactness.
     """
     from sympy.physics.wigner import wigner_3j
     import sympy as sp
-    w3 = wigner_3j(sp.Rational(j1), sp.Rational(j2), sp.Rational(J),
-                   sp.Rational(m1), sp.Rational(m2), sp.Rational(-M))
-    phase = (-1) ** (sp.Rational(j1 - j2 + M))
-    return sp.sqrt(2 * J + 1) * phase * w3
+    def _r(x): return sp.Rational(str(x))
+    w3 = wigner_3j(_r(j1), _r(j2), _r(J), _r(m1), _r(m2), _r(-M))
+    if w3 == 0:
+        return sp.Integer(0)
+    phase = (-1) ** _r(int(j1 - j2 + M))
+    result = sp.sqrt(_r(int(2 * J + 1))) * phase * w3
+    return sp.nsimplify(result)
 
 
 # ============================================================================
@@ -186,7 +188,7 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
 
     import sympy as _sp4
     ls_factor = _sp4.sqrt(
-        _sp4.Rational(2 * L + 1, 2 * round(Ja) + 1))
+        _sp4.Rational(int(2 * L + 1), int(2 * round(Ja) + 1)))
     base = cg1 * cg2 * ls_factor
     wd = wigner_d_weights(Ja, la, delta)
 

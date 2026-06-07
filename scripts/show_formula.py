@@ -41,7 +41,9 @@ for ci, dc in enumerate(m.decay_chains):
                 else:
                     trigs.append(f"{x.func}({x.k}·{x.name}/2)")
             trig = " · ".join(t for t in trigs if t)
-            coeff = sp.nsimplify(ft.coeff)
+            coeff = ft.coeff
+            if isinstance(coeff, sp.Float) and abs(float(coeff)) < 1e-12:
+                continue
             if ft.im:
                 imag_parts.append(f"{coeff}  ×  {trig}" if trig else f"{coeff}")
             else:
