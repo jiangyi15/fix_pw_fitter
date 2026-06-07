@@ -200,18 +200,24 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
             theta_name = f"theta_{theta_idx}"
             theta_factors = [Factor(theta_name, func, k)] if k > 0 else []
 
-            phi_factors = []
             if abs(la) < 1e-10:
-                pass  # cos(0·phi) = 1, no factor
+                terms.append(FourierTerm(
+                    coeff=base * wd_c * frac, im=False,
+                    factors=theta_factors,
+                ))
             else:
                 abs_la = int(abs(la) * 2)
-                phi_factors = [Factor(f"phi_{phi_idx}", "cos", abs_la)]
-
-            terms.append(FourierTerm(
-                coeff=base * wd_c * frac,
-                im=False,
-                factors=theta_factors + phi_factors,
-            ))
+                sin_sign = -1 if la < 0 else 1
+                # cos term (real part of e^{i·la·φ})
+                terms.append(FourierTerm(
+                    coeff=base * wd_c * frac, im=False,
+                    factors=theta_factors + [Factor(f"phi_{phi_idx}", "cos", abs_la)],
+                ))
+                # sin term (imaginary part of e^{i·la·φ})
+                terms.append(FourierTerm(
+                    coeff=base * wd_c * frac * sin_sign, im=True,
+                    factors=theta_factors + [Factor(f"phi_{phi_idx}", "sin", abs_la)],
+                ))
 
     return terms
 
@@ -230,8 +236,11 @@ def combine_vertices(vertex_terms_list):
     combined = []
     for t0 in v0:
         for t1 in v1:
+            coeff = t0.coeff * t1.coeff
+            if t0.im and t1.im:
+                coeff = -coeff  # i² = -1
             combined.append(FourierTerm(
-                coeff=t0.coeff * t1.coeff,
+                coeff=coeff,
                 im=t0.im ^ t1.im,
                 factors=t0.factors + t1.factors,
             ))
