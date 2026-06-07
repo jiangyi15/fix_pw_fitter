@@ -42,14 +42,6 @@ class Decay:
             p_break=self.p_break,
         )
 
-    def ls_combinations(self) -> list[tuple[tuple[int, float], ...]]:
-        """Cartesian product for this single decay (wrapper)."""
-        return [(ls,) for ls in self.get_ls_list()]
-
-    def g_ls_combinations(self) -> list[tuple[str, ...]]:
-        """Cartesian product of ``g_ls`` names for this single decay."""
-        return [(g,) for g in self.get_g_ls()]
-
     def get_g_ls(self) -> list[str]:
         """Coupling parameter names for each (L, S) pair.
 
