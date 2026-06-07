@@ -66,6 +66,50 @@ class DecayChain:
             children.update(d.children)
         return children - parents
 
+    @property
+    def topo_map(self) -> dict[str, tuple[str, ...]]:
+        """Map each particle to its final-state tuple.
+
+        For a final-state particle the tuple is ``(name,)``.
+        For a parent it is the concatenation of its children's tuples,
+        recursively flattened to finals.
+
+        Example::
+
+            DecayChain: A→R1+C  R1→B+D
+            topo_map = {
+                "A":  ("B", "C", "D"),
+                "R1": ("B", "D"),
+                "B":  ("B",),
+                "C":  ("C",),
+                "D":  ("D",),
+            }
+        """
+        children_of: dict[str, list[str]] = {}
+        for d in self.decays:
+            children_of.setdefault(d.parent, []).extend(d.children)
+        all_parts = set(children_of.keys())
+        for ch in children_of.values():
+            all_parts.update(ch)
+
+        memo: dict[str, tuple[str, ...]] = {}
+
+        def _resolve(name: str) -> tuple[str, ...]:
+            if name in memo:
+                return memo[name]
+            if name not in children_of:  # final state
+                memo[name] = (name,)
+                return memo[name]
+            result: list[str] = []
+            for c in children_of[name]:
+                result.extend(_resolve(c))
+            memo[name] = tuple(result)
+            return memo[name]
+
+        for p in all_parts:
+            _resolve(p)
+        return memo
+
 
 @dataclass
 class PhysicsModel:
