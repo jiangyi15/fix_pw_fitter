@@ -2,14 +2,22 @@
 
 Output is organized by (helicity, LS) keys, each value is a list of
 Fourier terms: ``coeff · sin(θ/2)^p · cos(θ/2)^q · cos(kφ)``
-or imaginary ``· sin(kφ)`` (tracked by im flag).
+where ``coeff`` may include ``I`` for imaginary parts (``I·sin(kφ)``).
 """
 
 from __future__ import annotations
 
 import math
+import sympy as sp
 from dataclasses import dataclass, field
 from itertools import product as iproduct
+
+
+# ============================================================================
+#  Constants
+# ============================================================================
+
+I = sp.I  # imaginary unit
 
 
 # ============================================================================
@@ -26,18 +34,6 @@ def _helicities(J: float):
     return vals
 
 
-def _half_int(v: float) -> int:
-    return round(2 * v)
-
-
-def _to_frac_str(v: float) -> str:
-    """Format a half-integer spin as a fraction string for computeCGExact."""
-    h = _half_int(v)
-    if h % 2 == 0:
-        return str(h // 2)
-    return f"{h}/2" if h > 0 else f"{h}/2"
-
-
 # ============================================================================
 #  Structured Fourier term
 # ============================================================================
@@ -52,13 +48,12 @@ class Factor:
 
 @dataclass
 class AmpTerm:
-    """A single term in the helicity amplitude.
+    """A single term in the helicity amplitude: ``coeff · Π Factor``.
 
-    The full amplitude is ``coeff · Π Factor``.
-    ``im=True`` means this term contributes to the imaginary part.
+    ``coeff`` is a sympy expression (may include ``I`` for imaginary parts).
+    Complex multiplication (``I·I = -1``) is handled automatically by sympy.
     """
-    coeff: object = 0  # sympy expression (exact)
-    im: bool = False
+    coeff: sp.Expr = sp.Integer(0)
     factors: list[Factor] = field(default_factory=list)
 
 
@@ -68,11 +63,6 @@ class AmpTerm:
 
 HelicityKey = str   # e.g. "0,0,0" for lambda_a, lambda_b, lambda_c
 LSKey = str         # e.g. "1,0.5;2,1.0" for L,S pairs per vertex
-
-
-def build_amplitude_dict() -> dict[HelicityKey, dict[LSKey, list[AmpTerm]]]:
-    """Create an empty amplitude dict."""
-    return {}
 
 
 # ============================================================================

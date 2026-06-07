@@ -62,7 +62,8 @@ e^{i·λ_A·φ} =
     cos(|λ_A|·φ) − i·sin(|λ_A|·φ)  if λ_A < 0
 ```
 
-The imaginary parts are tracked with an ``im=True`` flag.
+Imaginary parts are encoded directly in the coefficient: ``coeff = i·√2/2``.
+SymPy handles ``I·I = −1`` automatically in cascade multiplication.
 
 ### Cascade
 
@@ -86,7 +87,7 @@ Each (helicity, LS) combination produces ``AmpTerm``\s that fill the
 ``matrix_ang`` coefficients in the Kernel:
 
 ```
-AmpTerm(coeff, im, factors=[
+AmpTerm(coeff, factors=[
     Factor("theta_i", "cos"|"sin", k),     →  cos(k·θᵢ/2) or sin(k·θᵢ/2)
     Factor("phi_j",   "cos"|"sin", k),     →  cos(k·φⱼ/2) or sin(k·φⱼ/2)
 ])
