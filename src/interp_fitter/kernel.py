@@ -50,6 +50,7 @@ class Kernel:
         self.angle_k = np.asarray(config["angle_k"], dtype=float)
         self.angle_b = np.asarray(config["angle_b"], dtype=float)
         self.ang_order = np.asarray(config["ang_order"], dtype=int)
+        self.nhel = int(config.get("nhelicities", 1))
 
     def compute(self, params, data, norm=None):
         ck = params["ck"]                          # (nwaves,) complex
@@ -107,36 +108,45 @@ class Kernel:
         fla = np.prod(fl_reshaped, axis=-1)                                  # (nevt, nwaves) real
 
         # ============================================================
-        #  4) Angular basis
+        #  4) Angular basis  (with helicity expansion)
         # ============================================================
+        nhel = self.nhel
         ang = np.take(angle, self.angle_index, axis=-1)                      # (nevt, n_ang)
         ang_a = self.angle_k * ang + self.angle_b
         cosang = np.cos(ang_a)                                               # (nevt, n_ang)
         cos_ordered = np.take(cosang, self.ang_order, axis=-1)               # (nevt, nbasis, n_per)
         cosa = np.prod(cos_ordered, axis=-1)                                 # (nevt, nbasis) real
-        fa = cosa @ self.matrix_ang                                          # (nevt, nwaves) complex
-        # NB: matrix_ang is (nbasis, nwaves)
+        # matrix_ang: (nbasis, nwaves * nhel)
+        fa_flat = cosa @ self.matrix_ang                                     # (nevt, nwaves * nhel) complex
+        fa = fa_flat.reshape(nevt, nwaves, nhel)                             # (nevt, nwaves, nhel)
 
         # ============================================================
-        #  5) Wave amplitude -> two CP groups
+        #  5) Per-(wave, helicity) amplitude
         # ============================================================
-        T = bwa * fla * fa                                                   # (nevt, nwaves) complex
-        amp_waves = ck[np.newaxis, :] * T                                    # (nevt, nwaves) complex
-        amp = amp_waves.reshape(nevt, 2, -1).sum(axis=-1)                   # (nevt, 2)
-        amp0, amp1 = amp[:, 0], amp[:, 1]
+        T_hel = bwa[:, :, None] * fla[:, :, None] * fa                       # (nevt, nwaves, nhel)
+        amp_hel = ck[np.newaxis, :, np.newaxis] * T_hel                      # (nevt, nwaves, nhel)
 
         # ============================================================
-        #  6) Time-dependent mixing
+        #  6) CP grouping + helicity-incoherent sum
+        # ============================================================
+        # Split waves into two CP groups (0 = B, 1 = Bbar)
+        n0 = nwaves // 2                              # first group size
+        A0h = amp_hel[:, :n0, :].sum(axis=1)          # (nevt, nhel)
+        A1h = amp_hel[:, n0:, :].sum(axis=1)          # (nevt, nhel)
+
+        # ============================================================
+        #  7) Time-dependent mixing
         # ============================================================
         eL = np.exp(1j * time * (-delta_m / 2 + 1j * (gamma_tp + delta_gamma / 2) / 2))
         eH = np.exp(1j * time * (delta_m / 2 + 1j * (gamma_tp - delta_gamma / 2) / 2))
         ep = (eL + eH) / 2
         em = (eL - eH) / 2
 
-        X = ep * amp0 + poq * em * amp1                                      # (nevt,) complex
-        Y = em / poq * amp0 + ep * amp1                                      # (nevt,) complex
-        PB = np.abs(X) ** 2
-        PBbar = np.abs(Y) ** 2
+        # poq is scalar, broadcasts over event & helicity dims
+        X = ep[:, None] * A0h + poq * em[:, None] * A1h                       # (nevt, nhel)
+        Y = em[:, None] / poq * A0h + ep[:, None] * A1h                       # (nevt, nhel)
+        PB = np.sum(np.abs(X) ** 2, axis=-1)                                 # (nevt,)
+        PBbar = np.sum(np.abs(Y) ** 2, axis=-1)                              # (nevt,)
         P = (1 - frac) * (1 - ap) * PB + frac * (1 + ap) * PBbar
 
         # ============================================================
@@ -156,35 +166,30 @@ class Kernel:
         # ============================================================
         #  8) Gradients
         # ============================================================
-        # --- Adjoints for |X|^2, |Y|^2 ---
-        # P = (1-f)*(1-ap)*X*conj(X) + f*(1+ap)*Y*conj(Y)
-        # ∂P/∂X = (1-f)*(1-ap)*conj(X)   (Wirtinger)
-        # ∂P/∂Y = f*(1+ap)*conj(Y)
-        adjX = (1 - frac) * (1 - ap) * np.conj(X)
-        adjY = frac * (1 + ap) * np.conj(Y)
+        # --- Adjoints for |X_h|^2, |Y_h|^2 ---
+        # PB = sum_h |X_h|^2,  PBbar = sum_h |Y_h|^2
+        # ∂PB/∂X_h = conj(X_h)  (non-conjugate Wirtinger)
+        adjX = (1 - frac)[:, None] * (1 - ap) * np.conj(X)                  # (nevt, nhel)
+        adjY = frac[:, None] * (1 + ap) * np.conj(Y)                        # (nevt, nhel)
+        dQ_dX_hel = dQ_dP[:, None] * adjX                                   # (nevt, nhel)
+        dQ_dY_hel = dQ_dP[:, None] * adjY                                   # (nevt, nhel)
 
-        # ∂Q/∂X = dQ/dP * ∂P/∂X   (Wirtinger)
-        dQ_dX = dQ_dP * adjX
-        dQ_dY = dQ_dP * adjY
+        # --- Propagate to A0h, A1h ---
+        # X_h = ep*A0h + poq*em*A1h,  Y_h = em/poq*A0h + ep*A1h
+        # ∂Q/∂A0h = ∂Q/∂X_h*ep + ∂Q/∂Y_h*em/poq
+        dQ_dA0h = dQ_dX_hel * ep[:, None] + dQ_dY_hel * (em / poq)[:, None] # (nevt, nhel)
+        dQ_dA1h = dQ_dX_hel * (poq * em)[:, None] + dQ_dY_hel * ep[:, None] # (nevt, nhel)
 
-        # --- Propagate to amp0, amp1 ---
-        # X = ep*A0 + poq*em*A1,  Y = em/poq*A0 + ep*A1
-        # ∂Q/∂A0 = ∂Q/∂X*ep + ∂Q/∂Y*em/poq   (Wirtinger)
-        dQ_damp0 = dQ_dX * ep + dQ_dY * em / poq
-        dQ_damp1 = dQ_dX * poq * em + dQ_dY * ep
-
-        # --- Propagate to amp_waves ---
-        n_per_group = amp_waves.shape[1] // 2
-        dQ_damp_waves = np.zeros_like(amp_waves)
-        dQ_damp_waves[:, :n_per_group] = dQ_damp0[:, np.newaxis]
-        dQ_damp_waves[:, n_per_group:] = dQ_damp1[:, np.newaxis]
+        # --- Propagate to amp_hel ---
+        n0 = nwaves // 2
+        dQ_damp_hel = np.zeros((nevt, nwaves, nhel), dtype=complex)
+        dQ_damp_hel[:, :n0, :] = dQ_dA0h[:, None, :]
+        dQ_damp_hel[:, n0:, :] = dQ_dA1h[:, None, :]
 
         # --- ck gradient ---
-        # amp_waves[:,w] = ck[w] * T[:,w]
-        # ∂Q/∂ck[w] = Σ_e ∂Q/∂amp_waves[e,w] * T[e,w]   (Wirtinger)
-        dQ_dck_wirt = np.sum(dQ_damp_waves * T, axis=0)                     # (nwaves,) complex
-        # For optimisation (Re + Im coordinates):
-        #   ∂Q/∂Re(ck) + i*∂Q/∂Im(ck) = 2 * conj(∂Q/∂ck̄) = 2 * conj(∂Q/∂ck)
+        # amp_hel[:,w,h] = ck[w] * T_hel[:,w,h]
+        # ∂Q/∂ck[w] = Σ_{e,h} ∂Q/∂amp_hel[e,w,h] * T_hel[e,w,h]
+        dQ_dck_wirt = np.sum(dQ_damp_hel * T_hel, axis=(0, -1))             # (nwaves,) complex
         grads_ck = 2 * np.conj(dQ_dck_wirt)
 
         # --- m0 gradient ---
@@ -194,8 +199,10 @@ class Kernel:
 
         # d(bwa[w])/d(bw[d]) = bwa[w]/bw[d] if d used in wave w
         dBwa_dbw = bwa[..., np.newaxis] / bw_reshaped                        # (nevt, nwaves, nres)
-        dQ_dT = dQ_damp_waves * ck[np.newaxis, :]                            # (nevt, nwaves)
-        dQ_dbwa = dQ_dT * fla * fa                                           # (nevt, nwaves)
+        # dQ/dT_hel: amp_hel = ck * T_hel → ∂Q/∂T_hel = ∂Q/∂amp_hel * ck
+        dQ_dT_hel = dQ_damp_hel * ck[np.newaxis, :, np.newaxis]              # (nevt, nwaves, nhel)
+        # T_hel = bwa * fla * fa → ∂Q/∂bwa = sum_h ∂Q/∂T_hel * fla * fa
+        dQ_dbwa = np.sum(dQ_dT_hel * fla[:, :, None] * fa, axis=-1)          # (nevt, nwaves)
         dQ_dbw_reshaped = dQ_dbwa[..., np.newaxis] * dBwa_dbw                # (nevt, nwaves, nres)
         dQ_dbw = np.zeros((nevt, bw.shape[1]), dtype=complex)
         np.add.at(dQ_dbw, (slice(None), self.bw_order),
@@ -243,23 +250,25 @@ class Kernel:
         dep_ddm = (deL_ddm + deH_ddm) / 2
         dem_ddm = (deL_ddm - deH_ddm) / 2
 
-        # dX/d(param) = d(ep)/d(param)*A0 + poq*d(em)/d(param)*A1
-        dX_dgamma = dep_dgamma * amp0 + poq * dem_dgamma * amp1
-        dY_dgamma = dem_dgamma / poq * amp0 + dep_dgamma * amp1
-        dX_ddg = dep_ddg * amp0 + poq * dem_ddg * amp1
-        dY_ddg = dem_ddg / poq * amp0 + dep_ddg * amp1
-        dX_ddm = dep_ddm * amp0 + poq * dem_ddm * amp1
-        dY_ddm = dem_ddm / poq * amp0 + dep_ddm * amp1
+        # dX_h/d(param) = d(ep)/d(param)*A0h + poq*d(em)/d(param)*A1h
+        # poq is scalar, broadcasts over all event/helicity dims
+        dX_dgamma = dep_dgamma[:, None] * A0h + poq * dem_dgamma[:, None] * A1h
+        dY_dgamma = dem_dgamma[:, None] / poq * A0h + dep_dgamma[:, None] * A1h
+        dX_ddg = dep_ddg[:, None] * A0h + poq * dem_ddg[:, None] * A1h
+        dY_ddg = dem_ddg[:, None] / poq * A0h + dep_ddg[:, None] * A1h
+        dX_ddm = dep_ddm[:, None] * A0h + poq * dem_ddm[:, None] * A1h
+        dY_ddm = dem_ddm[:, None] / poq * A0h + dep_ddm[:, None] * A1h
 
-        dX_dpoqr = np.exp(1j * poqi) * em * amp1
-        dY_dpoqr = -em / (poq ** 2) * np.exp(1j * poqi) * amp0
-        dX_dpoqi = 1j * poq * em * amp1
-        dY_dpoqi = -1j * em / poq * amp0
+        dX_dpoqr = np.exp(1j * poqi) * em[:, None] * A1h
+        dY_dpoqr = -em[:, None] / (poq ** 2) * np.exp(1j * poqi) * A0h
+        dX_dpoqi = 1j * poq * em[:, None] * A1h
+        dY_dpoqi = -1j * em[:, None] / poq * A0h
         dP_dap = -(1 - frac) * PB + frac * PBbar
 
-        # Full real derivative: dQ/dp = 2*Re(Σ dQ_dX*dX/dp + dQ_dY*dY/dp)
+        # Full real derivative (sum over helicities):
+        # dQ/dp = 2*Re(Σ_{e,h} dQ_dX_hel[e,h]*dX/dp[e,h] + dQ_dY_hel[e,h]*dY/dp[e,h])
         def real_grad(dX, dY):
-            return 2 * np.real(np.sum(dQ_dX * dX + dQ_dY * dY))
+            return 2 * np.real(np.sum(dQ_dX_hel * dX + dQ_dY_hel * dY))
 
         grads_tp = np.array([
             real_grad(dX_dgamma, dY_dgamma),
