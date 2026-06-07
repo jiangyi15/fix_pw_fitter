@@ -60,7 +60,7 @@ particle:
         P: -1
         mass: 5.
     R: [R1, R2] # R can be replace to R1 and R2
-    Y: {J: 12, P: -1, mass: 3, model: BW} # or direcly with perproiteis
+    Y: {J: 1, P: -1, mass: 3, model: BW} # or direcly with perproiteis
     R1: {J: 0, P: 1, mass: 3, model: BW }
     R2: {J: 1, P: -1, mass: 3, model: BW}
     B: {J: 0, P: -1, mass: 0.1}

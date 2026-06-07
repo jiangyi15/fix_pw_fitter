@@ -305,12 +305,15 @@ def parse_physics(physics: dict) -> PhysicsModel:
             particles[name] = Particle(name=name, props=dict(val))
 
     def _parse_branch(branch: list) -> tuple[list[str], dict]:
-        """Split a decay branch into child names and an options dict."""
-        if not branch:
-            return [], {}
-        if isinstance(branch[-1], dict):
-            return [str(c) for c in branch[:-1]], dict(branch[-1])
-        return [str(c) for c in branch], {}
+        """Split a decay branch into child names and merged options dict."""
+        children: list[str] = []
+        opts: dict = {}
+        for item in branch:
+            if isinstance(item, dict):
+                opts.update(item)
+            else:
+                children.append(str(item))
+        return children, opts
 
     # ------------------------------------------------------------------
     #  Decay tree expansion  (unexpanded chains with aliases)
