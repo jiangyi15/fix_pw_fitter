@@ -15,7 +15,7 @@ def _mini_config():
     return {
         "gamma_table": np.ones((1, n_int), dtype=complex),
         "fl_table":    np.ones((1, n_int), dtype=float),
-        "matrix_gamma": np.ones((1, 1), dtype=float),
+        "matrix_gamma": np.ones((2, 1), dtype=float),
         "matrix_ang":   np.ones((1, 2), dtype=complex),
 
         "gamma_type":  np.array([0]),
@@ -27,7 +27,6 @@ def _mini_config():
 
         "m0_index":       np.array([0, 0]),
         "bw_index":       np.array([0, 0]),
-        "bw_gamma_index": np.array([0, 0]),
         "bw_order":       np.array([0, 1]),
 
         "q_index":  np.array([0]),
@@ -302,15 +301,14 @@ class TestGradientsNumerical:
             "gamma_delta": 0.05,
             "fl_min":      0.0,
             "fl_delta":    0.05,
-            "matrix_gamma": np.array([[0.8, 0.2], [0.3, 0.7]], dtype=float),
+            "matrix_gamma": np.array([[0.8, 0.2], [0.8, 0.2], [0.3, 0.7], [0.3, 0.7]], dtype=float),
             "matrix_ang":   np.array([[1.0, 0.0, 0.5, 0.1],
                                       [0.2, 1.0, 0.0, 0.3]], dtype=complex),
             "g0_index":       np.array([0, 1]),
             "gamma_index":    np.array([0, 0]),
             "m0_index":       np.array([0, 0, 1, 1]),
             "bw_index":       np.array([0, 0, 1, 1]),
-            "bw_gamma_index": np.array([0, 0, 1, 1]),
-            "bw_order":       np.array([0, 1, 2, 3]),
+        "bw_order":       np.array([0, 1, 2, 3]),
             "q_index":        np.array([0]),
             "fl_order":       np.array([0, 0, 0, 0]),
             "angle_index":    np.array([0, 1]),

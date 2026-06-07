@@ -37,7 +37,6 @@ class Kernel:
 
         self.m0_index = np.asarray(config["m0_index"], dtype=int)
         self.bw_index = np.asarray(config["bw_index"], dtype=int)
-        self.bw_gamma_index = np.asarray(config["bw_gamma_index"], dtype=int)
         self.bw_order = np.asarray(config["bw_order"], dtype=int)
 
         self.q_index = np.asarray(config["q_index"], dtype=int)
@@ -80,16 +79,14 @@ class Kernel:
                                    self.gamma_type, self.gamma_min,
                                    self.gamma_delta)                          # (nevt, n_gamma) complex
         gamma_val = g0a * gamma_interp                                        # (nevt, n_gamma) complex
-        gamma_for_mass = np.einsum('ij,...j->...i',
-                                   self.matrix_gamma, gamma_val)              # (nevt, n_m0) complex
+        gamma_for_bw = np.einsum('ij,...j->...i',
+                                 self.matrix_gamma, gamma_val)                # (nevt, n_bw) complex
 
         # ============================================================
         #  2) Breit-Wigner
         # ============================================================
         m0a = np.take(m0, self.m0_index, axis=-1)                             # (n_bw,)
         mass_for_bw = np.take(mass, self.bw_index, axis=-1)                   # (nevt, n_bw)
-        gamma_for_bw = np.take(gamma_for_mass,
-                               self.bw_gamma_index, axis=-1)                  # (nevt, n_bw) complex
         bwdom = m0a**2 - mass_for_bw**2 - 1j * m0a * gamma_for_bw            # (nevt, n_bw)
         bw = 1.0 / bwdom                                                     # (nevt, n_bw)
 
@@ -214,18 +211,13 @@ class Kernel:
         np.add.at(dQ_dm0, self.m0_index, dQ_dm0a)
 
         # --- g0 gradient ---
-        # gamma_for_bw[d] = Σ_j g0a[j] * gamma_interp[:,j] * mat_gamma[bwΓ_idx[d], j]
+        # gamma_for_bw[:,i] = Σ_j gamma_val[:,j] * mat_gamma[i,j]
         # dbw/dΓ = -bw² * (-i*m0a)
         dbw_dgamma = -(bw ** 2) * (-1j * m0a)                                # (nevt, n_bw)
         dQ_dgamma_bw = dQ_dbw * dbw_dgamma                                    # (nevt, n_bw)
 
-        dQ_dgamma_mass = np.zeros((nevt, gamma_for_mass.shape[1]), dtype=complex)
-        np.add.at(dQ_dgamma_mass, (slice(None), self.bw_gamma_index),
-                  dQ_dgamma_bw)
-
-        # gamma_for_mass[:,i] = Σ_j gamma_val[:,j] * mat_gamma[i,j]
-        # ∂Q/∂gamma_val[:,j] = Σ_i ∂Q/∂gamma_for_mass[:,i] * mat_gamma[i,j]
-        dQ_dgamma_val = np.einsum('...i,ij->...j', dQ_dgamma_mass,
+        # ∂Q/∂gamma_val[:,j] = Σ_i ∂Q/∂gamma_for_bw[:,i] * mat_gamma[i,j]
+        dQ_dgamma_val = np.einsum('...i,ij->...j', dQ_dgamma_bw,
                                   self.matrix_gamma)                         # (nevt, n_gamma)
 
         # gamma_val[:,j] = g0a[j] * gamma_interp[:,j]

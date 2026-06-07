@@ -238,15 +238,34 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
                         hel_terms[f"{la},{lb},{lc}"] = terms
         vertex_data.append(hel_terms)
 
-    # Tree structure: v1 ← lb(v0), v2 ← lc(v0), rest linear
+    # ── Build parent map from decay tree ──
+    # For each vertex vᵢ, determine which previous vertex is its parent
+    # and whether it's child 0 ("lb") or child 1 ("lc").
+    parent_map: dict[int, tuple[int, str] | None] = {}
+    for i, d in enumerate(decays):
+        pname = d.parent
+        found = False
+        for j in range(i):
+            dj = decays[j]
+            if dj.children[0] == pname:
+                parent_map[i] = (j, "lb")
+                found = True
+                break
+            if len(dj.children) > 1 and dj.children[1] == pname:
+                parent_map[i] = (j, "lc")
+                found = True
+                break
+        if not found:
+            parent_map[i] = None  # root vertex
+
+    # Set of intermediate-resonance names (particles that decay further)
+    parent_names = {d.parent for d in decays}
+
+    # Per-vertex decay objects for checking final vs intermediate
+    vertex_decays = decays
+
     def _parent_of(vi):
-        if vi == 1:
-            return (0, "lb")
-        if vi == 2:
-            return (0, "lc")
-        if vi > 2:
-            return (vi - 1, "lb")
-        return None
+        return parent_map.get(vi)
 
     def _get_hel(terms, pv, key):
         for t in terms:
@@ -262,6 +281,7 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
         result = {}
         parent = _parent_of(v_idx)
         need_hel = _get_hel(prev_terms, parent[0], parent[1]) if parent and prev_terms else None
+        vd = vertex_decays[v_idx]
 
         for hel_key, terms in vertex_data[v_idx].items():
             la = float(hel_key.split(",")[0])
@@ -270,8 +290,17 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
 
             if prev_terms is None:
                 new_terms = terms
-                # first vertex: key from la (external)
-                new_hkey = hel_key.split(",")[0]
+                # first vertex: key from la (external root)
+                parts0 = hel_key.split(",")
+                new_hkey = parts0[0]
+                # Add finals from first vertex's children
+                ext0 = []
+                if vd.children[0] not in parent_names:
+                    ext0.append(parts0[1])
+                if len(vd.children) > 1 and vd.children[1] not in parent_names:
+                    ext0.append(parts0[2])
+                if ext0:
+                    new_hkey = new_hkey + "," + ",".join(ext0)
             else:
                 new_terms = _group_like_terms([
                     AmpTerm(coeff=pt.coeff * ct.coeff,
@@ -279,9 +308,17 @@ def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
                             helicities=pt.helicities + ct.helicities)
                     for pt in prev_terms for ct in terms
                 ])
-                # add lb,lc of this vertex (external daughters)
+                # Only add final-state helicities to the external key
                 parts = hel_key.split(",")
-                new_hkey = prev_hkey + "," + parts[1] + "," + parts[2]
+                ext_parts = []
+                if vd.children[0] not in parent_names:
+                    ext_parts.append(parts[1])
+                if len(vd.children) > 1 and vd.children[1] not in parent_names:
+                    ext_parts.append(parts[2])
+                if ext_parts:
+                    new_hkey = prev_hkey + "," + ",".join(ext_parts)
+                else:
+                    new_hkey = prev_hkey
 
             sub = _cascade(v_idx + 1, new_terms, new_hkey)
             for hk, tl_list in sub.items():

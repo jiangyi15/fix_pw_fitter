@@ -321,7 +321,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     n_int_f = cfg["fl_table"].shape[-1]
     n_gamma = len(cfg["g0_index"])
     n_g0 = int(np.max(cfg["g0_index"]) + 1)
-    n_m0 = cfg["matrix_gamma"].shape[0]
+    n_m0 = int(np.max(cfg["m0_index"]) + 1) if len(cfg["m0_index"]) else 0
     n_bw = len(cfg["m0_index"])
     n_angle_waves = cfg["matrix_ang"].shape[-1]
     nwaves = n_angle_waves // nhel
@@ -368,7 +368,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     g.const("ma_im", np.ascontiguousarray(ma.imag))
 
     for name in ("g0_index", "gamma_index", "gamma_type",
-                 "m0_index", "bw_index", "bw_gamma_index", "bw_order",
+                 "m0_index", "bw_index", "bw_order",
                  "q_index", "fl_type", "fl_order",
                  "angle_index"):
         g.const(name, np.asarray(cfg[name], dtype=np.int32))
@@ -412,20 +412,15 @@ def build_onnx_model(config: dict, with_norm: bool = True,
                           n_int_g, "gamma_min", "gamma_delta")
     gv_r, gv_i = g.c_rmul(g0a, gi_r, gi_i)
 
-    # gamma_for_mass = mat_gamma @ gamma_val  (einsum ij,...j->...i)
-    # (n_m0, n_gamma) @ (nevt, n_gamma) -> (nevt, n_m0)
-    # We need: for each event e: gamma_for_mass[e] = mat_gamma @ gamma_val[e]
-    # gv_r/e is (nevt, n_gamma), mat_gamma is (n_m0, n_gamma)
-    # We want (nevt, n_m0) = (nevt, n_gamma) @ (n_gamma, n_m0)
-    mg_t = g.transpose("mat_gamma", [1, 0])                 # (n_gamma, n_m0)
-    gfm_r = g.matmul(gv_r, mg_t)                            # (nevt, n_m0)
-    gfm_i = g.matmul(gv_i, mg_t)
+    # gamma_for_bw = gamma_val @ matrix_gamma.T
+    # (nevt, n_gamma) @ (n_gamma, n_bw) → (nevt, n_bw)
+    mg_t = g.transpose("mat_gamma", [1, 0])                 # (n_gamma, n_bw)
+    gbw_r = g.matmul(gv_r, mg_t)                            # (nevt, n_bw)
+    gbw_i = g.matmul(gv_i, mg_t)
 
     # ---- 2) Breit-Wigner ------------------------------------------------
     m0a = g.gather(m0_in, "m0_index", axis=0)               # (n_bw,)
     mbw = g.gather(mass, "bw_index", axis=1)                # (nevt, n_bw)
-    gbw_r = g.gather(gfm_r, "bw_gamma_index", axis=1)       # (nevt, n_bw)
-    gbw_i = g.gather(gfm_i, "bw_gamma_index", axis=1)
 
     # bwdom = m0a² - s² - i*m0a*Gamma
     #   = (m0a² - s² + m0a*Im(Γ))  +  i*(-m0a*Re(Γ))
@@ -753,21 +748,11 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # ∂Q/∂Γ_bw = dQ_dbw * dbw_dG   (Wirtinger)
     dG_bw_r, dG_bw_i = g.c_mul(dQ_dbw_r, dQ_dbw_i, dbw_dG_r, dbw_dG_i)
 
-    # Map Γ_bw → Γ_mass via bw_gamma_index (reverse mapping)
-    # Γ_mass has shape (nevt, n_m0).  Γ_bw = Γ_mass[:, bw_gamma_index]
-    # Need to scatter dQ/dΓ_bw back to dQ/dΓ_mass
-    scatter_gbw = np.zeros((n_bw, n_m0), dtype=np.float32)
-    for d, k in enumerate(cfg["bw_gamma_index"]):
-        scatter_gbw[d, k] = 1.0
-    g.const("scatter_gbw", scatter_gbw)
-    dG_mass_r = g.matmul(dG_bw_r, "scatter_gbw")                 # (nevt, n_m0)
-    dG_mass_i = g.matmul(dG_bw_i, "scatter_gbw")
-
-    # Γ_mass[:,i] = Σ_j gamma_val[:,j] * matrix_gamma[i,j]
-    # ∂Q/∂gamma_val[:,j] = Σ_i ∂Q/∂Γ_mass[:,i] * matrix_gamma[i,j]
-    # (nevt, n_m0) @ (n_m0, n_gamma) = (nevt, n_gamma)
-    dG_val_r = g.matmul(dG_mass_r, "mat_gamma")
-    dG_val_i = g.matmul(dG_mass_i, "mat_gamma")
+    # Γ_bw[:,i] = Σ_j gamma_val[:,j] * matrix_gamma[i,j]
+    # ∂Q/∂gamma_val[:,j] = Σ_i ∂Q/∂Γ_bw[:,i] * matrix_gamma[i,j]
+    # (nevt, n_bw) @ (n_bw, n_gamma) = (nevt, n_gamma)
+    dG_val_r = g.matmul(dG_bw_r, "mat_gamma")
+    dG_val_i = g.matmul(dG_bw_i, "mat_gamma")
 
     # gamma_val = g0a * gamma_interp
     # dQ/dg0a = 2 * Re(Σ_e dQ/dgamma_val * conj(gamma_interp))

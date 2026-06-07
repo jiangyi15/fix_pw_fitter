@@ -281,6 +281,58 @@ def get_ls_list(parent_J: float, parent_P: int,
     return results
 
 
+def _expand_identical_particles(
+    chain: DecayChain,
+    identical_groups: list[list[str]],
+    particles_db: dict[str, Particle],
+) -> list[DecayChain]:
+    """Expand a DecayChain by permuting identical-particle groups.
+
+    For each permutation of the identical final-state particles, a new
+    DecayChain is created with the children of leaf decays remapped.
+    All permuted chains are independent topologies with separate data
+    columns; their amplitudes are summed coherently in the fit.
+    """
+    from itertools import permutations as iperms
+
+    # Build permutation list per group
+    perms_per_group = [list(iperms(g)) for g in identical_groups]
+
+    result: list[DecayChain] = []
+    for combo in iproduct(*perms_per_group):
+        mapping: dict[str, str] = {}
+        for orig_group, perm in zip(identical_groups, combo):
+            for orig, new in zip(orig_group, perm):
+                mapping[orig] = new
+
+        # Skip identity
+        if all(k == v for k, v in mapping.items()):
+            result.append(chain)
+            continue
+
+        # Build remapped decays
+        new_decays = []
+        for d in chain.decays:
+            # Only remap children that are final-state particles
+            new_children = [mapping.get(c, c) for c in d.children]
+            new_decays.append(Decay(
+                parent=d.parent,
+                children=new_children,
+                p_break=d.p_break,
+                parent_particle=d.parent_particle,
+                child_particles=[particles_db.get(c) for c in new_children],
+            ))
+
+        result.append(DecayChain(
+            decays=new_decays,
+            resonances=chain.resonances,
+            resonance_map=dict(chain.resonance_map),
+            particles=list(chain.particles),
+        ))
+
+    return result
+
+
 def parse_physics(physics: dict) -> PhysicsModel:
     """Parse a high-level physics dict into a ``PhysicsModel``.
 
@@ -307,6 +359,13 @@ def parse_physics(physics: dict) -> PhysicsModel:
               D:  {J: 0, P: -1, mass: 0.1}
               E:  {J: 0, P: -1, mass: 0.1}
 
+        Optional ``data`` key::
+
+            data:
+              identical_particles:
+                - [B, D]
+                - [C, E]
+
         ``R: [R1, R2]`` means *R* is an alias that expands to two distinct
         resonances, generating separate physics waves.
     """
@@ -314,6 +373,12 @@ def parse_physics(physics: dict) -> PhysicsModel:
     top = raw_part.pop("$top")
     finals = set(raw_part.pop("$finals"))
     decay_raw = dict(physics["decay"])
+
+    # Parse optional data section
+    data_raw = dict(physics.get("data", {}))
+    identical_particles: list[list[str]] = [
+        list(g) for g in data_raw.get("identical_particles", [])
+    ]
 
     # Separate alias lists from particle definitions
     particles: dict[str, Particle] = {}
@@ -403,6 +468,17 @@ def parse_physics(physics: dict) -> PhysicsModel:
             decay_chains.append(DecayChain(
                 decays=resolved_decays, resonances=actual,
                 resonance_map=res_map, particles=parts))
+
+    # ------------------------------------------------------------------
+    #  Expand identical particles (permute final-state labels)
+    # ------------------------------------------------------------------
+    if identical_particles:
+        expanded: list[DecayChain] = []
+        for dc in decay_chains:
+            expanded.extend(
+                _expand_identical_particles(dc, identical_particles, particles)
+            )
+        decay_chains = expanded
 
     return PhysicsModel(top=top, finals=list(finals),
                         decay_chains=decay_chains, particles=particles)
