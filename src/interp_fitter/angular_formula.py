@@ -33,18 +33,10 @@ class Factor:
 
 @dataclass
 class FourierTerm:
-    """A single Fourier term or power-form intermediate.
-
-    In **power form** (before expansion):
-        ``theta_power`` contains ``(var_idx, sin_pow, cos_pow)`` tuples.
-    In **Fourier form** (after :func:`expand_to_fourier`):
-        ``factors`` contains :class:`Factor` objects, at most one per variable.
-    """
-    coeff: 'Any' = 0  # sympy expression (exact) or float
+    """A single Fourier term: ``coeff · Π Factor``."""
+    coeff: 'Any' = 0
     im: bool = False
     factors: list[Factor] = field(default_factory=list)
-    theta_power: list[tuple[int, int, int]] = field(default_factory=list)
-    #  (var_idx, sin_pow, cos_pow)  — used during cascade combine
 
 
 # ============================================================================
@@ -196,21 +188,30 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
     base = cg1 * cg2 * ls_factor
     wd = wigner_d_weights(Ja, la, delta)
 
+    import sympy as _sp5
     terms = []
     for wd_c, sp, cp in wd:
-        theta_terms = [(theta_idx, sp, cp)]
-        phi_terms = []
-        if abs(la) < 1e-10:
-            phi_terms = [(phi_idx, "cos", 0)]
-        else:
-            abs_la = int(abs(la) * 2)
-            phi_terms = [(phi_idx, "cos", abs_la)]
+        # Expand sin^sp·cos^cp → Fourier basis immediately
+        half_exp = expand_half_angle(sp, cp)
+        # Each half_exp entry: (("cos"/"sin", k), sympy_Rational)
+        for (func, k), frac in half_exp.items():
+            if frac == 0:
+                continue
+            theta_name = f"theta_{theta_idx}"
+            theta_factors = [Factor(theta_name, func, k)] if k > 0 else []
 
-        terms.append(FourierTerm(
-            coeff=base * wd_c, im=False,
-            theta_power=theta_terms,
-            factors=[Factor(f"phi_{idx}", f, k) for idx, f, k in phi_terms],
-        ))
+            phi_factors = []
+            if abs(la) < 1e-10:
+                pass  # cos(0·phi) = 1, no factor
+            else:
+                abs_la = int(abs(la) * 2)
+                phi_factors = [Factor(f"phi_{phi_idx}", "cos", abs_la)]
+
+            terms.append(FourierTerm(
+                coeff=base * wd_c * frac,
+                im=False,
+                factors=theta_factors + phi_factors,
+            ))
 
     return terms
 
@@ -232,7 +233,6 @@ def combine_vertices(vertex_terms_list):
             combined.append(FourierTerm(
                 coeff=t0.coeff * t1.coeff,
                 im=t0.im ^ t1.im,
-                theta_power=t0.theta_power + t1.theta_power,
                 factors=t0.factors + t1.factors,
             ))
     return combined
@@ -243,11 +243,11 @@ def combine_vertices(vertex_terms_list):
 # ============================================================================
 
 def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
-    """Convert power-form ``FourierTerm`` objects to Fourier basis.
+    """Apply product-to-sum for same-named factors.
 
-    Each input term has theta in ``(idx, sp, cp)`` power form.
-    Output terms have ``factors`` as :class:`Factor` objects, with one factor
-    per variable at most (product-to-sum applied).
+    Theta factors are already in Fourier basis from ``vertex_amplitude``.
+    Phi factors with the same name from cascade combination are merged
+    via product-to-sum identities.
     """
     result: list[FourierTerm] = []
 
@@ -255,18 +255,6 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
         import sympy as _sp2
         expansions: list[tuple[list[Factor], _sp2.Expr]] \
             = [([], _sp2.Integer(1))]
-
-        # ── Expand theta power factors ──
-        for var_idx, sp, cp in term.theta_power:
-            half_exp = expand_half_angle(sp, cp)
-            new_exp = []
-            for factors, c in expansions:
-                for (func, k), frac in half_exp.items():
-                    if frac == 0:
-                        continue
-                    new_factors = factors + [Factor(f"theta_{var_idx}", func, k)]
-                    new_exp.append((new_factors, c * _sp2.Rational(frac.numerator, frac.denominator)))
-            expansions = new_exp
 
         # ── Product-to-sum for same-named factors ──
         by_name: dict[str, list[Factor]] = {}
