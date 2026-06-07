@@ -24,15 +24,17 @@ class Decay:
     """``parent -> children[0] + children[1] + ...`` (N-body)."""
     parent: str
     children: list[str]
+    p_break: bool = False                # parity violation flag
     parent_particle: Particle | None = None
     child_particles: list[Particle] | None = None
 
-    def get_ls(self, p_break: bool = False) -> list[tuple[int, float]]:
+    def get_ls_list(self) -> list[tuple[int, float]]:
         """Return valid (L, S) pairs for this two-body decay.
 
-        Requires exactly two children and that ``particle`` and
-        ``child_particles`` have been set.  Returns an empty list for
-        N-body decays with ``N != 2``.
+        Requires exactly two children and that the ``parent_particle``
+        and ``child_particles`` have been set.  Returns an empty list
+        for N-body decays with ``N != 2``.  The ``p_break`` attribute
+        controls whether parity conservation is enforced.
         """
         if len(self.children) != 2 or self.parent_particle is None:
             return []
@@ -43,7 +45,7 @@ class Decay:
             parent_J=pp.get("J", 0), parent_P=pp.get("P", 1),
             child1_J=c1p.get("J", 0), child1_P=c1p.get("P", 1),
             child2_J=c2p.get("J", 0), child2_P=c2p.get("P", 1),
-            p_break=p_break,
+            p_break=self.p_break,
         )
 
 
@@ -275,6 +277,14 @@ def parse_physics(physics: dict) -> PhysicsModel:
         elif isinstance(val, dict):
             particles[name] = Particle(name=name, props=dict(val))
 
+    def _parse_branch(branch: list) -> tuple[list[str], dict]:
+        """Split a decay branch into child names and an options dict."""
+        if not branch:
+            return [], {}
+        if isinstance(branch[-1], dict):
+            return [str(c) for c in branch[:-1]], dict(branch[-1])
+        return [str(c) for c in branch], {}
+
     # ------------------------------------------------------------------
     #  Decay tree expansion  (unexpanded chains with aliases)
     # ------------------------------------------------------------------
@@ -286,8 +296,8 @@ def parse_physics(physics: dict) -> PhysicsModel:
             branches = [branches]
         result: list[_Chain] = []
         for branch in branches:
-            children = [str(c) for c in branch]
-            top_decay = Decay(node, children)
+            children, opts = _parse_branch(branch)
+            top_decay = Decay(node, children, p_break=opts.get("p_break", False))
             sub_lists = [_expand(c) for c in children]
             non_empty = [sl for sl in sub_lists if sl]
             if not non_empty:
@@ -329,6 +339,7 @@ def parse_physics(physics: dict) -> PhysicsModel:
                 resolved_decays.append(Decay(
                     parent=parent_name,
                     children=child_names,
+                    p_break=d.p_break,
                     parent_particle=particles.get(parent_name),
                     child_particles=[particles.get(c) for c in child_names],
                 ))
