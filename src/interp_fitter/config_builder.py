@@ -130,6 +130,21 @@ class PhysicsModel:
     decay_chains: list[DecayChain]  # all concrete decay paths (the DecayGroup)
     particles: dict[str, Particle]
 
+    def __post_init__(self):
+        """Validate that all chains share the same top and finals."""
+        if not self.decay_chains:
+            return
+        top_sets = set()
+        for dc in self.decay_chains:
+            tm = dc.topo_map
+            top_sets.add(frozenset(tm.get(self.top, ())))
+        if len(top_sets) != 1:
+            raise ValueError(
+                f"Inconsistent top decay: {self.top} → "
+                f"{[sorted(s) for s in top_sets]}. "
+                "All DecayChains must produce the same set of final states."
+            )
+
 
 # ---------------------------------------------------------------------------
 #  Parser
