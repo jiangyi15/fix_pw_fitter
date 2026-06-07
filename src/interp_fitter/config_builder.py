@@ -128,6 +128,22 @@ class DecayChain:
         return tuple(sorted(tm[r] for r in self.resonances))
 
     @property
+    def g_ls_list(self) -> list[str]:
+        """All ``g_ls`` parameter names across every decay in the chain."""
+        result: list[str] = []
+        for d in self.decays:
+            result.extend(d.get_g_ls())
+        return result
+
+    @property
+    def ls_list(self) -> list[tuple[int, float]]:
+        """All (L, S) pairs across every decay in the chain."""
+        result: list[tuple[int, float]] = []
+        for d in self.decays:
+            result.extend(d.get_ls_list())
+        return result
+
+    @property
     def topo_map(self) -> dict[str, tuple[str, ...]]:
         """Map each particle to its final-state tuple.
 
