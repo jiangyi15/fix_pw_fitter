@@ -21,19 +21,12 @@ from typing import Any
 # ============================================================================
 
 @dataclass
-class ThetaFactor:
-    """``cos(k·θ/2)`` or ``sin(k·θ/2)`` for a given vertex."""
+class Factor:
+    """``cos(k·var/2)`` or ``sin(k·var/2)`` for a given vertex variable."""
     var_idx: int
+    kind: str      # "theta" or "phi"
     func: str      # "cos" or "sin"
-    k: int         # multiplier of θ/2
-
-
-@dataclass
-class PhiFactor:
-    """``cos(k·φ/2)`` or ``sin(k·φ/2)`` for a given vertex."""
-    var_idx: int
-    func: str
-    k: int
+    k: int         # multiplier of var/2
 
 
 @dataclass
@@ -43,14 +36,12 @@ class FourierTerm:
     In **power form** (before expansion):
         ``theta_power`` contains ``(var_idx, sin_pow, cos_pow)`` tuples.
     In **Fourier form** (after :func:`expand_to_fourier`):
-        ``theta`` contains :class:`ThetaFactor`\s, ``phi`` contains
-        :class:`PhiFactor`\s, each variable appears at most once.
+        ``factors`` contains :class:`Factor` objects, at most one per variable.
     """
     coeff: Fraction
     sqrt_r: int = 1
     im: bool = False
-    theta: list[ThetaFactor] = field(default_factory=list)
-    phi: list[PhiFactor] = field(default_factory=list)
+    factors: list[Factor] = field(default_factory=list)
     theta_power: list[tuple[int, int, int]] = field(default_factory=list)
     #  (var_idx, sin_pow, cos_pow)  — used during cascade combine
 
@@ -289,7 +280,7 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
         terms.append(FourierTerm(
             coeff=total, sqrt_r=sqrt_r, im=False,
             theta_power=theta_terms,
-            phi=[PhiFactor(idx, f, k) for idx, f, k in phi_terms],
+            factors=[Factor(idx, "phi", f, k) for idx, f, k in phi_terms],
         ))
 
     return terms
@@ -314,7 +305,7 @@ def combine_vertices(vertex_terms_list):
                 sqrt_r=t0.sqrt_r * t1.sqrt_r,
                 im=t0.im ^ t1.im,
                 theta_power=t0.theta_power + t1.theta_power,
-                phi=t0.phi + t1.phi,
+                factors=t0.factors + t1.factors,
             ))
     return combined
 
@@ -327,13 +318,13 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
     """Convert power-form ``FourierTerm``\s to Fourier basis.
 
     Each input term has theta in ``(idx, sp, cp)`` power form.
-    Output terms have theta/phi as lists of ``ThetaFactor`` / ``PhiFactor``
-    with one factor per variable at most (product-to-sum applied).
+    Output terms have ``factors`` as :class:`Factor`\s with one factor
+    per variable at most (product-to-sum applied).
     """
     result: list[FourierTerm] = []
 
     for term in terms:
-        expansions: list[tuple[list[ThetaFactor | PhiFactor], Fraction]] \
+        expansions: list[tuple[list[Factor], Fraction]] \
             = [([], Fraction(1, 1))]
 
         # ── Expand theta power factors ──
@@ -344,14 +335,14 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
                 for (func, k), frac in half_exp.items():
                     if frac == 0:
                         continue
-                    new_factors = factors + [ThetaFactor(var_idx, func, k)]
+                    new_factors = factors + [Factor(var_idx, "theta", func, k)]
                     new_exp.append((new_factors, c * frac))
             expansions = new_exp
 
         # ── Phi product-to-sum ──
-        phi_by_idx: dict[int, list[PhiFactor]] = {}
-        for pf in term.phi:
-            phi_by_idx.setdefault(pf.var_idx, []).append(pf)
+        phi_by_idx: dict[int, list[Factor]] = {}
+        for f in term.factors:
+            phi_by_idx.setdefault(f.var_idx, []).append(f)
 
         for idx, phis in phi_by_idx.items():
             products: list[tuple[str, int, Fraction]] = \
@@ -367,7 +358,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
             for factors, c in expansions:
                 for pfunc, pk, pc in products:
                     if pfunc != "1":
-                        new_factors = factors + [PhiFactor(idx, pfunc, pk)]
+                        new_factors = factors + [Factor(idx, "phi", pfunc, pk)]
                     else:
                         new_factors = factors
                     new_exp.append((new_factors, c * pc))
@@ -377,14 +368,11 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
         for factors, c in expansions:
             if c == 0:
                 continue
-            theta_list = [f for f in factors if isinstance(f, ThetaFactor)]
-            phi_list = [f for f in factors if isinstance(f, PhiFactor)]
             result.append(FourierTerm(
                 coeff=term.coeff * c,
                 sqrt_r=term.sqrt_r,
                 im=term.im,
-                theta=theta_list,
-                phi=phi_list,
+                factors=factors,
             ))
 
     return result
