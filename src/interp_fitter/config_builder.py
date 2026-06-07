@@ -27,26 +27,16 @@ class Decay:
 
 
 @dataclass
-class Chain:
-    """A full decay chain from the top particle to all final states."""
+class _Chain:
+    """Internal: a decay chain before alias substitution."""
     decays: list[Decay]
 
     @property
     def resonances(self) -> list[str]:
-        """Non-top intermediate particles that could be substituted."""
         if not self.decays:
             return []
         top = self.decays[0].parent
         return [d.parent for d in self.decays if d.parent != top]
-
-    @property
-    def finals(self) -> set[str]:
-        """Particles that never appear as a parent in this chain."""
-        parents = {d.parent for d in self.decays}
-        children = set()
-        for d in self.decays:
-            children.update(d.children)
-        return children - parents
 
 
 @dataclass
@@ -61,12 +51,20 @@ class Particle:
 
 
 @dataclass
-class Wave:
-    """A single physics wave after alias substitution."""
-    chain: Chain
+class DecayChain:
+    """A specific decay path from top to finals, with concrete resonances."""
+    decays: list[Decay]
     resonances: list[str]          # resolved resonance names
     resonance_map: dict[str, str]  # alias → concrete name
     particles: list[Particle]      # properties for each resonance in order
+
+    @property
+    def finals(self) -> set[str]:
+        parents = {d.parent for d in self.decays}
+        children = set()
+        for d in self.decays:
+            children.update(d.children)
+        return children - parents
 
 
 @dataclass
@@ -74,8 +72,7 @@ class PhysicsModel:
     """Full expanded physics description."""
     top: str
     finals: list[str]
-    chains: list[Chain]
-    waves: list[Wave]
+    decay_chains: list[DecayChain]  # all concrete decay paths (the DecayGroup)
     particles: dict[str, Particle]
 
 
@@ -128,41 +125,36 @@ def parse_physics(physics: dict) -> PhysicsModel:
             particles[name] = Particle(name=name, props=dict(val))
 
     # ------------------------------------------------------------------
-    #  Decay tree expansion
+    #  Decay tree expansion  (unexpanded chains with aliases)
     # ------------------------------------------------------------------
-    def _expand(node: str) -> list[Chain]:
-        """Return all chains rooted at *node*."""
+    def _expand(node: str) -> list[_Chain]:
         if node in finals:
             return []
         branches = decay_raw[node]
-        # Normalise: always list of lists
         if isinstance(branches[0], str):
             branches = [branches]
-        chains: list[Chain] = []
+        result: list[_Chain] = []
         for branch in branches:
             children = [str(c) for c in branch]
             top_decay = Decay(node, children)
-
-            # Expand each child; ``None`` means child is final
             sub_lists = [_expand(c) for c in children]
             non_empty = [sl for sl in sub_lists if sl]
-
             if not non_empty:
-                chains.append(Chain([top_decay]))
+                result.append(_Chain([top_decay]))
             else:
                 for combo in iproduct(*non_empty):
                     combined = [top_decay]
                     for sc in combo:
                         combined.extend(sc.decays)
-                    chains.append(Chain(combined))
-        return chains
+                    result.append(_Chain(combined))
+        return result
 
     chains = _expand(top)
 
     # ------------------------------------------------------------------
-    #  Wave generation  (substitute resonance aliases)
+    #  Build DecayChains  (substitute resonance aliases)
     # ------------------------------------------------------------------
-    waves: list[Wave] = []
+    decay_chains: list[DecayChain] = []
     for chain in chains:
         subst_groups = [aliases.get(r, [r]) for r in chain.resonances]
         for combo in iproduct(*subst_groups):
@@ -173,9 +165,10 @@ def parse_physics(physics: dict) -> PhysicsModel:
                     res_map[r] = combo[idx]
                     idx += 1
             actual = [res_map.get(r, r) for r in chain.resonances]
-            wave_parts = [particles.get(n, Particle(n)) for n in actual]
-            waves.append(Wave(chain=chain, resonances=actual,
-                              resonance_map=res_map, particles=wave_parts))
+            parts = [particles.get(n, Particle(n)) for n in actual]
+            decay_chains.append(DecayChain(
+                decays=chain.decays, resonances=actual,
+                resonance_map=res_map, particles=parts))
 
-    return PhysicsModel(top=top, finals=list(finals), chains=chains,
-                        waves=waves, particles=particles)
+    return PhysicsModel(top=top, finals=list(finals),
+                        decay_chains=decay_chains, particles=particles)
