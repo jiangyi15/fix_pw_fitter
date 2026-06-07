@@ -148,6 +148,68 @@ class PhysicsModel:
 #  Parser
 # ---------------------------------------------------------------------------
 
+def get_ls_list(parent_J: float, parent_P: int,
+                child1_J: float, child1_P: int,
+                child2_J: float, child2_P: int,
+                p_break: bool = False) -> list[tuple[int, float]]:
+    r"""Return all valid (L, S) pairs for a two-body decay.
+
+    Spins may be half-integers (0, 0.5, 1, 1.5, …).  *L* is always an
+    integer; *S* can be half-integer.
+
+    Constraints:
+
+    * **Spin addition** — total spin *S* of the two daughters::
+
+        |J₁ − J₂| ≤ S ≤ J₁ + J₂   (step 1)
+
+    * **Angular momentum** — L couples with S to form the parent *J*::
+
+        |L − S| ≤ J_parent ≤ L + S
+
+    * **Parity** — unless ``p_break=True``::
+
+        P_parent = P₁ · P₂ · (−1)^{L}
+
+    Parameters
+    ----------
+    parent_J, parent_P : float, int
+        Spin and parity of the decaying particle.
+    child1_J, child1_P, child2_J, child2_P : float, int
+        Spin and parity of the two daughters.
+    p_break : bool
+        If True, the parity conservation rule is skipped.
+
+    Returns
+    -------
+    list[tuple[int, float]]
+        All allowed (orbital angular momentum *L*, total spin *S*) pairs.
+    """
+    # Work in units of 1/2 to handle half-integer spins
+    def _to_halves(v: float) -> int:
+        return int(round(2 * v))
+
+    Jp2 = _to_halves(parent_J)
+    J12 = _to_halves(child1_J)
+    J22 = _to_halves(child2_J)
+
+    S_min = abs(J12 - J22)
+    S_max = J12 + J22
+
+    results: list[tuple[int, float]] = []
+    for S2 in range(S_min, S_max + 1, 2):  # step 2 in half-units = step 1
+        # L range: |Jp - S| ≤ L ≤ Jp + S
+        L_min = int(abs(Jp2 - S2) // 2)
+        L_max = int((Jp2 + S2) // 2)
+        for L in range(L_min, L_max + 1):
+            if p_break:
+                results.append((L, S2 / 2.0))
+            else:
+                if parent_P == child1_P * child2_P * ((-1) ** L):
+                    results.append((L, S2 / 2.0))
+    return results
+
+
 def parse_physics(physics: dict) -> PhysicsModel:
     """Parse a high-level physics dict into a ``PhysicsModel``.
 
