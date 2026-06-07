@@ -26,21 +26,22 @@ for ci, dc in enumerate(m.decay_chains):
         f = compute_angular_formula(dc, list(ls))
         groups = defaultdict(list)
         for ft in f["fourier_terms"]:
-            th = tuple((x.var_idx, x.k) for x in ft.factors if x.kind == "theta" and x.k)
-            ph = tuple((x.var_idx, x.k) for x in ft.factors if x.kind == "phi" and x.k)
-            groups[(th, ph)].append(ft.coeff)
+            th = tuple((x.var_idx, x.func, x.k) for x in ft.factors if x.k)
+            groups[(th,)].append(ft.coeff)
         parts = []
-        for (th, ph), coeffs in groups.items():
+        for (th,), coeffs in groups.items():
             total = sum(coeffs, sp.Integer(0))
             if total == 0:
                 continue
             trigs = []
-            for idx, kk in th:
+            for idx, func, kk in th:
                 n = kk // 2
-                trigs.append(f"cos(θ_{idx})" if n == 1 else f"cos({n}·θ_{idx})" if n else "1")
-            for idx, kk in ph:
-                n = kk // 2
-                trigs.append(f"cos(φ_{idx})" if n == 1 else f"cos({n}·φ_{idx})" if n else "1")
+                if n == 0:
+                    trigs.append("1")
+                elif kk % 2 == 0:
+                    trigs.append(f"{func}({n}·α_{idx})" if n > 1 else f"{func}(α_{idx})")
+                else:
+                    trigs.append(f"{func}({kk}·α_{idx}/2)")
             trig = " · ".join(t for t in trigs if t)
             c = sp.nsimplify(total)
             parts.append(f"{c}  ×  {trig}" if trig else f"{c}")

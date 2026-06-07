@@ -22,11 +22,10 @@ from typing import Any
 
 @dataclass
 class Factor:
-    """``cos(k·var/2)`` or ``sin(k·var/2)`` for a given vertex variable."""
-    var_idx: int
-    kind: str      # "theta" or "phi"
+    """``cos(k·angle/2)`` or ``sin(k·angle/2)`` for a given vertex."""
+    var_idx: int   # identifies which vertex angle
     func: str      # "cos" or "sin"
-    k: int         # multiplier of var/2
+    k: int         # multiplier of angle/2
 
 
 @dataclass
@@ -207,7 +206,7 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
         terms.append(FourierTerm(
             coeff=base * wd_c, im=False,
             theta_power=theta_terms,
-            factors=[Factor(idx, "phi", f, k) for idx, f, k in phi_terms],
+            factors=[Factor(idx, f, k) for idx, f, k in phi_terms],
         ))
 
     return terms
@@ -262,7 +261,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
                 for (func, k), frac in half_exp.items():
                     if frac == 0:
                         continue
-                    new_factors = factors + [Factor(var_idx, "theta", func, k)]
+                    new_factors = factors + [Factor(var_idx, func, k)]
                     new_exp.append((new_factors, c * _sp2.Rational(frac.numerator, frac.denominator)))
             expansions = new_exp
 
@@ -285,7 +284,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
             for factors, c in expansions:
                 for pfunc, pk, pc in products:
                     if pfunc != "1":
-                        new_factors = factors + [Factor(idx, "phi", pfunc, pk)]
+                        new_factors = factors + [Factor(idx, pfunc, pk)]
                     else:
                         new_factors = factors
                     new_exp.append((new_factors, c * pc))
