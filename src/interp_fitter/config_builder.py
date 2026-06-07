@@ -67,6 +67,17 @@ class DecayChain:
         return children - parents
 
     @property
+    def topo_id(self) -> tuple[tuple[str, ...], ...]:
+        """Sorted tuple of resonance final-state tuples — a unique topology key.
+
+        Each intermediate resonance contributes its ``topo_map`` value.
+        The collection is sorted so that identical topologies compare equal
+        regardless of resonance ordering.
+        """
+        tm = self.topo_map
+        return tuple(sorted(tm[r] for r in self.resonances))
+
+    @property
     def topo_map(self) -> dict[str, tuple[str, ...]]:
         """Map each particle to its final-state tuple.
 
