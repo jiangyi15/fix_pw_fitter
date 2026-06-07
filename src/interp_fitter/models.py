@@ -105,10 +105,17 @@ def phase_space(m: np.ndarray, m1: float, m2: float) -> np.ndarray:
 
 @register_model("one")
 class OneModel(Model):
-    """Unity width model — gamma_table = 1 everywhere.
+    """Unity model — the full Breit-Wigner propagator equals 1.
 
-    The propagator reduces to a constant-width Breit-Wigner:
-        A = 1 / (m₀² − m² − i·m₀·g₀)
+    The gamma_table is chosen so that (with g0 = 1):
+        BW(m) = 1 / (m₀² − m² − i·m₀·g₀·Γ(m))  ≡  1
+
+    This requires:
+        Γ(m) = (m₀² − m² − 1) / (i·m₀)
+             = −i · (m₀² − m² − 1) / m₀
+
+    The resonance contributes nothing to the dynamics — useful as a
+    placeholder or for non-resonant flat contributions.
     """
 
     @staticmethod
@@ -117,7 +124,10 @@ class OneModel(Model):
 
     @staticmethod
     def gamma_table(particle, child_masses, n_int, mass_min, mass_max):
-        return np.ones((1, n_int), dtype=np.complex64)
+        m0 = particle.props.get("mass", 1.0)
+        m_grid = np.linspace(mass_min, mass_max, n_int, endpoint=False)
+        gamma = -1j * (m0 ** 2 - m_grid ** 2 - 1.0) / m0
+        return gamma.astype(np.complex64).reshape(1, -1)
 
 
 @register_model("BW")
