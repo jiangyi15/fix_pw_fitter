@@ -127,7 +127,6 @@ class DecayChain:
         tm = self.topo_map
         return tuple(sorted(tm[r] for r in self.resonances))
 
-    @property
     def ls_combinations(self) -> list[tuple[tuple[int, float], ...]]:
         """Cartesian product of (L, S) pairs across all decays.
 
@@ -139,7 +138,6 @@ class DecayChain:
             return []
         return [combo for combo in iproduct(*lists)]
 
-    @property
     def g_ls_combinations(self) -> list[tuple[str, ...]]:
         """Cartesian product of ``g_ls`` names across all decays.
 
