@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 from .config_builder import PhysicsModel, DecayChain, Particle
 from .angular_formula import compute_amplitude, AmpTerm, Factor
+from .models import get_model, phase_space
 
 
 # ---------------------------------------------------------------------------
@@ -305,23 +306,62 @@ def physics_model_to_config(
     # ------------------------------------------------------------------
     # Phase 9 — Gamma arrays
     # ------------------------------------------------------------------
-    rkey_to_nchan: dict = {}
+    # Collect unique resonance types, their models, and child masses
+    rkey_info: list[tuple] = []          # (rkey, part, nchan, child_masses)
+    rkey_seen: set = set()
     for ci in range(n_topo):
         d2b = topo_decays_2b[ci]
         for pos in range(topo_nres[ci]):
             rname = d2b[pos + 1].parent
             part = _particle(physics, rname)
+            if part is None or _resonance_key(part) in rkey_seen:
+                continue
             rkey = _resonance_key(part)
-            if rkey not in rkey_to_nchan:
-                if part is not None and part.props.get("model") == "Flatte":
-                    rkey_to_nchan[rkey] = len(part.props.get("channels", []))
-                else:
-                    rkey_to_nchan[rkey] = 1
+            rkey_seen.add(rkey)
+            model_name = part.props.get("model", "BW")
+            model_cls = get_model(model_name)
+            if model_cls is None:
+                raise ValueError(f"Unknown model '{model_name}' for particle '{rname}'")
+            nchan = model_cls.n_channels(part)
+            child_parts = d2b[pos + 1].child_particles or []
+            child_masses = [cp.props.get("mass", 0.0) for cp in child_parts if cp is not None]
+            rkey_info.append((rkey, part, nchan, child_masses))
 
-    rkey_to_gt: dict = {}
-    for rk in rkey_to_nchan:
-        rkey_to_gt[rk] = len(rkey_to_gt)
-    n_gamma_type = len(rkey_to_gt)
+    # Determine mass grid
+    all_mass_vals = [
+        p.props["mass"] for p in physics.particles.values() if "mass" in p.props
+    ]
+    if all_mass_vals:
+        mass_min = min(all_mass_vals) * 0.5
+        mass_max = max(all_mass_vals) * 1.5
+    else:
+        mass_min, mass_max = 0.0, 2.0
+    gamma_min = float(mass_min)
+    gamma_delta = float((mass_max - mass_min) / n_int_gamma)
+
+    # Build gamma_table rows and gamma_type mapping
+    # gamma_table = (n_gamma_table_rows, n_int) — each row is a phase-space curve
+    # For each model, one row per channel
+    gamma_type_rows: list[int] = []  # per-channel: global row index in gamma_table
+    gamma_table_rows: list[np.ndarray] = []
+    rkey_to_kt_row: dict = {}  # (rkey, ch) → global gamma_type index
+
+    for rkey, part, nchan, child_masses in rkey_info:
+        model_name = part.props.get("model", "BW")
+        model_cls = get_model(model_name)
+        if model_cls is None:
+            rows = np.ones((nchan, n_int_gamma), dtype=np.complex64)
+        else:
+            rows = model_cls.gamma_table(part, child_masses,
+                                         n_int_gamma, gamma_min, mass_max)
+        for ch in range(nchan):
+            idx = len(gamma_type_rows)
+            gamma_type_rows.append(idx)
+            rkey_to_kt_row[(rkey, ch)] = idx
+        gamma_table_rows.append(rows)
+
+    gamma_table = np.concatenate(gamma_table_rows, axis=0)
+    n_gamma_table_rows = len(gamma_type_rows)
 
     gamma_type_list: list[int] = []
     gamma_index_list: list[int] = []
@@ -336,10 +376,15 @@ def physics_model_to_config(
             rname = d2b[pos + 1].parent
             part = _particle(physics, rname)
             rkey = _resonance_key(part)
-            nchan = rkey_to_nchan.get(rkey, 1)
-            gt = rkey_to_gt.get(rkey, 0)
+            nchan = 0
+            for rk, _, nc, _ in rkey_info:
+                if rk == rkey:
+                    nchan = nc
+                    break
+            if nchan == 0:
+                nchan = 1
             for ch in range(nchan):
-                gamma_type_list.append(gt)
+                gamma_type_list.append(rkey_to_kt_row.get((rkey, ch), 0))
                 gamma_index_list.append(mo + pos)
                 chkey = (rkey, ch)
                 if chkey not in rkch_to_g0:
@@ -359,21 +404,18 @@ def physics_model_to_config(
             rname = d2b[pos + 1].parent
             part = _particle(physics, rname)
             rkey = _resonance_key(part)
-            nchan = rkey_to_nchan.get(rkey, 1)
+            nchan = 0
+            for rk, _, nc, _ in rkey_info:
+                if rk == rkey:
+                    nchan = nc
+                    break
+            if nchan == 0:
+                nchan = 1
             br = part.props.get("branching", [1.0] * nchan) if part else [1.0] * nchan
             for ch in range(nchan):
                 mat_gamma[bwi, gi + ch] = br[ch] if ch < len(br) else 1.0
             gi += nchan
             bwi += 1
-
-    all_masses = [p.props["mass"] for p in physics.particles.values() if "mass" in p.props]
-    if all_masses:
-        mass_min = min(all_masses) * 0.5
-        mass_max = max(all_masses) * 1.5
-    else:
-        mass_min, mass_max = 0.0, 2.0
-    gamma_min = float(mass_min)
-    gamma_delta = float((mass_max - mass_min) / n_int_gamma)
 
     # ------------------------------------------------------------------
     # Phase 10 — Form factor arrays
@@ -422,7 +464,7 @@ def physics_model_to_config(
     # Phase 11 — Final config
     # ------------------------------------------------------------------
     config = {
-        "gamma_table": np.ones((n_gamma_type, n_int_gamma), dtype=complex),
+        "gamma_table": gamma_table.astype(np.complex64),
         "fl_table": fl_table.astype(np.float32),
         "matrix_gamma": mat_gamma.astype(np.float32),
         "matrix_ang": matrix_ang.astype(np.complex64),
