@@ -26,7 +26,7 @@ for ci, dc in enumerate(m.decay_chains):
         f = compute_angular_formula(dc, list(ls))
         groups = defaultdict(list)
         for ft in f["fourier_terms"]:
-            th = tuple((x.var_idx, x.func, x.k) for x in ft.factors if x.k)
+            th = tuple((x.name, x.func, x.k) for x in ft.factors if x.k)
             groups[(th,)].append(ft.coeff)
         parts = []
         for (th,), coeffs in groups.items():
@@ -34,14 +34,14 @@ for ci, dc in enumerate(m.decay_chains):
             if total == 0:
                 continue
             trigs = []
-            for idx, func, kk in th:
+            for name, func, kk in th:
                 n = kk // 2
                 if n == 0:
                     trigs.append("1")
                 elif kk % 2 == 0:
-                    trigs.append(f"{func}({n}·α_{idx})" if n > 1 else f"{func}(α_{idx})")
+                    trigs.append(f"{func}({n}·{name})" if n > 1 else f"{func}({name})")
                 else:
-                    trigs.append(f"{func}({kk}·α_{idx}/2)")
+                    trigs.append(f"{func}({kk}·{name}/2)")
             trig = " · ".join(t for t in trigs if t)
             c = sp.nsimplify(total)
             parts.append(f"{c}  ×  {trig}" if trig else f"{c}")

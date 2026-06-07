@@ -22,10 +22,13 @@ from typing import Any
 
 @dataclass
 class Factor:
-    """``cos(k·angle/2)`` or ``sin(k·angle/2)`` for a given vertex."""
-    var_idx: int   # identifies which vertex angle
+    """``cos(k·var/2)`` or ``sin(k·var/2)`` for an angle variable.
+
+    ``name`` identifies the variable (e.g. ``"theta_0"``, ``"phi_1"``).
+    """
+    name: str      # variable name, e.g. "theta_0", "phi_1"
     func: str      # "cos" or "sin"
-    k: int         # multiplier of angle/2
+    k: int         # multiplier of var/2
 
 
 @dataclass
@@ -206,7 +209,7 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
         terms.append(FourierTerm(
             coeff=base * wd_c, im=False,
             theta_power=theta_terms,
-            factors=[Factor(idx, f, k) for idx, f, k in phi_terms],
+            factors=[Factor(f"phi_{idx}", f, k) for idx, f, k in phi_terms],
         ))
 
     return terms
@@ -261,16 +264,16 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
                 for (func, k), frac in half_exp.items():
                     if frac == 0:
                         continue
-                    new_factors = factors + [Factor(var_idx, func, k)]
+                    new_factors = factors + [Factor(f"theta_{var_idx}", func, k)]
                     new_exp.append((new_factors, c * _sp2.Rational(frac.numerator, frac.denominator)))
             expansions = new_exp
 
-        # ── Phi product-to-sum ──
-        phi_by_idx: dict[int, list[Factor]] = {}
+        # ── Product-to-sum for same-named factors ──
+        by_name: dict[str, list[Factor]] = {}
         for f in term.factors:
-            phi_by_idx.setdefault(f.var_idx, []).append(f)
+            by_name.setdefault(f.name, []).append(f)
 
-        for idx, phis in phi_by_idx.items():
+        for name, phis in by_name.items():
             products: list[tuple[str, int, _sp2.Expr]] = \
                 [(phis[0].func, phis[0].k, _sp2.Integer(1))]
             for pf in phis[1:]:
@@ -284,7 +287,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
             for factors, c in expansions:
                 for pfunc, pk, pc in products:
                     if pfunc != "1":
-                        new_factors = factors + [Factor(idx, pfunc, pk)]
+                        new_factors = factors + [Factor(name, pfunc, pk)]
                     else:
                         new_factors = factors
                     new_exp.append((new_factors, c * pc))
