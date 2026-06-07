@@ -29,6 +29,29 @@ class Decay:
     child_particles: list[Particle] | None = None
 
     def get_ls_list(self) -> list[tuple[int, float]]:
+        """Return valid (L, S) pairs for this two-body decay."""
+        if len(self.children) != 2 or self.parent_particle is None:
+            return []
+        pp = self.parent_particle.props
+        c1p = self.child_particles[0].props if self.child_particles else {}
+        c2p = self.child_particles[1].props if self.child_particles else {}
+        return get_ls_list(
+            parent_J=pp.get("J", 0), parent_P=pp.get("P", 1),
+            child1_J=c1p.get("J", 0), child1_P=c1p.get("P", 1),
+            child2_J=c2p.get("J", 0), child2_P=c2p.get("P", 1),
+            p_break=self.p_break,
+        )
+
+    def get_gls(self) -> list[str]:
+        """Generate coupling parameter names for each (L, S).
+
+        Returns a list of strings ``\"{parent}_g_ls_{idx}\"`` where
+        ``idx`` indexes into ``get_ls_list()``.  Example::
+
+            Decay A -> B + C  with LS = [(1, 1.0), (3, 1.0)]
+            →  [\"A_g_ls_0\", \"A_g_ls_1\"]
+        """
+        return [f"{self.parent}_g_ls_{i}" for i in range(len(self.get_ls_list()))]
         """Return valid (L, S) pairs for this two-body decay.
 
         Requires exactly two children and that the ``parent_particle``
