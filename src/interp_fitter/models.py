@@ -91,9 +91,11 @@ def phase_space(m: np.ndarray, m1: float, m2: float) -> np.ndarray:
     """
     s_plus = (m1 + m2) ** 2
     s_minus = (m1 - m2) ** 2
-    result = np.sqrt(np.clip((1.0 - s_minus / m ** 2) * (1.0 - s_plus / m ** 2),
-                             0.0, None))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = np.sqrt(np.clip((1.0 - s_minus / m ** 2) * (1.0 - s_plus / m ** 2),
+                                 0.0, None))
     result[m < m1 + m2] = 0.0
+    result[~np.isfinite(result)] = 0.0
     return result
 
 
@@ -103,7 +105,27 @@ def phase_space(m: np.ndarray, m1: float, m2: float) -> np.ndarray:
 
 @register_model("BW")
 class BWModel(Model):
-    """Simple Breit-Wigner — a single channel with two-body phase space."""
+    """Constant Breit-Wigner — width does NOT run (Γ = Γ₀ constant).
+
+    gamma_table returns all ones; the width is just ``g0 * 1``.
+    """
+
+    @staticmethod
+    def n_channels(particle) -> int:
+        return 1
+
+    @staticmethod
+    def gamma_table(particle, child_masses, n_int, mass_min, mass_max):
+        return np.ones((1, n_int), dtype=np.complex64)
+
+
+@register_model("BWR")
+class BWRModel(Model):
+    """Running-width Breit-Wigner — energy-dependent phase-space width.
+
+    gamma_table returns the two-body phase space factor ρ(m) for the
+    given daughter masses.  The running width is ``g0 · ρ(m)``.
+    """
 
     @staticmethod
     def n_channels(particle) -> int:

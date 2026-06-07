@@ -318,7 +318,7 @@ def physics_model_to_config(
                 continue
             rkey = _resonance_key(part)
             rkey_seen.add(rkey)
-            model_name = part.props.get("model", "BW")
+            model_name = part.props.get("model", "BWR")
             model_cls = get_model(model_name)
             if model_cls is None:
                 raise ValueError(f"Unknown model '{model_name}' for particle '{rname}'")
@@ -347,7 +347,7 @@ def physics_model_to_config(
     rkey_to_kt_row: dict = {}  # (rkey, ch) → global gamma_type index
 
     for rkey, part, nchan, child_masses in rkey_info:
-        model_name = part.props.get("model", "BW")
+        model_name = part.props.get("model", "BWR")
         model_cls = get_model(model_name)
         if model_cls is None:
             rows = np.ones((nchan, n_int_gamma), dtype=np.complex64)
