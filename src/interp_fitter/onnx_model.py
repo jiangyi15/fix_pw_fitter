@@ -438,7 +438,14 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     bw_ord_r, bw_ord_i = g.c_gather(bw_r, bw_i, "bw_order", axis=1)
     bw_rsh_r = g.reshape(bw_ord_r, RS(0, nwaves, nres))
     bw_rsh_i = g.reshape(bw_ord_i, RS(0, nwaves, nres))
-    bwa_r, bwa_i = g.c_prod_seq(bw_rsh_r, bw_rsh_i, nres, dim=2)
+    if nres == 1:
+        bwa_r = g.squeeze(bw_rsh_r, [2])
+        bwa_i = g.squeeze(bw_rsh_i, [2])
+    else:
+        bwa_r, bwa_i = g.c_prod_seq(bw_rsh_r, bw_rsh_i, nres, dim=2)
+
+    # Pre-compute bw² for gradient reuse
+    bw2_r, bw2_i = g.c_pow2(bw_r, bw_i)
 
     # ---- 3) Form factors ------------------------------------------------
     fl_q = g.gather(q_in, "q_index", axis=1)                 # (nevt, n_fl)
@@ -699,9 +706,8 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     dQ_dbw_r = g.matmul(drsh_flat_r, "scatter_mat")
     dQ_dbw_i = g.matmul(drsh_flat_i, "scatter_mat")
 
-    # dbw/dm0a = -bw² * (2*m0a - i*Γ)
+    # dbw/dm0a = -bw² * (2*m0a - i*Γ)   (bw² from forward pass)
     # (2*m0a - i*Γ) = (2*m0a + Im(Γ)) + i*(-Re(Γ))
-    bw2_r, bw2_i = g.c_pow2(bw_r, bw_i)
     num_r = g.add(g.mul(_t, m0a), gbw_i)
     num_i = g.neg(gbw_r)
     t_r, t_i = g.c_mul(bw2_r, bw2_i, num_r, num_i)
@@ -737,11 +743,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # d(bw)/dΓ = -bw² * dD/dΓ = -bw² * (-i*m0a) = i*m0a*bw²
     # So d(bw)/dΓ (Wirtinger) = i * m0a * bw²
 
-    # i * bw² = i * ((bw_r² - bw_i²) + i*(2*bw_r*bw_i))
-    #          = i*(bw_r² - bw_i²) - 2*bw_r*bw_i
-    #          = -2*bw_r*bw_i + i*(bw_r² - bw_i²)
-    bw2_r, bw2_i = g.c_pow2(bw_r, bw_i)   # already computed above
-    # i * bw² = -bw2_i + i*bw2_r  (bw2 = bw_r² - bw_i² + i·2·bw_r·bw_i)
+    # i * bw² = -bw2_i + i*bw2_r  (bw2 from forward: bw_r² - bw_i² + i·2·bw_r·bw_i)
     ibw2_r = g.neg(bw2_i)
     ibw2_i = bw2_r
     # dbw/dΓ = m0a * i * bw²
