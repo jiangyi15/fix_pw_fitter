@@ -16,6 +16,20 @@ I = sp.I
 
 
 # ============================================================================
+#  Helpers
+# ============================================================================
+
+def _helicities(J: float):
+    """Return list of helicity values for spin J (step 1)."""
+    vals = []
+    h = -J
+    while h <= J + 1e-10:
+        vals.append(h)
+        h += 1.0
+    return vals
+
+
+# ============================================================================
 #  Fourier factor
 # ============================================================================
 
@@ -171,3 +185,110 @@ def _vertex_terms(Ja, Jb, Jc, la, lb, lc, L, S, theta_idx, phi_idx):
                 factors=wt.factors + pt.factors,
             ))
     return _group_like_terms(result)
+
+
+# ============================================================================
+#  Cascade combination
+# ============================================================================
+
+def compute_amplitude(decay_chain, ls_assignment: list[tuple[int, float]]):
+    """Compute T_{λ,LS} for a DecayChain with given (L,S) assignment.
+
+    Returns ``{helicity_key: {ls_key: [AmpTerm, …]}}``.
+
+    Parameters
+    ----------
+    decay_chain : DecayChain
+        From ``config_builder``.
+    ls_assignment : list of (int, float)
+        One (L, S) per two-body decay, in DFS order.
+
+    Returns
+    -------
+    dict
+        ``{ "λ_B,λ_π,…": { "L₁,S₁;L₂,…": [AmpTerm, …] } }``
+    """
+    # Get two-body decays in order
+    decays = [d for d in decay_chain.decays if len(d.children) == 2]
+    if len(decays) != len(ls_assignment):
+        raise ValueError(
+            f"Expected {len(decays)} (L,S) pairs, got {len(ls_assignment)}")
+
+    # Build per-vertex helicity terms for ALL helicities
+    vertex_data = []
+    helicity_lists = []
+    for vi, (decay, (L, S)) in enumerate(zip(decays, ls_assignment)):
+        pp = decay.parent_particle
+        c1p = decay.child_particles[0]
+        c2p = decay.child_particles[1]
+        Ja = pp.props.get("J", 0)
+        Jb = c1p.props.get("J", 0)
+        Jc = c2p.props.get("J", 0)
+
+        hels_a = _helicities(Ja)
+        hels_b = _helicities(Jb)
+        hels_c = _helicities(Jc)
+
+        # Map helicity → list of AmpTerms
+        hel_terms: dict[str, list[AmpTerm]] = {}
+        for la in hels_a:
+            for lb in hels_b:
+                for lc in hels_c:
+                    terms = _vertex_terms(Ja, Jb, Jc, la, lb, lc, L, S, vi, vi)
+                    if terms:
+                        key = f"{la},{lb},{lc}"
+                        hel_terms[key] = terms
+        vertex_data.append(hel_terms)
+        helicity_lists.append((hels_a, hels_b, hels_c))
+
+    def _cascade(v_idx: int, parent_lb: float | None,
+                 prev_terms: list[AmpTerm] | None,
+                 prev_hkey: str, prev_lskey: str):
+        """Recursively combine vertices, matching helicities."""
+        if v_idx >= len(vertex_data):
+            return {prev_hkey: {prev_lskey: prev_terms}}
+
+        result: dict[str, dict[str, list[AmpTerm]]] = {}
+        for hel_key, terms in vertex_data[v_idx].items():
+            la_str, lb_str, lc_str = hel_key.split(",")
+            la, lb, lc = float(la_str), float(lb_str), float(lc_str)
+
+            if parent_lb is not None and abs(la - parent_lb) > 1e-10:
+                continue
+
+            if prev_terms is None:
+                new_terms = terms
+            else:
+                new_terms = []
+                for pt in prev_terms:
+                    for ct in terms:
+                        new_terms.append(AmpTerm(
+                            coeff=pt.coeff * ct.coeff,
+                            factors=pt.factors + ct.factors,
+                        ))
+                new_terms = _group_like_terms(new_terms)
+
+            new_hkey = prev_hkey + "," + lb_str + "," + lc_str
+            new_lskey = prev_lskey + f";{L},{S}" if prev_lskey else f"{L},{S}"
+
+            sub = _cascade(v_idx + 1, lb, new_terms, new_hkey, new_lskey)
+            # Merge sub into result
+            for hk, ls_dict in sub.items():
+                if hk not in result:
+                    result[hk] = {}
+                for lsk, term_list in ls_dict.items():
+                    if lsk not in result[hk]:
+                        result[hk][lsk] = []
+                    result[hk][lsk].extend(term_list)
+        return result
+
+    # Start recursion: first vertex
+    raw = _cascade(0, None, None, "", "")
+
+    # Post-process: group like terms in each (hk, lsk) cell
+    final: dict[str, dict[str, list[AmpTerm]]] = {}
+    for hk, ls_dict in raw.items():
+        final[hk] = {}
+        for lsk, terms in ls_dict.items():
+            final[hk][lsk] = _group_like_terms(terms)
+    return final
