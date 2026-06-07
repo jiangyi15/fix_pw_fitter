@@ -17,6 +17,51 @@ from .config_builder import PhysicsModel, DecayChain, Particle
 from .angular_formula import compute_amplitude, AmpTerm, Factor
 
 
+# ---------------------------------------------------------------------------
+#  Blatt-Weisskopf form factors   F_L(q) = q^L / sqrt(B'_L(z))
+#  with  z = (q * radius)^2   and  radius = 3 GeV^{-1} by default.
+# ---------------------------------------------------------------------------
+
+def _bw_poly(L: int, z):
+    """Blatt-Weisskopf polynomial B'_L(z) for orbital angular momentum L."""
+    if L == 0:
+        return 1.0
+    if L == 1:
+        return 1.0 + z
+    if L == 2:
+        return 9.0 + 3.0 * z + z ** 2
+    if L == 3:
+        return 225.0 + 45.0 * z + 6.0 * z ** 2 + z ** 3
+    if L == 4:
+        return 11025.0 + 1575.0 * z + 135.0 * z ** 2 + 10.0 * z ** 3 + z ** 4
+    raise ValueError(f"Blatt-Weisskopf polynomial not implemented for L={L}")
+
+
+def bw_form_factor(q, L: int, radius: float = 3.0):
+    """F_L(q) = q^L / sqrt(B'_L((q·radius)²))."""
+    z = (q * radius) ** 2
+    return q ** L / np.sqrt(_bw_poly(L, z))
+
+
+def build_fl_table(
+    L_values: set[int],
+    n_int: int = 200,
+    q_min: float = 0.0,
+    q_max: float = 2.0,
+    radius: float = 3.0,
+) -> np.ndarray:
+    """Build the (n_type, n_int) form-factor interpolation table.
+
+    Each row corresponds to a unique orbital angular momentum *L*.
+    """
+    table = np.zeros((len(L_values), n_int), dtype=np.float64)
+    sorted_L = sorted(L_values)
+    for row, L in enumerate(sorted_L):
+        q = np.linspace(q_min, q_max, n_int, endpoint=False)
+        table[row] = bw_form_factor(q, L, radius)
+    return table
+
+
 def _resonance_key(part: Particle | None) -> tuple:
     if part is None:
         return ()
@@ -336,7 +381,27 @@ def physics_model_to_config(
     ndec_max = max(topo_ndec) if topo_ndec else 0
     q_index = np.zeros(ndim_q, dtype=np.int32)
     fl_order = np.zeros(nwaves * ndec_max, dtype=np.int32)
+
+    # Determine L for each decay position from first LS combination
+    all_L: set[int] = set()
+    fl_L = np.zeros(ndim_q, dtype=np.int32)  # L per q_index entry
+    for ci in range(n_topo):
+        qo = topo_q_offset[ci]
+        nd = topo_ndec[ci]
+        d2b = topo_decays_2b[ci]
+        if chain_ls[ci]:
+            first_ls = chain_ls[ci][0]
+            for pos in range(nd):
+                L = first_ls[pos][0]
+                all_L.add(L)
+                fl_L[qo + pos] = L
+
+    # Build fl_table from unique L values
+    fl_table = build_fl_table(all_L, n_int=n_int_fl, q_min=0.0, q_max=2.0, radius=3.0)
+    n_fl_type = len(all_L)
+    l_to_type = {L: i for i, L in enumerate(sorted(all_L))}
     fl_type = np.zeros(ndim_q, dtype=np.int32)
+
     wi = 0
     for ci in range(n_topo):
         nwt = n_waves_per_chain[ci]
@@ -344,12 +409,12 @@ def physics_model_to_config(
         nd = topo_ndec[ci]
         for pos in range(nd):
             q_index[qo + pos] = qo + pos
+            fl_type[qo + pos] = l_to_type[fl_L[qo + pos]]
         for _ in range(nwt):
             for pos in range(nd):
                 fl_order[wi * ndec_max + pos] = qo + pos
             wi += 1
 
-    n_fl_type = 1
     fl_min = 0.0
     fl_delta = float(2.0 / n_int_fl)
 
@@ -358,7 +423,7 @@ def physics_model_to_config(
     # ------------------------------------------------------------------
     config = {
         "gamma_table": np.ones((n_gamma_type, n_int_gamma), dtype=complex),
-        "fl_table": np.ones((n_fl_type, n_int_fl), dtype=float),
+        "fl_table": fl_table.astype(np.float32),
         "matrix_gamma": mat_gamma.astype(np.float32),
         "matrix_ang": matrix_ang.astype(np.complex64),
 
