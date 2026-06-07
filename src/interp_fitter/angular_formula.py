@@ -17,6 +17,45 @@ from typing import Any
 
 
 # ============================================================================
+#  Structured factor types
+# ============================================================================
+
+@dataclass
+class ThetaFactor:
+    """``cos(k·θ/2)`` or ``sin(k·θ/2)`` for a given vertex."""
+    var_idx: int
+    func: str      # "cos" or "sin"
+    k: int         # multiplier of θ/2
+
+
+@dataclass
+class PhiFactor:
+    """``cos(k·φ/2)`` or ``sin(k·φ/2)`` for a given vertex."""
+    var_idx: int
+    func: str
+    k: int
+
+
+@dataclass
+class FourierTerm:
+    """A single Fourier term or power-form intermediate.
+
+    In **power form** (before expansion):
+        ``theta_power`` contains ``(var_idx, sin_pow, cos_pow)`` tuples.
+    In **Fourier form** (after :func:`expand_to_fourier`):
+        ``theta`` contains :class:`ThetaFactor`\s, ``phi`` contains
+        :class:`PhiFactor`\s, each variable appears at most once.
+    """
+    coeff: Fraction
+    sqrt_r: int = 1
+    im: bool = False
+    theta: list[ThetaFactor] = field(default_factory=list)
+    phi: list[PhiFactor] = field(default_factory=list)
+    theta_power: list[tuple[int, int, int]] = field(default_factory=list)
+    #  (var_idx, sin_pow, cos_pow)  — used during cascade combine
+
+
+# ============================================================================
 #  Exact rational — just use Fraction for simplicity
 #  (sqrt coefficients come from CG / Wigner-d factorials)
 # ============================================================================
@@ -247,7 +286,11 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
                 phi_terms = [(phi_idx, "cos", abs_la)]
                 # sign flips
 
-        terms.append((total, sqrt_r, False, theta_terms, phi_terms))
+        terms.append(FourierTerm(
+            coeff=total, sqrt_r=sqrt_r, im=False,
+            theta_power=theta_terms,
+            phi=[PhiFactor(idx, f, k) for idx, f, k in phi_terms],
+        ))
 
     return terms
 
@@ -256,34 +299,23 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
 #  Cascade combination  (simplified — helicity sum)
 # ============================================================================
 
-def combine_vertices(vertex_terms_list, is_last_level=False):
-    """Combine vertex amplitudes through the decay cascade.
-
-    ``vertex_terms_list`` is a list of vertex amplitude lists,
-    ordered by decay depth (root first).
-
-    For a simple chain A→R, R→B, this combines the two vertices
-    by matching helicities.
-    """
-    # For a single vertex, return terms directly
+def combine_vertices(vertex_terms_list):
+    """Multiply amplitudes through the decay cascade."""
     if len(vertex_terms_list) == 1:
         return vertex_terms_list[0]
 
-    # For two vertices: multiply terms, sum over intermediate helicities
-    # (full implementation would match la/lb/lc across vertices)
     v0 = vertex_terms_list[0]
     v1 = vertex_terms_list[1]
-
     combined = []
     for t0 in v0:
         for t1 in v1:
-            coeff = t0[0] * t1[0]
-            sqrt_r = t0[1] * t1[1]
-            im = t0[2] ^ t1[2]
-            theta_terms = t0[3] + t1[3]
-            phi_terms = t0[4] + t1[4]
-            combined.append((coeff, sqrt_r, im, theta_terms, phi_terms))
-
+            combined.append(FourierTerm(
+                coeff=t0.coeff * t1.coeff,
+                sqrt_r=t0.sqrt_r * t1.sqrt_r,
+                im=t0.im ^ t1.im,
+                theta_power=t0.theta_power + t1.theta_power,
+                phi=t0.phi + t1.phi,
+            ))
     return combined
 
 
@@ -291,69 +323,69 @@ def combine_vertices(vertex_terms_list, is_last_level=False):
 #  Expand to Fourier basis (theta + phi)
 # ============================================================================
 
-def expand_to_fourier(terms):
-    """Convert power-form terms to Fourier basis.
+def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
+    """Convert power-form ``FourierTerm``\s to Fourier basis.
 
-    Input: list of ``(coeff, sqrt_r, im, theta_terms, phi_terms)``
-    Output: list of ``{coeff, im, factors: [(name, func, k)]}``
+    Each input term has theta in ``(idx, sp, cp)`` power form.
+    Output terms have theta/phi as lists of ``ThetaFactor`` / ``PhiFactor``
+    with one factor per variable at most (product-to-sum applied).
     """
-    from fractions import Fraction
+    result: list[FourierTerm] = []
 
-    result = []
+    for term in terms:
+        expansions: list[tuple[list[ThetaFactor | PhiFactor], Fraction]] \
+            = [([], Fraction(1, 1))]
 
-    for coeff, sqrt_r, im, theta_terms, phi_terms in terms:
-        # Start with one expansion path
-        expansions = [([], Fraction(1, 1))]  # (factors, coeff)
-
-        # Expand each theta
-        for idx, sp, cp in theta_terms:
+        # ── Expand theta power factors ──
+        for var_idx, sp, cp in term.theta_power:
             half_exp = expand_half_angle(sp, cp)
             new_exp = []
             for factors, c in expansions:
                 for (func, k), frac in half_exp.items():
                     if frac == 0:
                         continue
-                    new_factors = factors + [("theta", idx, func, k)]
+                    new_factors = factors + [ThetaFactor(var_idx, func, k)]
                     new_exp.append((new_factors, c * frac))
             expansions = new_exp
 
-        # Handle phi: group by idx, apply product-to-sum
-        phi_by_idx: dict[int, list] = {}
-        for idx, func, k in phi_terms:
-            phi_by_idx.setdefault(idx, []).append((func, k))
+        # ── Phi product-to-sum ──
+        phi_by_idx: dict[int, list[PhiFactor]] = {}
+        for pf in term.phi:
+            phi_by_idx.setdefault(pf.var_idx, []).append(pf)
 
         for idx, phis in phi_by_idx.items():
-            # Combine multiple phi factors for the same idx
-            products = [(phis[0][0], phis[0][1], Fraction(1, 1))]
-            for func2, k2 in phis[1:]:
+            products: list[tuple[str, int, Fraction]] = \
+                [(phis[0].func, phis[0].k, Fraction(1, 1))]
+            for pf in phis[1:]:
                 new_prods = []
                 for func1, k1, c1 in products:
-                    for res in _phi_product(func1, k1, func2, k2):
-                        pf, pm, frac_str = res
-                        c = c1 * Fraction(frac_str)
-                        new_prods.append((pf, pm, c))
+                    for res in _phi_product(func1, k1, pf.func, pf.k):
+                        pfunc, pk, frac_str = res
+                        new_prods.append((pfunc, pk, c1 * Fraction(frac_str)))
                 products = new_prods
-            # Cross with expansions
             new_exp = []
             for factors, c in expansions:
-                for pf, pm, pc in products:
-                    if pf != "1":
-                        new_factors = factors + [("phi", idx, pf, pm)]
+                for pfunc, pk, pc in products:
+                    if pfunc != "1":
+                        new_factors = factors + [PhiFactor(idx, pfunc, pk)]
                     else:
                         new_factors = factors
                     new_exp.append((new_factors, c * pc))
             expansions = new_exp
 
-        # Final result
+        # ── Build output FourierTerms ──
         for factors, c in expansions:
             if c == 0:
                 continue
-            result.append({
-                "coeff": coeff * c,
-                "sqrt_r": sqrt_r,
-                "im": im,
-                "factors": factors,
-            })
+            theta_list = [f for f in factors if isinstance(f, ThetaFactor)]
+            phi_list = [f for f in factors if isinstance(f, PhiFactor)]
+            result.append(FourierTerm(
+                coeff=term.coeff * c,
+                sqrt_r=term.sqrt_r,
+                im=term.im,
+                theta=theta_list,
+                phi=phi_list,
+            ))
 
     return result
 
