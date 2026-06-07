@@ -103,6 +103,23 @@ def phase_space(m: np.ndarray, m1: float, m2: float) -> np.ndarray:
 #  Built-in models
 # ---------------------------------------------------------------------------
 
+@register_model("one")
+class OneModel(Model):
+    """Unity width model — gamma_table = 1 everywhere.
+
+    The propagator reduces to a constant-width Breit-Wigner:
+        A = 1 / (m₀² − m² − i·m₀·g₀)
+    """
+
+    @staticmethod
+    def n_channels(particle) -> int:
+        return 1
+
+    @staticmethod
+    def gamma_table(particle, child_masses, n_int, mass_min, mass_max):
+        return np.ones((1, n_int), dtype=np.complex64)
+
+
 @register_model("BW")
 class BWModel(Model):
     """Constant Breit-Wigner — width does NOT run (Γ = Γ₀ constant).
