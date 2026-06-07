@@ -28,24 +28,27 @@ for ci, dc in enumerate(m.decay_chains):
         for ft in f["fourier_terms"]:
             th = tuple((x.name, x.func, x.k) for x in ft.factors if x.k)
             groups[(th,)].append(ft.coeff)
-        parts = []
-        for (th,), coeffs in groups.items():
-            total = sum(coeffs, sp.Integer(0))
-            if total == 0:
-                continue
+        real_parts = []
+        imag_parts = []
+        for ft in f["fourier_terms"]:
             trigs = []
-            for name, func, kk in th:
-                n = kk // 2
+            for x in ft.factors:
+                n = x.k // 2
                 if n == 0:
                     trigs.append("1")
-                elif kk % 2 == 0:
-                    trigs.append(f"{func}({n}·{name})" if n > 1 else f"{func}({name})")
+                elif x.k % 2 == 0:
+                    trigs.append(f"{x.func}({n}·{x.name})" if n > 1 else f"{x.func}({x.name})")
                 else:
-                    trigs.append(f"{func}({kk}·{name}/2)")
+                    trigs.append(f"{x.func}({x.k}·{x.name}/2)")
             trig = " · ".join(t for t in trigs if t)
-            c = sp.nsimplify(total)
-            parts.append(f"{c}  ×  {trig}" if trig else f"{c}")
+            coeff = sp.nsimplify(ft.coeff)
+            if ft.im:
+                imag_parts.append(f"{coeff}  ×  {trig}" if trig else f"{coeff}")
+            else:
+                real_parts.append(f"{coeff}  ×  {trig}" if trig else f"{coeff}")
         print(f"  LS = {ls}")
-        for p in parts:
-            print(f"    {p}")
+        if real_parts:
+            print("    Re:  " + "  +  ".join(real_parts))
+        if imag_parts:
+            print("    Im:  " + "  +  ".join(imag_parts))
         print()

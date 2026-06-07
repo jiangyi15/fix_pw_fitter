@@ -37,6 +37,8 @@ class FourierTerm:
     coeff: 'Any' = 0
     im: bool = False
     factors: list[Factor] = field(default_factory=list)
+    helicities: dict[str, float] = field(default_factory=dict)
+    # e.g. {"la": 0.5, "lb": 0.0, "lc": -0.5} for the vertex
 
 
 # ============================================================================
@@ -200,23 +202,24 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
             theta_name = f"theta_{theta_idx}"
             theta_factors = [Factor(theta_name, func, k)] if k > 0 else []
 
+            hel = {"la": la, "lb": lb, "lc": lc}
             if abs(la) < 1e-10:
                 terms.append(FourierTerm(
                     coeff=base * wd_c * frac, im=False,
-                    factors=theta_factors,
+                    factors=theta_factors, helicities=hel,
                 ))
             else:
                 abs_la = int(abs(la) * 2)
                 sin_sign = -1 if la < 0 else 1
-                # cos term (real part of e^{i·la·φ})
                 terms.append(FourierTerm(
                     coeff=base * wd_c * frac, im=False,
                     factors=theta_factors + [Factor(f"phi_{phi_idx}", "cos", abs_la)],
+                    helicities=hel,
                 ))
-                # sin term (imaginary part of e^{i·la·φ})
                 terms.append(FourierTerm(
                     coeff=base * wd_c * frac * sin_sign, im=True,
                     factors=theta_factors + [Factor(f"phi_{phi_idx}", "sin", abs_la)],
+                    helicities=hel,
                 ))
 
     return terms
@@ -227,7 +230,11 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
 # ============================================================================
 
 def combine_vertices(vertex_terms_list):
-    """Multiply amplitudes through the decay cascade."""
+    """Multiply amplitudes through the decay cascade.
+
+    Each consecutive pair is matched by ``lb(v_i) == la(v_{i+1})``
+    (the first daughter of the parent vertex is the parent of the child vertex).
+    """
     if len(vertex_terms_list) == 1:
         return vertex_terms_list[0]
 
@@ -235,7 +242,11 @@ def combine_vertices(vertex_terms_list):
     v1 = vertex_terms_list[1]
     combined = []
     for t0 in v0:
+        lb0 = t0.helicities.get("lb")
         for t1 in v1:
+            la1 = t1.helicities.get("la")
+            if lb0 is not None and la1 is not None and abs(lb0 - la1) > 1e-10:
+                continue  # helicity mismatch — skip
             coeff = t0.coeff * t1.coeff
             if t0.im and t1.im:
                 coeff = -coeff  # i² = -1
@@ -243,6 +254,7 @@ def combine_vertices(vertex_terms_list):
                 coeff=coeff,
                 im=t0.im ^ t1.im,
                 factors=t0.factors + t1.factors,
+                helicities=t0.helicities | t1.helicities,
             ))
     return combined
 
@@ -317,8 +329,25 @@ def compute_angular_formula(decay_chain, ls_assignment: list[tuple[int, float]])
     # Combine cascadingly
     combined = combine_vertices(all_terms)
 
+    # Sum like terms (same trig basis) across helicities
+    # Separately for real (im=False) and imaginary (im=True) parts
+    from collections import defaultdict
+    summed: dict[tuple, dict[bool, Any]] = defaultdict(lambda: {False: 0, True: 0})
+    import sympy as _sp6
+    for ft in combined:
+        key = tuple(sorted((f.name, f.func, f.k) for f in ft.factors))
+        summed[key][ft.im] = summed[key].get(ft.im, _sp6.Integer(0)) + ft.coeff
+
+    fourier_terms = []
+    for key, parts in summed.items():
+        for im_flag, coeff in parts.items():
+            if coeff == 0:
+                continue
+            factors = [Factor(name, func, k) for name, func, k in key]
+            fourier_terms.append(FourierTerm(coeff=coeff, im=im_flag, factors=factors))
+
     return {
-        "fourier_terms": combined,
+        "fourier_terms": fourier_terms,
         "n_theta": len(decays),
         "n_phi": len(decays),
     }
