@@ -1,7 +1,8 @@
 """Print the angular formula for the README config example."""
+from collections import defaultdict
+import sympy as sp
 from interp_fitter.config_builder import parse_physics
 from interp_fitter.angular_formula import compute_angular_formula
-import sympy as sp
 
 physics = {
     "decay": {
@@ -11,11 +12,9 @@ physics = {
     },
     "particle": {
         "$top": "A", "$finals": ["B", "C", "D"],
-        "A": {"J": 0, "P": -1},
-        "R": ["R1", "R2"],
-        "Y": {"J": 1, "P": -1},
-        "R1": {"J": 0, "P": 1}, "R2": {"J": 1, "P": -1},
-        "B": {"J": 0, "P": -1}, "C": {"J": 0, "P": -1}, "D": {"J": 0, "P": -1},
+        "A": {"J": 0}, "R": ["R1", "R2"],
+        "Y": {"J": 1}, "R1": {"J": 0}, "R2": {"J": 1},
+        "B": {"J": 0}, "C": {"J": 0}, "D": {"J": 0},
     },
 }
 
@@ -24,18 +23,28 @@ for ci, dc in enumerate(m.decay_chains):
     names = [f"{d.parent}->{'+'.join(d.children)}" for d in dc.decays]
     print(f"Chain {ci}: {'  '.join(names)}")
     for ls in dc.ls_combinations():
-        formula = compute_angular_formula(dc, list(ls))
-        print(f"  LS {ls}")
-        for ft in formula["fourier_terms"]:
-            t = [x for x in ft.factors if x.kind == "theta" and x.k]
-            p = [x for x in ft.factors if x.kind == "phi" and x.k]
-            trig = " * ".join(
-                [f"{x.func}({''if x.k==1 else str(x.k)+'*'}{x.kind}_{x.var_idx}/2)" for x in t] +
-                [f"{x.func}({''if x.k==1 else str(x.k)+'*'}{x.kind}_{x.var_idx}/2)" for x in p]
-            )
-            coeff = sp.nsimplify(ft.coeff)
-            line = str(coeff)
-            if trig:
-                line += "  |  " + trig
-            print(f"    {line}")
+        f = compute_angular_formula(dc, list(ls))
+        groups = defaultdict(list)
+        for ft in f["fourier_terms"]:
+            th = tuple((x.var_idx, x.k) for x in ft.factors if x.kind == "theta" and x.k)
+            ph = tuple((x.var_idx, x.k) for x in ft.factors if x.kind == "phi" and x.k)
+            groups[(th, ph)].append(ft.coeff)
+        parts = []
+        for (th, ph), coeffs in groups.items():
+            total = sum(coeffs, sp.Integer(0))
+            if total == 0:
+                continue
+            trigs = []
+            for idx, kk in th:
+                n = kk // 2
+                trigs.append(f"cos(θ_{idx})" if n == 1 else f"cos({n}·θ_{idx})" if n else "1")
+            for idx, kk in ph:
+                n = kk // 2
+                trigs.append(f"cos(φ_{idx})" if n == 1 else f"cos({n}·φ_{idx})" if n else "1")
+            trig = " · ".join(t for t in trigs if t)
+            c = sp.nsimplify(total)
+            parts.append(f"{c}  ×  {trig}" if trig else f"{c}")
+        print(f"  LS = {ls}")
+        for p in parts:
+            print(f"    {p}")
         print()
