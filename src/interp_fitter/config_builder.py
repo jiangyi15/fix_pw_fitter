@@ -42,7 +42,7 @@ class Decay:
             p_break=self.p_break,
         )
 
-    def get_gls(self) -> list[str]:
+    def get_g_ls(self) -> list[str]:
         """Coupling parameter names for each (L, S) pair.
 
         Format: ``{parent}->{child1}.{child2}_g_ls_{idx}``.
