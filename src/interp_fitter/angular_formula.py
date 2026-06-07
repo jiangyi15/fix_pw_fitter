@@ -242,71 +242,7 @@ def combine_vertices(vertex_terms_list):
 #  Expand to Fourier basis (theta + phi)
 # ============================================================================
 
-def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
-    """Apply product-to-sum for same-named factors.
 
-    Theta factors are already in Fourier basis from ``vertex_amplitude``.
-    Phi factors with the same name from cascade combination are merged
-    via product-to-sum identities.
-    """
-    result: list[FourierTerm] = []
-
-    for term in terms:
-        import sympy as _sp2
-        expansions: list[tuple[list[Factor], _sp2.Expr]] \
-            = [([], _sp2.Integer(1))]
-
-        # ── Product-to-sum for same-named factors ──
-        by_name: dict[str, list[Factor]] = {}
-        for f in term.factors:
-            by_name.setdefault(f.name, []).append(f)
-
-        for name, phis in by_name.items():
-            products: list[tuple[str, int, _sp2.Expr]] = \
-                [(phis[0].func, phis[0].k, _sp2.Integer(1))]
-            for pf in phis[1:]:
-                new_prods = []
-                for func1, k1, c1 in products:
-                    for res in _phi_product(func1, k1, pf.func, pf.k):
-                        pfunc, pk, frac_str = res
-                        new_prods.append((pfunc, pk, c1 * _sp2.Rational(frac_str)))
-                products = new_prods
-            new_exp = []
-            for factors, c in expansions:
-                for pfunc, pk, pc in products:
-                    if pfunc != "1":
-                        new_factors = factors + [Factor(name, pfunc, pk)]
-                    else:
-                        new_factors = factors
-                    new_exp.append((new_factors, c * pc))
-            expansions = new_exp
-
-        # ── Build output FourierTerms ──
-        for factors, c in expansions:
-            if c == 0:
-                continue
-            result.append(FourierTerm(
-                coeff=term.coeff * c,
-                im=term.im,
-                factors=factors,
-            ))
-
-    return result
-
-
-def _phi_product(f1: str, k1: int, f2: str, k2: int):
-    """Product-to-sum for two phi factors of the same variable."""
-    if f1 == "1": return [("1", 0, "1")]
-    if f2 == "1": return []
-    if f1 == "cos" and f2 == "cos":
-        return [("cos", k1 + k2, "1/2"), ("cos", abs(k1 - k2), "1/2")]
-    if f1 == "sin" and f2 == "sin":
-        return [("cos", abs(k1 - k2), "1/2"), ("cos", k1 + k2, "-1/2")]
-    if f1 == "cos" and f2 == "sin":
-        return [("sin", k1 + k2, "1/2"), ("sin", abs(k1 - k2), "-1/2" if k1 >= k2 else "1/2")]
-    if f1 == "sin" and f2 == "cos":
-        return [("sin", k1 + k2, "1/2"), ("sin", abs(k1 - k2), "1/2" if k1 >= k2 else "-1/2")]
-    return []
 
 
 # ============================================================================
@@ -372,11 +308,8 @@ def compute_angular_formula(decay_chain, ls_assignment: list[tuple[int, float]])
     # Combine cascadingly
     combined = combine_vertices(all_terms)
 
-    # Expand to Fourier basis
-    fourier = expand_to_fourier(combined)
-
     return {
-        "fourier_terms": fourier,
+        "fourier_terms": combined,
         "n_theta": len(decays),
         "n_phi": len(decays),
     }
