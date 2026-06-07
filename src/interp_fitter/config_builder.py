@@ -24,24 +24,25 @@ class Decay:
     """``parent -> children[0] + children[1] + ...`` (N-body)."""
     parent: str
     children: list[str]
+    parent_particle: Particle | None = None
+    child_particles: list[Particle] | None = None
 
-    def get_ls(self, particles: dict[str, Particle],
-               p_break: bool = False) -> list[tuple[int, float]]:
+    def get_ls(self, p_break: bool = False) -> list[tuple[int, float]]:
         """Return valid (L, S) pairs for this two-body decay.
 
-        Requires exactly two children.  Lookups the ``J`` and ``P``
-        properties from *particles*.  Returns an empty list for N-body
-        decays with ``N != 2``.
+        Requires exactly two children and that ``particle`` and
+        ``child_particles`` have been set.  Returns an empty list for
+        N-body decays with ``N != 2``.
         """
-        if len(self.children) != 2:
+        if len(self.children) != 2 or self.parent_particle is None:
             return []
-        p_props = particles[self.parent].props
-        c1_props = particles[self.children[0]].props
-        c2_props = particles[self.children[1]].props
+        pp = self.parent_particle.props
+        c1p = self.child_particles[0].props if self.child_particles else {}
+        c2p = self.child_particles[1].props if self.child_particles else {}
         return get_ls_list(
-            parent_J=p_props.get("J", 0), parent_P=p_props.get("P", 1),
-            child1_J=c1_props.get("J", 0), child1_P=c1_props.get("P", 1),
-            child2_J=c2_props.get("J", 0), child2_P=c2_props.get("P", 1),
+            parent_J=pp.get("J", 0), parent_P=pp.get("P", 1),
+            child1_J=c1p.get("J", 0), child1_P=c1p.get("P", 1),
+            child2_J=c2p.get("J", 0), child2_P=c2p.get("P", 1),
             p_break=p_break,
         )
 
@@ -323,9 +324,13 @@ def parse_physics(physics: dict) -> PhysicsModel:
 
             resolved_decays = []
             for d in chain.decays:
+                parent_name = _resolve(d.parent)
+                child_names = [_resolve(c) for c in d.children]
                 resolved_decays.append(Decay(
-                    parent=_resolve(d.parent),
-                    children=[_resolve(c) for c in d.children],
+                    parent=parent_name,
+                    children=child_names,
+                    parent_particle=particles.get(parent_name),
+                    child_particles=[particles.get(c) for c in child_names],
                 ))
 
             decay_chains.append(DecayChain(
