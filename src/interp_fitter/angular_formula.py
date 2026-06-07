@@ -38,8 +38,7 @@ class FourierTerm:
     In **Fourier form** (after :func:`expand_to_fourier`):
         ``factors`` contains :class:`Factor` objects, at most one per variable.
     """
-    coeff: Fraction
-    sqrt_r: int = 1
+    coeff: 'Any' = 0  # sympy expression (exact) or float
     im: bool = False
     factors: list[Factor] = field(default_factory=list)
     theta_power: list[tuple[int, int, int]] = field(default_factory=list)
@@ -63,71 +62,19 @@ def _comb(n: int, k: int) -> int:
 #  Using Racah formula with exact integer arithmetic
 # ============================================================================
 
-def cg_coeff(j1: float, m1: float, j2: float, m2: float, J: float, M: float) -> Fraction:
-    """Clebsch-Gordan coefficient as an exact Fraction (may contain sqrt).
+def cg_coeff(j1: float, m1: float, j2: float, m2: float,
+             J: float, M: float):
+    """Clebsch-Gordan coefficient ``⟨j1 m1 j2 m2 | J M⟩``.
 
-    Returns the coefficient as a Fraction.  The actual CG coefficient is
-    ``sqrt(result)`` — the caller must take the square root for the
-    numerical value, or keep it symbolic.
+    Returns a ``sympy`` expression (exact symbolic).
+    Raises ``ImportError`` if sympy is not installed.
     """
-    # Convert to half-integer units
-    def _to_int(v: float) -> int:
-        return round(2 * v)
-
-    j1_2, m1_2 = _to_int(j1), _to_int(m1)
-    j2_2, m2_2 = _to_int(j2), _to_int(m2)
-    J_2, M_2 = _to_int(J), _to_int(M)
-
-    if m1_2 + m2_2 != M_2:
-        return Fraction(0, 1)
-    if abs(m1_2) > j1_2 or abs(m2_2) > j2_2 or abs(M_2) > J_2:
-        return Fraction(0, 1)
-    if j1_2 + j2_2 < J_2 or abs(j1_2 - j2_2) > J_2:
-        return Fraction(0, 1)
-    if (j1_2 + j2_2 + J_2) % 2 != 0:
-        return Fraction(0, 1)  # triangle condition
-
-    # Racah formula — returns the SQUARE of the CG coefficient as a rational
-    # (the sign is determined by the phase convention)
-    from math import factorial as fac
-
-    # Phase factor: (-1)^{j1 - j2 + M}
-    phase = -1 if (j1_2 - j2_2 + M_2) % 4 == 2 else 1
-
-    # Delta factor
-    def _delta(a, b, c):
-        return fac((a + b - c)//2) * fac((a - b + c)//2) * fac((-a + b + c)//2) // fac((a + b + c)//2 + 1)
-
-    # Summation term
-    # CG = δ(m1+m2, M) * √Δ(j1,j2,J) * √[(j1+m1)!(j1-m1)!(j2+m2)!(j2-m2)!(J+M)!(J-M)!]
-    #      * Σ_k (-1)^k / [k!(j1+j2-J-k)!(j1-m1-k)!(j2+m2-k)!(J-j2+m1+k)!(J-j1-m2+k)!]
-
-    # For the angular formula pipeline, we return the squared coefficient
-    # as Fraction.  The caller will take sqrt when needed.
-
-    # Actually, let me use sympy if available, otherwise implement a simpler version
-    # that returns the EXACT rational value (square of the CG).
-    from math import comb
-
-    k_min = max(0, j2_2 - J_2 - m1_2, j1_2 + m2_2 - J_2)
-    k_max = min(j1_2 + j2_2 - J_2, j1_2 - m1_2, j2_2 + m2_2)
-    k_min = max(0, -(-k_min)//2 * 2)  # round up to even
-    k_max = k_max // 2 * 2  # round down to even
-
-    total = Fraction(0, 1)
-    for k in range(k_min, k_max + 1, 2):
-        k2 = k // 2
-        sign = -1 if k2 % 2 == 1 else 1
-        try:
-            term = comb((j1_2 + j2_2 - J_2)//2, k2) * comb((j1_2 - m1_2)//2, k2) * comb((j2_2 + m2_2)//2, k2)
-            term *= comb((J_2 - j2_2 + m1_2)//2, k2) * comb((J_2 - j1_2 - m2_2)//2, k2)
-        except:
-            continue
-        total += Fraction(sign * term, 1)
-
-    # This simplified approach gives a rational value, but the full CG
-    # has sqrt factors.  For now we return the numeric rational part.
-    return total
+    from sympy.physics.wigner import wigner_3j
+    import sympy as sp
+    w3 = wigner_3j(sp.Rational(j1), sp.Rational(j2), sp.Rational(J),
+                   sp.Rational(m1), sp.Rational(m2), sp.Rational(-M))
+    phase = (-1) ** (sp.Rational(j1 - j2 + M))
+    return sp.sqrt(2 * J + 1) * phase * w3
 
 
 # ============================================================================
@@ -135,12 +82,7 @@ def cg_coeff(j1: float, m1: float, j2: float, m2: float, J: float, M: float) -> 
 # ============================================================================
 
 def wigner_d_weights(J: float, m1: float, m2: float):
-    """Return ``[(coeff_numer, sin_pow, cos_pow), ...]`` for d^J_{m1,m2}(θ).
-
-    Each term is ``coeff * sin(θ/2)^sin_pow * cos(θ/2)^cos_pow``.
-    ``coeff`` is a ``Fraction`` (the actual coefficient, not squared).
-    The full coefficient has a sqrt factor from the factorial ratio.
-    """
+    """Return ``[(coeff_float, sin_pow, cos_pow), ...]`` for d^J_{m1,m2}(θ)."""
     twoJ = round(2 * J)
     jpm1 = round(J + m1); jmm1 = round(J - m1)
     jpm2 = round(J + m2); jmm2 = round(J - m2)
@@ -163,7 +105,6 @@ def wigner_d_weights(J: float, m1: float, m2: float):
         if round(m1 - m2) + k >= 0: denom *= _fact(round(m1 - m2) + k)
         if k >= 0: denom *= _fact(k)
 
-        # Extract perfect squares from num_num
         p, r = 1, num_num
         i = 2
         while i * i <= r:
@@ -175,10 +116,8 @@ def wigner_d_weights(J: float, m1: float, m2: float):
         g = math.gcd(p, denom)
         p //= g; denom //= g
 
-        # The coefficient is sign * p * sqrt(r) / denom
-        # Store as Fraction for the rational part p/denom
-        # The sqrt(r) factor is stored separately
-        weights.append((Fraction(sign * p, denom), r, L, twoJ - L))
+        coeff = sign * p * math.sqrt(r) / denom
+        weights.append((coeff, L, twoJ - L))
 
     return weights
 
@@ -241,44 +180,30 @@ def vertex_amplitude(Ja: float, Jb: float, Jc: float,
     if abs(delta) > Ja + 1e-10:
         return []
 
-    # CG1: <Jb lb Jc (-lc) | S delta>
     cg1 = cg_coeff(Jb, lb, Jc, -lc, S, delta)
-    if cg1 == 0:
+    if abs(cg1) < 1e-15:
         return []
 
-    # CG2: <L 0 S delta | Ja delta>
     cg2 = cg_coeff(float(L), 0.0, S, delta, Ja, delta)
-    if cg2 == 0:
+    if abs(cg2) < 1e-15:
         return []
 
-    # Wigner-d weights: d^Ja_{la, delta}(θ)
+    ls_factor = math.sqrt((2 * L + 1) / (2 * round(Ja) + 1))
+    base = cg1 * cg2 * ls_factor
     wd = wigner_d_weights(Ja, la, delta)
 
-    # Combined coefficient = sqrt((2L+1)/(2Ja+1)) * cg1 * cg2 * wd
-    # Store as rational part and sqrt part separately
-
     terms = []
-    for coeff_frac, sqrt_r, sp, cp in wd:
-        # Total rational coefficient
-        total = coeff_frac  # * sqrt((2L+1)/(2Ja+1)) — this is the full pipeline
-
+    for wd_c, sp, cp in wd:
         theta_terms = [(theta_idx, sp, cp)]
         phi_terms = []
-
         if abs(la) < 1e-10:
             phi_terms = [(phi_idx, "cos", 0)]
         else:
-            abs_la = int(abs(la) * 2)  # in half-units
-            if la > 0:
-                phi_terms = [(phi_idx, "cos", abs_la)]
-                # Also sin term with negative sign
-                # (handled by im flag in the full JS code)
-            else:
-                phi_terms = [(phi_idx, "cos", abs_la)]
-                # sign flips
+            abs_la = int(abs(la) * 2)
+            phi_terms = [(phi_idx, "cos", abs_la)]
 
         terms.append(FourierTerm(
-            coeff=total, sqrt_r=sqrt_r, im=False,
+            coeff=base * wd_c, im=False,
             theta_power=theta_terms,
             factors=[Factor(idx, "phi", f, k) for idx, f, k in phi_terms],
         ))
@@ -302,7 +227,6 @@ def combine_vertices(vertex_terms_list):
         for t1 in v1:
             combined.append(FourierTerm(
                 coeff=t0.coeff * t1.coeff,
-                sqrt_r=t0.sqrt_r * t1.sqrt_r,
                 im=t0.im ^ t1.im,
                 theta_power=t0.theta_power + t1.theta_power,
                 factors=t0.factors + t1.factors,
@@ -315,17 +239,17 @@ def combine_vertices(vertex_terms_list):
 # ============================================================================
 
 def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
-    """Convert power-form ``FourierTerm``\s to Fourier basis.
+    """Convert power-form ``FourierTerm`` objects to Fourier basis.
 
     Each input term has theta in ``(idx, sp, cp)`` power form.
-    Output terms have ``factors`` as :class:`Factor`\s with one factor
+    Output terms have ``factors`` as :class:`Factor` objects, with one factor
     per variable at most (product-to-sum applied).
     """
     result: list[FourierTerm] = []
 
     for term in terms:
-        expansions: list[tuple[list[Factor], Fraction]] \
-            = [([], Fraction(1, 1))]
+        expansions: list[tuple[list[Factor], float]] \
+            = [([], 1.0)]
 
         # ── Expand theta power factors ──
         for var_idx, sp, cp in term.theta_power:
@@ -336,7 +260,7 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
                     if frac == 0:
                         continue
                     new_factors = factors + [Factor(var_idx, "theta", func, k)]
-                    new_exp.append((new_factors, c * frac))
+                    new_exp.append((new_factors, c * float(frac)))
             expansions = new_exp
 
         # ── Phi product-to-sum ──
@@ -345,14 +269,14 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
             phi_by_idx.setdefault(f.var_idx, []).append(f)
 
         for idx, phis in phi_by_idx.items():
-            products: list[tuple[str, int, Fraction]] = \
-                [(phis[0].func, phis[0].k, Fraction(1, 1))]
+            products: list[tuple[str, int, float]] = \
+                [(phis[0].func, phis[0].k, 1.0)]
             for pf in phis[1:]:
                 new_prods = []
                 for func1, k1, c1 in products:
                     for res in _phi_product(func1, k1, pf.func, pf.k):
                         pfunc, pk, frac_str = res
-                        new_prods.append((pfunc, pk, c1 * Fraction(frac_str)))
+                        new_prods.append((pfunc, pk, c1 * float(Fraction(frac_str))))
                 products = new_prods
             new_exp = []
             for factors, c in expansions:
@@ -366,11 +290,10 @@ def expand_to_fourier(terms: list[FourierTerm]) -> list[FourierTerm]:
 
         # ── Build output FourierTerms ──
         for factors, c in expansions:
-            if c == 0:
+            if abs(c) < 1e-15:
                 continue
             result.append(FourierTerm(
                 coeff=term.coeff * c,
-                sqrt_r=term.sqrt_r,
                 im=term.im,
                 factors=factors,
             ))
