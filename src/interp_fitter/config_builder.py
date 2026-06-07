@@ -25,6 +25,26 @@ class Decay:
     parent: str
     children: list[str]
 
+    def get_ls(self, particles: dict[str, Particle],
+               p_break: bool = False) -> list[tuple[int, float]]:
+        """Return valid (L, S) pairs for this two-body decay.
+
+        Requires exactly two children.  Lookups the ``J`` and ``P``
+        properties from *particles*.  Returns an empty list for N-body
+        decays with ``N != 2``.
+        """
+        if len(self.children) != 2:
+            return []
+        p_props = particles[self.parent].props
+        c1_props = particles[self.children[0]].props
+        c2_props = particles[self.children[1]].props
+        return get_ls_list(
+            parent_J=p_props.get("J", 0), parent_P=p_props.get("P", 1),
+            child1_J=c1_props.get("J", 0), child1_P=c1_props.get("P", 1),
+            child2_J=c2_props.get("J", 0), child2_P=c2_props.get("P", 1),
+            p_break=p_break,
+        )
+
 
 @dataclass
 class _Chain:
