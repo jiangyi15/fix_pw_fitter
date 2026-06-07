@@ -166,8 +166,20 @@ def parse_physics(physics: dict) -> PhysicsModel:
                     idx += 1
             actual = [res_map.get(r, r) for r in chain.resonances]
             parts = [particles.get(n, Particle(n)) for n in actual]
+
+            # Build decays with aliases resolved in parent/children names
+            def _resolve(name: str) -> str:
+                return res_map.get(name, name)
+
+            resolved_decays = []
+            for d in chain.decays:
+                resolved_decays.append(Decay(
+                    parent=_resolve(d.parent),
+                    children=[_resolve(c) for c in d.children],
+                ))
+
             decay_chains.append(DecayChain(
-                decays=chain.decays, resonances=actual,
+                decays=resolved_decays, resonances=actual,
                 resonance_map=res_map, particles=parts))
 
     return PhysicsModel(top=top, finals=list(finals),
