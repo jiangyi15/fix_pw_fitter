@@ -25,6 +25,79 @@ P     = (1-frac)·(1-ap)·PB + frac·(1+ap)·PBbar
 | No norm | `Q = Σ w·P` |
 | With norm | `Q = -Σ w·log(P/norm + bkg)` |
 
+## Helicity amplitude formula
+
+For a single decay vertex ``A → B + C`` with orbital angular momentum *L* and total
+spin *S*, the angular part of the helicity amplitude is:
+
+```
+T^{L,S}_{λ_A,λ_B,λ_C}(φ,θ) = √((2L+1)/(2J_A+1))
+    ×  ⟨J_B, λ_B, J_C, -λ_C | S, δ⟩         CG coefficient
+    ×  ⟨L, 0, S, δ | J_A, δ⟩                CG coefficient
+    ×  e^{i·λ_A·φ}                           azimuthal phase
+    ×  d^{J_A}_{λ_A,δ}(θ)                    Wigner d-function
+```
+
+where ``δ = λ_B − λ_C``.
+
+### Wigner-d half-angle expansion
+
+```
+d^{J}_{λ,δ}(θ) = Σ_k  C_k · sin(θ/2)^{sp_k} · cos(θ/2)^{cp_k}
+```
+
+Each term coefficient ``C_k = sign × p × √r / d`` (exact integers, gcd-reduced)
+comes from the factorial ratio:
+
+```
+C_k = sign · √[(J+λ)!(J-λ)!(J+δ)!(J-δ)!]  /  [k!(J-λ-k)!(J+δ-k)!(λ-δ+k)!]
+```
+
+### Azimuthal phase
+
+```
+e^{i·λ_A·φ} =
+    cos(λ_A·φ)                     if λ_A = 0
+    cos(|λ_A|·φ) + i·sin(|λ_A|·φ)  if λ_A > 0
+    cos(|λ_A|·φ) − i·sin(|λ_A|·φ)  if λ_A < 0
+```
+
+The imaginary parts are tracked with an ``im=True`` flag.
+
+### Cascade
+
+For a decay chain, vertex amplitudes are **multiplied**:
+
+```
+T_{chain} = T_{v₀} × T_{v₁} × T_{v₂} × …
+```
+
+Intermediate-resonance helicities are **summed over** (matched via
+``λ_B(vᵢ) = λ_A(vᵢ₊₁)``). The output is organized by:
+
+```
+helicity key = "λ_root, λ_final₁, λ_final₂, …"
+LS key       = "L₁,S₁; L₂,S₂; …"
+```
+
+### Mapping to Kernel config
+
+Each (helicity, LS) combination produces ``AmpTerm``\s that fill the
+``matrix_ang`` coefficients in the Kernel:
+
+```
+AmpTerm(coeff, im, factors=[
+    Factor("theta_i", "cos"|"sin", k),     →  cos(k·θᵢ/2) or sin(k·θᵢ/2)
+    Factor("phi_j",   "cos"|"sin", k),     →  cos(k·φⱼ/2) or sin(k·φⱼ/2)
+])
+```
+
+| Kernel field | Source |
+|-------------|--------|
+| ``angle_k``, ``angle_b`` | ``k`` from ``Factor.k``, ``b=0`` or ``b=−π/2`` for sin |
+| ``ang_order`` | Groups ``Factor``\s into basis products per wave |
+| ``matrix_ang`` | ``AmpTerm.coeff`` times ``CG`` × ``Wigner-d`` × ``LS-factor`` |
+
 ## Installation
 
 ```bash
