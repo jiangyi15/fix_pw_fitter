@@ -310,6 +310,9 @@ def build_onnx_model(config: dict, with_norm: bool = True,
 
     cfg = config
 
+    # helicity dimension (backward compatible: default 1)
+    nhel = int(cfg.get("nhelicities", 1))
+
     # inner dims (always concrete — derived from config)
     ndim_mass = int(max(np.max(cfg["gamma_index"]), np.max(cfg["bw_index"])) + 1)
     ndim_q    = int(np.max(cfg["q_index"]) + 1)
@@ -320,10 +323,13 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     n_g0 = int(np.max(cfg["g0_index"]) + 1)
     n_m0 = cfg["matrix_gamma"].shape[0]
     n_bw = len(cfg["m0_index"])
-    nwaves = cfg["matrix_ang"].shape[-1]
+    n_angle_waves = cfg["matrix_ang"].shape[-1]
+    nwaves = n_angle_waves // nhel
     nres = len(cfg["bw_order"]) // nwaves
     ndec = len(cfg["fl_order"]) // nwaves
     nbasis = cfg["ang_order"].shape[0]
+    n0 = nwaves // 2
+    n1 = nwaves - n0
 
     # batch dim
     _N = nevt if nevt else "nevt"
@@ -442,7 +448,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     fl_rsh = g.reshape(fl_ord, RS(0, nwaves, ndec))
     fla = g.reduce_prod(fl_rsh, [2])                          # (nevt, nwaves)
 
-    # ---- 4) Angular basis -----------------------------------------------
+    # ---- 4) Angular basis (with helicity expansion) --------------------
     ang = g.gather(angle, "angle_index", axis=1)             # (nevt, n_ang)
     ang_a = g.add(g.mul(ang, "angle_k"), "angle_b")
     cosang = g.cos(ang_a)                                    # (nevt, n_ang)
@@ -452,40 +458,45 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     cos_rsh = g.reshape(cos_ord, RS(0, nbasis, n_per))
     cosa = g.reduce_prod(cos_rsh, [2])                        # (nevt, nbasis)
 
-    # fa = cosa @ matrix_ang  (complex)
+    # fa = cosa @ matrix_ang  (complex) — matrix_ang is (nbasis, nwaves*nhel)
     fa_r = g.matmul(cosa, "ma_re")
     fa_i = g.matmul(cosa, "ma_im")
+    fa_r = g.reshape(fa_r, RS(0, nwaves, nhel))
+    fa_i = g.reshape(fa_i, RS(0, nwaves, nhel))
 
-    # ---- 5) Amplitude ---------------------------------------------------
-    # T = bwa * fla * fa   (bwa complex, fla real, fa complex)
-    # First: bwa * fa  (complex * complex)
-    bf_r, bf_i = g.c_mul(bwa_r, bwa_i, fa_r, fa_i)
-    # Then * fla (real)
-    T_r = g.mul(bf_r, fla)
-    T_i = g.mul(bf_i, fla)
+    # ---- 5) Amplitude (per-wave, per-helicity) -------------------------
+    # T_hel = bwa * fla * fa  (bwa complex, fla real, fa complex)
+    # bwa: (nevt, nwaves), fla: (nevt, nwaves), fa: (nevt, nwaves, nhel)
+    bwa_us_r = g.reshape(bwa_r, RS(0, nwaves, 1))
+    bwa_us_i = g.reshape(bwa_i, RS(0, nwaves, 1))
+    fla_us = g.reshape(fla, RS(0, nwaves, 1))
 
-    # amp_waves = ck * T
-    aw_r, aw_i = g.c_mul(ck_re, ck_im, T_r, T_i)             # (nevt, nwaves)
+    bf_r, bf_i = g.c_mul(bwa_us_r, bwa_us_i, fa_r, fa_i)    # (nevt, nwaves, nhel)
+    T_r = g.mul(fla_us, bf_r)                                # (nevt, nwaves, nhel)
+    T_i = g.mul(fla_us, bf_i)
 
-    # Split into 2 CP groups
-    n_per_group = nwaves // 2
-    aw_rsh_r = g.reshape(aw_r, RS(0, 2, n_per_group))
-    aw_rsh_i = g.reshape(aw_i, RS(0, 2, n_per_group))
+    # amp_hel = ck * T_hel
+    ck_us_r = g.reshape(ck_re, [1, nwaves, 1])
+    ck_us_i = g.reshape(ck_im, [1, nwaves, 1])
+    aw_r, aw_i = g.c_mul(ck_us_r, ck_us_i, T_r, T_i)        # (nevt, nwaves, nhel)
 
-    idx0 = g.int_scalar("i0", 0)
-    idx1 = g.int_scalar("i1", 1)
+    # ---- 6) CP groups — split waves, keep helicity --------------------
+    idx0_arr = np.arange(n0, dtype=np.int32)
+    idx1_arr = np.arange(n0, nwaves, dtype=np.int32)
+    g.const("idx_g0", idx0_arr)
+    g.const("idx_g1", idx1_arr)
 
-    g0_r = g.gather(aw_rsh_r, idx0, axis=1)   # (nevt, n_per_group) — scalar index removes dim
-    g0_i = g.gather(aw_rsh_i, idx0, axis=1)
-    g1_r = g.gather(aw_rsh_r, idx1, axis=1)
-    g1_i = g.gather(aw_rsh_i, idx1, axis=1)
+    g0_r = g.gather(aw_r, "idx_g0", axis=1)                  # (nevt, n0, nhel)
+    g0_i = g.gather(aw_i, "idx_g0", axis=1)
+    g1_r = g.gather(aw_r, "idx_g1", axis=1)                  # (nevt, n1, nhel)
+    g1_i = g.gather(aw_i, "idx_g1", axis=1)
 
-    amp0_r = g.reduce_sum(g0_r, [1])   # (nevt,)
-    amp0_i = g.reduce_sum(g0_i, [1])
-    amp1_r = g.reduce_sum(g1_r, [1])
-    amp1_i = g.reduce_sum(g1_i, [1])
+    A0h_r = g.reduce_sum(g0_r, [1])                           # (nevt, nhel)
+    A0h_i = g.reduce_sum(g0_i, [1])
+    A1h_r = g.reduce_sum(g1_r, [1])
+    A1h_i = g.reduce_sum(g1_i, [1])
 
-    # ---- 6) Time-dependent mixing ----------------------------------------
+    # ---- 7) Time-dependent mixing (helicity-aware) --------------------
     gt = g.gather(tp_in, g.int_scalar("ti0", 0), axis=0)
     dg = g.gather(tp_in, g.int_scalar("ti1", 1), axis=0)
     dm = g.gather(tp_in, g.int_scalar("ti2", 2), axis=0)
@@ -507,21 +518,32 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     poq_r = g.mul(poqr, g.cos(poqi))
     poq_i = g.mul(poqr, g.sin(poqi))
 
-    # X = ep*amp0 + poq*em*amp1
-    t1_r, t1_i = g.c_mul(ep_r, ep_i, amp0_r, amp0_i)
-    t2_r, t2_i = g.c_mul(poq_r, poq_i, em_r, em_i)
-    t3_r, t3_i = g.c_mul(t2_r, t2_i, amp1_r, amp1_i)
-    X_r, X_i = g.c_add(t1_r, t1_i, t3_r, t3_i)
+    # Unsqueeze ep/em for helicity broadcasting
+    ep_us_r = g.reshape(ep_r, RS(0, 1))
+    ep_us_i = g.reshape(ep_i, RS(0, 1))
+    em_us_r = g.reshape(em_r, RS(0, 1))
+    em_us_i = g.reshape(em_i, RS(0, 1))
 
-    # Y = em/poq * amp0 + ep * amp1
+    # X_h = ep * A0h + poq * em * A1h
+    t1_r, t1_i = g.c_mul(ep_us_r, ep_us_i, A0h_r, A0h_i)    # (nevt, nhel)
+    p1_r, p1_i = g.c_mul(poq_r, poq_i, em_us_r, em_us_i)     # (nevt, 1)
+    t2_r, t2_i = g.c_mul(p1_r, p1_i, A1h_r, A1h_i)           # (nevt, nhel)
+    X_r, X_i = g.c_add(t1_r, t1_i, t2_r, t2_i)
+
+    # em / poq
     poq_div_r, poq_div_i = g.c_inv(poq_r, poq_i)
     em_poq_r, em_poq_i = g.c_mul(em_r, em_i, poq_div_r, poq_div_i)
-    u1_r, u1_i = g.c_mul(em_poq_r, em_poq_i, amp0_r, amp0_i)
-    u2_r, u2_i = g.c_mul(ep_r, ep_i, amp1_r, amp1_i)
+    em_poq_us_r = g.reshape(em_poq_r, RS(0, 1))
+    em_poq_us_i = g.reshape(em_poq_i, RS(0, 1))
+
+    # Y_h = em/poq * A0h + ep * A1h
+    u1_r, u1_i = g.c_mul(em_poq_us_r, em_poq_us_i, A0h_r, A0h_i)  # (nevt, nhel)
+    u2_r, u2_i = g.c_mul(ep_us_r, ep_us_i, A1h_r, A1h_i)          # (nevt, nhel)
     Y_r, Y_i = g.c_add(u1_r, u1_i, u2_r, u2_i)
 
-    PB = g.c_abs2(X_r, X_i)
-    PBbar = g.c_abs2(Y_r, Y_i)
+    # PB = sum_h |X_h|^2,  PBbar = sum_h |Y_h|^2
+    PB = g.reduce_sum(g.c_abs2(X_r, X_i), [1])
+    PBbar = g.reduce_sum(g.c_abs2(Y_r, Y_i), [1])
 
     one = g.scalar("o", 1.0)
     P = g.add(
@@ -529,7 +551,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
         g.mul(g.mul(frac, g.add(one, ap)), PBbar),
     )
 
-    # ---- 7) Objective ---------------------------------------------------
+    # ---- 8) Objective ---------------------------------------------------
     if with_norm:
         Pnorm = g.add(g.div(P, norm), bkg)
         Q = g.neg(g.reduce_sum(g.mul(weight, g.log(Pnorm)), [0]))
@@ -537,7 +559,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
         Q = g.reduce_sum(g.mul(weight, P), [0])
 
     # ================================================================
-    #  8) Gradients
+    #  9) Gradients
     # ================================================================
 
     # shared constants
@@ -560,60 +582,75 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     else:
         dQ_dP = weight
 
-    # --- Wirtinger adjoints |X|², |Y|² --------------------------------
+    # --- Wirtinger adjoints |X_h|^2, |Y_h|^2 --------------------------
     cX_r, cX_i = g.c_conj(X_r, X_i)
     cY_r, cY_i = g.c_conj(Y_r, Y_i)
 
     def _adj(r, i, coeff):
         return g.mul(coeff, r), g.mul(coeff, i)
 
-    adjX_r, adjX_i = _adj(cX_r, cX_i, g.mul(_1mf, _1ma))
-    adjY_r, adjY_i = _adj(cY_r, cY_i, g.mul(frac, _1pa))
+    # coeff is (nevt,), need unsqueeze for helicity broadcasting
+    coeffX = g.mul(_1mf, _1ma)  # (nevt,)
+    coeffY = g.mul(frac, _1pa)  # (nevt,)
+    coeffX_us = g.reshape(coeffX, RS(0, 1))
+    coeffY_us = g.reshape(coeffY, RS(0, 1))
 
-    dX_r = g.mul(dQ_dP, adjX_r)
-    dX_i = g.mul(dQ_dP, adjX_i)
-    dY_r = g.mul(dQ_dP, adjY_r)
-    dY_i = g.mul(dQ_dP, adjY_i)
+    adjX_r, adjX_i = _adj(cX_r, cX_i, coeffX_us)
+    adjY_r, adjY_i = _adj(cY_r, cY_i, coeffY_us)
 
-    # --- ∂Q/∂amp0, ∂Q/∂amp1 -------------------------------------------
-    t_r, t_i = g.c_mul(dX_r, dX_i, ep_r, ep_i)
-    u_r, u_i = g.c_mul(dY_r, dY_i, em_poq_r, em_poq_i)   # em/poq from forward
-    dA0_r, dA0_i = g.c_add(t_r, t_i, u_r, u_i)
+    dQ_dP_us = g.reshape(dQ_dP, RS(0, 1))
+    dX_r = g.mul(dQ_dP_us, adjX_r)
+    dX_i = g.mul(dQ_dP_us, adjX_i)
+    dY_r = g.mul(dQ_dP_us, adjY_r)
+    dY_i = g.mul(dQ_dP_us, adjY_i)
 
-    p1_r, p1_i = g.c_mul(poq_r, poq_i, em_r, em_i)        # poq * em
+    # --- ∂Q/∂A0h, ∂Q/∂A1h ---------------------------------------------
+    t_r, t_i = g.c_mul(dX_r, dX_i, ep_us_r, ep_us_i)
+    u_r, u_i = g.c_mul(dY_r, dY_i, em_poq_us_r, em_poq_us_i)
+    dA0h_r, dA0h_i = g.c_add(t_r, t_i, u_r, u_i)
+
+    p1_r, p1_i = g.c_mul(poq_r, poq_i, em_us_r, em_us_i)
     t_r, t_i = g.c_mul(dX_r, dX_i, p1_r, p1_i)
-    u_r, u_i = g.c_mul(dY_r, dY_i, ep_r, ep_i)
-    dA1_r, dA1_i = g.c_add(t_r, t_i, u_r, u_i)
+    u_r, u_i = g.c_mul(dY_r, dY_i, ep_us_r, ep_us_i)
+    dA1h_r, dA1h_i = g.c_add(t_r, t_i, u_r, u_i)
 
-    # scatter → (nevt, nwaves) via Tile (avoids 400 individual Reshape)
-    dA0_2d_r = g.reshape(dA0_r, RS(0, 1))                       # (nevt, 1)
-    dA0_2d_i = g.reshape(dA0_i, RS(0, 1))
-    dA1_2d_r = g.reshape(dA1_r, RS(0, 1))
-    dA1_2d_i = g.reshape(dA1_i, RS(0, 1))
-    reps = g.const(g._uid("dawr"), np.array([1, n_per_group], dtype=np.int64))
-    daw0_r = g.node("Tile", [dA0_2d_r, reps], [g._uid("tle")])
-    daw0_i = g.node("Tile", [dA0_2d_i, reps], [g._uid("tle")])
-    daw1_r = g.node("Tile", [dA1_2d_r, reps], [g._uid("tle")])
-    daw1_i = g.node("Tile", [dA1_2d_i, reps], [g._uid("tle")])
-    dAw_r = g.concat([daw0_r, daw1_r], axis=1)                  # (nevt, nwaves)
+    # scatter → (nevt, nwaves, nhel) via Tile
+    dA0_3d_r = g.reshape(dA0h_r, RS(0, 1, nhel))
+    dA0_3d_i = g.reshape(dA0h_i, RS(0, 1, nhel))
+    reps0 = g.const(g._uid("daw0"), np.array([1, n0, 1], dtype=np.int64))
+    daw0_r = g.node("Tile", [dA0_3d_r, reps0], [g._uid("tle")])
+    daw0_i = g.node("Tile", [dA0_3d_i, reps0], [g._uid("tle")])
+
+    dA1_3d_r = g.reshape(dA1h_r, RS(0, 1, nhel))
+    dA1_3d_i = g.reshape(dA1h_i, RS(0, 1, nhel))
+    reps1 = g.const(g._uid("daw1"), np.array([1, n1, 1], dtype=np.int64))
+    daw1_r = g.node("Tile", [dA1_3d_r, reps1], [g._uid("tle")])
+    daw1_i = g.node("Tile", [dA1_3d_i, reps1], [g._uid("tle")])
+
+    dAw_r = g.concat([daw0_r, daw1_r], axis=1)               # (nevt, nwaves, nhel)
     dAw_i = g.concat([daw0_i, daw1_i], axis=1)
 
     # --- grad ck -------------------------------------------------------
-    td_r, td_i = g.c_mul(dAw_r, dAw_i, T_r, T_i)
-    dck_w_r = g.reduce_sum(td_r, [0])
+    # dck_wirt = sum_{e,h} dAw * T_hel
+    td_r, td_i = g.c_mul(dAw_r, dAw_i, T_r, T_i)             # (nevt, nwaves, nhel)
+    td_r = g.reduce_sum(td_r, [2])                             # (nevt, nwaves)
+    td_i = g.reduce_sum(td_i, [2])
+    dck_w_r = g.reduce_sum(td_r, [0])                          # (nwaves,)
     dck_w_i = g.reduce_sum(td_i, [0])
     dck_cr, dck_ci = g.c_conj(dck_w_r, dck_w_i)
     grad_ck_re = g.mul(_t, dck_cr)
     grad_ck_im = g.mul(_t, dck_ci)
 
     # --- grad m0 -------------------------------------------------------
-    # Backprop: amp_waves → T → bwa → bw → m0a → m0
-    # ∂Q/∂T = dAw * ck   (Wirtinger)
-    dT_r, dT_i = g.c_mul(dAw_r, dAw_i, ck_re, ck_im)
+    # Backprop: amp_hel → T_hel → bwa → bw → m0a → m0
+    # ∂Q/∂T_hel = dAw * ck   (Wirtinger)
+    dT_r, dT_i = g.c_mul(dAw_r, dAw_i, ck_us_r, ck_us_i)     # (nevt, nwaves, nhel)
 
-    # ∂Q/∂bwa = ∂Q/∂T * fla * fa   (Wirtinger, T holomorphic in bwa)
-    bf_r, bf_i = g.c_mul(dT_r, dT_i, fa_r, fa_i)
-    dbwa_r, dbwa_i = g.c_rmul(fla, bf_r, bf_i)
+    # ∂Q/∂bwa = sum_h ∂Q/∂T_hel * fla * fa   (helicity sum)
+    bf_r, bf_i = g.c_mul(dT_r, dT_i, fa_r, fa_i)              # (nevt, nwaves, nhel)
+    bf_r = g.reduce_sum(bf_r, [2])                              # (nevt, nwaves)
+    bf_i = g.reduce_sum(bf_i, [2])
+    dbwa_r, dbwa_i = g.c_rmul(fla, bf_r, bf_i)                  # (nevt, nwaves)
 
     # d(bwa[e,w]) / d(bw[e,w,r]) = bwa[e,w] / bw_reshaped[e,w,r]
     # ∂Q/∂bw_reshaped = ∂Q/∂bwa * bwa / bw_reshaped
@@ -767,17 +804,25 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     dY_dgamma_r, dY_dgamma_i = g.c_rmul(g.neg(g.div(time, _t)), Y_r, Y_i)
 
     def _dXdY(dep_r, dep_i, dem_r, dem_i):
-        t1_r, t1_i = g.c_mul(dep_r, dep_i, amp0_r, amp0_i)
-        p1_r, p1_i = g.c_mul(poq_r, poq_i, dem_r, dem_i)
-        t2_r, t2_i = g.c_mul(p1_r, p1_i, amp1_r, amp1_i)
-        u1_r, u1_i = g.c_mul(dem_r, dem_i, poq_div_r, poq_div_i)
-        u2_r, u2_i = g.c_mul(dep_r, dep_i, amp1_r, amp1_i)
+        # dep/dem are (nevt,), unsqueeze for helicity broadcasting
+        dep_us_r = g.reshape(dep_r, RS(0, 1))
+        dep_us_i = g.reshape(dep_i, RS(0, 1))
+        dem_us_r = g.reshape(dem_r, RS(0, 1))
+        dem_us_i = g.reshape(dem_i, RS(0, 1))
+
+        t1_r, t1_i = g.c_mul(dep_us_r, dep_us_i, A0h_r, A0h_i)
+        p1_r, p1_i = g.c_mul(poq_r, poq_i, dem_us_r, dem_us_i)
+        t2_r, t2_i = g.c_mul(p1_r, p1_i, A1h_r, A1h_i)
+        u1_r, u1_i = g.c_mul(dem_us_r, dem_us_i, poq_div_r, poq_div_i)
+        u2_r, u2_i = g.c_mul(dep_us_r, dep_us_i, A1h_r, A1h_i)
         return (g.c_add(t1_r, t1_i, t2_r, t2_i),
                 g.c_add(u1_r, u1_i, u2_r, u2_i))
 
     def _grad_tp(dx_r, dx_i, dy_r, dy_i):
+        # dX_r/dY_r are (nevt, nhel), so are dx/dy
         p_r = g.add(g.sub(g.mul(dX_r, dx_r), g.mul(dX_i, dx_i)),
-                    g.sub(g.mul(dY_r, dy_r), g.mul(dY_i, dy_i)))
+                    g.sub(g.mul(dY_r, dy_r), g.mul(dY_i, dy_i)))  # (nevt, nhel)
+        p_r = g.reduce_sum(p_r, [1])                               # (nevt,)
         return g.mul(_t, g.reduce_sum(p_r, [0]))
 
     dg_f = g.neg(g.div(time, _f))                   # -t/4
@@ -796,68 +841,31 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     dpoq_dpoqi_r = g.neg(g.mul(poqr, g.sin(poqi)))
     dpoq_dpoqi_i = g.mul(poqr, g.cos(poqi))
 
-    def _dXdY_poq(dpoq_r, dpoq_i):
-        dX_r = g.mul(g.sub(g.mul(dpoq_r, em_r), g.mul(dpoq_i, em_i)), amp1_r)
-        dX_i = g.mul(g.add(g.mul(dpoq_r, em_i), g.mul(dpoq_i, em_r)), amp1_r)
-        # Wait, dX/dpoq * dpoq/dp where dX/dpoq = em * amp1
-        # dX = d(poq)*em*amp1, so dX/dpoq = em*amp1 (this is a complex derivative)
-        # ∂X/∂poq_r = em * amp1  (Wirtinger)
-        # ∂X/∂poq_i = i * em * amp1
-        # But dpoq/dp is a real derivative, so full chain:
-        # dX/dp = dX/dpoq * dpoq/dp (complex * complex for poq)
-        # Actually dX = d(poq*em*amp1) = dpoq * em * amp1
-        # dpoq = dpoq_dp * dp where dpoq_dp = (dpoq_r/dp + i*dpoq_i/dp)
-        # So dX/dp = (dpoq_r/dp + i*dpoq_i/dp) * em * amp1
-        return g.c_mul(dpoq_r, dpoq_i, g.c_mul(em_r, em_i, amp1_r, amp1_i))
+    # --- poqr / poqi gradients ---
+    # dX/d(poq) = em * A1h  (shared between poqr and poqi derivatives)
+    em_amp1_r, em_amp1_i = g.c_mul(em_us_r, em_us_i, A1h_r, A1h_i)
+    # dY/d(poq) = -em/poq * 1/poq * A0h  (shared factor)
+    neg_em_poq_us_r, neg_em_poq_us_i = g.c_rmul(_no, em_poq_us_r, em_poq_us_i)
 
-    # Hmm this is getting really tangled. Let me simplify.
-
-    # For X = ep*amp0 + poq*em*amp1:
-    # dX/dpoqr = d(poq)/dpoqr * em * amp1 = (cos(poqi) + i*sin(poqi)) * em * amp1
-    # dX/dpoqi = d(poq)/dpoqi * em * amp1 = (-poqr*sin(poqi) + i*poqr*cos(poqi)) * em * amp1
-
-    # For Y = em/poq * amp0 + ep * amp1:
-    # dY/dpoqr = em * d(1/poq)/dpoqr * amp0
-    # d(1/poq)/dpoqr = -1/poq² * dpoq/dpoqr
-    # dY/dpoqi = em * d(1/poq)/dpoqi * amp0
-    # d(1/poq)/dpoqi = -1/poq² * dpoq/dpoqi
-
-    # This is a lot. Let me use a simpler approach for poq-related derivatives.
-
-    # For the time params not involving poq, use _dXdY.
-    # For poqr, poqi, use separate formulas.
-
-    g_gt = _grad_tp(dX_dgamma_r, dX_dgamma_i, dY_dgamma_r, dY_dgamma_i)
-    g_dg = _grad_tp(dx_ddg_r, dx_ddg_i, dy_ddg_r, dy_ddg_i)
-    g_dm = _grad_tp(dx_ddm_r, dx_ddm_i, dy_ddm_r, dy_ddm_i)
-
-    # grad_poqr: dX = dpoq * em * amp1, dY = -em/poq² * dpoq * amp0
-    em_amp1_r, em_amp1_i = g.c_mul(em_r, em_i, amp1_r, amp1_i)
+    # poqr
     dX_poqr_r, dX_poqr_i = g.c_mul(dpoq_dpoqr_r, dpoq_dpoqr_i,
                                     em_amp1_r, em_amp1_i)
-    # For Y: dY = -em/poq² * dpoq * amp0 = -(em/poq) * dpoq/poq * amp0
-    # em/poq we already have as em_poq_r, em_poq_i
-    # dpoq/poq = dpoq * 1/poq = dpoq * poq_div
     dpoq_dpoqr_poq_r, dpoq_dpoqr_poq_i = g.c_mul(
         dpoq_dpoqr_r, dpoq_dpoqr_i, poq_div_r, poq_div_i)
-    # -em/poq * dpoq/poq * amp0
-    t_r, t_i = g.c_mul(em_poq_r, em_poq_i, dpoq_dpoqr_poq_r, dpoq_dpoqr_poq_i)
-    dY_poqr_r = g.neg(g.mul(t_r, amp0_r))  # Wait, this is wrong. t_r * amp0_r doesn't respect complex mult.
-    # Actually: (-em/poq * dpoq/poq) * amp0
-    # Let me do: c_mul(c_mul(-one, c_mul(em_poq, dpoq_poq)), amp0)
-    neg_em_poq_r, neg_em_poq_i = g.c_rmul(_no, em_poq_r, em_poq_i)
-    t_r, t_i = g.c_mul(neg_em_poq_r, neg_em_poq_i, dpoq_dpoqr_poq_r, dpoq_dpoqr_poq_i)
-    dY_poqr_r, dY_poqr_i = g.c_mul(t_r, t_i, amp0_r, amp0_i)
-
+    t_r, t_i = g.c_mul(neg_em_poq_us_r, neg_em_poq_us_i,
+                       dpoq_dpoqr_poq_r, dpoq_dpoqr_poq_i)
+    dY_poqr_r, dY_poqr_i = g.c_mul(t_r, t_i, A0h_r, A0h_i)
     g_poqr = _grad_tp(dX_poqr_r, dX_poqr_i, dY_poqr_r, dY_poqr_i)
 
-    # grad_poqi — same structure with dpoq_dpoqi
+    # poqi
     dX_poqi_r, dX_poqi_i = g.c_mul(dpoq_dpoqi_r, dpoq_dpoqi_i,
                                     em_amp1_r, em_amp1_i)
-    dpoq_poqi_poq_r, dpoq_poqi_poq_i = g.c_mul(
+    dpoq_dpoqi_poq_r, dpoq_dpoqi_poq_i = g.c_mul(
         dpoq_dpoqi_r, dpoq_dpoqi_i, poq_div_r, poq_div_i)
-    t_r, t_i = g.c_mul(neg_em_poq_r, neg_em_poq_i, dpoq_poqi_poq_r, dpoq_poqi_poq_i)
-    dY_poqi_r, dY_poqi_i = g.c_mul(t_r, t_i, amp0_r, amp0_i)
+    t_r, t_i = g.c_mul(neg_em_poq_us_r, neg_em_poq_us_i,
+                       dpoq_dpoqi_poq_r, dpoq_dpoqi_poq_i)
+    dY_poqi_r, dY_poqi_i = g.c_mul(t_r, t_i, A0h_r, A0h_i)
+
     g_poqi = _grad_tp(dX_poqi_r, dX_poqi_i, dY_poqi_r, dY_poqi_i)
 
     # grad_ap: P = (1-frac)*(1-ap)*PB + frac*(1+ap)*PBbar
@@ -865,6 +873,10 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     dP_ap = g.add(g.neg(g.mul(g.sub(one, frac), PB)),
                   g.mul(frac, PBbar))
     g_ap = g.reduce_sum(g.mul(dQ_dP, dP_ap), [0])
+
+    g_gt = _grad_tp(dX_dgamma_r, dX_dgamma_i, dY_dgamma_r, dY_dgamma_i)
+    g_dg = _grad_tp(dx_ddg_r, dx_ddg_i, dy_ddg_r, dy_ddg_i)
+    g_dm = _grad_tp(dx_ddm_r, dx_ddm_i, dy_ddm_r, dy_ddm_i)
 
     # ================================================================
     #  Outputs
