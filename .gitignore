@@ -7,3 +7,5 @@ build/
 *.onnx
 *.swp
 *.kate-swp
+pwa-web-tools-main.zip
+pwa-web-tools-source/
