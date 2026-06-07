@@ -541,7 +541,6 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # ================================================================
 
     # shared constants
-    _h = g.scalar("_h", 0.5)
     _t = g.scalar("_t", 2.0)
     _f = g.scalar("_f", 4.0)
     _o = one
@@ -760,58 +759,36 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     grad_g0 = g.squeeze(grad_g0_r2, [0])                          # (n_g0,)
 
     # --- grad time_params ---------------------------------------------
-    # Derivatives of eL, eH
-    deL_dgt = g.c_rmul(g.neg(g.div(time, _t)), eL_r, eL_i)
-    deH_dgt = g.c_rmul(g.neg(g.div(time, _t)), eH_r, eH_i)
-    deL_ddg = g.c_rmul(g.neg(g.div(time, _f)), eL_r, eL_i)
-    deH_ddg = g.c_rmul(g.div(time, _f), eH_r, eH_i)
-    deL_ddm = g.c_rmul(g.neg(g.mul(time, _h)), eL_r, eL_i)
-    deH_ddm = g.c_rmul(g.mul(time, _h), eH_r, eH_i)
+    # Analytical derivatives using the identities:
+    #   dep/dγ = (-t/2)·ep,  dem/dγ = (-t/2)·em    (→ dX/dγ = (-t/2)·X)
+    #   dep/dΔγ = (-t/4)·em,  dem/dΔγ = (-t/4)·ep
+    #   dep/dΔm = (-i·t/2)·em,  dem/dΔm = (-i·t/2)·ep
+    dX_dgamma_r, dX_dgamma_i = g.c_rmul(g.neg(g.div(time, _t)), X_r, X_i)
+    dY_dgamma_r, dY_dgamma_i = g.c_rmul(g.neg(g.div(time, _t)), Y_r, Y_i)
 
-    def _c_avg(a_r, a_i, b_r, b_i):
-        return g.c_rmul(_h, *g.c_add(a_r, a_i, b_r, b_i))
-
-    def _c_diff(a_r, a_i, b_r, b_i):
-        return g.c_rmul(_h, *g.c_sub(a_r, a_i, b_r, b_i))
-
-    dep_dgt_r, dep_dgt_i = _c_avg(*deL_dgt, *deH_dgt)
-    dem_dgt_r, dem_dgt_i = _c_diff(*deL_dgt, *deH_dgt)
-    dep_ddg_r, dep_ddg_i = _c_avg(*deL_ddg, *deH_ddg)
-    dem_ddg_r, dem_ddg_i = _c_diff(*deL_ddg, *deH_ddg)
-    dep_ddm_r, dep_ddm_i = _c_avg(*deL_ddm, *deH_ddm)
-    dem_ddm_r, dem_ddm_i = _c_diff(*deL_ddm, *deH_ddm)
-
-    # dX/dp = dep/dp * amp0 + poq * dem/dp * amp1
-    # dY/dp = dem/dp / poq * amp0 + dep/dp * amp1
     def _dXdY(dep_r, dep_i, dem_r, dem_i):
         t1_r, t1_i = g.c_mul(dep_r, dep_i, amp0_r, amp0_i)
         p1_r, p1_i = g.c_mul(poq_r, poq_i, dem_r, dem_i)
         t2_r, t2_i = g.c_mul(p1_r, p1_i, amp1_r, amp1_i)
-        dx_r, dx_i = g.c_add(t1_r, t1_i, t2_r, t2_i)
-
-        # em/poq already computed as em_poq_r, em_poq_i
-        u1_r, u1_i = g.c_mul(dem_r, dem_i, poq_div_r, poq_div_i)
-        # Actually Y = em/poq * amp0 + ep * amp1
-        # dY/dp = d(em/poq)/dp * amp0 + dep/dp * amp1
-        # where d(em/poq)/dp = (dem/dp * poq - em * dpoq/dp) / poq²
-        # For time params (not poq/poqi): dpoq/dp = 0, so d(em/poq)/dp = dem/dp / poq
         u1_r, u1_i = g.c_mul(dem_r, dem_i, poq_div_r, poq_div_i)
         u2_r, u2_i = g.c_mul(dep_r, dep_i, amp1_r, amp1_i)
-        dy_r, dy_i = g.c_add(u1_r, u1_i, u2_r, u2_i)
-        return dx_r, dx_i, dy_r, dy_i
+        return (g.c_add(t1_r, t1_i, t2_r, t2_i),
+                g.c_add(u1_r, u1_i, u2_r, u2_i))
 
     def _grad_tp(dx_r, dx_i, dy_r, dy_i):
-        """2 * Re(Σ dQ_dX*dx + dQ_dY*dy)"""
         p_r = g.add(g.sub(g.mul(dX_r, dx_r), g.mul(dX_i, dx_i)),
                     g.sub(g.mul(dY_r, dy_r), g.mul(dY_i, dy_i)))
         return g.mul(_t, g.reduce_sum(p_r, [0]))
 
-    dx_dgt_r, dx_dgt_i, dy_dgt_r, dy_dgt_i = _dXdY(
-        dep_dgt_r, dep_dgt_i, dem_dgt_r, dem_dgt_i)
-    dx_ddg_r, dx_ddg_i, dy_ddg_r, dy_ddg_i = _dXdY(
-        dep_ddg_r, dep_ddg_i, dem_ddg_r, dem_ddg_i)
-    dx_ddm_r, dx_ddm_i, dy_ddm_r, dy_ddm_i = _dXdY(
-        dep_ddm_r, dep_ddm_i, dem_ddm_r, dem_ddm_i)
+    dg_f = g.neg(g.div(time, _f))                   # -t/4
+    (dx_ddg_r, dx_ddg_i), (dy_ddg_r, dy_ddg_i) = _dXdY(  # Δγ
+        *g.c_rmul(dg_f, em_r, em_i), *g.c_rmul(dg_f, ep_r, ep_i))
+
+    dm_f_r = g.scalar("_z", 0.0)
+    dm_f_i = g.neg(g.div(time, _t))                  # -t/2
+    (dx_ddm_r, dx_ddm_i), (dy_ddm_r, dy_ddm_i) = _dXdY(  # Δm
+        *g.c_mul(dm_f_r, dm_f_i, em_r, em_i),
+        *g.c_mul(dm_f_r, dm_f_i, ep_r, ep_i))
 
     # poq = poqr * exp(i*poqi)
     dpoq_dpoqr_r = g.cos(poqi)
@@ -850,8 +827,7 @@ def build_onnx_model(config: dict, with_norm: bool = True,
     # For the time params not involving poq, use _dXdY.
     # For poqr, poqi, use separate formulas.
 
-    # grad_gt
-    g_gt = _grad_tp(dx_dgt_r, dx_dgt_i, dy_dgt_r, dy_dgt_i)
+    g_gt = _grad_tp(dX_dgamma_r, dX_dgamma_i, dY_dgamma_r, dY_dgamma_i)
     g_dg = _grad_tp(dx_ddg_r, dx_ddg_i, dy_ddg_r, dy_ddg_i)
     g_dm = _grad_tp(dx_ddm_r, dx_ddm_i, dy_ddm_r, dy_ddm_i)
 
