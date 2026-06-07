@@ -29,32 +29,18 @@ class Decay:
     child_particles: list[Particle] | None = None
 
     def get_ls_list(self) -> list[tuple[int, float]]:
-        """Return valid (L, S) pairs for this two-body decay.
-
-        If parity conservation yields no valid pair, the constraint is
-        relaxed (``p_break=True`` fallback) so that every two-body decay
-        always produces at least one (L, S) combination.
-        """
+        """Return valid (L, S) pairs for this two-body decay."""
         if len(self.children) != 2 or self.parent_particle is None:
             return []
         pp = self.parent_particle.props
         c1p = self.child_particles[0].props if self.child_particles else {}
         c2p = self.child_particles[1].props if self.child_particles else {}
-        result = get_ls_list(
+        return get_ls_list(
             parent_J=pp.get("J", 0), parent_P=pp.get("P", 1),
             child1_J=c1p.get("J", 0), child1_P=c1p.get("P", 1),
             child2_J=c2p.get("J", 0), child2_P=c2p.get("P", 1),
             p_break=self.p_break,
         )
-        if not result and not self.p_break:
-            # fallback — relax parity so the decay is not left empty
-            result = get_ls_list(
-                parent_J=pp.get("J", 0), parent_P=pp.get("P", 1),
-                child1_J=c1p.get("J", 0), child1_P=c1p.get("P", 1),
-                child2_J=c2p.get("J", 0), child2_P=c2p.get("P", 1),
-                p_break=True,
-            )
-        return result
 
     def get_g_ls(self) -> list[str]:
         """Coupling parameter names for each (L, S) pair.
@@ -384,6 +370,11 @@ def parse_physics(physics: dict) -> PhysicsModel:
                     parent_particle=particles.get(parent_name),
                     child_particles=[particles.get(c) for c in child_names],
                 ))
+
+            # Skip chains where any two-body decay has no valid (L,S)
+            if any(len(d.get_ls_list()) == 0 for d in resolved_decays
+                   if len(d.children) == 2):
+                continue
 
             decay_chains.append(DecayChain(
                 decays=resolved_decays, resonances=actual,
