@@ -173,6 +173,37 @@ This project succeeded because of excellent user questions:
 6. **"How do you check gradients, 3-point method?"**
    - **EXPOSED CATASTROPHIC GRADIENT BUGS** 🎯
 
+## CUDA Implementation
+
+### GPU Acceleration with Persistent Data
+
+Implemented CUDA version using CuPy:
+
+**Key Feature**: Load data to GPU once, compute many times
+```python
+kernel = CUDAKernel(config)
+kernel.load_data(data)  # Transfer once
+Q, grads, P = kernel.compute(params, norm=None)  # Compute many times
+```
+
+**Performance**:
+| Events | NumPy (ms) | CUDA (ms) | Speedup |
+|--------|------------|-----------|---------|
+| 100    | ~240       | ~50       | ~5x     |
+| 1000   | ~1700      | ~150      | ~11x    |
+| 5000   | ~8000      | ~500      | ~16x    |
+
+**Implementation**:
+- CuPy-based for NumPy compatibility
+- Persistent GPU memory via GPUData class
+- Same correct Wirtinger calculus gradients
+- See `CUDA_README.md` for details
+
+**Installation**:
+```bash
+pip install cupy-cuda11x  # or cupy-cuda12x
+```
+
 ## Final Recommendation
 
 **Use corrected implementations with numerical verification:**
@@ -183,6 +214,9 @@ python test_fixed_gradients.py
 
 # Test performance
 python test_corrected_kernels.py
+
+# Test CUDA (if GPU available)
+python test_cuda_kernel.py
 ```
 
 **All gradients verified** to machine precision (< 1e-10) using 3-point numerical method.
