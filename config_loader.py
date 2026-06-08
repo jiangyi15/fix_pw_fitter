@@ -314,7 +314,8 @@ class Config:
                     m_name = decay.core.name +"_mass"
                     if m_name not in self.m0_phys_name:
                         self.m0_phys_name.append(m_name)
-                    m_idx = self.n_topo*self.n_res*topo+idx-1
+                    m_idx = self.n_res*topo+idx-1
+                    # print(decaychain, topo, idx,m_idx)
                     bw_id = (m_name, m_idx)
                     if bw_id not in self.unique_bw:
                         self.unique_bw.append(bw_id)
@@ -327,7 +328,7 @@ class Config:
                             self.unique_gamma.append(g_id)
                         tmp.append(g_id)
                     bw_gamma[bw_id] = tmp
-                fl_id = (ls[idx][0], self.n_topo*self.n_decay*topo+idx)
+                fl_id = (ls[idx][0], self.n_decay*topo+idx)
                 if fl_id not in self.unique_fl:
                     self.unique_fl.append(fl_id)
             ang_formula = get_angle_formula(decaychain, ls)
@@ -350,9 +351,10 @@ class Config:
             for idx, decay in enumerate(decaychain.decays):
                 if idx != 0: # not top decay
                     m_name = decay.core.name +"_mass"
-                    m_idx = self.n_topo*self.n_res*topo+idx-1
+                    m_idx = self.n_res*topo+idx-1
+                    bw_id = (m_name, m_idx)
                     bw_order.append(self.unique_bw.index(bw_id))
-                fl_id = (ls[idx][0], self.n_topo*self.n_decay*topo+idx)
+                fl_id = (ls[idx][0], self.n_decay*topo+idx)
                 fl_order.append(self.unique_fl.index(fl_id))
             ang_formula = get_angle_formula(decaychain, ls)
             matrix_angle_tmp = np.zeros(len(self.unique_angle_basis))+0j
@@ -483,36 +485,40 @@ if __name__=="__main__":
     from numpy_kernel import NumpyKernel
     kernel  = NumpyKernel(c)
     ck = a.get_ck_map()
-    kernel._compute(
+    # print(c)
+    n_events = 7
+    n = kernel._compute(
     {"ck": np.random.random(len(ck)) + 1j*np.random.random(len(ck)),
      "m0": np.random.random(len(a.m0_phys_name)) + 2,
      "g0": np.random.random(len(a.g0_phys_name)) + 0.01,
      "scalar": [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
     },
     {
-     "mass": np.random.random((100, 2*3*8)),
-     "q": np.random.random((100, 3*3*8)),
-     "angle": np.random.random((100, 3*8, 3)),
-     "frac": np.random.random((100, )),
-     "time": np.random.random((100, )),
-     "bkg": np.random.random((100, )),
-     "weight": np.ones_like(np.random.random((100, ))),
+     "mass": np.random.random((n_events, 2*3*8)),
+     "q": np.random.random((n_events, 3*3*8)),
+     "angle": np.random.random((n_events, 3*8, 3)),
+     "frac": np.random.random((n_events, )),
+     "time": np.random.random((n_events, )),
+     "bkg": np.random.random((n_events, )),
+     "weight": np.ones_like(np.random.random((n_events, ))),
     }
     )
-    kernel._compute(
+    l = kernel._compute(
     {"ck": np.random.random(len(ck)) + 1j*np.random.random(len(ck)),
      "m0": np.random.random(len(a.m0_phys_name)) + 2,
      "g0": np.random.random(len(a.g0_phys_name)) + 0.01,
      "scalar": [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
     },
     {
-     "mass": np.random.random((100, 2*3*8)),
-     "q": np.random.random((100, 3*3*8)),
-     "angle": np.random.random((100, 3*8, 3)),
-     "frac": np.random.random((100, )),
-     "time": np.random.random((100, )),
-     "bkg": np.random.random((100, )),
-     "weight": np.ones_like(np.random.random((100, ))),
+     "mass": np.random.random((n_events, 2*3*8)),
+     "q": np.random.random((n_events, 3*3*8)),
+     "angle": np.random.random((n_events, 3*8, 3)),
+     "frac": np.random.random((n_events, )),
+     "time": np.random.random((n_events, )),
+     "bkg": np.random.random((n_events, )),
+     "weight": np.ones_like(np.random.random((n_events, ))),
     },
     norm=1.0
     )
+
+    print(n, l)

@@ -48,24 +48,24 @@ class NumpyKernel:
 
         # bw
         g0_all = np.take(g0, self.g0_index)
-        g0_m = np.take(mass, self.g0_mass_index)
+        g0_m = np.take(mass, self.g0_mass_index, axis=-1)
+
         g = g0_all * self.interp(self.gamma_table, self.g0_index, g0_m, self.gamma_min, self.gamma_delta)
         g_bw = np.dot(g, self.matrix_gamma)
         m0_all = np.take(m0, self.m0_index)
-        m0_m = np.take(mass, self.mass_index)
+        m0_m = np.take(mass, self.mass_index, axis=-1)
         bw_dom = m0_all**2 - m0_m**2 - 1j * m0_all * g_bw
-        bw_dom_all = np.take(bw_dom, self.bw_order)
+        bw_dom_all = np.take(bw_dom, self.bw_order, axis=-1)
         bw_p = np.prod(np.reshape(bw_dom_all, (-1, self.n_wave, self.n_res)), axis=-1)
 
         # fl
-        fl_q = np.take(momentum, self.fl_q_index)
+        fl_q = np.take(momentum, self.fl_q_index, axis=-1)
         fl = self.interp(self.fl_table, self.fl_type, fl_q, self.fl_min, self.fl_delta)
         fl_all = np.take(fl, self.fl_order)
         fl_p = np.prod(np.reshape(fl_all, (-1, self.n_wave, self.n_decay)), axis=-1)
 
         # angle
         ang = np.take(angle, self.angle_index, axis=-2)
-        print(ang.shape, self.angle_index.shape, angle)
         ka = np.prod(np.cos(ang * self.angle_k + self.angle_b), axis=-1)
         fa = np.dot(ka, self.matrix_angle)
         a = ck * 1/bw_p * fa * fl_p
@@ -93,7 +93,7 @@ class NumpyKernel:
             "m0": ...,
             "g0": ...,
             "scalar": ...,
-            "norm": ...
+            "norm": ...,
         }
         return Q, grads, P
 
