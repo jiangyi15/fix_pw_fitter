@@ -50,6 +50,7 @@ class NumpyKernel:
         g0_all = np.take(g0, self.g0_index)
         g0_m = np.take(mass, self.g0_mass_index, axis=-1)
 
+
         g = g0_all * self.interp(self.gamma_table, self.g0_index, g0_m, self.gamma_min, self.gamma_delta)
         g_bw = np.dot(g, self.matrix_gamma)
         m0_all = np.take(m0, self.m0_index)
@@ -61,7 +62,7 @@ class NumpyKernel:
         # fl
         fl_q = np.take(momentum, self.fl_q_index, axis=-1)
         fl = self.interp(self.fl_table, self.fl_type, fl_q, self.fl_min, self.fl_delta)
-        fl_all = np.take(fl, self.fl_order)
+        fl_all = np.take(fl, self.fl_order, axis=-1)
         fl_p = np.prod(np.reshape(fl_all, (-1, self.n_wave, self.n_decay)), axis=-1)
 
         # angle

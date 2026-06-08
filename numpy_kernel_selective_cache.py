@@ -104,7 +104,7 @@ class NumpyKernelSelectiveCache:
         fl_q = np.take(momentum, self.fl_q_index, axis=-1)
         fl = self.interp(self.fl_table, self.fl_type, fl_q, 
                         self.fl_min, self.fl_delta)
-        fl_all = np.take(fl, self.fl_order)
+        fl_all = np.take(fl, self.fl_order, axis=-1)  # FIXED: Added axis=-1
         fl_p = np.prod(fl_all.reshape(-1, self.n_wave, self.n_decay), axis=-1)
         
         # Angular factors
