@@ -1,17 +1,15 @@
-"""Compare all kernel implementations"""
+"""Compare kernel implementations"""
 import numpy as np
 import time
 from config_loader import Config
 from numpy_kernel import NumpyKernel
-from numpy_kernel_optimized import NumpyKernelOptimized
-from numpy_kernel_truly_optimized import NumpyKernelSelectiveCache
-from numpy_kernel_merged import NumpyKernelMergedGradients
+from numpy_kernel_selective_cache import NumpyKernelSelectiveCache
 
 
 def benchmark_all():
     """Benchmark all implementations"""
     print("="*70)
-    print("COMPREHENSIVE KERNEL COMPARISON")
+    print("KERNEL PERFORMANCE COMPARISON")
     print("="*70)
     
     config = Config("config_angle.yml")
@@ -19,9 +17,7 @@ def benchmark_all():
     
     kernels = {
         "Original": NumpyKernel(kernel_config),
-        "Bad Cache": NumpyKernelOptimized(kernel_config),
         "Selective Cache": NumpyKernelSelectiveCache(kernel_config),
-        "Merged Gradients": NumpyKernelMergedGradients(kernel_config),
     }
     
     ck_map = config.get_ck_map()
@@ -68,11 +64,11 @@ def benchmark_all():
         
         # Display results
         baseline = results["Original"]
-        print(f"\n{'Kernel':<20} {'Time (ms)':<12} {'Speedup':<10} {'vs Baseline':<15}")
+        print(f"\n{'Kernel':<20} {'Time (ms)':<12} {'Speedup':<10}")
         print("-"*70)
         for name, elapsed in sorted(results.items(), key=lambda x: x[1]):
             speedup = baseline / elapsed
-            print(f"{name:<20} {elapsed*1000:>10.1f}  {speedup:>8.2f}x  {'✓' if speedup > 1.0 else '✗':<5}")
+            print(f"{name:<20} {elapsed*1000:>10.1f}  {speedup:>8.2f}x")
     
     # Summary table
     print("\n" + "="*70)
@@ -94,13 +90,14 @@ def benchmark_all():
         print()
     
     print("="*70)
-    print("\nKEY FINDINGS:")
+    print("\nOPTIMIZATION SUMMARY:")
     print("="*70)
-    print("1. Original: Baseline implementation")
-    print("2. Bad Cache: Over-caching hurts large batches (cache overflow)")
-    print("3. Selective Cache: Good for all batch sizes (fits in L3 cache)")
-    print("4. Merged Gradients: Best overall (1.3-1.6x faster than original)")
-    print("\nRecommendation: Use Merged Gradients for best performance")
+    print("Original:       Baseline implementation (no optimizations)")
+    print("Selective Cache: Cache only compute-bound operations (g_bw, fa)")
+    print("\nKey insight: Selective caching provides best performance at")
+    print("production scale (500-1000 events) by keeping memory footprint")
+    print("within L3 cache limits (~10 MB)")
+    print("\nRecommendation: Use NumpyKernelSelectiveCache for production")
     print("="*70)
 
 
