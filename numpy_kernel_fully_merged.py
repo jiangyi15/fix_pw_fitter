@@ -1,11 +1,11 @@
 """
-Truly optimized NumPy kernel with selective caching.
-Only cache compute-bound operations, not memory-bound ones.
+Optimized kernel with merged amplitude calculations.
+Merges repeated 1/bw * fl * fa computations between forward and backward passes.
 """
 import numpy as np
 
 
-class NumpyKernelSelectiveCache:
+class NumpyKernelFullyMerged:
     def __init__(self, config):
         # Store config arrays
         self.m0_index = config["m0_index"]
@@ -26,7 +26,7 @@ class NumpyKernelSelectiveCache:
         self.gamma_min = config["gamma_min"]
         self.fl_min = config["fl_min"]
         self.gamma_delta = config["gamma_delta"]
-        self.fl_delta = config["fl_delta"]  # Fixed bug: was "fl_time"
+        self.fl_delta = config["fl_delta"]
 
         # Compute dimensions
         self.n_basis = self.angle_k.shape[0]
@@ -34,14 +34,6 @@ class NumpyKernelSelectiveCache:
         self.n_wave = self.matrix_angle.shape[1]
         self.n_res = self.bw_order.size // self.n_wave
         self.n_decay = self.fl_order.size // self.n_wave
-        
-        # Precompute index mappings
-        self._precompute_mappings()
-        
-    def _precompute_mappings(self):
-        """Precompute index arrays for efficient gradient scatter"""
-        # bw_order mapping for scatter-add in gradients
-        self.bw_order_indices = self.bw_order.copy()
         
     def interp(self, table, types, x, xmin, xdelta):
         """Vectorized linear interpolation"""
@@ -57,11 +49,9 @@ class NumpyKernelSelectiveCache:
 
     def _compute(self, params, data, norm=None):
         """
-        Compute forward pass and gradients with selective caching.
+        Compute forward pass and gradients with FULLY MERGED calculations.
         
-        Caching strategy:
-        - ✅ Cache: Matrix multiplications (compute-bound)
-        - ❌ Don't cache: Element-wise ops (memory-bound, cheap to recompute)
+        Key optimization: Compute common amplitude factors once and reuse.
         """
         
         # Extract parameters
@@ -86,10 +76,9 @@ class NumpyKernelSelectiveCache:
         g0_m = np.take(mass, self.g0_mass_index, axis=-1)
         g_interp = self.interp(self.gamma_table, self.g0_index, g0_m, 
                                self.gamma_min, self.gamma_delta)
-        g = g0_all * g_interp  # shape: (n_events, n_gamma)
+        g = g0_all * g_interp
         
-        # Matrix multiplication - EXPENSIVE, CACHE THIS
-        g_bw = np.dot(g, self.matrix_gamma)  # shape: (n_events, n_unique_bw)
+        g_bw = np.dot(g, self.matrix_gamma)
         
         m0_all = np.take(m0, self.m0_index)
         m0_m = np.take(mass, self.mass_index, axis=-1)
@@ -110,12 +99,18 @@ class NumpyKernelSelectiveCache:
         # Angular factors
         ang = np.take(angle, self.angle_index, axis=-2)
         ka = np.prod(np.cos(ang * self.angle_k + self.angle_b), axis=-1)
-        
-        # Matrix multiplication - EXPENSIVE, CACHE THIS
         fa = np.dot(ka, self.matrix_angle)
         
-        # Amplitudes
-        a = ck * (1.0 / bw_p) * fa * fl_p
+        # ==================== MERGED AMPLITUDE CALCULATIONS ====================
+        # Key optimization: Compute common factors once, reuse in forward AND backward
+        
+        # Common amplitude factor (used in both forward and backward)
+        one_over_bw = 1.0 / bw_p                      # shape: (n_events, n_wave)
+        fa_times_fl = fa * fl_p                        # shape: (n_events, n_wave)
+        common_amp_factor = one_over_bw * fa_times_fl  # shape: (n_events, n_wave)
+        
+        # Forward pass: compute amplitude
+        a = ck * common_amp_factor                     # shape: (n_events, n_wave)
         a_reshaped = a.reshape(-1, 2, self.n_wave // 2)
         ap = np.sum(a_reshaped[:, 0, :], axis=-1)
         am = np.sum(a_reshaped[:, 1, :], axis=-1)
@@ -170,16 +165,21 @@ class NumpyKernelSelectiveCache:
         dQ_da[:, 1, :] = dQ_dam[:, np.newaxis]
         dQ_da_flat = dQ_da.reshape(n_events, self.n_wave)
         
-        # ck gradient
-        grad_ck = np.sum(dQ_da_flat * (1.0 / bw_p) * fa * fl_p, axis=0)
+        # ==================== MERGED GRADIENT CALCULATIONS ====================
+        # Reuse common_amp_factor computed in forward pass!
         
-        # bw_p gradient
-        dQ_dbw_p = dQ_da_flat * ck * (-1.0 / bw_p**2) * fa * fl_p
+        # ck gradient (reuse common_amp_factor)
+        grad_ck = np.sum(dQ_da_flat * common_amp_factor, axis=0)
         
-        # fa gradient - use cached matrix multiply result
-        dQ_dfa = dQ_da_flat * ck * (1.0 / bw_p) * fl_p
+        # bw_p gradient (derive from common_amp_factor)
+        # d(a)/d(bw_p) = ck * (-1/bw_p^2) * fa * fl_p
+        #              = ck * (-one_over_bw / bw_p) * fa_times_fl
+        #              = -ck * one_over_bw * common_amp_factor
+        dQ_dbw_p = dQ_da_flat * ck * (-one_over_bw) * common_amp_factor
         
-        # ka gradient - backprop through matrix multiply
+        # fa gradient (partial reuse)
+        # d(a)/d(fa) = ck * (1/bw_p) * fl_p = ck * one_over_bw * fl_p
+        dQ_dfa = dQ_da_flat * ck * one_over_bw * fl_p
         dQ_dka = np.dot(dQ_dfa, self.matrix_angle.T)
         # angle_k and angle_b are fixed config, so no further gradient needed
         
@@ -206,7 +206,7 @@ class NumpyKernelSelectiveCache:
             m0_param_idx = self.m0_index[bw_idx]
             grad_m0[m0_param_idx] += np.sum(np.real(dQ_dbw_dom[:, bw_idx] * d_bw_dom_dm0[:, bw_idx]))
         
-        # g_bw gradient - backprop through matrix multiply
+        # g_bw gradient
         dQ_dg = np.dot(np.real(dQ_dbw_dom * (-1j * m0_all)), self.matrix_gamma.T)
         
         # g0 gradient
@@ -215,10 +215,9 @@ class NumpyKernelSelectiveCache:
             g0_param_idx = self.g0_index[gamma_idx]
             grad_g0[g0_param_idx] += np.sum(np.real(dQ_dg[:, gamma_idx] * g_interp[:, gamma_idx]))
         
-        # ==================== MERGED TIME GRADIENTS ====================
-        # Optimization: Use simplified formulas instead of computing eL/eH separately
-        # Mathematical derivation: d(gp)/d(Gamma) = -time/2 * gp
-        # This saves 78% divisions and 29% multiplications
+        # Time gradients (merged)
+        time_half = time / 2
+        time_quarter = time / 4
         
         d_pb_dgp = 2 * np.real(np.conj(pap) * ap)
         d_pb_dgm = 2 * np.real(np.conj(pap) * poq * am)
@@ -228,22 +227,20 @@ class NumpyKernelSelectiveCache:
         grad_common_gp = dQ_dpb * d_pb_dgp + dQ_dpbbar * d_pbbar_dgp
         grad_common_gm = dQ_dpb * d_pb_dgm + dQ_dpbbar * d_pbbar_dgm
         
-        dgp_dGamma = -time/2 * gp
-        dgm_dGamma = -time/2 * gm
+        dgp_dGamma = -time_half * gp
+        dgm_dGamma = -time_half * gm
         
-        dgp_dDeltaGamma = -time/4 * gm
-        dgm_dDeltaGamma = -time/4 * gp
+        dgp_dDeltaGamma = -time_quarter * gm
+        dgm_dDeltaGamma = -time_quarter * gp
         
-        dgp_dDeltaM = -1j * time/2 * gm
-        dgm_dDeltaM = -1j * time/2 * gp
+        dgp_dDeltaM = -1j * time_half * gm
+        dgm_dDeltaM = -1j * time_half * gp
         
         dQ_dGamma = np.sum(grad_common_gp * dgp_dGamma + grad_common_gm * dgm_dGamma)
         dQ_dDeltaGamma = np.sum(grad_common_gp * dgp_dDeltaGamma + grad_common_gm * dgm_dDeltaGamma)
         dQ_dDeltaM = np.sum(grad_common_gp * dgp_dDeltaM + grad_common_gm * dgm_dDeltaM)
         
-        # ==================== MERGED POQ GRADIENTS ====================
-        # Optimization: Merge repeated calculations for poq gradients
-        
+        # poq gradients (merged)
         conj_pap_gm_am = np.conj(pap) * gm * am
         conj_pam = np.conj(pam)
         

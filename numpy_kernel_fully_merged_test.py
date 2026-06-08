@@ -181,7 +181,17 @@ class NumpyKernelSelectiveCache:
         
         # ka gradient - backprop through matrix multiply
         dQ_dka = np.dot(dQ_dfa, self.matrix_angle.T)
-        # angle_k and angle_b are fixed config, so no further gradient needed
+        
+        # Recompute angular terms (cheap, memory-bound)
+        cos_term = np.cos(ang * self.angle_k + self.angle_b)
+        
+        # Gradient of product
+        dQ_dcos_term = np.zeros_like(cos_term)
+        for i in range(self.n_angle):
+            mask = np.ones(self.n_angle, dtype=bool)
+            mask[i] = False
+            prod_except_i = np.prod(cos_term[:, :, mask], axis=-1)
+            dQ_dcos_term[:, :, i] = prod_except_i * dQ_dka
         
         # BW gradients
         dQ_dbw_dom_all = np.zeros_like(bw_dom_all_reshaped)

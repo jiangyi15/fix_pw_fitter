@@ -142,31 +142,8 @@ class NumpyKernel:
         grad_ck = np.sum(dQ_dck, axis=0)
 
         # Backprop through fa = dot(ka, matrix_angle)
-        # ka shape: (-1, n_basis), matrix_angle: (n_basis, n_wave)
-        dQ_dka = np.dot(dQ_dfa, self.matrix_angle.T)
-
-        # Backprop through ka = prod(cos(ang * angle_k + angle_b), axis=-1)
-        # ang shape: (n_events, n_basis, n_angle), angle_k: (n_basis, n_angle)
-        ang = np.take(angle, self.angle_index, axis=-2)
-        cos_term = np.cos(ang * self.angle_k + self.angle_b)
-        sin_term = np.sin(ang * self.angle_k + self.angle_b)
-
-        # Gradient w.r.t ka
-        # ka = prod(cos_term, axis=-1), so d(ka)/d(cos_term[:, :, i]) = prod(cos_term except i)
-        dQ_dcos_term = np.zeros_like(cos_term)
-        for i in range(self.n_angle):
-            mask = np.ones(self.n_angle, dtype=bool)
-            mask[i] = False
-            prod_except_i = np.prod(cos_term[:, :, mask], axis=-1)
-            dQ_dcos_term[:, :, i] = prod_except_i * dQ_dka
-
-        # d(cos_term)/d(ang) = -sin_term * angle_k
-        # angle_k shape: (n_basis, n_angle)
-        dQ_dang = -sin_term * self.angle_k[np.newaxis, :, :] * dQ_dcos_term
-
-        # Gradient for angle_k and angle_b (if needed as parameters)
-        # These appear to be fixed config parameters, so no gradient
-
+        # ka comes from fixed angle_k and angle_b, so no gradient needed
+        
         # Backprop through fl_p
         # fl_p = prod(fl_all, axis=-1) where fl_all shape: (-1, n_wave, n_decay)
         # fl comes from interpolation of fixed table, so no gradient parameters here
