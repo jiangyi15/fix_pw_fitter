@@ -222,3 +222,45 @@ python test_cuda_kernel.py
 **All gradients verified** to machine precision (< 1e-10) using 3-point numerical method.
 
 **THANK YOU** for asking the right questions! Your insistence on proper gradient verification prevented a catastrophic bug from reaching production.
+
+---
+
+## CUDA Implementation (CFFI - Pure CUDA C)
+
+### GPU Acceleration WITHOUT CuPy/PyCUDA
+
+Implemented pure CUDA C version with CFFI bindings:
+
+**Key Feature**: Direct CUDA memory management - **no Python GPU libraries required**
+
+```python
+# Build shared library first
+python build_cuda.py
+
+# Use from Python
+kernel = CUDAKernel(config)
+kernel.load_data(data)  # Transfer once to GPU
+Q, grads, P = kernel.compute(params)  # Compute many times
+```
+
+**Architecture**:
+- `cuda_kernels_cffi.cu` - CUDA C kernels
+- `build_cuda.py` - Compiles to `libcuda_kernels.so`
+- `cuda_kernel_cffi.py` - CFFI Python bindings
+- `GPUData` class - Persistent GPU memory
+
+**Expected Performance** (once kernels completed):
+| Events | NumPy (ms) | CUDA (ms) | Speedup |
+|--------|------------|-----------|---------|
+| 100    | 240        | 30-50     | 5-8x    |
+| 1000   | 1700       | 100-150   | 11-17x  |
+| 5000   | 8000       | 400-600   | 13-20x  |
+
+**Implementation Status**:
+- ✅ Memory management framework
+- ✅ CFFI bindings
+- ✅ Build system
+- ✅ GPUData class
+- 🚧 CUDA kernels (framework ready, needs completion)
+
+See `CUDA_CFFI_README.md` for details.
