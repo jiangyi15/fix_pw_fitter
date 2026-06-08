@@ -190,6 +190,13 @@ class CUDALibrary:
     """Load and manage CUDA shared library"""
 
     def __init__(self, lib_path="libcuda_kernels.so"):
+        # Use absolute path if relative path given
+        if not os.path.isabs(lib_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            lib_path_abs = os.path.join(script_dir, lib_path)
+            if os.path.exists(lib_path_abs):
+                lib_path = lib_path_abs
+        
         if not os.path.exists(lib_path):
             raise RuntimeError(
                 f"CUDA library not found: {lib_path}\n"
@@ -276,7 +283,8 @@ class GPUData:
         self.n_mass = len(config["mass_index"])
         self.n_momentum = len(config["fl_q_index"])
         self.n_angle_k = config["angle_k"].shape[0]
-        self.n_angle_total = config["angle_index"].shape[1]
+        # n_angle_total will be set when data is loaded
+        self.n_angle_total = int(np.max(config["angle_index"])) + 1 if len(config["angle_index"]) > 0 else 0
 
         self.gamma_table_bins = config["gamma_table"].shape[-1]
         self.fl_table_bins = config["fl_table"].shape[-1]

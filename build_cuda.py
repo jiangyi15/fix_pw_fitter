@@ -14,25 +14,34 @@ import sys
 
 def find_cuda():
     """Find CUDA installation"""
+    # First check if nvcc is in PATH
+    import shutil
+    nvcc_path = shutil.which('nvcc')
+    
+    if nvcc_path:
+        cuda_path = os.path.dirname(os.path.dirname(nvcc_path))
+        return cuda_path, nvcc_path
+    
     cuda_path = os.environ.get('CUDA_PATH') or os.environ.get('CUDA_HOME')
-
-    if not cuda_path:
-        # Try common locations
-        common_paths = [
-            '/usr/local/cuda',
-            '/usr/local/cuda-11.0',
-            '/usr/local/cuda-12.0',
-            '/opt/cuda',
-        ]
-        for path in common_paths:
-            if os.path.exists(path):
-                cuda_path = path
-                break
 
     if cuda_path:
         nvcc = os.path.join(cuda_path, 'bin', 'nvcc')
         if os.path.exists(nvcc):
             return cuda_path, nvcc
+
+    # Try common locations
+    common_paths = [
+        '/usr/local/cuda',
+        '/usr/local/cuda-13.2',
+        '/usr/local/cuda-12.0',
+        '/usr/local/cuda-11.0',
+        '/opt/cuda',
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            nvcc = os.path.join(path, 'bin', 'nvcc')
+            if os.path.exists(nvcc):
+                return path, nvcc
 
     return None, None
 
