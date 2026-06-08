@@ -278,8 +278,9 @@ class GPUData:
         self.n_wave = config["matrix_angle"].shape[1]
         self.n_res = config["bw_order"].size // self.n_wave
         self.n_decay = config["fl_order"].size // self.n_wave
-        self.n_unique_bw = len(config["g0_index"])
-        self.n_gamma_rows = config["matrix_gamma"].shape[0]
+        self.n_unique_bw = len(config["m0_index"])  # Should be 216
+        self.n_gamma_rows = config["matrix_gamma"].shape[0]  # Should be 288
+        self.n_gamma_cols = config["matrix_gamma"].shape[1]  # Should be 216 (same as n_unique_bw)
         self.n_mass = len(config["mass_index"])
         self.n_momentum = len(config["fl_q_index"])
         self.n_angle_k = config["angle_k"].shape[0]
@@ -635,8 +636,24 @@ class GPUData:
         grad_ck_imag = self.grad_ck_imag_sum_gpu.get()
         grad_ck = grad_ck_real + 1j * grad_ck_imag
 
-        grad_m0 = self.grad_m0_sum_gpu.get()
-        grad_g0 = self.grad_g0_sum_gpu.get()
+        # Get partial gradients and scatter them
+        grad_m0_partial = self.grad_m0_sum_gpu.get()  # shape: (n_unique_bw,)
+        grad_g0_partial = self.grad_g0_sum_gpu.get()  # shape: (n_unique_bw,)
+
+        # Scatter gradients to actual parameters
+        n_m0_params = len(np.unique(self.config["m0_index"]))
+        n_g0_params = len(np.unique(self.config["g0_index"]))
+        grad_m0 = np.zeros(n_m0_params)
+        grad_g0 = np.zeros(n_g0_params)
+
+        # Accumulate gradients based on parameter indices
+        for bw_idx in range(self.n_unique_bw):
+            m0_param_idx = self.config["m0_index"][bw_idx]
+            grad_m0[m0_param_idx] += grad_m0_partial[bw_idx]
+
+        for gamma_idx in range(self.n_unique_bw):
+            g0_param_idx = self.config["g0_index"][gamma_idx]
+            grad_g0[g0_param_idx] += grad_g0_partial[gamma_idx]
 
         grad_Gamma = np.sum(self.grad_Gamma_partial.get())
         grad_DeltaGamma = np.sum(self.grad_DeltaGamma_partial.get())
