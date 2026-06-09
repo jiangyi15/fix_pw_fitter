@@ -225,10 +225,10 @@ class Fitter:
         self._phsp_batch_size = 50000  # events per batch
         self._phsp_n = 0               # total phsp events
 
-        # Default physical params (used when not passed to get_nll)
-        self.default_m0 = None
-        self.default_g0 = None
-        self.default_scalar = None
+        # Default physical params from config.yml (lazy-built)
+        self._default_m0_arr = None   # built from config particle masses
+        self._default_g0_arr = None   # built from config particle widths
+        self.default_scalar = None    # user-set scalar defaults
 
         # Bound transforms and fixed slots
         self._bound_transforms = {}        # {flat_idx: BoundTransform}
@@ -435,12 +435,76 @@ class Fitter:
         """
         return self._var_registry.flat_names
 
+    def _extract_config_defaults(self):
+        """Build default m0/g0 arrays from config.yml particle definitions.
+        
+        Mass defaults come from the 'mass' field of each particle.
+        Width/defaults come from 'width' (simple) or 'g_{idx}' (Flatte coupling).
+        """
+        if self._default_m0_arr is None:
+            m0 = []
+            for name in self.config.m0_phys_name:
+                particle = name.replace('_mass', '')
+                dic = self.config.dic.get('particle', {})
+                mass = None
+                if particle in dic:
+                    mass = dic[particle].get('mass')
+                if mass is None:
+                    mass = 0.8
+                m0.append(float(mass))
+            self._default_m0_arr = np.array(m0, dtype=np.float64)
+
+        if self._default_g0_arr is None:
+            g0 = []
+            for name in self.config.g0_phys_name:
+                particle = None
+                for p in self.config.dic.get('particle', {}):
+                    if name.startswith(p):
+                        particle = p
+                        break
+                val = 0.1
+                if particle is not None:
+                    pdic = self.config.dic['particle'][particle]
+                    # Try width first (simple resonance)
+                    w = pdic.get('width')
+                    if w is not None:
+                        val = float(w)
+                    else:
+                        # Try Flatte coupling: name like 'f0(980)_g0' → key 'g_0'
+                        suffix = name[len(particle):]  # e.g. '_g0' → 'g_0'
+                        if suffix.startswith('_g'):
+                            gkey = 'g_' + suffix[2:]  # '_g0' → 'g_0', '_g1' → 'g_1'
+                            if gkey in pdic:
+                                val = float(pdic[gkey])
+                g0.append(val)
+            self._default_g0_arr = np.array(g0, dtype=np.float64)
+
+    @property
+    def default_m0(self):
+        """Default m0 values from config (lazy-built)."""
+        self._extract_config_defaults()
+        return self._default_m0_arr
+
+    @default_m0.setter
+    def default_m0(self, val):
+        self._default_m0_arr = np.array(val, dtype=np.float64) if val is not None else None
+
+    @property
+    def default_g0(self):
+        """Default g0 values from config (lazy-built)."""
+        self._extract_config_defaults()
+        return self._default_g0_arr
+
+    @default_g0.setter
+    def default_g0(self, val):
+        self._default_g0_arr = np.array(val, dtype=np.float64) if val is not None else None
+
     def set_default_params(self, m0=None, g0=None, scalar=None):
         """Set default physical parameters (used when not passed to get_nll)."""
         if m0 is not None:
-            self.default_m0 = np.array(m0, dtype=np.float64)
+            self._default_m0_arr = np.array(m0, dtype=np.float64)
         if g0 is not None:
-            self.default_g0 = np.array(g0, dtype=np.float64)
+            self._default_g0_arr = np.array(g0, dtype=np.float64)
         if scalar is not None:
             self.default_scalar = np.array(scalar, dtype=np.float64)
 
@@ -458,16 +522,11 @@ class Fitter:
     def _build_base_params(self, ck, m0, g0, scalar):
         """Build the params dict from components, using defaults for None."""
         if m0 is None:
-            m0 = self.default_m0
+            m0 = self.default_m0  # from config.yml particle masses
         if g0 is None:
-            g0 = self.default_g0
+            g0 = self.default_g0  # from config.yml particle widths
         if scalar is None:
             scalar = self.default_scalar
-        # Auto-generate default arrays if still None
-        if m0 is None:
-            m0 = np.ones(self.n_m0, dtype=np.float64) * 0.8
-        if g0 is None:
-            g0 = np.ones(self.n_g0, dtype=np.float64) * 0.1
         if scalar is None:
             scalar = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
         return {"ck": ck, "m0": m0, "g0": g0, "scalar": list(scalar)}
@@ -604,15 +663,9 @@ class Fitter:
         # 3. Build m0, g0, scalar arrays from x + fixed values
         scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
 
-        # Start from defaults or fallback values
-        if self.default_m0 is not None:
-            m0_arr = self.default_m0.copy()
-        else:
-            m0_arr = np.ones(self.n_m0, dtype=np.float64) * 0.8
-        if self.default_g0 is not None:
-            g0_arr = self.default_g0.copy()
-        else:
-            g0_arr = np.ones(self.n_g0, dtype=np.float64) * 0.1
+        # Start from config.yml defaults (lazy-built from particle definitions)
+        m0_arr = self.default_m0.copy()      # masses from config
+        g0_arr = self.default_g0.copy()      # widths from config
         if self.default_scalar is not None:
             scalar_arr = list(self.default_scalar)
         else:
