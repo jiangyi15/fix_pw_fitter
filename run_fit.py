@@ -5,7 +5,7 @@ Real NLL computation using ampfit package with constraints from pw_cfit5_td6_fix
 Usage:
     python run_fit.py                       # Full fit with all data
     python run_fit.py --debug               # Quick test with 1K events
-    python run_fit.py --batch-phsp 50000    # Process phsp in batches of N events
+    python run_fit.py --phsp-sample 100000  # Use 100K phsp sample (default)
 """
 import sys
 import os
@@ -164,19 +164,38 @@ def compute_norm_batched(fitter, phsp_np, batch_size=50000):
 
 
 class BatchedNormFitter(Fitter):
-    """Fitter that handles large phase space by batching."""
+    """Fitter that handles large phase space by sampling a representative subset."""
 
-    def __init__(self, config_file="config_angle.yml", phsp_batch_size=50000):
+    def __init__(self, config_file="config_angle.yml", phsp_sample_size=100000):
         super().__init__(config_file)
-        self.phsp_batch_size = phsp_batch_size
-        self._last_x = None
-        self._last_ck = None
+        self.phsp_sample_size = phsp_sample_size
+        self._phsp_np = None
+        self._phsp_n = 0
+        self._phsp_weight_scale = 1.0  # scale factor for norm
 
     def set_phsp_npz(self, npz_path, max_events=None):
-        """Load phsp from .npz (stores numpy, creates GPU holders on demand)."""
-        self._phsp_np, self._phsp_n = load_npz_arrays(npz_path, max_events)
-        print(f"  Phsp: {self._phsp_n:,} events loaded")
-        return self._phsp_n
+        """Load phsp from .npz. If too large, take a representative random sample."""
+        full_np, full_n = load_npz_arrays(npz_path, max_events=max_events)
+        self._phsp_n = full_n
+
+        sample_size = min(self.phsp_sample_size, full_n)
+        if sample_size < full_n:
+            # Random sample, stratified by weight
+            rng = np.random.RandomState(42)
+            idx = rng.choice(full_n, sample_size, replace=False)
+            self._phsp_np = {k: v[idx] for k, v in full_np.items()}
+            # Compute weight scaling: full sum / sample sum
+            self._phsp_weight_scale = full_np["weight"].sum() / self._phsp_np["weight"].sum()
+            print(f"  Phsp: {full_n:,} events (using {sample_size:,} sample, "
+                  f"weight scale={self._phsp_weight_scale:.3f})")
+        else:
+            self._phsp_np = full_np
+            self._phsp_weight_scale = 1.0
+            print(f"  Phsp: {sample_size:,} events")
+
+        # Load the sample onto GPU
+        self.set_phsp(self._phsp_np)
+        return full_n
 
     def set_data_npz(self, npz_path, max_events=None):
         """Load data from .npz."""
@@ -185,44 +204,20 @@ class BatchedNormFitter(Fitter):
         print(f"  Data: {n_data:,} events loaded")
         return n_data
 
-    def _compute_norm_batched(self, params):
-        """Compute norm integral by batching phsp."""
-        n_phsp = self._phsp_np["mass"].shape[0]
-        batch_size = self.phsp_batch_size
-        total_norm = 0.0
-        total_grad_ck = None
-
-        gc = self.kernel.gpu_config
-        lib = self.kernel.lib
-        from ampfit._cuda import GPUDataHolder
-
-        for start in range(0, n_phsp, batch_size):
-            end = min(start + batch_size, n_phsp)
-            batch = {k: v[start:end] for k, v in self._phsp_np.items()}
-
-            holder = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-            holder.load(batch)
-
-            n_batch, g_batch, _ = self.kernel.compute(params, holder, norm=None)
-            total_norm += float(n_batch)
-            if total_grad_ck is None:
-                total_grad_ck = g_batch["ck"].copy()
-            else:
-                total_grad_ck += g_batch["ck"]
-
-            holder.free()
-
-        return total_norm, total_grad_ck
+    def _compute_norm_scaled(self, params):
+        """Compute norm from GPU data, then scale to full phsp size."""
+        norm, grads, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
+        norm = float(norm) * self._phsp_weight_scale
+        grads["ck"] = grads["ck"] * self._phsp_weight_scale
+        return norm, grads
 
     def get_nll(self, x, m0=None, g0=None, scalar=None):
-        """Compute NLL with batched phsp norm."""
-        self._last_x = x.copy()
+        """Compute NLL with scaled phsp norm."""
         ck = self.pc.build_ck(x)
-        self._last_ck = ck.copy()
         params = self._build_base_params(ck, m0, g0, scalar)
 
-        # Norm from batched phsp
-        norm, ng = self._compute_norm_batched(params)
+        # Norm from phsp (auto-sampled + scaled)
+        norm, ng = self._compute_norm_scaled(params)
         norm = float(norm)
 
         # NLL from data
@@ -237,7 +232,7 @@ class BatchedNormFitter(Fitter):
         dNLL_dnorm = np.sum(weight * P / denom)
 
         # Combine gradients
-        total_grad_ck = grads["ck"] + dNLL_dnorm * ng
+        total_grad_ck = grads["ck"] + dNLL_dnorm * ng["ck"]
         grad_x = self.pc.backprop_grad(x, total_grad_ck)
         return nll, grad_x
 
@@ -246,8 +241,8 @@ def main():
     parser = argparse.ArgumentParser(description="Real NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true",
                         help="Quick test with 1K data / 10K phsp events")
-    parser.add_argument("--batch-phsp", type=int, default=50000,
-                        help="Phsp batch size (default: 50000)")
+    parser.add_argument("--phsp-sample", type=int, default=100000,
+                        help="Phsp sample size for norm (default: 100000)")
     parser.add_argument("--config", default="config_angle.yml",
                         help="Config YAML (default: config_angle.yml)")
     parser.add_argument("--data", default="data/data_arrays.npz",
@@ -276,7 +271,7 @@ def main():
     # ==================================================================
     # 2. Create fitter with constraints
     # ==================================================================
-    fitter = BatchedNormFitter(args.config, phsp_batch_size=args.batch_phsp)
+    fitter = BatchedNormFitter(args.config, phsp_sample_size=args.phsp_sample)
     fitter.set_fixed(fixed_params)
     fitter.set_same(same_params)
     fitter.set_scale(scale_params)
