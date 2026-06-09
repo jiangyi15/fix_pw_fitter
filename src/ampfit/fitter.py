@@ -455,32 +455,16 @@ class Fitter:
             self._default_m0_arr = np.array(m0, dtype=np.float64)
 
         if self._default_g0_arr is None:
-            from ampfit.particle_model import build_particle
-            g0 = []
-            for name in self.config.g0_phys_name:
-                # Find the particle that this g0 name belongs to
-                particle = None
-                for p in self.config.dic.get('particle', {}):
-                    if name.startswith(p):
-                        particle = p
-                        break
-                if particle is not None:
-                    # Build the particle model and ask for its gamma defaults
-                    try:
-                        pmodel = build_particle(particle,
-                            **self.config.dic['particle'][particle])
-                        defaults = pmodel.get_gamma_defaults()
-                        gnames = pmodel.get_gamma_name()
-                        # Match this g0 name to an index in the model
-                        if name in gnames:
-                            idx = gnames.index(name)
-                            g0.append(float(defaults[idx]))
-                        else:
-                            g0.append(0.1)
-                    except Exception:
-                        g0.append(0.1)
-                else:
-                    g0.append(0.1)
+            # Build a map: gamma_name → default value from pre-built models
+            gamma_map = {}
+            for chain in self.config.full_decay.chains:
+                for decay in chain.decays:
+                    model = decay.core._model
+                    names = model.get_gamma_name()
+                    vals = model.get_gamma_defaults()
+                    for n, v in zip(names, vals):
+                        gamma_map[n] = float(v)
+            g0 = [gamma_map.get(name, 0.1) for name in self.config.g0_phys_name]
             self._default_g0_arr = np.array(g0, dtype=np.float64)
 
     @property
