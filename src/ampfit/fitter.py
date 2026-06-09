@@ -390,26 +390,58 @@ class Fitter:
             f"Available: {self._var_registry.flat_names[:6]}... "
         )
 
+    def _build_alias_map(self):
+        """Build alias→canonical name map from same_params."""
+        alias_to_canon = {}
+        for group in self._same_params:
+            if group:
+                canon = group[0]
+                for a in group[1:]:
+                    alias_to_canon[a] = canon
+        self._alias_to_canon = alias_to_canon
+
     def _rebuild_var_registry(self):
-        """Build the VariableRegistry from all non-fixed parameter slots."""
+        """Build the VariableRegistry from all non-fixed parameter slots.
+        
+        Handles alias name mapping: if a slot is fixed under an alias name,
+        the canonical name is also recognized as fixed.
+        """
+        self._build_alias_map()
+
+        def _slot_fixed(name, suffix=''):
+            if (name + suffix) in self._fixed_slots:
+                return True
+            for a in self._alias_to_canon.get(name, []):
+                if (a + suffix) in self._fixed_slots:
+                    return True
+            return False
+
+        def _name_fixed(name):
+            if name in self._fixed_slots:
+                return True
+            for a in self._alias_to_canon.get(name, []):
+                if a in self._fixed_slots:
+                    return True
+            return False
+
         self._var_registry = VariableRegistry()
         # Ck parameters (complex) — skip if both r and i are fixed
         for name in self.pc.free_param_names():
-            r_fixed = (name + 'r') in self._fixed_slots
-            i_fixed = (name + 'i') in self._fixed_slots
+            r_fixed = _slot_fixed(name, 'r')
+            i_fixed = _slot_fixed(name, 'i')
             if not (r_fixed and i_fixed):
                 self._var_registry.add_complex(name, ('ck', name))
         # M0 parameters (real)
         for name in self.config.m0_phys_name:
-            if name not in self._fixed_slots:
+            if not _name_fixed(name):
                 self._var_registry.add_real(name, ('m0', name))
         # G0 parameters (real)
         for name in self.config.g0_phys_name:
-            if name not in self._fixed_slots:
+            if not _name_fixed(name):
                 self._var_registry.add_real(name, ('g0', name))
         # Scalar/time parameters (real)
         for name in ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
-            if name not in self._fixed_slots:
+            if not _name_fixed(name):
                 self._var_registry.add_real(name, ('scalar', name))
 
     def _n_flat_vars(self):
@@ -624,14 +656,18 @@ class Fitter:
         # 2. Extract ck vars and merge fixed r/θ slots
         x_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
         # For partially-fixed ck vars, reinsert fixed r or θ values
-        # pc.build_ck expects [r0, θ0, r1, θ1, ...] in pc.free_param_names() order
+        # Resolve alias names to canonical via _alias_to_canon
+        pc_names = set(self.pc.free_param_names())
         fixed_ck_r = {}  # {name: fixed_r}
         fixed_ck_i = {}  # {name: fixed_i}
         for slot, val in self._fixed_slots.items():
-            if slot.endswith('r') and slot[:-1] in self.pc.free_param_names():
-                fixed_ck_r[slot[:-1]] = val
-            elif slot.endswith('i') and slot[:-1] in self.pc.free_param_names():
-                fixed_ck_i[slot[:-1]] = val
+            base = slot[:-1]  # e.g., 'name' from 'namer' or 'namei'
+            # Resolve alias to canonical
+            canon = self._alias_to_canon.get(base, base)
+            if slot.endswith('r') and canon in pc_names:
+                fixed_ck_r[canon] = val
+            elif slot.endswith('i') and canon in pc_names:
+                fixed_ck_i[canon] = val
         if fixed_ck_r or fixed_ck_i:
             # Rebuild x_ck with fixed values merged
             new_x_ck = []
