@@ -19,7 +19,7 @@ def compare_intermediates():
     np.random.seed(42)
     data = {
         "mass": np.random.random((n_events, 48)),
-        "q": np.random.random((n_events, 24)),
+        "q": np.random.random((n_events, 72)),
         "angle": np.random.random((n_events, 24, 3)),
         "frac": np.random.random((n_events,)),
         "time": np.random.random((n_events,)),
@@ -139,57 +139,57 @@ def compare_intermediates():
     
     try:
         cuda_kernel = CUDAKernel(kernel_config)
-        cuda_kernel.load_data(data)
+        holder = cuda_kernel.load_data(data)
         
         # Run forward pass
-        Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(params, norm=None)
+        Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(params, holder, norm=None)
         
-        # Get intermediate arrays from GPU
+        # Get intermediate arrays from GPU via holder
         print(f"\n1. g_interp:")
         print(f"   Shape: (n_events, n_unique_bw)")
-        g_interp_real = cuda_kernel.gpu_data.g_interp_real_gpu.get()
-        g_interp_imag = cuda_kernel.gpu_data.g_interp_imag_gpu.get()
+        g_interp_real = holder.g_interp_real_gpu.get()
+        g_interp_imag = holder.g_interp_imag_gpu.get()
         print(f"   [0, 0]: {complex(g_interp_real[0, 0], g_interp_imag[0, 0])}")
         print(f"   [0, 1]: {complex(g_interp_real[0, 1], g_interp_imag[0, 1])}")
         print(f"   Has imag: {np.any(g_interp_imag != 0)}")
         
         print(f"\n2. g_bw:")
         print(f"   Shape: (n_events, n_unique_bw)")
-        g_bw_real = cuda_kernel.gpu_data.g_bw_real_gpu.get()
-        g_bw_imag = cuda_kernel.gpu_data.g_bw_imag_gpu.get()
+        g_bw_real = holder.g_bw_real_gpu.get()
+        g_bw_imag = holder.g_bw_imag_gpu.get()
         print(f"   [0, 0]: {complex(g_bw_real[0, 0], g_bw_imag[0, 0])}")
         print(f"   [0, 1]: {complex(g_bw_real[0, 1], g_bw_imag[0, 1])}")
         print(f"   [0, 215]: {complex(g_bw_real[0, 215], g_bw_imag[0, 215])}")
         
         print(f"\n3. bw_dom:")
         print(f"   Shape: (n_events, n_unique_bw)")
-        bw_dom_real = cuda_kernel.gpu_data.bw_dom_real_gpu.get()
-        bw_dom_imag = cuda_kernel.gpu_data.bw_dom_imag_gpu.get()
+        bw_dom_real = holder.bw_dom_real_gpu.get()
+        bw_dom_imag = holder.bw_dom_imag_gpu.get()
         print(f"   [0, 0]: {complex(bw_dom_real[0, 0], bw_dom_imag[0, 0])}")
         print(f"   [0, 1]: {complex(bw_dom_real[0, 1], bw_dom_imag[0, 1])}")
         print(f"   [0, 215]: {complex(bw_dom_real[0, 215], bw_dom_imag[0, 215])}")
         
         print(f"\n4. bw_p:")
         print(f"   Shape: (n_events, n_wave)")
-        bw_p_real = cuda_kernel.gpu_data.bw_p_real_gpu.get()
-        bw_p_imag = cuda_kernel.gpu_data.bw_p_imag_gpu.get()
+        bw_p_real = holder.bw_p_real_gpu.get()
+        bw_p_imag = holder.bw_p_imag_gpu.get()
         print(f"   [0, 0]: {complex(bw_p_real[0, 0], bw_p_imag[0, 0])}")
         print(f"   [0, 1]: {complex(bw_p_real[0, 1], bw_p_imag[0, 1])}")
         print(f"   [0, 447]: {complex(bw_p_real[0, 447], bw_p_imag[0, 447])}")
         
         print(f"\n5. common_amp_factor:")
         print(f"   Shape: (n_events, n_wave)")
-        common_real = cuda_kernel.gpu_data.common_amp_factor_real_gpu.get()
-        common_imag = cuda_kernel.gpu_data.common_amp_factor_imag_gpu.get()
+        common_real = holder.common_amp_factor_real_gpu.get()
+        common_imag = holder.common_amp_factor_imag_gpu.get()
         print(f"   [0, 0]: {complex(common_real[0, 0], common_imag[0, 0])}")
         print(f"   [0, 1]: {complex(common_real[0, 1], common_imag[0, 1])}")
         print(f"   [0, 447]: {complex(common_real[0, 447], common_imag[0, 447])}")
         
         print(f"\n6. ap, am:")
-        ap_real = cuda_kernel.gpu_data.ap_real_gpu.get()
-        ap_imag = cuda_kernel.gpu_data.ap_imag_gpu.get()
-        am_real = cuda_kernel.gpu_data.am_real_gpu.get()
-        am_imag = cuda_kernel.gpu_data.am_imag_gpu.get()
+        ap_real = holder.ap_real_gpu.get()
+        ap_imag = holder.ap_imag_gpu.get()
+        am_real = holder.am_real_gpu.get()
+        am_imag = holder.am_imag_gpu.get()
         print(f"   ap[0]: {complex(ap_real[0], ap_imag[0])}")
         print(f"   am[0]: {complex(am_real[0], am_imag[0])}")
         
@@ -245,6 +245,7 @@ def compare_intermediates():
         print(f"   CUDA Q: {Q_cuda:.10f}")
         print(f"   Difference: {abs(Q_numpy - Q_cuda):.6e}")
         
+        holder.free()
         cuda_kernel.free()
         
     except Exception as e:

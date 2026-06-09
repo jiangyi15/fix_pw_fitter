@@ -1,6 +1,6 @@
 """
 Test CUDA kernel against NumPy for correctness and performance.
-Uses the new standalone GPUDataHolder architecture.
+Uses the new API: kernel.load_data(data) → kernel.compute(params, data)
 """
 
 import numpy as np
@@ -31,7 +31,7 @@ def test_correctness():
     from numpy_kernel import NumpyKernelCorrect
 
     try:
-        from cuda_kernel_cffi import CUDAKernel, GPUDataHolder
+        from cuda_kernel_cffi import CUDAKernel
     except Exception as e:
         print(f"\nCUDA not available: {e}")
         print("Skipping CUDA test")
@@ -48,10 +48,8 @@ def test_correctness():
     n_events = 100
     data = make_test_data(n_events)
 
-    # Load data into a GPUDataHolder (standalone)
-    gc = cuda_kernel.gpu_config
-    data_holder = GPUDataHolder(cuda_kernel.lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-    data_holder.load(data)
+    # Load data via kernel.load_data() → returns GPUDataHolder
+    data_holder = cuda_kernel.load_data(data)
 
     # Create parameters
     ck_map = config.get_ck_map()
@@ -66,10 +64,10 @@ def test_correctness():
     print("\nComputing with NumPy kernel...")
     Q_numpy, grads_numpy, P_numpy = numpy_kernel._compute(params, data, norm=None)
 
-    # Compute with CUDA using new API
+    # Compute with CUDA using new API: compute(params, data_holder)
     print("Computing with CUDA kernel (new API)...")
     try:
-        Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(data_holder, params, norm=None)
+        Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(params, data_holder, norm=None)
     except Exception as e:
         print(f"CUDA computation failed: {e}")
         import traceback
@@ -130,7 +128,7 @@ def test_multi_dataset():
     from numpy_kernel import NumpyKernelCorrect
 
     try:
-        from cuda_kernel_cffi import CUDAKernel, GPUDataHolder
+        from cuda_kernel_cffi import CUDAKernel
     except Exception as e:
         print(f"CUDA not available: {e}")
         return False
@@ -141,19 +139,12 @@ def test_multi_dataset():
     cuda_kernel = CUDAKernel(kernel_config)
 
     n_events = 50
-    # Create two different datasets
     data1 = make_test_data(n_events, seed=100)
     data2 = make_test_data(n_events, seed=200)
 
-    gc = cuda_kernel.gpu_config
-    lib = cuda_kernel.lib
-
-    # Create two independent data holders
-    holder1 = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-    holder1.load(data1)
-
-    holder2 = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-    holder2.load(data2)
+    # Load two independent datasets via kernel.load_data()
+    holder1 = cuda_kernel.load_data(data1)
+    holder2 = cuda_kernel.load_data(data2)
 
     ck_map = config.get_ck_map()
     params = {
@@ -169,11 +160,11 @@ def test_multi_dataset():
 
     # Compute with CUDA on dataset 1
     print("\nComputing dataset 1...")
-    Q1_cu, grads1_cu, P1_cu = cuda_kernel.compute(holder1, params, norm=None)
+    Q1_cu, grads1_cu, P1_cu = cuda_kernel.compute(params, holder1, norm=None)
 
     # Compute with CUDA on dataset 2 (no data reload!)
     print("Computing dataset 2 (no reload)...")
-    Q2_cu, grads2_cu, P2_cu = cuda_kernel.compute(holder2, params, norm=None)
+    Q2_cu, grads2_cu, P2_cu = cuda_kernel.compute(params, holder2, norm=None)
 
     # Verify both match
     err1 = abs(Q1_np - Q1_cu)
@@ -181,7 +172,6 @@ def test_multi_dataset():
     print(f"\nDataset 1 Q error: {err1:.2e} {'✓' if err1 < 1e-8 else '✗'}")
     print(f"Dataset 2 Q error: {err2:.2e} {'✓' if err2 < 1e-8 else '✗'}")
 
-    # Verify gradients
     ok = True
     for key in ["ck", "m0", "g0"]:
         e1 = np.max(np.abs(grads1_np[key] - grads1_cu[key]))
@@ -194,7 +184,6 @@ def test_multi_dataset():
         e2 = abs(grads2_np["scalar"][i] - grads2_cu["scalar"][i])
         ok &= e1 < 1e-8 and e2 < 1e-8
 
-    # Clean up
     holder1.free()
     holder2.free()
 
@@ -216,7 +205,7 @@ def test_performance():
     from numpy_kernel import NumpyKernelCorrect
 
     try:
-        from cuda_kernel_cffi import CUDAKernel, GPUDataHolder
+        from cuda_kernel_cffi import CUDAKernel
     except Exception:
         print("CUDA not available, skipping performance test")
         return
@@ -226,7 +215,6 @@ def test_performance():
 
     numpy_kernel = NumpyKernelCorrect(kernel_config)
     cuda_kernel = CUDAKernel(kernel_config)
-    gc = cuda_kernel.gpu_config
 
     ck_map = config.get_ck_map()
 
@@ -249,18 +237,17 @@ def test_performance():
             numpy_kernel._compute(params, data, norm=None)
         time_numpy = (time.time() - start) / 10
 
-        # Load to GPU once
-        holder = GPUDataHolder(cuda_kernel.lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-        holder.load(data)
+        # Load to GPU once via kernel.load_data()
+        holder = cuda_kernel.load_data(data)
 
         # Warm up
-        cuda_kernel.compute(holder, params, norm=None)
+        cuda_kernel.compute(params, holder, norm=None)
 
         # Benchmark CUDA (data already on GPU)
         start = time.time()
         for _ in range(10):
             params["m0"] = params["m0"] + np.random.random(len(params["m0"])) * 0.001
-            cuda_kernel.compute(holder, params, norm=None)
+            cuda_kernel.compute(params, holder, norm=None)
         time_cuda = (time.time() - start) / 10
 
         speedup = time_numpy / time_cuda
@@ -279,10 +266,9 @@ def test_numerical_gradient():
     print("="*70)
 
     from config_loader import Config
-    from numpy_kernel import NumpyKernelCorrect
 
     try:
-        from cuda_kernel_cffi import CUDAKernel, GPUDataHolder
+        from cuda_kernel_cffi import CUDAKernel
     except Exception:
         print("CUDA not available, skipping gradient test")
         return
@@ -290,17 +276,14 @@ def test_numerical_gradient():
     config = Config("config_angle.yml")
     kernel_config = config.build_all_index()
 
-    numpy_kernel = NumpyKernelCorrect(kernel_config)
     cuda_kernel = CUDAKernel(kernel_config)
-    gc = cuda_kernel.gpu_config
 
     ck_map = config.get_ck_map()
     n_events = 100
     epsilon = 1e-5
 
     data = make_test_data(n_events)
-    holder = GPUDataHolder(cuda_kernel.lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-    holder.load(data)
+    holder = cuda_kernel.load_data(data)
 
     params = {
         "ck": np.random.random(len(ck_map)) + 1j*np.random.random(len(ck_map)),
@@ -309,48 +292,40 @@ def test_numerical_gradient():
         "scalar": [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
     }
 
-    # Test m0 gradient
-    print("\nVerifying m0[0] gradient with 3-point numerical method:")
+    print("\nVerifying gradients with 3-point numerical method:")
 
     for param_name in ["m0", "g0", "ck"]:
         if param_name == "m0":
             idx = 0
-            params_plus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_minus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_plus['m0'][idx] += epsilon
-            params_minus['m0'][idx] -= epsilon
-
-            Q_plus, _, _ = cuda_kernel.compute(holder, params_plus, norm=None)
-            Q_minus, _, _ = cuda_kernel.compute(holder, params_minus, norm=None)
-            Q, grads, _ = cuda_kernel.compute(holder, params, norm=None)
-            grad_num = (Q_plus - Q_minus) / (2 * epsilon)
+            params_p = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_m = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_p['m0'][idx] += epsilon; params_m['m0'][idx] -= epsilon
+            Qp, _, _ = cuda_kernel.compute(params_p, holder, norm=None)
+            Qm, _, _ = cuda_kernel.compute(params_m, holder, norm=None)
+            Q, grads, _ = cuda_kernel.compute(params, holder, norm=None)
+            grad_num = (Qp - Qm) / (2 * epsilon)
             grad_ana = grads['m0'][idx]
 
         elif param_name == "g0":
             idx = 0
-            params_plus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_minus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_plus['g0'][idx] += epsilon
-            params_minus['g0'][idx] -= epsilon
-
-            Q_plus, _, _ = cuda_kernel.compute(holder, params_plus, norm=None)
-            Q_minus, _, _ = cuda_kernel.compute(holder, params_minus, norm=None)
-            Q, grads, _ = cuda_kernel.compute(holder, params, norm=None)
-            grad_num = (Q_plus - Q_minus) / (2 * epsilon)
+            params_p = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_m = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_p['g0'][idx] += epsilon; params_m['g0'][idx] -= epsilon
+            Qp, _, _ = cuda_kernel.compute(params_p, holder, norm=None)
+            Qm, _, _ = cuda_kernel.compute(params_m, holder, norm=None)
+            Q, grads, _ = cuda_kernel.compute(params, holder, norm=None)
+            grad_num = (Qp - Qm) / (2 * epsilon)
             grad_ana = grads['g0'][idx]
 
         else:  # ck - test real part
             idx = 0
-            params_plus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_minus = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
-            params_plus['ck'][idx] += epsilon
-            params_minus['ck'][idx] -= epsilon
-
-            Q_plus, _, _ = cuda_kernel.compute(holder, params_plus, norm=None)
-            Q_minus, _, _ = cuda_kernel.compute(holder, params_minus, norm=None)
-            Q, grads, _ = cuda_kernel.compute(holder, params, norm=None)
-            grad_num = (Q_plus - Q_minus) / (2 * epsilon)
-            # For real param: dQ/dRe(ck) = 2*Re(grad_ck)
+            params_p = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_m = {k: v.copy() if isinstance(v, np.ndarray) else list(v) for k, v in params.items()}
+            params_p['ck'][idx] += epsilon; params_m['ck'][idx] -= epsilon
+            Qp, _, _ = cuda_kernel.compute(params_p, holder, norm=None)
+            Qm, _, _ = cuda_kernel.compute(params_m, holder, norm=None)
+            Q, grads, _ = cuda_kernel.compute(params, holder, norm=None)
+            grad_num = (Qp - Qm) / (2 * epsilon)
             grad_ana = 2 * grads['ck'][idx].real
 
         error = abs(grad_num - grad_ana)
@@ -365,17 +340,11 @@ if __name__ == "__main__":
     print("COMPLETE CUDA KERNEL TESTING SUITE")
     print("="*70)
 
-    # Test correctness
     correct = test_correctness()
 
     if correct:
-        # Test multi-dataset
-        multi_ok = test_multi_dataset()
-
-        # Test performance
+        test_multi_dataset()
         test_performance()
-
-        # Test gradients
         test_numerical_gradient()
 
     print("\n" + "="*70)

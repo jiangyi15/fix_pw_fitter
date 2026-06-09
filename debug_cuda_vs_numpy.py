@@ -44,12 +44,12 @@ def debug_forward_pass():
     print("\nComputing with NumPy...")
     Q_numpy, grads_numpy, P_numpy = numpy_kernel._compute(params, data, norm=None)
     
-    # Create CUDA kernel
+    # Create CUDA kernel and load data
     cuda_kernel = CUDAKernel(kernel_config)
-    cuda_kernel.load_data(data)
+    holder = cuda_kernel.load_data(data)
     
     print("\nComputing with CUDA...")
-    Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(params, norm=None)
+    Q_cuda, grads_cuda, P_cuda = cuda_kernel.compute(params, holder, norm=None)
     
     # Compare results step by step
     print("\n" + "="*70)
@@ -107,7 +107,8 @@ def debug_forward_pass():
     print(f"  n_gamma_rows: {kernel_config['matrix_gamma'].shape[0]}")
     print(f"  matrix_gamma: {kernel_config['matrix_gamma'].shape}")
     
-    cuda_kernel.free_data()
+    holder.free()
+    cuda_kernel.free()
     
     return abs(Q_numpy - Q_cuda) < 1e-6
 

@@ -610,13 +610,15 @@ class CUDAKernel:
             self.numpy_kernel = NumpyKernelCorrect(config)
 
     def load_data(self, data):
-        """Convenience: load data into a new GPUDataHolder and return it."""
-        holder = self.create_data_holder(data)
-        return holder
-
-    def create_data_holder(self, data):
-        """Create a GPUDataHolder and load data into it."""
-        from numpy_kernel import NumpyKernelCorrect
+        """Load a dataset into a new GPUDataHolder and return it.
+        
+        The returned GPUDataHolder owns all GPU memory for this dataset
+        and can be passed to compute() multiple times.
+        
+        Example::
+            data = kernel.load_data(data_dict)
+            Q, grads, P = kernel.compute(params, data)
+        """
         if not self.cuda_available:
             raise RuntimeError("CUDA not available")
         gc = self.gpu_config
@@ -624,12 +626,12 @@ class CUDAKernel:
         holder.load(data)
         return holder
 
-    def compute(self, data_holder, params, norm=None):
+    def compute(self, params, data_holder, norm=None):
         """Compute forward and backward pass for one dataset.
         
         Args:
-            data_holder: GPUDataHolder with loaded data.
             params: dict with 'ck', 'm0', 'g0', 'scalar'.
+            data_holder: GPUDataHolder with loaded data (from load_data()).
             norm: optional normalization factor.
         Returns:
             (Q, grads, P) tuple.
@@ -642,9 +644,7 @@ class CUDAKernel:
     def _get_fallback_data(self, data_holder):
         """When CUDA is unavailable, we need numpy data.  
            This helper is used by the compatibility path."""
-        # If we have an old-style GPUData, try to get raw data
         if hasattr(data_holder, 'data_loaded') and data_holder.data_loaded:
-            # We can't reconstruct numpy data from GPU arrays, so raise
             raise RuntimeError(
                 "Cannot compute: CUDA unavailable and no numpy fallback data. "
                 "Use CUDAKernel.compute_numpy() with explicit data dict."
