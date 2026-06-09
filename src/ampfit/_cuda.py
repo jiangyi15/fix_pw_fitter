@@ -430,8 +430,9 @@ class GPUDataHolder:
         self.n_momentum = 0
         self.data_loaded = False
 
-        # Input data buffer - set during load()
+        # Input data buffer - set during load() or attach_input_slice()
         self.inputs = None
+        self._slice_start = -1  # -1 means no slicing (load full)
 
         # Output / gradient arrays - set during load()
         for attr in ['Q_gpu', 'P_gpu',
@@ -539,7 +540,9 @@ class GPUDataHolder:
         print(f"✓ DataHolder loaded {self.n_events} events")
 
     def input_ptr(self, name):
-        """Get input pointer for a named field."""
+        """Get input pointer for a named field (with slice offset if set)."""
+        if self._slice_start >= 0:
+            return self.inputs.get_slice_ptr(name, self._slice_start, self._slice_end)
         return self.inputs.get_ptr(name)
 
     def alloc_intermediates(self, n_events):
@@ -594,12 +597,31 @@ class GPUDataHolder:
         self.grad_g0_sum_gpu = GPUArray(self.lib, (ng,), np.float64)
         self.data_loaded = True
 
+    def attach_input_slice(self, parent_buffer, start, end, n_mass, n_momentum):
+        """Attach to a slice of an external GPUDataBuffer (zero-copy).
+        
+        The parent_buffer owns the memory. This holder stores a reference
+        and uses input_ptr() to compute slice pointers during kernel launch.
+        """
+        self.inputs = parent_buffer
+        self._slice_start = start
+        self._slice_end = end
+        self.n_events = end - start
+        self.n_mass = n_mass
+        self.n_momentum = n_momentum
+
     def free(self):
-        """Free all GPU arrays owned by this holder."""
-        # Free input buffer
+        """Free all GPU arrays owned by this holder.
+        
+        NOTE: If attached via attach_input_slice(), the parent buffer is
+        NOT freed (it's owned externally). Only free() when load() was used.
+        """
+        # Free input buffer (skip if attached as slice)
         if self.inputs is not None:
-            self.inputs.free()
+            if self._slice_start < 0:
+                self.inputs.free()
             self.inputs = None
+        self._slice_start = -1
         
         # Free output/intermediate arrays
         for attr in ['Q_gpu', 'P_gpu',

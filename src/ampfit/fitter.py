@@ -219,14 +219,20 @@ class Fitter:
         self._data_np = None
         self._phsp_np = None
 
+        # Phsp batching (for phsp larger than GPU memory)
+        self._phsp_buffer = None   # GPUDataBuffer with all phsp input data
+        self._phsp_scratch = None  # GPUDataHolder with batch-sized intermediates
+        self._phsp_batch_size = 50000  # events per batch
+        self._phsp_n = 0               # total phsp events
+
         # Default physical params (used when not passed to get_nll)
         self.default_m0 = None
         self.default_g0 = None
         self.default_scalar = None
 
-        # Bound transforms and fixed scalar values
+        # Bound transforms and fixed slots
         self._bound_transforms = {}        # {flat_idx: BoundTransform}
-        self._fixed_scalars = {}           # {name: value} for fixed scalar params
+        self._fixed_slots = {}             # {slot_name: value}
 
     # ------------------------------------------------------------------
     # Constraint setup
@@ -291,11 +297,62 @@ class Fitter:
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.
         
+        Auto-batches if phsp is too large for GPU memory.
+        All input data stays on GPU permanently across get_nll calls.
+        
         Args:
             phsp: dict with same structure as data.
         """
+        from ampfit._cuda import GPUDataBuffer, GPUDataHolder
+
         self._phsp_np = phsp
-        self.phsp_holder = self.kernel.load_data(phsp)
+        n = phsp["mass"].shape[0]
+        self._phsp_n = n
+
+        # Estimate memory: ~36KB per event for intermediates + ~1.5KB for inputs
+        # VRAM budget: ~70% of 8GB ≈ 5.6GB usable
+        est_intermediates_mb = n * 36 / 1024  # MB for full intermediates
+        if est_intermediates_mb < 4000:  # fits comfortably in VRAM
+            self._phsp_buffer = None
+            self._phsp_scratch = None
+            self.phsp_holder = self.kernel.load_data(phsp)
+            return
+
+        # Too large for one batch → use batching with zero-copy slices
+        print(f"  Phsp too large for single batch ({est_intermediates_mb:.0f} MB), "
+              f"using batches of {self._phsp_batch_size}")
+
+        # Pre-load ALL input data into one contiguous GPU buffer
+        gc = self.kernel.gpu_config
+        lib = self.kernel.lib
+        ne = n
+        bkg = phsp.get("bkg", 0.0)
+        if np.isscalar(bkg):
+            bkg = np.full(ne, bkg, dtype=np.float64)
+        self._phsp_buffer = GPUDataBuffer(lib, [
+            ("mass",   ((ne, phsp["mass"].shape[1]), np.float64)),
+            ("q",      ((ne, phsp["q"].shape[1]), np.float64)),
+            ("angle",  ((phsp["angle"].size,), np.float64)),
+            ("frac",   ((ne,), np.float64)),
+            ("time",   ((ne,), np.float64)),
+            ("weight", ((ne,), np.float64)),
+            ("bkg",    ((ne,), np.float64)),
+        ])
+        self._phsp_buffer.set("mass", phsp["mass"])
+        self._phsp_buffer.set("q", phsp["q"])
+        self._phsp_buffer.set("angle", phsp["angle"].flatten().astype(np.float64))
+        self._phsp_buffer.set("frac", phsp["frac"].astype(np.float64))
+        self._phsp_buffer.set("time", phsp["time"].astype(np.float64))
+        self._phsp_buffer.set("weight", phsp["weight"].astype(np.float64))
+        self._phsp_buffer.set("bkg", bkg.astype(np.float64))
+        print(f"  Phsp data on GPU: {self._phsp_buffer.total_bytes/1024/1024:.0f} MB")
+
+        # Create scratch holder with batch-sized intermediates
+        self._phsp_scratch = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
+        self._phsp_scratch.alloc_intermediates(self._phsp_batch_size)
+
+        # Keep phsp_holder as None when batching
+        self.phsp_holder = None
 
     # ------------------------------------------------------------------
     # Bound constraints on parameters
@@ -360,11 +417,12 @@ class Fitter:
         return self._var_registry.n_flat
 
     def initial_values(self, seed=None):
-        """Random initial guess for all free variables (ck + scalar).
+        """Random initial guess for all free variables.
         
         Returns:
             array of shape (n_flat,) matching free_param_names() length.
         """
+        _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
     def free_param_names(self):
@@ -390,7 +448,8 @@ class Fitter:
         """Raise if data or phsp not set."""
         if self.data_holder is None:
             raise RuntimeError("Data not set. Call set_data() first.")
-        if self.phsp_holder is None:
+        phsp_ok = self.phsp_holder is not None or self._phsp_buffer is not None
+        if not phsp_ok:
             raise RuntimeError("Phase space not set. Call set_phsp() first.")
 
     # ------------------------------------------------------------------
@@ -427,6 +486,38 @@ class Fitter:
         denom = norm * (P + bkg * norm)
         return np.sum(weight * P / denom)
 
+    def _compute_norm_batched(self, params):
+        """Compute norm over ALL phsp events, batching if needed."""
+        if self._phsp_buffer is None:
+            # Single-batch: use phsp_holder directly
+            norm, grads, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
+            return float(norm), grads
+
+        # Batched mode: iterate over phsp buffer via zero-copy slices
+        total_norm = 0.0
+        total_grads = None
+        bs = self._phsp_batch_size
+        n_batches = (self._phsp_n + bs - 1) // bs
+        gc = self.kernel.gpu_config
+
+        for b in range(n_batches):
+            start = b * bs
+            end = min(start + bs, self._phsp_n)
+            self._phsp_scratch.attach_input_slice(
+                self._phsp_buffer, start, end,
+                self._phsp_np["mass"].shape[1] if self._phsp_np is not None else 0,
+                self._phsp_np["q"].shape[1] if self._phsp_np is not None else 0,
+            )
+            n_b, g_b, _ = self.kernel.compute(params, self._phsp_scratch, norm=None)
+            total_norm += float(n_b)
+            if total_grads is None:
+                total_grads = {k: v.copy() for k, v in g_b.items()}
+            else:
+                for k in g_b:
+                    total_grads[k] += g_b[k]
+
+        return total_norm, total_grads
+
     def get_nll_raw(self, params):
         """Compute NLL from full params dict (no constraint transformation).
         
@@ -439,11 +530,9 @@ class Fitter:
         """
         self._check_data_loaded()
 
-        # 1. Norm from phase space (computed without norm factor)
-        norm, norm_grads, _ = self.kernel.compute(
-            params, self.phsp_holder, norm=None
-        )
-        norm = float(norm)  # ensure Python float for CFFI
+        # 1. Norm from phase space (batched if needed)
+        norm, norm_grads = self._compute_norm_batched(params)
+        norm = float(norm)
 
         # 2. NLL from data (with norm)
         nll, grads, P = self.kernel.compute(
@@ -599,6 +688,12 @@ class Fitter:
             self.data_holder.free()
         if self.phsp_holder is not None:
             self.phsp_holder.free()
+        if self._phsp_scratch is not None:
+            self._phsp_scratch.free()
+            self._phsp_scratch = None
+        if self._phsp_buffer is not None:
+            self._phsp_buffer.free()
+            self._phsp_buffer = None
         self.kernel.free()
 
 
