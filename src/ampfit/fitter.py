@@ -510,10 +510,9 @@ class Fitter:
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
         
-        Reads physical (bounded) values from the 'value' section and
-        inverts bound transforms to get optimizer-space x.
-        The arctan-based BoundTransform is exactly bijective, so
-        the roundtrip is lossless.
+        Reads physical (bounded) values from the 'value' section,
+        reverses archive-style scale factors, and inverts bound
+        transforms to get optimizer-space x.
         
         Args:
             data: dict from save_params() JSON (keys 'value', 'error', ...).
@@ -529,6 +528,10 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
+                # Reverse archive-style scale on r-slots
+                for p, s in self._scale_params.items():
+                    if name == p + 'r' and s != 0:
+                        val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
