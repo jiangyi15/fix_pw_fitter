@@ -128,6 +128,10 @@ def main():
     parser.add_argument("--fit", action="store_true", help="Run BFGS minimization")
     parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
+    parser.add_argument("--plot", type=str, nargs='?', const='plots/',
+                        default=None, help="Plot distributions (optional: output dir)")
+    parser.add_argument("--plot-init", action="store_true",
+                        help="Also plot initial (pre-fit) distributions")
     args = parser.parse_args()
 
     # ==================================================================
@@ -237,6 +241,16 @@ def main():
             save_path = f"{prefix}_fit_results.json"
         fitter.save_params(result, save_path)
         print(f"  Results saved to {save_path}")
+
+        # Plot post-fit distributions
+        if args.plot:
+            fitter.plot(result, prefix=args.plot)
+            print(f"  Plots saved to {args.plot}")
+
+    # Plot initial (pre-fit) distributions if requested
+    if args.plot_init and args.plot:
+        fitter.plot(x0, prefix=os.path.join(args.plot, "initial"))
+        print(f"  Initial plots saved to {args.plot}/initial")
 
     # ==================================================================
     # 6. Summary

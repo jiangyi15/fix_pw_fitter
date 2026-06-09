@@ -34,7 +34,7 @@ data:
     phsp_weight: ["../create_data17/phsp_sig_time_weight.npy"]
     phsp_bg_value: ["../create_data17/phsp_sig_bg_model.npy"]
     phsp_l0_weight: ["../create_data17/phsp_sig_time_weight.npy"]
-    bg_frac: 0.914
+    purity: 0.914
     preprocessor: [default, strip]
     amp_model:
         flavour_tag_mix:
