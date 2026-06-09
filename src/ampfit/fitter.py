@@ -895,8 +895,8 @@ class Fitter:
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
-    def plot(self, x=None, params=None, n_bins=50, max_plots=16,
-             figsize=(15, 10), save=None, show=True):
+    def plot(self, x=None, params=None, n_bins=50, variables='mass+angles+time',
+             cols=4, figsize=(15, 10), save=None, show=True):
         """Plot data vs phsp distributions for mass, angle, and time.
         
         For each variable, shows two histograms:
@@ -907,12 +907,15 @@ class Fitter:
             x: flat variable vector for get_nll (or None if params given).
             params: full params dict (or None if x given).
             n_bins: number of histogram bins.
-            max_plots: max number of variable plots to show.
-            figsize: figure size.
+            variables: which to plot — 'mass', 'angles', 'time',
+                       'mass+angles', 'mass+angles+time', or 'all'.
+            cols: number of columns in the subplot grid.
+            figsize: figure size (width, height) — height is auto-scaled.
             save: path to save figure (None = don't save).
             show: whether to call plt.show().
         """
         import matplotlib.pyplot as plt
+        import os
         from ampfit.boundary import apply_bounds
 
         # Build params dict from x if needed
@@ -921,7 +924,6 @@ class Fitter:
                 raise ValueError("Provide x (flat vector) or params dict.")
             x_mapped = apply_bounds(x, self._bound_transforms)
             raw_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
-            # Merge fixed ck slot values (same logic as get_nll)
             pc_names = set(self.pc.free_param_names())
             f_ck_r = {}
             f_ck_i = {}
@@ -953,60 +955,90 @@ class Fitter:
         data_np = self._data_np
         phsp_np = self._phsp_np
         dw = data_np["weight"]
-        pw = phsp_np["weight"] * P_phsp  # model-weighted phsp
+        pw = phsp_np["weight"] * P_phsp
 
-        # Collect variables to plot
-        plot_vars = []
-
-        # Mass: each column of the mass array (use first max_plots/3)
-        mass_cols = min(data_np["mass"].shape[1], max(1, max_plots // 3))
-        for i in range(mass_cols):
-            plot_vars.append((f"mass[{i}]", data_np["mass"][:, i], phsp_np["mass"][:, i]))
-
-        # Angle: some columns (skip every 3 since angles are (n, 24, 3))
-        n_angle = data_np["angle"].shape[1]  # = 24
-        angle_cols = min(n_angle, max(1, max_plots // 3))
-        for i in range(angle_cols):
-            # Average over the 3 components for a simpler plot
-            da = data_np["angle"].reshape(len(P_data), -1, 3)[:, i, :].mean(axis=1)
-            pa = phsp_np["angle"].reshape(len(P_phsp), -1, 3)[:, i, :].mean(axis=1)
-            plot_vars.append((f"angle[{i}]", da, pa))
-
-        # Time
-        plot_vars.append(("time", data_np["time"], phsp_np["time"]))
-
-        # Limit number of plots
-        plot_vars = plot_vars[:max_plots]
-        n_cols = min(4, len(plot_vars))
-        n_rows = (len(plot_vars) + n_cols - 1) // n_cols
-
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
-                                 squeeze=False)
-        axes = axes.flatten()
-
-        for idx, (name, d, p) in enumerate(plot_vars):
-            ax = axes[idx]
+        def _make_hist(ax, label, d, p):
             lo = min(d.min(), p.min())
             hi = max(d.max(), p.max())
+            if hi - lo < 1e-12:
+                hi = lo + 1.0
             bins = np.linspace(lo, hi, n_bins + 1)
-
             ax.hist(d, bins=bins, weights=dw, alpha=0.6, label='data',
                     color='C0', density=True)
             ax.hist(p, bins=bins, weights=pw, alpha=0.6, label='phsp×P',
                     color='C1', density=True, histtype='step', linewidth=2)
-            ax.set_xlabel(name)
-            ax.set_ylabel('a.u.')
-            ax.legend(fontsize=8)
+            ax.set_xlabel(label, fontsize=7)
+            ax.tick_params(labelsize=6)
 
-        # Hide unused subplots
-        for idx in range(len(plot_vars), len(axes)):
-            axes[idx].set_visible(False)
+        plot_groups = variables.split('+')
 
-        plt.tight_layout()
-        if save:
-            plt.savefig(save, dpi=150, bbox_inches='tight')
-        if show:
-            plt.show()
+        # ---- Mass: all columns separately ----
+        if 'mass' in plot_groups or 'all' in plot_groups:
+            mass_cols = data_np["mass"].shape[1]
+            n_plots = mass_cols
+            n_rows = (n_plots + cols - 1) // cols
+            fig_m, axes_m = plt.subplots(n_rows, cols,
+                figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
+            for i in range(n_plots):
+                ax = axes_m.flatten()[i]
+                _make_hist(ax, f"mass[{i}]",
+                           data_np["mass"][:, i], phsp_np["mass"][:, i])
+            for i in range(n_plots, len(axes_m.flatten())):
+                axes_m.flatten()[i].set_visible(False)
+            plt.tight_layout()
+            if save:
+                base, ext = os.path.splitext(save)
+                plt.savefig(f"{base}_mass{ext}", dpi=150, bbox_inches='tight')
+            if show:
+                plt.show()
+            else:
+                plt.close(fig_m)
+
+        # ---- Angles: each position × each component separately ----
+        if 'angles' in plot_groups or 'all' in plot_groups:
+            ne_d = len(P_data)
+            ne_p = len(P_phsp)
+            n_pos = data_np["angle"].shape[1]  # = 24
+            n_comp = data_np["angle"].reshape(ne_d, -1, 3).shape[2]  # = 3
+            angle_vars = []
+            for pos in range(n_pos):
+                for comp in range(n_comp):
+                    angle_vars.append((
+                        f"angle[{pos},{comp}]",
+                        data_np["angle"].reshape(ne_d, -1, 3)[:, pos, comp],
+                        phsp_np["angle"].reshape(ne_p, -1, 3)[:, pos, comp],
+                    ))
+            n_plots = len(angle_vars)
+            n_rows = (n_plots + cols - 1) // cols
+            fig_a, axes_a = plt.subplots(n_rows, cols,
+                figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
+            for i, (label, d, p) in enumerate(angle_vars):
+                ax = axes_a.flatten()[i]
+                _make_hist(ax, label, d, p)
+            for i in range(n_plots, len(axes_a.flatten())):
+                axes_a.flatten()[i].set_visible(False)
+            plt.tight_layout()
+            if save:
+                base, ext = os.path.splitext(save)
+                plt.savefig(f"{base}_angles{ext}", dpi=150, bbox_inches='tight')
+            if show:
+                plt.show()
+            else:
+                plt.close(fig_a)
+
+        # ---- Time ----
+        if 'time' in plot_groups or 'all' in plot_groups:
+            fig_t, ax_t = plt.subplots(1, 1, figsize=(figsize[0], 3))
+            _make_hist(ax_t, "time", data_np["time"], phsp_np["time"])
+            ax_t.legend(fontsize=8)
+            plt.tight_layout()
+            if save:
+                base, ext = os.path.splitext(save)
+                plt.savefig(f"{base}_time{ext}", dpi=150, bbox_inches='tight')
+            if show:
+                plt.show()
+            else:
+                plt.close(fig_t)
 
     # ------------------------------------------------------------------
     # JSON export (matching archive/w_pw_cfit5_td6_fix29.py format)
