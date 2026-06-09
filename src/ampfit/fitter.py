@@ -801,6 +801,26 @@ class Fitter:
             nll, grad = self.get_nll(x)
             return nll, grad.astype(np.float64)
 
+        # Default callback: print NLL at each iteration
+        class IterTracker:
+            def __init__(self):
+                self.n = 0
+            def __call__(self, xk):
+                self.n += 1
+                nll, grad = nll_and_grad(xk)
+                gn = np.linalg.norm(grad)
+                print(f"  iter {self.n:4d}: NLL = {nll:.6f}, |grad| = {gn:.4e}")
+                return False
+
+        tracker = IterTracker()
+        user_cb = callback
+        if user_cb is None:
+            combined_cb = tracker
+        else:
+            def combined_cb(xk):
+                tracker(xk)
+                user_cb(xk)
+
         opts = {'maxiter': maxiter, 'gtol': gtol, 'disp': disp}
         if method in ('L-BFGS-B', 'L-BFGS-B'):
             opts['ftol'] = ftol
@@ -808,7 +828,7 @@ class Fitter:
             nll_and_grad, x0, jac=True,
             method=method,
             options=opts,
-            callback=callback,
+            callback=combined_cb,
             **kwargs
         )
         return result
