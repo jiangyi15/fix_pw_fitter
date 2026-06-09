@@ -25,6 +25,148 @@ Usage:
 import numpy as np
 
 
+class VariableRegistry:
+    """Maps named variables to flat vector indices and kernel slots."""
+    
+    def __init__(self):
+        self._entries = []  # list of (name, kind, target)
+        self._name_to_entry = {}  # name -> entry
+    
+    def add_complex(self, name, target):
+        """Add a complex variable (2 flat slots: name_r, name_i)."""
+        entry = {'name': name, 'kind': 'complex', 'target': target}
+        self._entries.append(entry)
+        self._name_to_entry[name] = entry
+    
+    def add_real(self, name, target):
+        """Add a real variable (1 flat slot: name)."""
+        entry = {'name': name, 'kind': 'real', 'target': target}
+        self._entries.append(entry)
+        self._name_to_entry[name] = entry
+    
+    @property
+    def names(self):
+        return [e['name'] for e in self._entries]
+    
+    @property
+    def n_flat(self):
+        """Total number of real values in the flat vector."""
+        return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
+    
+    def flat_index(self, name):
+        """Return (start, end) indices in the flat vector for a named variable.
+        
+        For real: returns (i, i+1)
+        For complex: returns (i, i+2) where i = r, i+1 = imag
+        """
+        idx = 0
+        for e in self._entries:
+            if e['name'] == name:
+                end = idx + (2 if e['kind'] == 'complex' else 1)
+                return (idx, end)
+            idx += 2 if e['kind'] == 'complex' else 1
+        raise KeyError(f"Unknown variable: {name}")
+    
+    def build_initial(self, seed=None):
+        """Build initial flat vector with random values."""
+        import numpy as np
+        if seed is not None:
+            np.random.seed(seed)
+        x = np.empty(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r = np.random.uniform(0.5, 2.0)
+                theta = np.random.uniform(-np.pi, np.pi)
+                x[idx] = r
+                x[idx + 1] = theta
+                idx += 2
+            else:
+                x[idx] = np.random.uniform(-0.5, 0.5)
+                idx += 1
+        return x
+    
+    def extract_complex_dict(self, x):
+        """Extract {name: complex} for all complex variables from flat x."""
+        result = {}
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                result[e['name']] = r * np.exp(1j * theta)
+                idx += 2
+            else:
+                idx += 1
+        return result
+    
+    def extract_real_dict(self, x):
+        """Extract {name: value} for all real variables from flat x."""
+        result = {}
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                result[e['name']] = r * np.exp(1j * theta)
+                idx += 2
+            else:
+                result[e['name']] = x[idx]
+                idx += 1
+        return result
+    
+    def extract_by_target(self, x, target_type):
+        """Extract flat sub-vector for all entries with matching target type.
+        
+        Args:
+            x: flat vector with all variables
+            target_type: string like 'ck', 'scalar', 'm0', 'g0'
+        
+        Returns:
+            flat sub-vector with only matching entries (in order they appear)
+        """
+        result = []
+        idx = 0
+        for e in self._entries:
+            if e['target'][0] == target_type:
+                if e['kind'] == 'complex':
+                    result.extend([x[idx], x[idx + 1]])
+                    idx += 2
+                else:
+                    result.append(x[idx])
+                    idx += 1
+            else:
+                idx += 2 if e['kind'] == 'complex' else 1
+        return np.array(result) if result else np.array([])
+    
+    def backprop_grad(self, x, grad_dict):
+        """Build flat gradient from dict of {name: complex_grad} or {name: real_grad}.
+        
+        For complex vars: grad_dict[name] = dQ/d(var) (complex Wirtinger derivative)
+        The real gradient w.r.t. r, theta is:
+          dQ/dr = 2 * Re(dQ/d(var) * exp(j*theta))
+          dQ/dtheta = 2 * Re(dQ/d(var) * j * r * exp(j*theta))
+        """
+        import numpy as np
+        flat_grad = np.zeros(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            name = e['name']
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                grad_complex = grad_dict.get(name, 0j)
+                # Wirtinger: dQ/dr = 2*Re(grad * exp(j*θ)), dQ/dθ = 2*Re(grad * j * r * exp(j*θ))
+                exp_theta = np.exp(1j * theta)
+                flat_grad[idx] = 2.0 * np.real(grad_complex * exp_theta)
+                flat_grad[idx + 1] = 2.0 * np.real(grad_complex * 1j * r * exp_theta)
+                idx += 2
+            else:
+                flat_grad[idx] = grad_dict.get(name, 0.0)
+                idx += 1
+        return flat_grad
+
+
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
@@ -101,6 +243,7 @@ class Fitter:
             same_params=self._same_params,
             scale_params=self._scale_params,
         )
+        self._rebuild_var_registry()
 
     @property
     def pc(self):
@@ -151,25 +294,17 @@ class Fitter:
         from ampfit.boundary import BoundTransform
         bt = BoundTransform(lo, hi)
 
-        # Check free ck parameters
-        if self._pc is not None and name in self.pc.free_param_names():
-            idx = self.pc.free_param_names().index(name)
-            self._bound_transforms[2 * idx] = bt      # magnitude r
-            self._bound_transforms[2 * idx + 1] = bt   # phase theta
-            return
-
-        # Check time parameters
-        if name in self._free_time_params:
-            idx = self._free_time_params.index(name)
-            flat_idx = 2 * self.pc.n_free_vars + idx
-            self._bound_transforms[flat_idx] = bt
-            return
-
-        raise ValueError(
-            f"Unknown parameter '{name}'. "
-            f"Free ck params: {self.pc.free_param_names()[:3]}... "
-            f"Free time params: {self._free_time_params}"
-        )
+        # Find the variable in the registry
+        try:
+            si, ei = self._var_registry.flat_index(name)
+            # For complex vars, apply bounds to both r and theta
+            for idx in range(si, ei):
+                self._bound_transforms[idx] = bt
+        except KeyError:
+            raise ValueError(
+                f"Unknown parameter '{name}'. "
+                f"Free params: {self._var_registry.names[:3]}... "
+            )
 
     def set_free_time_params(self, names, defaults=None):
         """Set which time parameters are free (fit variables).
@@ -182,10 +317,21 @@ class Fitter:
         self._free_time_params = list(names)
         if defaults:
             self._fixed_time_params.update(defaults)
+        self._rebuild_var_registry()
+
+    def _rebuild_var_registry(self):
+        """Build or rebuild the VariableRegistry after constraint changes."""
+        self._var_registry = VariableRegistry()
+        # Add free ck parameters (complex)
+        for name in self.pc.free_param_names():
+            self._var_registry.add_complex(name, ('ck', name))
+        # Add free time parameters (real)
+        for name in self._free_time_params:
+            self._var_registry.add_real(name, ('scalar', name))
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
-        return 2 * self.pc.n_free_vars + len(self._free_time_params)
+        return self._var_registry.n_flat
 
     def initial_values(self, seed=None):
         """Random initial guess including both ck and time variables.
@@ -194,21 +340,24 @@ class Fitter:
             array of shape (n_flat_vars,) where n_flat_vars =
             2 * n_free_vars + n_free_time_params.
         """
-        x = self.pc.initial_values(seed=seed)
-        # Append free time parameters
+        # Start with registry-generated random values
+        x = self._var_registry.build_initial(seed=seed)
+        
+        # Override time parameters with their fixed default values
         for name in self._free_time_params:
+            si, ei = self._var_registry.flat_index(name)
             val = self._fixed_time_params.get(name, 0.0)
-            # Convert to unbounded via inverse transform
-            if 2 * self.pc.n_free_vars + self._free_time_params.index(name) in self._bound_transforms:
-                bt = self._bound_transforms[2 * self.pc.n_free_vars + self._free_time_params.index(name)]
+            # Convert to unbounded via inverse transform if bounds are set
+            if si in self._bound_transforms:
+                bt = self._bound_transforms[si]
                 val = bt.inverse(val)
-            x = np.append(x, val)
+            x[si] = val
+        
         return x
 
     def free_param_names(self):
         """Names of free parameters (ck vars + time params)."""
-        ck_names = self.pc.free_param_names()
-        return ck_names + self._free_time_params
+        return self._var_registry.names
 
     def set_default_params(self, m0=None, g0=None, scalar=None):
         """Set default physical parameters (used when not passed to get_nll)."""
@@ -304,9 +453,8 @@ class Fitter:
     def get_nll(self, x, m0=None, g0=None):
         """Compute NLL and gradient w.r.t. the flat variable vector.
         
-        The flat vector x contains:
-            [r0, θ0, r1, θ1, ... , free_time_param_0, ...]
-        =   [ck_vars (2 * n_free_vars) | free_time_params (n_free_time)]
+        The flat vector x contains all free variables tracked by the registry:
+            [ck_var0_r, ck_var0_theta, ck_var1_r, ck_var1_theta, ..., time_param0, ...]
         
         Bound transforms are applied automatically before calling the kernel,
         and the gradient is corrected via the chain rule.
@@ -323,9 +471,9 @@ class Fitter:
         # 1. Apply bound transforms
         x_mapped = apply_bounds(x, self._bound_transforms)
 
-        # 2. Split into ck vars and time params
-        n_ck_vars = 2 * self.pc.n_free_vars
-        x_ck = x_mapped[:n_ck_vars]
+        # 2. Extract ck vars for ParameterConstraint.build_ck
+        # The registry stores ck vars in the same order as pc.free_param_names()
+        x_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
 
         # 3. Build scalar from defaults + free time params
         if len(self._free_time_params) == 0:
@@ -338,9 +486,11 @@ class Fitter:
                 scalar_list = list(self.default_scalar)
             else:
                 scalar_list = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
-            for i, name in enumerate(self._free_time_params):
+            # Extract time params from x using registry
+            scalar_dict = self._var_registry.extract_real_dict(x_mapped)
+            for name in self._free_time_params:
                 idx = scalar_names.index(name)
-                scalar_list[idx] = x_mapped[n_ck_vars + i]
+                scalar_list[idx] = scalar_dict[name]
 
         # 4. Build ck + params
         ck = self.pc.build_ck(x_ck)
@@ -349,18 +499,22 @@ class Fitter:
         # 5. Compute NLL with norm
         nll, total_grads = self.get_nll_raw(params)
 
-        # 6. Backprop ck gradient through pc
+        # 6. Build flat gradient: ck part (via pc jacobian) + time part
+        # total_grads["ck"] has 448 elements (partial waves); pc.backprop_grad
+        # maps them to 76 named ck variables in [r0, θ0, ...] format via the
+        # combination-product Jacobian: d(ck[i])/d(variable_k).
         grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
 
-        # 7. Build flat gradient: ck part + free time part
+        # Scalar gradients for free time params
         scalar_grad = np.array(total_grads["scalar"])
-        # scalar order: [gamma, delta_gamma, delta_m, A_prod, poqr, poqi]
         scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
         grad_time = np.array([scalar_grad[scalar_names.index(n)]
                               for n in self._free_time_params])
+
+        # Concatenate into full flat gradient
         grad_flat = np.concatenate([grad_ck, grad_time])
 
-        # 8. Apply bound gradient correction: dNLL/dx = dNLL/dy * dy/dx
+        # 7. Apply bound gradient correction: dNLL/dx = dNLL/dy * dy/dx
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
 
         return nll, grad_flat
