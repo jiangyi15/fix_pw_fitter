@@ -198,9 +198,17 @@ class CUDALibrary:
         if err != 0:
             raise RuntimeError(f"CUDA memset failed: {err}")
 
+    def ptr_offset(self, ptr, byte_offset):
+        """Return a void* at byte_offset from ptr (zero-copy slicing)."""
+        return ffi.cast("void*", ffi.cast("char*", ptr) + byte_offset)
+
 
 class GPUArray:
-    """GPU array with automatic memory management"""
+    """GPU array with automatic memory management.
+    
+    Can own its memory (default) or wrap an externally-allocated pointer
+    (created via from_ptr()). External pointers are NOT freed on free().
+    """
 
     def __init__(self, lib, shape, dtype=np.float64):
         self.lib = lib
@@ -208,6 +216,21 @@ class GPUArray:
         self.dtype = dtype
         self.nbytes = int(np.prod(self.shape)) * np.dtype(dtype).itemsize
         self.ptr = lib.alloc(self.nbytes)
+        self._external = False
+
+    @classmethod
+    def from_ptr(cls, lib, ptr, shape, dtype=np.float64):
+        """Create GPUArray wrapping an existing pointer (no ownership)."""
+        shape = shape if isinstance(shape, tuple) else (shape,)
+        nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+        arr = cls.__new__(cls)
+        arr.lib = lib
+        arr.shape = shape
+        arr.dtype = dtype
+        arr.nbytes = nbytes
+        arr.ptr = ptr
+        arr._external = True
+        return arr
 
     def set(self, data):
         if data.shape != self.shape:
@@ -224,7 +247,7 @@ class GPUArray:
         self.lib.memset(self.ptr, 0, self.nbytes)
 
     def free(self):
-        if self.ptr is not None:
+        if self.ptr is not None and not self._external:
             self.lib.free(self.ptr)
             self.ptr = None
 
