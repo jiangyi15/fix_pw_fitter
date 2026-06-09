@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ampfit"
+version = "0.1.0"
+description = "Amplitude analysis fitting framework with NumPy and CUDA kernels"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "cffi",
+]
+dynamic = []
+
+[project.optional-dependencies]
+cuda = [
+    "cffi",
+]
+dev = [
+    "pytest",
+    "pytest-xdist",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ampfit*"]
+
+[tool.setuptools.package-data]
+ampfit = ["cuda/kernels.cu"]
