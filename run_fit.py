@@ -17,7 +17,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ampfit import Config, Fitter, ParameterConstraint
-from ampfit._cuda import GPUArray
+from ampfit._cuda import GPUArray, GPUDataBuffer
 
 
 def build_constraints(all_comb):
@@ -171,11 +171,11 @@ def compute_norm_batched(fitter, phsp_np, batch_size=50000):
 
 
 class PhspManager:
-    """Holds ALL phsp input data on GPU permanently.
+    """Holds ALL phsp input data in one contiguous GPU buffer.
     
-    Creates one scratch GPUDataHolder with batch-sized intermediate arrays.
-    For each batch, attaches slice views of the big arrays to the scratch holder.
-    No data transfer between NLL calls — all phsp data stays on GPU.
+    One GPUDataBuffer for all phsp input fields.
+    One scratch GPUDataHolder with batch-sized intermediates.
+    Zero data transfer between NLL calls — all phsp data stays on GPU.
     """
 
     def __init__(self, fitter, npz_data, batch_size=50000):
@@ -184,27 +184,35 @@ class PhspManager:
         self.gc = fitter.kernel.gpu_config
         self.batch_size = batch_size
         self.n_phsp = npz_data["mass"].shape[0]
-
-        # Pre-load ALL phsp input data onto GPU (permanent)
-        print("  Loading phsp data to GPU...", end=" ", flush=True)
-        self._mass_all = GPUArray(self.lib, npz_data["mass"].shape); self._mass_all.set(npz_data["mass"])
-        self._q_all = GPUArray(self.lib, npz_data["q"].shape); self._q_all.set(npz_data["q"])
         n_events = self.n_phsp
-        n_angle = npz_data["angle"].shape[1]
-        n_comp = npz_data["angle"].shape[2]
-        self._angle_all = GPUArray(self.lib, (n_events, n_angle, n_comp)); self._angle_all.set(npz_data["angle"])
-        self._time_all = GPUArray(self.lib, (n_events,)); self._time_all.set(npz_data["time"].astype(np.float64))
-        self._frac_all = GPUArray(self.lib, (n_events,)); self._frac_all.set(npz_data["frac"].astype(np.float64))
-        self._weight_all = GPUArray(self.lib, (n_events,)); self._weight_all.set(npz_data["weight"].astype(np.float64))
+
+        # Pre-load ALL phsp input data in ONE contiguous GPU buffer
+        print("  Loading phsp data to GPU...", end=" ", flush=True)
+        self.n_mass = npz_data["mass"].shape[1]
+        self.n_momentum = npz_data["q"].shape[1]
         bkg = npz_data["bkg"]
         if np.isscalar(bkg):
             bkg = np.full(n_events, bkg, dtype=np.float64)
-        self._bkg_all = GPUArray(self.lib, (n_events,)); self._bkg_all.set(bkg.astype(np.float64))
-        self._n_mass = npz_data["mass"].shape[1]
-        self._n_momentum = npz_data["q"].shape[1]
-        print(f"done ({self.n_phsp:,} events)")
 
-        # Create ONE scratch holder with batch-sized intermediates
+        self.data = GPUDataBuffer(self.lib, [
+            ("mass",   ((n_events, self.n_mass), np.float64)),
+            ("q",      ((n_events, self.n_momentum), np.float64)),
+            ("angle",  ((npz_data["angle"].size,), np.float64)),
+            ("frac",   ((n_events,), np.float64)),
+            ("time",   ((n_events,), np.float64)),
+            ("weight", ((n_events,), np.float64)),
+            ("bkg",    ((n_events,), np.float64)),
+        ])
+        self.data.set("mass", npz_data["mass"])
+        self.data.set("q", npz_data["q"])
+        self.data.set("angle", npz_data["angle"].flatten().astype(np.float64))
+        self.data.set("frac", npz_data["frac"].astype(np.float64))
+        self.data.set("time", npz_data["time"].astype(np.float64))
+        self.data.set("weight", npz_data["weight"].astype(np.float64))
+        self.data.set("bkg", bkg.astype(np.float64))
+        print(f"done ({self.n_phsp:,} events, {self.data.total_bytes/1024/1024:.1f} MB)")
+
+        # Create ONE scratch holder with batch-sized intermediate arrays
         print(f"  Allocating scratch buffers (batch={batch_size})...", end=" ", flush=True)
         from ampfit._cuda import GPUDataHolder
         self._scratch = GPUDataHolder(self.lib, self.gc.n_wave,
@@ -212,17 +220,8 @@ class PhspManager:
         self._scratch.alloc_intermediates(batch_size)
         print("done")
 
-    def _slice_ptr(self, gpu_arr, start, end):
-        """Create a GPUArray view into a slice of a larger array (zero copy)."""
-        elem_size = np.dtype(gpu_arr.dtype).itemsize
-        row_size = int(np.prod(gpu_arr.shape[1:])) if len(gpu_arr.shape) > 1 else 1
-        byte_offset = start * row_size * elem_size
-        slice_shape = (end - start,) + gpu_arr.shape[1:]
-        slice_ptr = self.lib.ptr_offset(gpu_arr.ptr, byte_offset)
-        return GPUArray.from_ptr(self.lib, slice_ptr, slice_shape, gpu_arr.dtype)
-
     def compute_norm(self, params):
-        """Compute norm over ALL phsp events. No data transfer."""
+        """Compute norm over ALL phsp events. Batch via zero-copy slices."""
         batch_size = self.batch_size
         total_norm = 0.0
         total_grad_ck = None
@@ -231,20 +230,10 @@ class PhspManager:
         for batch_idx in range(n_batches):
             start = batch_idx * batch_size
             end = min(start + batch_size, self.n_phsp)
-            batch_ne = end - start
 
-            # Create slice views into big arrays (zero copy)
-            slice_data = {
-                "mass":   self._slice_ptr(self._mass_all, start, end),
-                "q":      self._slice_ptr(self._q_all, start, end),
-                "angle":  self._slice_ptr(self._angle_all, start, end),
-                "frac":   self._slice_ptr(self._frac_all, start, end),
-                "time":   self._slice_ptr(self._time_all, start, end),
-                "weight": self._slice_ptr(self._weight_all, start, end),
-                "bkg":    self._slice_ptr(self._bkg_all, start, end),
-            }
-            # Attach to scratch holder (just sets pointers, no alloc/free/copy)
-            self._scratch.attach_input(slice_data, self._n_mass, self._n_momentum)
+            # Zero-copy: attach slices to scratch holder
+            self._scratch.attach_input_slice(
+                self.data, start, end, self.n_mass, self.n_momentum)
 
             n_batch, g_batch, _ = self.fitter.kernel.compute(
                 params, self._scratch, norm=None)
@@ -261,13 +250,7 @@ class PhspManager:
         return total_norm, total_grad_ck
 
     def free(self):
-        self._mass_all.free()
-        self._q_all.free()
-        self._angle_all.free()
-        self._time_all.free()
-        self._frac_all.free()
-        self._weight_all.free()
-        self._bkg_all.free()
+        self.data.free()
         if self._scratch is not None:
             self._scratch.free()
 

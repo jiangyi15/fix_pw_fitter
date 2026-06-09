@@ -252,6 +252,96 @@ class GPUArray:
             self.ptr = None
 
 
+class GPUDataBuffer:
+    """Contiguous GPU buffer holding multiple named fields in ONE allocation.
+    
+    Each field is accessed by name with automatic pointer-offset calculation.
+    Supports zero-copy slicing for batch processing via slice_ptr().
+    Frees ALL memory with a single cudaFree call.
+    
+    Usage:
+        buf = GPUDataBuffer(lib, {
+            "mass":   ((n, 48), np.float64),
+            "q":      ((n, 72), np.float64),
+            "angle":  ((n, 72), np.float64),
+            "time":   ((n,),   np.float64),
+            "frac":   ((n,),   np.float64),
+            "weight": ((n,),   np.float64),
+            "bkg":    ((n,),   np.float64),
+        })
+        buf.set("mass", mass_array)        # copy to correct offset
+        ptr = buf.get_ptr("mass")          # pointer for kernel launch
+        p = buf.get_slice_ptr("mass", 0, batch_size)  # zero-copy slice
+        buf.free()                         # single cudaFree
+    """
+
+    def __init__(self, lib, layout):
+        """
+        Args:
+            lib: CUDALibrary instance.
+            layout: OrderedDict or list of (name, (shape, dtype)) tuples,
+                    or dict of {name: (shape, dtype)}.
+                    Order matters for computing offsets.
+        """
+        self.lib = lib
+        self._fields = {}  # name -> {offset, shape, dtype, nbytes, row_size}
+        self._names = []   # ordered field names
+
+        offset = 0
+        items = layout.items() if hasattr(layout, 'items') else layout
+        for name, (shape, dtype) in items:
+            self._names.append(name)
+            shape = shape if isinstance(shape, tuple) else (shape,)
+            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+            row_size = int(np.prod(shape[1:])) if len(shape) > 1 else 1
+            self._fields[name] = {
+                "offset": offset, "shape": shape, "dtype": dtype,
+                "nbytes": nbytes, "row_size": row_size,
+            }
+            offset += nbytes
+
+        self.total_bytes = offset
+        self.ptr = lib.alloc(self.total_bytes) if offset > 0 else None
+
+    def get_ptr(self, name):
+        """Get base CUDA pointer for a named field."""
+        info = self._fields[name]
+        return self.lib.ptr_offset(self.ptr, info["offset"])
+
+    def get_slice_ptr(self, name, start, end):
+        """Get pointer to slice [start:end] along first dimension (zero-copy)."""
+        info = self._fields[name]
+        elem_size = np.dtype(info["dtype"]).itemsize
+        byte_off = info["offset"] + start * info["row_size"] * elem_size
+        return self.lib.ptr_offset(self.ptr, byte_off)
+
+    def set(self, name, data):
+        """Copy numpy data to a named field."""
+        info = self._fields[name]
+        data = np.ascontiguousarray(data, dtype=info["dtype"])
+        if data.nbytes != info["nbytes"]:
+            raise ValueError(f"{name}: data {data.shape} vs expected {info['shape']}")
+        self.lib.copy_to_device(self.get_ptr(name), data, info["nbytes"])
+
+    def get(self, name):
+        """Read a named field back to host numpy array."""
+        info = self._fields[name]
+        data = np.empty(info["shape"], dtype=info["dtype"])
+        self.lib.copy_to_host(data, self.get_ptr(name), info["nbytes"])
+        return data
+
+    def zero(self):
+        """Zero entire buffer."""
+        if self.ptr is not None:
+            self.lib.memset(self.ptr, 0, self.total_bytes)
+
+    def free(self):
+        """Free entire buffer — single cudaFree call."""
+        if self.ptr is not None:
+            self.lib.free(self.ptr)
+            self.ptr = None
+
+
 class GPUConfig:
     """GPU-resident configuration arrays (indices, tables, matrices).
     
@@ -340,14 +430,10 @@ class GPUDataHolder:
         self.n_momentum = 0
         self.data_loaded = False
 
-        # Data arrays - set during load()
-        self.mass_gpu = None
-        self.momentum_gpu = None
-        self.angle_gpu = None
-        self.frac_gpu = None
-        self.time_gpu = None
-        self.weight_gpu = None
-        self.bkg_gpu = None
+        # Input data buffer - set during load() or attach_input_slice()
+        self.inputs = None
+        self._slice_start = None
+        self._slice_end = None
 
         # Output / gradient arrays - set during load()
         for attr in ['Q_gpu', 'P_gpu',
@@ -382,19 +468,26 @@ class GPUDataHolder:
 
         ne = self.n_events
 
-        # ---- data arrays ----
-        self.mass_gpu = GPUArray(self.lib, data["mass"].shape, np.float64); self.mass_gpu.set(data["mass"])
-        self.momentum_gpu = GPUArray(self.lib, data["q"].shape, np.float64); self.momentum_gpu.set(data["q"])
-        self.angle_gpu = GPUArray(self.lib, (data["angle"].size,), np.float64)
-        self.angle_gpu.set(data["angle"].flatten().astype(np.float64))
-        self.frac_gpu = GPUArray(self.lib, (ne,), np.float64); self.frac_gpu.set(data["frac"])
-        self.time_gpu = GPUArray(self.lib, (ne,), np.float64); self.time_gpu.set(data["time"])
-        self.weight_gpu = GPUArray(self.lib, (ne,), np.float64); self.weight_gpu.set(data["weight"])
-
+        # ---- input data buffer ----
+        self.inputs = GPUDataBuffer(self.lib, [
+            ("mass",   ((ne, self.n_mass), np.float64)),
+            ("q",      ((ne, self.n_momentum), np.float64)),
+            ("angle",  ((data["angle"].size,), np.float64)),
+            ("frac",   ((ne,), np.float64)),
+            ("time",   ((ne,), np.float64)),
+            ("weight", ((ne,), np.float64)),
+            ("bkg",    ((ne,), np.float64)),
+        ])
+        self.inputs.set("mass", data["mass"])
+        self.inputs.set("q", data["q"])
+        self.inputs.set("angle", data["angle"].flatten().astype(np.float64))
+        self.inputs.set("frac", data["frac"])
+        self.inputs.set("time", data["time"])
+        self.inputs.set("weight", data["weight"])
         bkg = data.get("bkg", 0.0)
         if np.isscalar(bkg):
             bkg = np.full(ne, bkg, dtype=np.float64)
-        self.bkg_gpu = GPUArray(self.lib, (ne,), np.float64); self.bkg_gpu.set(bkg)
+        self.inputs.set("bkg", bkg)
 
         # ---- forward output arrays ----
         self.Q_gpu = GPUArray(self.lib, (ne,), np.float64)
@@ -447,10 +540,93 @@ class GPUDataHolder:
         self.data_loaded = True
         print(f"✓ DataHolder loaded {self.n_events} events")
 
+    def input_ptr(self, name):
+        """Get input pointer, respecting slice offset if set."""
+        if hasattr(self, '_slice_start') and self._slice_start is not None:
+            return self.inputs.get_slice_ptr(name, self._slice_start, self._slice_end)
+        return self.inputs.get_ptr(name)
+
+    def alloc_intermediates(self, n_events):
+        """Allocate intermediate/output arrays for n_events.
+        
+        Used by PhspManager to create a scratch holder without loading
+        input data (inputs are attached via attach_input_slice).
+        """
+        self.n_events = n_events
+        ne = n_events
+        nw = self.n_wave
+        nb = self.n_unique_bw
+        ng = self.n_gamma_rows
+
+        self.Q_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.P_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.pap_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.pap_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.pam_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.pam_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.gp_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.gp_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.gm_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.gm_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.poq_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.poq_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.bw_p_real_gpu = GPUArray(self.lib, (ne, nw), np.float64)
+        self.bw_p_imag_gpu = GPUArray(self.lib, (ne, nw), np.float64)
+        self.common_amp_factor_real_gpu = GPUArray(self.lib, (ne, nw), np.float64)
+        self.common_amp_factor_imag_gpu = GPUArray(self.lib, (ne, nw), np.float64)
+        self.ap_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.ap_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.am_real_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.am_imag_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.dQ_dP_gpu = GPUArray(self.lib, (ne,), np.float64)
+        self.bw_dom_real_gpu = GPUArray(self.lib, (ne, nb), np.float64)
+        self.bw_dom_imag_gpu = GPUArray(self.lib, (ne, nb), np.float64)
+        self.g_interp_real_gpu = GPUArray(self.lib, (ne, ng), np.float64)
+        self.g_interp_imag_gpu = GPUArray(self.lib, (ne, ng), np.float64)
+        self.g_bw_real_gpu = GPUArray(self.lib, (ne, nb), np.float64)
+        self.g_bw_imag_gpu = GPUArray(self.lib, (ne, nb), np.float64)
+        self.grad_ck_real_partial = GPUArray(self.lib, (ne, nw), np.float64)
+        self.grad_ck_imag_partial = GPUArray(self.lib, (ne, nw), np.float64)
+        self.grad_m0_partial = GPUArray(self.lib, (ne, nb), np.float64)
+        self.grad_g0_partial = GPUArray(self.lib, (ne, ng), np.float64)
+        self.grad_Gamma_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.grad_DeltaGamma_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.grad_DeltaM_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.grad_Ap_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.grad_poq_rho_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.grad_pop_phi_partial = GPUArray(self.lib, (ne,), np.float64)
+        self.Q_sum_gpu = GPUArray(self.lib, (1,), np.float64)
+        self.grad_ck_real_sum_gpu = GPUArray(self.lib, (nw,), np.float64)
+        self.grad_ck_imag_sum_gpu = GPUArray(self.lib, (nw,), np.float64)
+        self.grad_m0_sum_gpu = GPUArray(self.lib, (nb,), np.float64)
+        self.grad_g0_sum_gpu = GPUArray(self.lib, (ng,), np.float64)
+        self.data_loaded = True
+
+    def attach_input_slice(self, parent_buffer, start, end, n_mass, n_momentum):
+        """Attach to a slice of an external GPUDataBuffer (zero-copy)."""
+        self.inputs = parent_buffer
+        self._slice_start = start
+        self._slice_end = end
+        self.n_events = end - start
+        self.n_mass = n_mass
+        self.n_momentum = n_momentum
+
     def free(self):
-        """Free all GPU arrays owned by this holder."""
-        for attr in ['mass_gpu', 'momentum_gpu', 'angle_gpu', 'frac_gpu', 'time_gpu',
-                     'weight_gpu', 'bkg_gpu', 'Q_gpu', 'P_gpu',
+        """Free all GPU arrays owned by this holder.
+        
+        NOTE: If attached via attach_input_slice(), the parent buffer is NOT
+        freed (it's owned by the PhspManager). Only free() when load() was used.
+        """
+        # Free input buffer
+        if self.inputs is not None:
+            if not hasattr(self, '_slice_start') or self._slice_start is None:
+                self.inputs.free()
+            self.inputs = None
+        self._slice_start = None
+        self._slice_end = None
+        
+        # Free output/intermediate arrays
+        for attr in ['Q_gpu', 'P_gpu',
                      'pap_real_gpu', 'pap_imag_gpu', 'pam_real_gpu', 'pam_imag_gpu',
                      'gp_real_gpu', 'gp_imag_gpu', 'gm_real_gpu', 'gm_imag_gpu',
                      'poq_real_gpu', 'poq_imag_gpu', 'bw_p_real_gpu', 'bw_p_imag_gpu',
@@ -659,7 +835,7 @@ class CUDAKernel:
 
         # ---- launch forward (kernel 1: g_bw computation) ----
         lib.lib.launch_compute_g_bw(
-            dh.mass_gpu.ptr, g0_gpu.ptr,
+            dh.input_ptr("mass"), g0_gpu.ptr,
             gc.g0_index_gpu.ptr, gc.g0_mass_index_gpu.ptr,
             gc.matrix_gamma_gpu.ptr,
             gc.gamma_table_real_gpu.ptr, gc.gamma_table_imag_gpu.ptr,
@@ -672,8 +848,8 @@ class CUDAKernel:
 
         # ---- launch forward (kernel 2: main computation) ----
         lib.lib.launch_compute_main(
-            dh.mass_gpu.ptr, dh.momentum_gpu.ptr, dh.angle_gpu.ptr,
-            dh.frac_gpu.ptr, dh.time_gpu.ptr, dh.weight_gpu.ptr, dh.bkg_gpu.ptr,
+            dh.input_ptr("mass"), dh.input_ptr("q"), dh.input_ptr("angle"),
+            dh.input_ptr("frac"), dh.input_ptr("time"), dh.input_ptr("weight"), dh.input_ptr("bkg"),
             gc.m0_index_gpu.ptr, gc.fl_type_gpu.ptr,
             gc.mass_index_gpu.ptr, gc.fl_q_index_gpu.ptr,
             gc.bw_order_gpu.ptr, gc.fl_order_gpu.ptr, gc.angle_index_gpu.ptr,
@@ -718,7 +894,7 @@ class CUDAKernel:
             dh.bw_dom_real_gpu.ptr, dh.bw_dom_imag_gpu.ptr,
             dh.g_interp_real_gpu.ptr, dh.g_interp_imag_gpu.ptr,
             dh.g_bw_real_gpu.ptr, dh.g_bw_imag_gpu.ptr,
-            dh.frac_gpu.ptr, dh.time_gpu.ptr,
+            dh.input_ptr("frac"), dh.input_ptr("time"),
             gc.m0_index_gpu.ptr, gc.g0_index_gpu.ptr, gc.bw_order_gpu.ptr,
             gc.matrix_gamma_gpu.ptr,
             m0_gpu.ptr, g0_gpu.ptr, ck_real_gpu.ptr, ck_imag_gpu.ptr,
