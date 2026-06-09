@@ -146,6 +146,15 @@ def main():
     fitter.set_scale(scale_params)
     print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
 
+    # Set boundary ranges for masses and widths
+    for name in fitter.config.m0_phys_name:
+        val = float(fitter.default_m0[fitter.config.m0_phys_name.index(name)])
+        if name not in fitter._fixed_slots:
+            fitter.set_range(name, val - 0.1, val + 0.1)
+    for name in fitter.config.g0_phys_name:
+        if name not in fitter._fixed_slots:
+            fitter.set_range(name, 0.0, 2.0)
+
     # ==================================================================
     # 2. Load data
     # ==================================================================
