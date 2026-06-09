@@ -93,19 +93,6 @@ class ParameterConstraint:
         # var_idx_map: canon_name -> var_index
         self._var_index = {name: i for i, name in enumerate(self._free_params)}
 
-        # Build per-variable scale: check canonical AND alias names
-        self._var_scale = {}
-        for name in self._free_params:
-            s = self.scale_params.get(name)
-            if s is None:
-                # Check aliases of this canonical name
-                for alias, canon in self._canonical_map.items():
-                    if canon == name and alias in self.scale_params:
-                        s = self.scale_params[alias]
-                        break
-            if s is not None:
-                self._var_scale[name] = s
-
         # For each combination, store (var_idx, multiplicity) pairs
         self._comb_vars = []  # list of list of (var_idx, order)
         self._comb_fixed_scale = []  # list of complex scale per combo
@@ -116,12 +103,16 @@ class ParameterConstraint:
             for p in comb:
                 if isinstance(p, str):
                     canon = self._canonical_map.get(p, p)
-                    fixed_val = self.fixed_params.get(canon) or self.fixed_params.get(p)
+                    # Scale check on the ORIGINAL name (before alias→canonical
+                    # mapping), matching archive pw_cfit5_td6_fix29.py behavior:
+                    #   if j in scale_params: tmp.append(scale_params[j])
+                    scale_val = self.scale_params.get(p)
+                    if scale_val is not None:
+                        fixed_scale *= scale_val
+                    # Fixed check on both original and canonical
+                    fixed_val = self.fixed_params.get(p) or self.fixed_params.get(canon)
                     if fixed_val is not None:
                         fixed_scale *= fixed_val
-                    elif canon in self._var_scale:
-                        counts[canon] += 1
-                        fixed_scale *= self._var_scale[canon]
                     else:
                         counts[canon] += 1
                 else:
