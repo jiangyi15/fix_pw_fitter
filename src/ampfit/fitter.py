@@ -895,33 +895,47 @@ class Fitter:
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
-    def plot(self, x=None, params=None, n_bins=50, variables='mass+angles+time',
-             cols=4, figsize=(15, 10), save=None, show=True):
-        """Plot data vs phsp distributions for mass, angle, and time.
+    def plot(self, result=None, x=None, params=None, prefix="plots/",
+             n_bins=50, cols=4, figsize=(15, 10), show=False):
+        """Plot data vs phsp distributions, saving figures to a directory.
         
         For each variable, shows two histograms:
           - Data (weighted by data weight)
           - Phsp weighted by P × phsp_weight (the model prediction)
         
+        Figures are saved as:
+          {prefix}mass.png      — all mass columns (48 subplots)
+          {prefix}angles.png    — all angle positions × components (72 subplots)
+          {prefix}time.png      — time distribution
+        
         Args:
-            x: flat variable vector for get_nll (or None if params given).
-            params: full params dict (or None if x given).
+            result: OptimizeResult from Fitter.fit(), or a flat array x.
+            x: flat variable vector (alternative to result).
+            params: full params dict (instead of result/x).
+            prefix: directory path for output figures (default "plots/").
+                    Created automatically if it doesn't exist.
             n_bins: number of histogram bins.
-            variables: which to plot — 'mass', 'angles', 'time',
-                       'mass+angles', 'mass+angles+time', or 'all'.
             cols: number of columns in the subplot grid.
-            figsize: figure size (width, height) — height is auto-scaled.
-            save: path to save figure (None = don't save).
-            show: whether to call plt.show().
+            figsize: figure width; height is auto-scaled per figure.
+            show: if True, call plt.show() in addition to saving.
         """
         import matplotlib.pyplot as plt
         import os
         from ampfit.boundary import apply_bounds
 
-        # Build params dict from x if needed
-        if params is None:
-            if x is None:
-                raise ValueError("Provide x (flat vector) or params dict.")
+        # Resolve the flat x vector
+        if params is not None:
+            pass  # use params directly
+        elif result is not None:
+            if isinstance(result, np.ndarray):
+                x = result
+            elif hasattr(result, 'x'):
+                x = result.x
+            else:
+                x = result
+        if x is None and params is None:
+            raise ValueError("Provide result, x, or params.")
+        if x is not None:
             x_mapped = apply_bounds(x, self._bound_transforms)
             raw_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
             pc_names = set(self.pc.free_param_names())
@@ -946,7 +960,7 @@ class Fitter:
             ck = self.pc.build_ck(raw_ck)
             params = self._build_base_params(ck, None, None, None)
 
-        # Compute norm from phsp, then P for data and phsp
+        # Compute norm and probabilities
         norm, _, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
         norm = float(norm)
         _, _, P_data = self.kernel.compute(params, self.data_holder, norm=norm)
@@ -956,6 +970,10 @@ class Fitter:
         phsp_np = self._phsp_np
         dw = data_np["weight"]
         pw = phsp_np["weight"] * P_phsp
+        ne_d, ne_p = len(P_data), len(P_phsp)
+
+        # Ensure output directory
+        os.makedirs(prefix, exist_ok=True)
 
         def _make_hist(ax, label, d, p):
             lo = min(d.min(), p.min())
@@ -970,75 +988,56 @@ class Fitter:
             ax.set_xlabel(label, fontsize=7)
             ax.tick_params(labelsize=6)
 
-        plot_groups = variables.split('+')
+        def _save_figure(fig, name):
+            path = os.path.join(prefix, name)
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print(f"  saved {path}")
 
-        # ---- Mass: all columns separately ----
-        if 'mass' in plot_groups or 'all' in plot_groups:
-            mass_cols = data_np["mass"].shape[1]
-            n_plots = mass_cols
-            n_rows = (n_plots + cols - 1) // cols
-            fig_m, axes_m = plt.subplots(n_rows, cols,
-                figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
-            for i in range(n_plots):
-                ax = axes_m.flatten()[i]
-                _make_hist(ax, f"mass[{i}]",
-                           data_np["mass"][:, i], phsp_np["mass"][:, i])
-            for i in range(n_plots, len(axes_m.flatten())):
-                axes_m.flatten()[i].set_visible(False)
-            plt.tight_layout()
-            if save:
-                base, ext = os.path.splitext(save)
-                plt.savefig(f"{base}_mass{ext}", dpi=150, bbox_inches='tight')
-            if show:
-                plt.show()
-            else:
-                plt.close(fig_m)
+        # ---- Mass ----
+        n_mass = data_np["mass"].shape[1]
+        n_rows = (n_mass + cols - 1) // cols
+        fig, axes = plt.subplots(n_rows, cols,
+            figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
+        for i in range(n_mass):
+            _make_hist(axes.flatten()[i], f"mass[{i}]",
+                       data_np["mass"][:, i], phsp_np["mass"][:, i])
+        for i in range(n_mass, len(axes.flatten())):
+            axes.flatten()[i].set_visible(False)
+        plt.tight_layout()
+        _save_figure(fig, "mass.png")
 
-        # ---- Angles: each position × each component separately ----
-        if 'angles' in plot_groups or 'all' in plot_groups:
-            ne_d = len(P_data)
-            ne_p = len(P_phsp)
-            n_pos = data_np["angle"].shape[1]  # = 24
-            n_comp = data_np["angle"].reshape(ne_d, -1, 3).shape[2]  # = 3
-            angle_vars = []
-            for pos in range(n_pos):
-                for comp in range(n_comp):
-                    angle_vars.append((
-                        f"angle[{pos},{comp}]",
-                        data_np["angle"].reshape(ne_d, -1, 3)[:, pos, comp],
-                        phsp_np["angle"].reshape(ne_p, -1, 3)[:, pos, comp],
-                    ))
-            n_plots = len(angle_vars)
-            n_rows = (n_plots + cols - 1) // cols
-            fig_a, axes_a = plt.subplots(n_rows, cols,
-                figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
-            for i, (label, d, p) in enumerate(angle_vars):
-                ax = axes_a.flatten()[i]
-                _make_hist(ax, label, d, p)
-            for i in range(n_plots, len(axes_a.flatten())):
-                axes_a.flatten()[i].set_visible(False)
-            plt.tight_layout()
-            if save:
-                base, ext = os.path.splitext(save)
-                plt.savefig(f"{base}_angles{ext}", dpi=150, bbox_inches='tight')
-            if show:
-                plt.show()
-            else:
-                plt.close(fig_a)
+        # ---- Angles ----
+        n_pos = data_np["angle"].shape[1]  # 24
+        n_comp = 3
+        angle_vars = []
+        for pos in range(n_pos):
+            for comp in range(n_comp):
+                angle_vars.append((
+                    f"angle[{pos},{comp}]",
+                    data_np["angle"].reshape(ne_d, -1, 3)[:, pos, comp],
+                    phsp_np["angle"].reshape(ne_p, -1, 3)[:, pos, comp],
+                ))
+        n_ang = len(angle_vars)  # 72
+        n_rows = (n_ang + cols - 1) // cols
+        fig, axes = plt.subplots(n_rows, cols,
+            figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
+        for i, (label, d, p) in enumerate(angle_vars):
+            _make_hist(axes.flatten()[i], label, d, p)
+        for i in range(n_ang, len(axes.flatten())):
+            axes.flatten()[i].set_visible(False)
+        plt.tight_layout()
+        _save_figure(fig, "angles.png")
 
         # ---- Time ----
-        if 'time' in plot_groups or 'all' in plot_groups:
-            fig_t, ax_t = plt.subplots(1, 1, figsize=(figsize[0], 3))
-            _make_hist(ax_t, "time", data_np["time"], phsp_np["time"])
-            ax_t.legend(fontsize=8)
-            plt.tight_layout()
-            if save:
-                base, ext = os.path.splitext(save)
-                plt.savefig(f"{base}_time{ext}", dpi=150, bbox_inches='tight')
-            if show:
-                plt.show()
-            else:
-                plt.close(fig_t)
+        fig, ax = plt.subplots(1, 1, figsize=(figsize[0], 3))
+        _make_hist(ax, "time", data_np["time"], phsp_np["time"])
+        ax.legend(fontsize=8)
+        plt.tight_layout()
+        _save_figure(fig, "time.png")
+
+        if show:
+            plt.show()
 
     # ------------------------------------------------------------------
     # JSON export (matching archive/w_pw_cfit5_td6_fix29.py format)
