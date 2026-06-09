@@ -430,10 +430,8 @@ class GPUDataHolder:
         self.n_momentum = 0
         self.data_loaded = False
 
-        # Input data buffer - set during load() or attach_input_slice()
+        # Input data buffer - set during load()
         self.inputs = None
-        self._slice_start = None
-        self._slice_end = None
 
         # Output / gradient arrays - set during load()
         for attr in ['Q_gpu', 'P_gpu',
@@ -541,17 +539,11 @@ class GPUDataHolder:
         print(f"✓ DataHolder loaded {self.n_events} events")
 
     def input_ptr(self, name):
-        """Get input pointer, respecting slice offset if set."""
-        if hasattr(self, '_slice_start') and self._slice_start is not None:
-            return self.inputs.get_slice_ptr(name, self._slice_start, self._slice_end)
+        """Get input pointer for a named field."""
         return self.inputs.get_ptr(name)
 
     def alloc_intermediates(self, n_events):
-        """Allocate intermediate/output arrays for n_events.
-        
-        Used by PhspManager to create a scratch holder without loading
-        input data (inputs are attached via attach_input_slice).
-        """
+        """Allocate intermediate/output arrays for n_events (no input data)."""
         self.n_events = n_events
         ne = n_events
         nw = self.n_wave
@@ -602,28 +594,12 @@ class GPUDataHolder:
         self.grad_g0_sum_gpu = GPUArray(self.lib, (ng,), np.float64)
         self.data_loaded = True
 
-    def attach_input_slice(self, parent_buffer, start, end, n_mass, n_momentum):
-        """Attach to a slice of an external GPUDataBuffer (zero-copy)."""
-        self.inputs = parent_buffer
-        self._slice_start = start
-        self._slice_end = end
-        self.n_events = end - start
-        self.n_mass = n_mass
-        self.n_momentum = n_momentum
-
     def free(self):
-        """Free all GPU arrays owned by this holder.
-        
-        NOTE: If attached via attach_input_slice(), the parent buffer is NOT
-        freed (it's owned by the PhspManager). Only free() when load() was used.
-        """
+        """Free all GPU arrays owned by this holder."""
         # Free input buffer
         if self.inputs is not None:
-            if not hasattr(self, '_slice_start') or self._slice_start is None:
-                self.inputs.free()
+            self.inputs.free()
             self.inputs = None
-        self._slice_start = None
-        self._slice_end = None
         
         # Free output/intermediate arrays
         for attr in ['Q_gpu', 'P_gpu',
