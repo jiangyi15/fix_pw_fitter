@@ -757,6 +757,56 @@ class Fitter:
         return nll, grad_flat
 
     # ------------------------------------------------------------------
+    # Optimization
+    # ------------------------------------------------------------------
+    def fit(self, x0=None, maxiter=1000, ftol=1e-8, gtol=1e-8, callback=None,
+            method='BFGS', disp=True, **kwargs):
+        """Minimize NLL using BFGS (default) or any scipy optimizer.
+        
+        BFGS provides the full Hessian inverse (result.hess_inv) for
+        computing parameter uncertainties:
+          errors = sqrt(diag(result.hess_inv))
+        
+        Bound transforms (set via set_range) are applied automatically
+        inside get_nll(), so the optimizer sees unbounded values.
+        To get uncertainties in the bounded space, use BoundTransform.trans_err.
+        
+        Args:
+            x0: starting point. If None, uses initial_values().
+            maxiter: maximum number of iterations.
+            ftol: convergence tolerance on function value value change.
+            gtol: convergence tolerance on gradient norm.
+            callback: optional callback function(xk) called after each step.
+            method: scipy.optimize.minimize method (default 'BFGS').
+            disp: print convergence messages.
+            **kwargs: passed to scipy.optimize.minimize.
+        
+        Returns:
+            OptimizeResult from scipy.optimize.minimize.
+            For BFGS: result.hess_inv contains the inverse Hessian.
+        """
+        from scipy.optimize import minimize
+
+        if x0 is None:
+            x0 = self.initial_values()
+
+        def nll_and_grad(x):
+            nll, grad = self.get_nll(x)
+            return nll, grad.astype(np.float64)
+
+        opts = {'maxiter': maxiter, 'gtol': gtol, 'disp': disp}
+        if method in ('L-BFGS-B', 'L-BFGS-B'):
+            opts['ftol'] = ftol
+        result = minimize(
+            nll_and_grad, x0, jac=True,
+            method=method,
+            options=opts,
+            callback=callback,
+            **kwargs
+        )
+        return result
+
+    # ------------------------------------------------------------------
     # Convenience / utility
     # ------------------------------------------------------------------
     def free(self):
