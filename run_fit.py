@@ -159,15 +159,12 @@ def main():
     data_np, n_data = load_npz(args.data, max_events=max_data)
     phsp_np, n_phsp = load_npz(args.phsp, max_events=max_phsp)
 
-    fitter.set_data(data_np)
+
     fitter.set_phsp(phsp_np)
+    fitter.set_data(data_np)
 
-    fitter.set_default_params(
-        m0=np.random.random(fitter.n_m0) + 2,
-        g0=np.random.random(fitter.n_g0) + 0.1,
-        scalar=[0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
-    )
-
+    # m0 and g0 default values come from config.yml particle definitions
+    # (lazy-loaded by Fitter.default_m0 / Fitter.default_g0)
     n_free = len(fitter.free_param_names())
     print(f"Free slots: {n_free}")
 
