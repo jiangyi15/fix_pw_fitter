@@ -893,6 +893,122 @@ class Fitter:
         return {name: (values[name], errors[name]) for name in values}
 
     # ------------------------------------------------------------------
+    # Plotting
+    # ------------------------------------------------------------------
+    def plot(self, x=None, params=None, n_bins=50, max_plots=16,
+             figsize=(15, 10), save=None, show=True):
+        """Plot data vs phsp distributions for mass, angle, and time.
+        
+        For each variable, shows two histograms:
+          - Data (weighted by data weight)
+          - Phsp weighted by P × phsp_weight (the model prediction)
+        
+        Args:
+            x: flat variable vector for get_nll (or None if params given).
+            params: full params dict (or None if x given).
+            n_bins: number of histogram bins.
+            max_plots: max number of variable plots to show.
+            figsize: figure size.
+            save: path to save figure (None = don't save).
+            show: whether to call plt.show().
+        """
+        import matplotlib.pyplot as plt
+        from ampfit.boundary import apply_bounds
+
+        # Build params dict from x if needed
+        if params is None:
+            if x is None:
+                raise ValueError("Provide x (flat vector) or params dict.")
+            x_mapped = apply_bounds(x, self._bound_transforms)
+            raw_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
+            # Merge fixed ck slot values (same logic as get_nll)
+            pc_names = set(self.pc.free_param_names())
+            f_ck_r = {}
+            f_ck_i = {}
+            for slot, val in self._fixed_slots.items():
+                base = slot[:-1]
+                canon = self._alias_to_canon.get(base, base)
+                if slot.endswith('r') and canon in pc_names:
+                    f_ck_r[canon] = val
+                elif slot.endswith('i') and canon in pc_names:
+                    f_ck_i[canon] = val
+            if f_ck_r or f_ck_i:
+                new_x = []; idx = 0
+                for name in self.pc.free_param_names():
+                    in_reg = name in self._var_registry._name_to_entry
+                    r = raw_ck[idx] if in_reg else 0.0
+                    th = raw_ck[idx + 1] if in_reg else 0.0
+                    if in_reg: idx += 2
+                    new_x.extend([f_ck_r.get(name, r), f_ck_i.get(name, th)])
+                raw_ck = np.array(new_x)
+            ck = self.pc.build_ck(raw_ck)
+            params = self._build_base_params(ck, None, None, None)
+
+        # Compute norm from phsp, then P for data and phsp
+        norm, _, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
+        norm = float(norm)
+        _, _, P_data = self.kernel.compute(params, self.data_holder, norm=norm)
+        _, _, P_phsp = self.kernel.compute(params, self.phsp_holder, norm=None)
+
+        data_np = self._data_np
+        phsp_np = self._phsp_np
+        dw = data_np["weight"]
+        pw = phsp_np["weight"] * P_phsp  # model-weighted phsp
+
+        # Collect variables to plot
+        plot_vars = []
+
+        # Mass: each column of the mass array (use first max_plots/3)
+        mass_cols = min(data_np["mass"].shape[1], max(1, max_plots // 3))
+        for i in range(mass_cols):
+            plot_vars.append((f"mass[{i}]", data_np["mass"][:, i], phsp_np["mass"][:, i]))
+
+        # Angle: some columns (skip every 3 since angles are (n, 24, 3))
+        n_angle = data_np["angle"].shape[1]  # = 24
+        angle_cols = min(n_angle, max(1, max_plots // 3))
+        for i in range(angle_cols):
+            # Average over the 3 components for a simpler plot
+            da = data_np["angle"].reshape(len(P_data), -1, 3)[:, i, :].mean(axis=1)
+            pa = phsp_np["angle"].reshape(len(P_phsp), -1, 3)[:, i, :].mean(axis=1)
+            plot_vars.append((f"angle[{i}]", da, pa))
+
+        # Time
+        plot_vars.append(("time", data_np["time"], phsp_np["time"]))
+
+        # Limit number of plots
+        plot_vars = plot_vars[:max_plots]
+        n_cols = min(4, len(plot_vars))
+        n_rows = (len(plot_vars) + n_cols - 1) // n_cols
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
+                                 squeeze=False)
+        axes = axes.flatten()
+
+        for idx, (name, d, p) in enumerate(plot_vars):
+            ax = axes[idx]
+            lo = min(d.min(), p.min())
+            hi = max(d.max(), p.max())
+            bins = np.linspace(lo, hi, n_bins + 1)
+
+            ax.hist(d, bins=bins, weights=dw, alpha=0.6, label='data',
+                    color='C0', density=True)
+            ax.hist(p, bins=bins, weights=pw, alpha=0.6, label='phsp×P',
+                    color='C1', density=True, histtype='step', linewidth=2)
+            ax.set_xlabel(name)
+            ax.set_ylabel('a.u.')
+            ax.legend(fontsize=8)
+
+        # Hide unused subplots
+        for idx in range(len(plot_vars), len(axes)):
+            axes[idx].set_visible(False)
+
+        plt.tight_layout()
+        if save:
+            plt.savefig(save, dpi=150, bbox_inches='tight')
+        if show:
+            plt.show()
+
+    # ------------------------------------------------------------------
     # JSON export (matching archive/w_pw_cfit5_td6_fix29.py format)
     # ------------------------------------------------------------------
     def save_params(self, fit_result, filepath, grad_scale=1.0):
