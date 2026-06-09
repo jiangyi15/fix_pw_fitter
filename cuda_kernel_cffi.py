@@ -52,9 +52,11 @@ void launch_forward(
     const int* angle_index,
     const double* angle_k,
     const double* angle_b,
-    const double* matrix_angle,
+    const double* matrix_angle_real,
+    const double* matrix_angle_imag,
     const double* matrix_gamma,
-    const double* gamma_table,
+    const double* gamma_table_real,
+    const double* gamma_table_imag,
     const double* fl_table,
     double gamma_min,
     double gamma_delta,
@@ -104,8 +106,10 @@ void launch_forward(
     double* dQ_dP,
     double* bw_dom_real,
     double* bw_dom_imag,
-    double* g_interp,
-    double* g_bw,
+    double* g_interp_real,
+    double* g_interp_imag,
+    double* g_bw_real,
+    double* g_bw_imag,
     int n_events,
     int use_norm,
     double norm
@@ -135,8 +139,10 @@ void launch_backward(
     const double* dQ_dP,
     const double* bw_dom_real,
     const double* bw_dom_imag,
-    const double* g_interp,
-    const double* g_bw,
+    const double* g_interp_real,
+    const double* g_interp_imag,
+    const double* g_bw_real,
+    const double* g_bw_imag,
     const double* frac,
     const double* time,
     const double* weight,
@@ -172,7 +178,7 @@ void launch_backward(
     int n_events
 );
 
-/* Reduction */
+/* Reduction - single value */
 void launch_reduce_sum(const double* input, double* output, int n);
 void launch_reduce_sum_complex(
     const double* real_in,
@@ -181,6 +187,14 @@ void launch_reduce_sum_complex(
     double* imag_out,
     int n
 );
+
+/* Reduction - column-wise (sum over events for each feature) */
+void launch_reduce_sum_features(const double* input, double* output,
+    int n_events, int n_features);
+void launch_reduce_sum_complex_features(
+    const double* real_in, const double* imag_in,
+    double* real_out, double* imag_out,
+    int n_events, int n_features);
 """
 
 ffi.cdef(CDEF)
@@ -281,8 +295,9 @@ class GPUData:
         self.n_unique_bw = len(config["m0_index"])  # Should be 216
         self.n_gamma_rows = config["matrix_gamma"].shape[0]  # Should be 288
         self.n_gamma_cols = config["matrix_gamma"].shape[1]  # Should be 216 (same as n_unique_bw)
-        self.n_mass = len(config["mass_index"])
-        self.n_momentum = len(config["fl_q_index"])
+        # n_mass and n_momentum will be set from data dimensions in load_data()
+        self.n_mass = None
+        self.n_momentum = None
         self.n_angle_k = config["angle_k"].shape[0]
         # n_angle_total will be set when data is loaded
         self.n_angle_total = int(np.max(config["angle_index"])) + 1 if len(config["angle_index"]) > 0 else 0
@@ -339,20 +354,29 @@ class GPUData:
         self.angle_index_gpu.set(self.config["angle_index"])
 
         # Table arrays
-        self.angle_k_gpu = GPUArray(self.lib, self.config["angle_k"].shape, np.float64)
-        self.angle_k_gpu.set(self.config["angle_k"])
+        # angle_k and angle_b have shape (n_angle_k, 3) - flatten for CUDA
+        self.angle_k_gpu = GPUArray(self.lib, (self.config["angle_k"].size,), np.float64)
+        self.angle_k_gpu.set(self.config["angle_k"].flatten().astype(np.float64))
+        
+        self.angle_b_gpu = GPUArray(self.lib, (self.config["angle_b"].size,), np.float64)
+        self.angle_b_gpu.set(self.config["angle_b"].flatten().astype(np.float64))
 
-        self.angle_b_gpu = GPUArray(self.lib, self.config["angle_b"].shape, np.float64)
-        self.angle_b_gpu.set(self.config["angle_b"])
-
-        self.matrix_angle_gpu = GPUArray(self.lib, self.config["matrix_angle"].shape, np.float64)
-        self.matrix_angle_gpu.set(self.config["matrix_angle"])
+        # matrix_angle is complex128 - split into real/imag parts
+        matrix_angle = self.config["matrix_angle"]
+        self.matrix_angle_real_gpu = GPUArray(self.lib, matrix_angle.shape, np.float64)
+        self.matrix_angle_imag_gpu = GPUArray(self.lib, matrix_angle.shape, np.float64)
+        self.matrix_angle_real_gpu.set(matrix_angle.real.astype(np.float64))
+        self.matrix_angle_imag_gpu.set(matrix_angle.imag.astype(np.float64))
 
         self.matrix_gamma_gpu = GPUArray(self.lib, self.config["matrix_gamma"].shape, np.float64)
         self.matrix_gamma_gpu.set(self.config["matrix_gamma"])
 
-        self.gamma_table_gpu = GPUArray(self.lib, self.config["gamma_table"].shape, np.float64)
-        self.gamma_table_gpu.set(self.config["gamma_table"])
+        # gamma_table is complex128 - split into real/imag parts
+        gamma_table = self.config["gamma_table"]
+        self.gamma_table_real_gpu = GPUArray(self.lib, gamma_table.shape, np.float64)
+        self.gamma_table_imag_gpu = GPUArray(self.lib, gamma_table.shape, np.float64)
+        self.gamma_table_real_gpu.set(gamma_table.real.astype(np.float64))
+        self.gamma_table_imag_gpu.set(gamma_table.imag.astype(np.float64))
 
         self.fl_table_gpu = GPUArray(self.lib, self.config["fl_table"].shape, np.float64)
         self.fl_table_gpu.set(self.config["fl_table"])
@@ -364,7 +388,15 @@ class GPUData:
 
     def load_data(self, data):
         """Load data to GPU"""
+        # Free existing data if any
+        if self.data_loaded:
+            self.free()
+        
         self.n_events = data["mass"].shape[0]
+        
+        # Set dimensions from actual data
+        self.n_mass = data["mass"].shape[1] if len(data["mass"].shape) > 1 else 1
+        self.n_momentum = data["q"].shape[1] if len(data["q"].shape) > 1 else 1
 
         # Allocate and copy data arrays
         self.mass_gpu = GPUArray(self.lib, data["mass"].shape, np.float64)
@@ -373,8 +405,9 @@ class GPUData:
         self.momentum_gpu = GPUArray(self.lib, data["q"].shape, np.float64)
         self.momentum_gpu.set(data["q"])
 
-        self.angle_gpu = GPUArray(self.lib, data["angle"].shape, np.float64)
-        self.angle_gpu.set(data["angle"])
+        # angle has shape (n_events, n_angle_total, 3) - flatten for CUDA
+        self.angle_gpu = GPUArray(self.lib, (data["angle"].size,), np.float64)
+        self.angle_gpu.set(data["angle"].flatten().astype(np.float64))
 
         self.frac_gpu = GPUArray(self.lib, (self.n_events,), np.float64)
         self.frac_gpu.set(data["frac"])
@@ -415,14 +448,18 @@ class GPUData:
         self.dQ_dP_gpu = GPUArray(self.lib, (self.n_events,), np.float64)
         self.bw_dom_real_gpu = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
         self.bw_dom_imag_gpu = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
-        self.g_interp_gpu = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
-        self.g_bw_gpu = GPUArray(self.lib, (self.n_events, self.n_gamma_rows), np.float64)
+        # g_interp has shape (n_events, n_gamma_rows) because it's indexed by g0_index (length n_gamma_rows)
+        self.g_interp_real_gpu = GPUArray(self.lib, (self.n_events, self.n_gamma_rows), np.float64)
+        self.g_interp_imag_gpu = GPUArray(self.lib, (self.n_events, self.n_gamma_rows), np.float64)
+        # g_bw has shape (n_events, n_unique_bw) because g_bw = g @ matrix_gamma where matrix_gamma is (n_gamma_rows, n_unique_bw)
+        self.g_bw_real_gpu = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
+        self.g_bw_imag_gpu = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
 
         # Gradient partial sums
         self.grad_ck_real_partial = GPUArray(self.lib, (self.n_events, self.n_wave), np.float64)
         self.grad_ck_imag_partial = GPUArray(self.lib, (self.n_events, self.n_wave), np.float64)
         self.grad_m0_partial = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
-        self.grad_g0_partial = GPUArray(self.lib, (self.n_events, self.n_unique_bw), np.float64)
+        self.grad_g0_partial = GPUArray(self.lib, (self.n_events, self.n_gamma_rows), np.float64)
         self.grad_Gamma_partial = GPUArray(self.lib, (self.n_events,), np.float64)
         self.grad_DeltaGamma_partial = GPUArray(self.lib, (self.n_events,), np.float64)
         self.grad_DeltaM_partial = GPUArray(self.lib, (self.n_events,), np.float64)
@@ -492,9 +529,11 @@ class GPUData:
             self.angle_index_gpu.ptr,
             self.angle_k_gpu.ptr,
             self.angle_b_gpu.ptr,
-            self.matrix_angle_gpu.ptr,
+            self.matrix_angle_real_gpu.ptr,
+            self.matrix_angle_imag_gpu.ptr,
             self.matrix_gamma_gpu.ptr,
-            self.gamma_table_gpu.ptr,
+            self.gamma_table_real_gpu.ptr,
+            self.gamma_table_imag_gpu.ptr,
             self.fl_table_gpu.ptr,
             self.config["gamma_min"],
             self.config["gamma_delta"],
@@ -544,8 +583,10 @@ class GPUData:
             self.dQ_dP_gpu.ptr,
             self.bw_dom_real_gpu.ptr,
             self.bw_dom_imag_gpu.ptr,
-            self.g_interp_gpu.ptr,
-            self.g_bw_gpu.ptr,
+            self.g_interp_real_gpu.ptr,
+            self.g_interp_imag_gpu.ptr,
+            self.g_bw_real_gpu.ptr,
+            self.g_bw_imag_gpu.ptr,
             self.n_events,
             use_norm,
             norm_val
@@ -575,8 +616,10 @@ class GPUData:
             self.dQ_dP_gpu.ptr,
             self.bw_dom_real_gpu.ptr,
             self.bw_dom_imag_gpu.ptr,
-            self.g_interp_gpu.ptr,
-            self.g_bw_gpu.ptr,
+            self.g_interp_real_gpu.ptr,
+            self.g_interp_imag_gpu.ptr,
+            self.g_bw_real_gpu.ptr,
+            self.g_bw_imag_gpu.ptr,
             self.frac_gpu.ptr,
             self.time_gpu.ptr,
             self.weight_gpu.ptr,
@@ -612,21 +655,30 @@ class GPUData:
             self.n_events
         )
 
-        # Reduce Q
+        # Reduce Q (single value sum)
         self.lib.lib.launch_reduce_sum(self.Q_gpu.ptr, self.Q_sum_gpu.ptr, self.n_events)
 
-        # Reduce gradients
-        self.lib.lib.launch_reduce_sum_complex(
+        # Reduce gradients using column-wise reduction (sum over events for each feature)
+        # ck: (n_events, n_wave) -> (n_wave,)
+        self.lib.lib.launch_reduce_sum_complex_features(
             self.grad_ck_real_partial.ptr,
             self.grad_ck_imag_partial.ptr,
             self.grad_ck_real_sum_gpu.ptr,
             self.grad_ck_imag_sum_gpu.ptr,
-            self.n_events * self.n_wave
+            self.n_events, self.n_wave
         )
 
-        self.lib.lib.launch_reduce_sum(self.grad_m0_partial.ptr, self.grad_m0_sum_gpu.ptr, self.n_events * self.n_unique_bw)
-        self.lib.lib.launch_reduce_sum(self.grad_g0_partial.ptr, self.grad_g0_sum_gpu.ptr, self.n_events * self.n_unique_bw)
-        self.lib.lib.launch_reduce_sum(self.grad_Gamma_partial.ptr, self.Q_sum_gpu.ptr, self.n_events)
+        # m0: (n_events, n_unique_bw) -> (n_unique_bw,)
+        self.lib.lib.launch_reduce_sum_features(
+            self.grad_m0_partial.ptr, self.grad_m0_sum_gpu.ptr,
+            self.n_events, self.n_unique_bw
+        )
+
+        # g0: (n_events, n_gamma_rows) -> (n_gamma_rows,)
+        self.lib.lib.launch_reduce_sum_features(
+            self.grad_g0_partial.ptr, self.grad_g0_sum_gpu.ptr,
+            self.n_events, self.n_gamma_rows
+        )
 
         # Get results
         Q = self.Q_sum_gpu.get()[0]
@@ -636,22 +688,22 @@ class GPUData:
         grad_ck_imag = self.grad_ck_imag_sum_gpu.get()
         grad_ck = grad_ck_real + 1j * grad_ck_imag
 
-        # Get partial gradients and scatter them
+        # Get partial gradients and scatter them to actual parameters
         grad_m0_partial = self.grad_m0_sum_gpu.get()  # shape: (n_unique_bw,)
-        grad_g0_partial = self.grad_g0_sum_gpu.get()  # shape: (n_unique_bw,)
+        grad_g0_partial = self.grad_g0_sum_gpu.get()  # shape: (n_gamma_rows,)
 
-        # Scatter gradients to actual parameters
         n_m0_params = len(np.unique(self.config["m0_index"]))
         n_g0_params = len(np.unique(self.config["g0_index"]))
         grad_m0 = np.zeros(n_m0_params)
         grad_g0 = np.zeros(n_g0_params)
 
-        # Accumulate gradients based on parameter indices
+        # Scatter m0: each unique BW index maps to a parameter index
         for bw_idx in range(self.n_unique_bw):
             m0_param_idx = self.config["m0_index"][bw_idx]
             grad_m0[m0_param_idx] += grad_m0_partial[bw_idx]
 
-        for gamma_idx in range(self.n_unique_bw):
+        # Scatter g0: each gamma row index maps to a parameter index
+        for gamma_idx in range(self.n_gamma_rows):
             g0_param_idx = self.config["g0_index"][gamma_idx]
             grad_g0[g0_param_idx] += grad_g0_partial[gamma_idx]
 
@@ -678,22 +730,44 @@ class GPUData:
         return Q, grads, P
 
     def free(self):
-        """Free all GPU memory"""
+        """Free only data arrays (keep config arrays for reuse)"""
+        # Free data arrays
+        for attr in ['mass_gpu', 'momentum_gpu', 'angle_gpu', 'frac_gpu', 'time_gpu',
+                     'weight_gpu', 'bkg_gpu', 'Q_gpu', 'P_gpu',
+                     'pap_real_gpu', 'pap_imag_gpu', 'pam_real_gpu', 'pam_imag_gpu',
+                     'gp_real_gpu', 'gp_imag_gpu', 'gm_real_gpu', 'gm_imag_gpu',
+                     'poq_real_gpu', 'poq_imag_gpu', 'bw_p_real_gpu', 'bw_p_imag_gpu',
+                     'common_amp_factor_real_gpu', 'common_amp_factor_imag_gpu',
+                     'ap_real_gpu', 'ap_imag_gpu', 'am_real_gpu', 'am_imag_gpu',
+                     'dQ_dP_gpu', 'bw_dom_real_gpu', 'bw_dom_imag_gpu',
+                     'g_interp_real_gpu', 'g_interp_imag_gpu',
+                     'g_bw_real_gpu', 'g_bw_imag_gpu',
+                     'grad_ck_real_partial', 'grad_ck_imag_partial',
+                     'grad_m0_partial', 'grad_g0_partial',
+                     'grad_Gamma_partial', 'grad_DeltaGamma_partial',
+                     'grad_DeltaM_partial', 'grad_Ap_partial',
+                     'grad_poq_rho_partial', 'grad_pop_phi_partial']:
+            if hasattr(self, attr):
+                gpu_arr = getattr(self, attr)
+                if gpu_arr is not None:
+                    gpu_arr.free()
+                    setattr(self, attr, None)
+
+        self.data_loaded = False
+
+    def free_all(self):
+        """Free all GPU memory including config arrays"""
         # Free config arrays
         for attr in ['m0_index_gpu', 'g0_index_gpu', 'fl_type_gpu', 'mass_index_gpu',
                      'g0_mass_index_gpu', 'fl_q_index_gpu', 'bw_order_gpu', 'fl_order_gpu',
-                     'angle_index_gpu', 'angle_k_gpu', 'angle_b_gpu', 'matrix_angle_gpu',
-                     'matrix_gamma_gpu', 'gamma_table_gpu', 'fl_table_gpu']:
+                     'angle_index_gpu', 'angle_k_gpu', 'angle_b_gpu',
+                     'matrix_angle_real_gpu', 'matrix_angle_imag_gpu', 'matrix_gamma_gpu', 
+                     'gamma_table_real_gpu', 'gamma_table_imag_gpu', 'fl_table_gpu']:
             if hasattr(self, attr):
                 getattr(self, attr).free()
 
         # Free data arrays
-        for attr in ['mass_gpu', 'momentum_gpu', 'angle_gpu', 'frac_gpu', 'time_gpu',
-                     'weight_gpu', 'bkg_gpu', 'Q_gpu', 'P_gpu']:
-            if hasattr(self, attr) and getattr(self, attr) is not None:
-                getattr(self, attr).free()
-
-        self.data_loaded = False
+        self.free()
 
 
 class CUDAKernel:
