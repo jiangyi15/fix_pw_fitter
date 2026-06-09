@@ -128,7 +128,7 @@ ffi.cdef(CDEF)
 
 
 class CUDALibrary:
-    """Load and manage CUDA shared library"""
+    """Load and manage CUDA shared library. Auto-builds if missing."""
 
     def __init__(self, lib_path=None):
         if lib_path is None:
@@ -141,13 +141,30 @@ class CUDALibrary:
             lib_path_abs = os.path.join(script_dir, lib_path)
             if os.path.exists(lib_path_abs):
                 lib_path = lib_path_abs
-        
+
         if not os.path.exists(lib_path):
-            raise RuntimeError(
-                f"CUDA library not found: {lib_path}\n"
-                "Please build it first:\n"
-                "  python build_cuda.py"
-            )
+            # Auto-build if missing
+            print("CUDA library not found. Attempting auto-build...")
+            build_dir = os.path.dirname(lib_path)
+            try:
+                import subprocess
+                import sys
+                result = subprocess.run(
+                    [sys.executable, "-m", "ampfit.cuda.build"],
+                    capture_output=True, text=True, cwd=build_dir
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Auto-build failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Auto-build failed: {e}\n\n"
+                    f"To build manually:\n"
+                    f"  python -m ampfit.cuda.build"
+                )
+            if not os.path.exists(lib_path):
+                raise RuntimeError(f"Auto-build claimed success but {lib_path} not found.")
 
         self.lib = ffi.dlopen(lib_path)
         print(f"✓ Loaded CUDA library: {lib_path}")
