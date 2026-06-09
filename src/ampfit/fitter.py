@@ -49,6 +49,22 @@ class VariableRegistry:
         return [e['name'] for e in self._entries]
     
     @property
+    def flat_names(self):
+        """Slot-level names: '{name}r', '{name}i' for complex, '{name}' for real.
+        
+        Length matches n_flat (and the flat vector x).
+        Example: ['B->...total_0r', 'B->...total_0i', 'gamma', ...]
+        """
+        result = []
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                result.append(e['name'] + 'r')
+                result.append(e['name'] + 'i')
+            else:
+                result.append(e['name'])
+        return result
+    
+    @property
     def n_flat(self):
         """Total number of real values in the flat vector."""
         return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
@@ -208,20 +224,31 @@ class Fitter:
         self.default_g0 = None
         self.default_scalar = None
 
-        # Bound transforms and time parameter handling
+        # Bound transforms and fixed scalar values
         self._bound_transforms = {}        # {flat_idx: BoundTransform}
-        self._free_time_params = []        # names of free time params
-        self._fixed_time_params = {        # fixed time param values
-            "gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0,
-        }
+        self._fixed_scalars = {}           # {name: value} for fixed scalar params
 
     # ------------------------------------------------------------------
     # Constraint setup
     # ------------------------------------------------------------------
     def set_fixed(self, fixed_params):
-        """Set fixed (constant) parameters: {name: complex_value}."""
-        self._fixed_params = dict(fixed_params)
+        """Set fixed (constant) parameters: {name: value}.
+        
+        Works for all parameter types: ck (complex), m0/g0 (real), scalar (real).
+        Fixed params are excluded from the VariableRegistry and flat vector x.
+        """
+        ck_fixed = {}
+        scalar_fixed = {}
+        scalar_names = {"gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"}
+        m0_names = set(self.config.m0_phys_name)
+        g0_names = set(self.config.g0_phys_name)
+        for name, val in fixed_params.items():
+            if name in scalar_names or name in m0_names or name in g0_names:
+                scalar_fixed[name] = float(val)
+            else:
+                ck_fixed[name] = val
+        self._fixed_params = ck_fixed
+        self._fixed_scalars = scalar_fixed
         self._rebuild_pc()
 
     def set_same(self, same_params):
@@ -280,84 +307,80 @@ class Fitter:
     def set_range(self, name, lo, hi):
         """Set a bound constraint on a parameter via sin-transform.
         
-        The parameter is mapped to its index(es) in the flat variable 
-        vector x. A BoundTransform ensures the optimizer sees an 
-        unbounded value while the kernel sees the bounded range.
-        
         Args:
-            name: parameter name. Can be:
-                - A free ck parameter name from free_param_names()
-                - A time parameter name ("gamma", "delta_m", etc.)
+            name: parameter name (base name or slot name with r/i suffix).
+                  Examples: 'gamma', 'B->...total_0', 'B->...total_0r'
             lo: lower bound.
             hi: upper bound.
         """
         from ampfit.boundary import BoundTransform
         bt = BoundTransform(lo, hi)
 
-        # Find the variable in the registry
+        # Try base name first (e.g. 'gamma' → one slot, 'B->...total_0' → two slots)
         try:
             si, ei = self._var_registry.flat_index(name)
-            # For complex vars, apply bounds to both r and theta
             for idx in range(si, ei):
                 self._bound_transforms[idx] = bt
+            return
         except KeyError:
-            raise ValueError(
-                f"Unknown parameter '{name}'. "
-                f"Free params: {self._var_registry.names[:3]}... "
-            )
+            pass
 
-    def set_free_time_params(self, names, defaults=None):
-        """Set which time parameters are free (fit variables).
-        
-        Args:
-            names: list of time parameter names to free.
-                   e.g. ["gamma"] or ["gamma", "delta_m"]
-            defaults: optional dict of {name: value} to override defaults.
-        """
-        self._free_time_params = list(names)
-        if defaults:
-            self._fixed_time_params.update(defaults)
-        self._rebuild_var_registry()
+        # Try flat slot name (e.g. 'B->...total_0r')
+        flat_n = self._var_registry.flat_names
+        for i, n in enumerate(flat_n):
+            if n == name:
+                self._bound_transforms[i] = bt
+                return
+
+        raise ValueError(
+            f"Unknown parameter '{name}'. "
+            f"Available: {self._var_registry.flat_names[:6]}... "
+        )
 
     def _rebuild_var_registry(self):
-        """Build or rebuild the VariableRegistry after constraint changes."""
+        """Build or rebuild the VariableRegistry after constraint changes.
+        
+        All params (ck, mass, width, scalar) are added as variables by default.
+        Fixed params are excluded from the registry.
+        """
         self._var_registry = VariableRegistry()
-        # Add free ck parameters (complex)
+        # Add free ck parameters (complex, from pc)
         for name in self.pc.free_param_names():
             self._var_registry.add_complex(name, ('ck', name))
-        # Add free time parameters (real)
-        for name in self._free_time_params:
-            self._var_registry.add_real(name, ('scalar', name))
+        # Add m0 parameters (real), excluding fixed ones
+        for name in self.config.m0_phys_name:
+            if name not in self._fixed_scalars:
+                self._var_registry.add_real(name, ('m0', name))
+        # Add g0 parameters (real), excluding fixed ones
+        for name in self.config.g0_phys_name:
+            if name not in self._fixed_scalars:
+                self._var_registry.add_real(name, ('g0', name))
+        # Add scalar/time parameters (real), excluding fixed ones
+        for name in ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
+            if name not in self._fixed_scalars:
+                self._var_registry.add_real(name, ('scalar', name))
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
         return self._var_registry.n_flat
 
     def initial_values(self, seed=None):
-        """Random initial guess including both ck and time variables.
+        """Random initial guess for all free variables (ck + scalar).
         
         Returns:
-            array of shape (n_flat_vars,) where n_flat_vars =
-            2 * n_free_vars + n_free_time_params.
+            array of shape (n_flat,) matching free_param_names() length.
         """
-        # Start with registry-generated random values
-        x = self._var_registry.build_initial(seed=seed)
-        
-        # Override time parameters with their fixed default values
-        for name in self._free_time_params:
-            si, ei = self._var_registry.flat_index(name)
-            val = self._fixed_time_params.get(name, 0.0)
-            # Convert to unbounded via inverse transform if bounds are set
-            if si in self._bound_transforms:
-                bt = self._bound_transforms[si]
-                val = bt.inverse(val)
-            x[si] = val
-        
-        return x
+        return self._var_registry.build_initial(seed=seed)
 
     def free_param_names(self):
-        """Names of free parameters (ck vars + time params)."""
-        return self._var_registry.names
+        """Slot-level names of all free variables. Length matches x0.
+        
+        Complex vars: '{name}r', '{name}i'
+        Real vars:    '{name}'
+        
+        Example: ['B->...total_0r', 'B->...total_0i', 'gamma', ...]
+        """
+        return self._var_registry.flat_names
 
     def set_default_params(self, m0=None, g0=None, scalar=None):
         """Set default physical parameters (used when not passed to get_nll)."""
@@ -453,15 +476,11 @@ class Fitter:
     def get_nll(self, x, m0=None, g0=None):
         """Compute NLL and gradient w.r.t. the flat variable vector.
         
-        The flat vector x contains all free variables tracked by the registry:
-            [ck_var0_r, ck_var0_theta, ck_var1_r, ck_var1_theta, ..., time_param0, ...]
-        
-        Bound transforms are applied automatically before calling the kernel,
-        and the gradient is corrected via the chain rule.
+        The flat vector x contains all free variables:
+          [ck0_r, ck0_θ, ..., m0_0, m0_1, ..., g0_0, g0_1, ..., scalar_0, ...]
         
         Args:
-            x: flat variable vector including both ck and time variables.
-            m0, g0: override default physical params (optional).
+            x: flat variable vector (length = free_param_names()).
         
         Returns:
             (nll, grad_x) where grad_x has the same shape as x.
@@ -472,49 +491,72 @@ class Fitter:
         x_mapped = apply_bounds(x, self._bound_transforms)
 
         # 2. Extract ck vars for ParameterConstraint.build_ck
-        # The registry stores ck vars in the same order as pc.free_param_names()
         x_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
 
-        # 3. Build scalar from defaults + free time params
-        if len(self._free_time_params) == 0:
-            # No free time params → use default scalar as-is (old behavior)
-            scalar_list = None
+        # 3. Build m0, g0, scalar arrays from x + fixed values
+        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+
+        # Start from defaults or fallback values
+        if self.default_m0 is not None:
+            m0_arr = self.default_m0.copy()
         else:
-            # Start from defaults, then override free params from x
-            scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
-            if self.default_scalar is not None:
-                scalar_list = list(self.default_scalar)
-            else:
-                scalar_list = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
-            # Extract time params from x using registry
-            scalar_dict = self._var_registry.extract_real_dict(x_mapped)
-            for name in self._free_time_params:
-                idx = scalar_names.index(name)
-                scalar_list[idx] = scalar_dict[name]
+            m0_arr = np.ones(self.n_m0, dtype=np.float64) * 0.8
+        if self.default_g0 is not None:
+            g0_arr = self.default_g0.copy()
+        else:
+            g0_arr = np.ones(self.n_g0, dtype=np.float64) * 0.1
+        if self.default_scalar is not None:
+            scalar_arr = list(self.default_scalar)
+        else:
+            scalar_arr = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
+
+        # Override with fixed values
+        for name, val in self._fixed_scalars.items():
+            if name in self.config.m0_phys_name:
+                m0_arr[self.config.m0_phys_name.index(name)] = val
+            elif name in self.config.g0_phys_name:
+                g0_arr[self.config.g0_phys_name.index(name)] = val
+            elif name in scalar_names:
+                scalar_arr[scalar_names.index(name)] = val
+
+        # Override with free values from x (those in the registry)
+        vals = self._var_registry.extract_real_dict(x_mapped)
+        for name, val in vals.items():
+            if name in self.config.m0_phys_name:
+                m0_arr[self.config.m0_phys_name.index(name)] = val
+            elif name in self.config.g0_phys_name:
+                g0_arr[self.config.g0_phys_name.index(name)] = val
+            elif name in scalar_names:
+                scalar_arr[scalar_names.index(name)] = val
 
         # 4. Build ck + params
         ck = self.pc.build_ck(x_ck)
-        params = self._build_base_params(ck, m0, g0, scalar_list)
+        params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
 
         # 5. Compute NLL with norm
         nll, total_grads = self.get_nll_raw(params)
 
-        # 6. Build flat gradient: ck part (via pc jacobian) + time part
-        # total_grads["ck"] has 448 elements (partial waves); pc.backprop_grad
-        # maps them to 76 named ck variables in [r0, θ0, ...] format via the
-        # combination-product Jacobian: d(ck[i])/d(variable_k).
+        # 6. Build flat gradient: ck, m0, g0, scalar parts
+        # ck: pc.backprop_grad maps 448 partial waves → ck vars in r/θ format
         grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
 
-        # Scalar gradients for free time params
-        scalar_grad = np.array(total_grads["scalar"])
-        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
-        grad_time = np.array([scalar_grad[scalar_names.index(n)]
-                              for n in self._free_time_params])
+        # m0, g0, scalar: pick gradients for free params by name
+        grad_extra = []
+        for target, names_list in [('m0', self.config.m0_phys_name),
+                                    ('g0', self.config.g0_phys_name),
+                                    ('scalar', scalar_names)]:
+            arr = np.asarray(total_grads[target])
+            for name in names_list:
+                if name in self._var_registry._name_to_entry:
+                    idx = list(names_list).index(name)
+                    grad_extra.append(arr[idx])
 
-        # Concatenate into full flat gradient
-        grad_flat = np.concatenate([grad_ck, grad_time])
+        if len(grad_extra):
+            grad_flat = np.concatenate([grad_ck] + [np.atleast_1d(g) for g in grad_extra])
+        else:
+            grad_flat = grad_ck.copy()
 
-        # 7. Apply bound gradient correction: dNLL/dx = dNLL/dy * dy/dx
+        # 7. Apply bound gradient correction
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
 
         return nll, grad_flat
