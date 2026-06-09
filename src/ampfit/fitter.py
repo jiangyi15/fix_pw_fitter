@@ -66,6 +66,14 @@ class Fitter:
         self.default_g0 = None
         self.default_scalar = None
 
+        # Bound transforms and time parameter handling
+        self._bound_transforms = {}        # {flat_idx: BoundTransform}
+        self._free_time_params = []        # names of free time params
+        self._fixed_time_params = {        # fixed time param values
+            "gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0,
+        }
+
     # ------------------------------------------------------------------
     # Constraint setup
     # ------------------------------------------------------------------
@@ -101,18 +109,6 @@ class Fitter:
             self._rebuild_pc()
         return self._pc
 
-    def initial_values(self, seed=None):
-        """Random initial guess for the free variable vector x.
-        
-        Returns:
-            array of shape (2 * n_free_vars,): [r0, θ0, r1, θ1, ...]
-        """
-        return self.pc.initial_values(seed=seed)
-
-    def free_param_names(self):
-        """Names of free parameters (after constraint reduction)."""
-        return self.pc.free_param_names()
-
     # ------------------------------------------------------------------
     # Data setup
     # ------------------------------------------------------------------
@@ -134,6 +130,85 @@ class Fitter:
         """
         self._phsp_np = phsp
         self.phsp_holder = self.kernel.load_data(phsp)
+
+    # ------------------------------------------------------------------
+    # Bound constraints on parameters
+    # ------------------------------------------------------------------
+    def set_range(self, name, lo, hi):
+        """Set a bound constraint on a parameter via sin-transform.
+        
+        The parameter is mapped to its index(es) in the flat variable 
+        vector x. A BoundTransform ensures the optimizer sees an 
+        unbounded value while the kernel sees the bounded range.
+        
+        Args:
+            name: parameter name. Can be:
+                - A free ck parameter name from free_param_names()
+                - A time parameter name ("gamma", "delta_m", etc.)
+            lo: lower bound.
+            hi: upper bound.
+        """
+        from ampfit.boundary import BoundTransform
+        bt = BoundTransform(lo, hi)
+
+        # Check free ck parameters
+        if self._pc is not None and name in self.pc.free_param_names():
+            idx = self.pc.free_param_names().index(name)
+            self._bound_transforms[2 * idx] = bt      # magnitude r
+            self._bound_transforms[2 * idx + 1] = bt   # phase theta
+            return
+
+        # Check time parameters
+        if name in self._free_time_params:
+            idx = self._free_time_params.index(name)
+            flat_idx = 2 * self.pc.n_free_vars + idx
+            self._bound_transforms[flat_idx] = bt
+            return
+
+        raise ValueError(
+            f"Unknown parameter '{name}'. "
+            f"Free ck params: {self.pc.free_param_names()[:3]}... "
+            f"Free time params: {self._free_time_params}"
+        )
+
+    def set_free_time_params(self, names, defaults=None):
+        """Set which time parameters are free (fit variables).
+        
+        Args:
+            names: list of time parameter names to free.
+                   e.g. ["gamma"] or ["gamma", "delta_m"]
+            defaults: optional dict of {name: value} to override defaults.
+        """
+        self._free_time_params = list(names)
+        if defaults:
+            self._fixed_time_params.update(defaults)
+
+    def _n_flat_vars(self):
+        """Total number of flat variables: ck vars + free time params."""
+        return 2 * self.pc.n_free_vars + len(self._free_time_params)
+
+    def initial_values(self, seed=None):
+        """Random initial guess including both ck and time variables.
+        
+        Returns:
+            array of shape (n_flat_vars,) where n_flat_vars =
+            2 * n_free_vars + n_free_time_params.
+        """
+        x = self.pc.initial_values(seed=seed)
+        # Append free time parameters
+        for name in self._free_time_params:
+            val = self._fixed_time_params.get(name, 0.0)
+            # Convert to unbounded via inverse transform
+            if 2 * self.pc.n_free_vars + self._free_time_params.index(name) in self._bound_transforms:
+                bt = self._bound_transforms[2 * self.pc.n_free_vars + self._free_time_params.index(name)]
+                val = bt.inverse(val)
+            x = np.append(x, val)
+        return x
+
+    def free_param_names(self):
+        """Names of free parameters (ck vars + time params)."""
+        ck_names = self.pc.free_param_names()
+        return ck_names + self._free_time_params
 
     def set_default_params(self, m0=None, g0=None, scalar=None):
         """Set default physical parameters (used when not passed to get_nll)."""
@@ -226,30 +301,69 @@ class Fitter:
 
         return nll, total_grads
 
-    def get_nll(self, x, m0=None, g0=None, scalar=None):
-        """Compute NLL and its gradient w.r.t. constrained variables x.
+    def get_nll(self, x, m0=None, g0=None):
+        """Compute NLL and gradient w.r.t. the flat variable vector.
+        
+        The flat vector x contains:
+            [r0, θ0, r1, θ1, ... , free_time_param_0, ...]
+        =   [ck_vars (2 * n_free_vars) | free_time_params (n_free_time)]
+        
+        Bound transforms are applied automatically before calling the kernel,
+        and the gradient is corrected via the chain rule.
         
         Args:
-            x: real variable vector (2 * n_free_vars,), 
-               [r0, θ0, r1, θ1, ...].
-            m0, g0, scalar: override default physical params (optional).
+            x: flat variable vector including both ck and time variables.
+            m0, g0: override default physical params (optional).
         
         Returns:
             (nll, grad_x) where grad_x has the same shape as x.
         """
-        # Build ck from constraint variables
-        ck = self.pc.build_ck(x)
+        from ampfit.boundary import apply_bounds, apply_bound_grads
 
-        # Build full params dict
-        params = self._build_base_params(ck, m0, g0, scalar)
+        # 1. Apply bound transforms
+        x_mapped = apply_bounds(x, self._bound_transforms)
 
-        # Compute NLL with norm (handles gradient combination internally)
+        # 2. Split into ck vars and time params
+        n_ck_vars = 2 * self.pc.n_free_vars
+        x_ck = x_mapped[:n_ck_vars]
+
+        # 3. Build scalar from defaults + free time params
+        if len(self._free_time_params) == 0:
+            # No free time params → use default scalar as-is (old behavior)
+            scalar_list = None
+        else:
+            # Start from defaults, then override free params from x
+            scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+            if self.default_scalar is not None:
+                scalar_list = list(self.default_scalar)
+            else:
+                scalar_list = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
+            for i, name in enumerate(self._free_time_params):
+                idx = scalar_names.index(name)
+                scalar_list[idx] = x_mapped[n_ck_vars + i]
+
+        # 4. Build ck + params
+        ck = self.pc.build_ck(x_ck)
+        params = self._build_base_params(ck, m0, g0, scalar_list)
+
+        # 5. Compute NLL with norm
         nll, total_grads = self.get_nll_raw(params)
 
-        # Backpropagate ck gradient through parameter constraints
-        grad_x = self.pc.backprop_grad(x, total_grads["ck"])
+        # 6. Backprop ck gradient through pc
+        grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
 
-        return nll, grad_x
+        # 7. Build flat gradient: ck part + free time part
+        scalar_grad = np.array(total_grads["scalar"])
+        # scalar order: [gamma, delta_gamma, delta_m, A_prod, poqr, poqi]
+        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+        grad_time = np.array([scalar_grad[scalar_names.index(n)]
+                              for n in self._free_time_params])
+        grad_flat = np.concatenate([grad_ck, grad_time])
+
+        # 8. Apply bound gradient correction: dNLL/dx = dNLL/dy * dy/dx
+        grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
+
+        return nll, grad_flat
 
     # ------------------------------------------------------------------
     # Convenience / utility
