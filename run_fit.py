@@ -130,6 +130,8 @@ def main():
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
                         default=None, help="Plot distributions (optional: output dir)")
+    parser.add_argument("--fix-mass-width", action="store_true",
+                        help="Fix all mass and width parameters to config defaults")
     args = parser.parse_args()
 
     # ==================================================================
@@ -141,6 +143,15 @@ def main():
 
     fitter = Fitter(args.config)
     fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
+    # Optionally add mass/width fixes to the fixed slots
+    if args.fix_mass_width:
+        for name in fitter.config.m0_phys_name:
+            val = float(fitter.default_m0[fitter.config.m0_phys_name.index(name)])
+            fixed_slots[name] = val
+        for name in fitter.config.g0_phys_name:
+            val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
+            fixed_slots[name] = val
+
     fitter.set_fixed(fixed_slots)
     fitter.set_same(same_params)
     fitter.set_scale(scale_params)
