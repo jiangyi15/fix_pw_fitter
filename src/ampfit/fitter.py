@@ -866,6 +866,108 @@ class Fitter:
         return {name: (values[name], errors[name]) for name in values}
 
     # ------------------------------------------------------------------
+    # JSON export (matching archive/w_pw_cfit5_td6_fix29.py format)
+    # ------------------------------------------------------------------
+    def save_params(self, fit_result, filepath, grad_scale=1.0):
+        """Save fit results to JSON file matching archive pw_cfit5_td6_fix29.py format.
+        
+        The JSON structure:
+            value: {name_r: float, name_i: float, time_param: float, ...}
+            error: {name_r: float, ...}
+            status: {NLL, Ndf, jac, success, message, rhorho}
+        
+        Handles bound transforms, fixed params, same-param aliases,
+        scale params, and time parameter defaults automatically.
+        
+        Args:
+            fit_result: OptimizeResult from fit() method.
+            filepath: output JSON file path.
+            grad_scale: gradient scaling factor (default 1.0).
+                        Matches archive's grad_sacle if used.
+        """
+        import json, cmath
+
+        values, errors = self._params_from_fit(fit_result, return_bounded=True)
+        flat_names = self._var_registry.flat_names
+
+        # Build value and error dicts (start with free params from fit)
+        out = {"value": {}, "error": {}}
+        for name in flat_names:
+            out["value"][name] = float(values[name])
+            out["error"][name] = float(errors[name])
+
+        # Build alias→canonical map from same_params (like archive's new_name)
+        new_name = {}
+        for group in self._same_params:
+            if group:
+                canon = group[0]
+                for a in group[1:]:
+                    new_name[a] = canon
+
+        # Add fixed ck parameters (from _fixed_slots or old _fixed_params)
+        all_param_names = set()
+        for comb in self.all_comb:
+            for p in comb:
+                if isinstance(p, str):
+                    all_param_names.add(p)
+        for p in sorted(all_param_names):
+            r_name = p + 'r'
+            i_name = p + 'i'
+            if r_name in self._fixed_slots and i_name in self._fixed_slots:
+                out["value"][r_name] = float(self._fixed_slots[r_name])
+                out["value"][i_name] = float(self._fixed_slots[i_name])
+                out["error"][r_name] = 0.0
+                out["error"][i_name] = 0.0
+
+        # Same-param aliases: copy value from canonical
+        for alias, canon in new_name.items():
+            for suf in ['r', 'i']:
+                ak = alias + suf
+                ck = canon + suf
+                if ck in out["value"]:
+                    out["value"][ak] = out["value"][ck]
+                    out["error"][ak] = out["error"][ck]
+
+        # Scale params: multiply value by scale factor
+        for p, scale in self._scale_params.items():
+            out["value"][p + 'r'] = scale * out["value"].get(p + 'r', 0.0)
+
+        # Fixed time parameter defaults
+        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+        time_defaults = {
+            "gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0,
+        }
+        for name in scalar_names:
+            if name not in out["value"]:
+                out["value"][name] = time_defaults.get(name, 0.0)
+                out["error"][name] = 0.0
+
+        # Status
+        hess_inv = fit_result.hess_inv
+        n_params = len(fit_result.x)
+        out["status"] = {
+            "NLL": float(fit_result.fun),
+            "Ndf": n_params,
+            "jac": fit_result.jac.tolist() if hasattr(fit_result.jac, 'tolist') else list(fit_result.jac),
+            "success": bool(fit_result.success),
+            "message": str(fit_result.message),
+        }
+
+        # Correlation matrix for B->rhoA.rhoB params (like archive)
+        corr_items = [[i, n] for i, n in enumerate(flat_names) if "B->rhoA.rhoB" in n]
+        if corr_items:
+            corr_idx = np.array([i for i, n in corr_items])
+            corr_order = [n for i, n in corr_items]
+            corr_mat = hess_inv[np.ix_(corr_idx, corr_idx)] * grad_scale
+            out["status"]["rhorho"] = [corr_order, corr_mat.tolist()]
+
+        with open(filepath, 'w') as f:
+            json.dump(out, f, indent=2)
+        print(f"✓ Saved fit results to {filepath}")
+        return out
+
+    # ------------------------------------------------------------------
     # Convenience / utility
     # ------------------------------------------------------------------
     def free(self):
