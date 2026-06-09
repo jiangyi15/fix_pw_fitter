@@ -231,37 +231,20 @@ class Fitter:
     # ------------------------------------------------------------------
     # Constraint setup
     # ------------------------------------------------------------------
-    def set_fixed(self, fixed_params):
-        """Set fixed (constant) parameter slots: {slot_name: value}.
+    def set_fixed(self, fixed_slots):
+        """Set fixed parameter slots: {slot_name: value}.
         
-        Slot naming (matches free_param_names()):
+        Slot names match free_param_names():
           '{name}r' — magnitude of complex parameter
-          '{name}i' — phase of complex parameter  
+          '{name}i' — phase of complex parameter
           '{name}'  — real parameter (scalar, mass, or width)
         
-        Also accepts complex base names '{name}' for ck parameters
-        (fixes both magnitude and phase).
-        
         Examples:
-          fitter.set_fixed({"B->..._g_ls_0": 1+0j})  # both r and i
-          fitter.set_fixed({"B->..._g_ls_0r": 1.0})    # magnitude only
-          fitter.set_fixed({"gamma": 0.0})              # real scalar
+          fitter.set_fixed({"B->..._g_ls_0r": 1.0})   # magnitude only
+          fitter.set_fixed({"B->..._g_ls_0i": 0.0})   # phase only
+          fitter.set_fixed({"gamma": 0.0})             # real scalar
         """
-        self._fixed_slots = {}
-        # Force-build pc to have ck names available
-        ck_names = set(self.pc.free_param_names())
-        for name, val in fixed_params.items():
-            if name in ck_names:
-                # Complex base name → fix both r and i
-                if isinstance(val, complex):
-                    r, i = abs(val), np.angle(val)
-                else:
-                    r, i = float(val), 0.0
-                self._fixed_slots[name + 'r'] = r
-                self._fixed_slots[name + 'i'] = i
-            else:
-                self._fixed_slots[name] = float(val)
-        # Rebuild pc (which also rebuilds the variable registry)
+        self._fixed_slots = {k: float(v) for k, v in fixed_slots.items()}
         self._rebuild_pc()
 
     def set_same(self, same_params):
