@@ -125,6 +125,9 @@ def main():
     parser.add_argument("--data", default="data/data_arrays.npz")
     parser.add_argument("--phsp", default="data/phsp_arrays.npz")
     parser.add_argument("--check-grad", action="store_true", help="Verify gradient")
+    parser.add_argument("--fit", action="store_true", help="Run BFGS minimization")
+    parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
+    parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     args = parser.parse_args()
 
     # ==================================================================
@@ -201,11 +204,49 @@ def main():
             print(f"  x[{k:2d}]: ana={grad_x[k]:+.4e} num={num:+.4e} rel_err={err:.2e} {status}")
 
     # ==================================================================
-    # 5. Summary
+    # 5. Fit (optional)
+    # ==================================================================
+    if args.fit:
+        print("\n" + "=" * 70)
+        print("FITTING")
+        print("=" * 70)
+
+        t0 = time.time()
+        result = fitter.fit(x0, maxiter=args.maxiter, disp=True)
+        fit_time = time.time() - t0
+        print(f"\n  Fit time: {fit_time:.2f}s")
+        print(f"  Final NLL: {result.fun:.6f}")
+        print(f"  nfev: {result.nfev}, nit: {result.nit}")
+        print(f"  success: {result.success}")
+
+        # Print uncertainties for top parameters
+        uncert = fitter.get_uncertainties(result)
+        names = list(uncert.keys())
+
+        # Show largest-magnitude free parameters
+        vals_err = [(n, uncert[n][0], uncert[n][1]) for n in names]
+        vals_err.sort(key=lambda x: abs(x[1]), reverse=True)
+        print(f"\n  Top free parameters:")
+        for name, val, err in vals_err[:5]:
+            print(f"    {name:50s} = {val:+.6f} ± {err:.6f}")
+
+        # Save results if requested
+        save_path = args.save
+        if save_path is None:
+            prefix = os.path.splitext(os.path.basename(args.config))[0]
+            save_path = f"{prefix}_fit_results.json"
+        fitter.save_params(result, save_path)
+        print(f"  Results saved to {save_path}")
+
+    # ==================================================================
+    # 6. Summary
     # ==================================================================
     print("\n" + "=" * 70)
-    print(f"  Data: {n_data:>10,}   Phsp: {n_phsp:>10,}   Free: {n_free:>4}   "
-          f"NLL: {nll:>10.4f}   Time: {elapsed:>6.2f}s")
+    print(f"  Data: {n_data:>10,}   Phsp: {n_phsp:>10,}   Free: {n_free:>4}")
+    if args.fit:
+        print(f"  Fit NLL: {result.fun:.4f}   nfev: {result.nfev}   nit: {result.nit}")
+    else:
+        print(f"  NLL: {nll:>10.4f}   Time: {elapsed:>6.2f}s")
     print("=" * 70)
 
     fitter.free()

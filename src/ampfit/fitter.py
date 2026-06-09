@@ -724,25 +724,32 @@ class Fitter:
         # 5. Compute NLL with norm
         nll, total_grads = self.get_nll_raw(params)
 
-        # 6. Build flat gradient: ck, m0, g0, scalar parts
-        # ck: pc.backprop_grad maps 448 partial waves → ck vars in r/θ format
-        grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
+        # 6. Build flat gradient matching the registry order.
+        # grad_ck from pc.backprop_grad covers ALL pc.free_param_names()
+        # (including fully-fixed vars). We filter to only registry entries.
+        full_grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
 
-        # m0, g0, scalar: pick gradients for free params by name
-        grad_extra = []
+        # Lookup: name → gradient in backprop_grad output (r/θ pairs)
+        ck_grad_map = {}
+        idx = 0
+        for name in self.pc.free_param_names():
+            ck_grad_map[name + 'r'] = full_grad_ck[idx]
+            ck_grad_map[name + 'i'] = full_grad_ck[idx + 1]
+            idx += 2
+
+        # m0, g0, scalar gradients by name
+        extra_grad_map = {}
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
                                     ('scalar', scalar_names)]:
             arr = np.asarray(total_grads[target])
             for name in names_list:
-                if name in self._var_registry._name_to_entry:
-                    idx = list(names_list).index(name)
-                    grad_extra.append(arr[idx])
+                extra_grad_map[name] = arr[list(names_list).index(name)]
 
-        if len(grad_extra):
-            grad_flat = np.concatenate([grad_ck] + [np.atleast_1d(g) for g in grad_extra])
-        else:
-            grad_flat = grad_ck.copy()
+        # Build flat gradient from registry entries only
+        flat_names = self._var_registry.flat_names
+        grad_flat = np.array([ck_grad_map.get(n, extra_grad_map.get(n, 0.0))
+                               for n in flat_names])
 
         # 7. Apply bound gradient correction (before fixed-slot zeroing)
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
