@@ -130,8 +130,6 @@ def main():
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
                         default=None, help="Plot distributions (optional: output dir)")
-    parser.add_argument("--plot-init", action="store_true",
-                        help="Also plot initial (pre-fit) distributions")
     args = parser.parse_args()
 
     # ==================================================================
@@ -246,11 +244,6 @@ def main():
         if args.plot:
             fitter.plot(result, prefix=args.plot)
             print(f"  Plots saved to {args.plot}")
-
-    # Plot initial (pre-fit) distributions if requested
-    if args.plot_init and args.plot:
-        fitter.plot(x0, prefix=os.path.join(args.plot, "initial"))
-        print(f"  Initial plots saved to {args.plot}/initial")
 
     # ==================================================================
     # 6. Summary
