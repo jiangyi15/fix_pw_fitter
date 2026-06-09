@@ -805,6 +805,10 @@ class CUDAKernel:
 
     def _compute_cuda(self, data_holder, params, norm):
         """Internal CUDA compute using GPUDataHolder + GPUConfig."""
+        if data_holder is None or not data_holder.data_loaded:
+            raise RuntimeError(
+                "GPUDataHolder is not loaded. Check GPU memory or call "
+                "set_data()/set_phsp() before compute().")
         dh = data_holder
         gc = self.gpu_config
         lib = self.lib

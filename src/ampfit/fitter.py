@@ -1019,11 +1019,28 @@ class Fitter:
             ck = self.pc.build_ck(raw_ck)
             params = self._build_base_params(ck, None, None, None)
 
-        # Compute norm and probabilities
-        norm, _, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
+        # Compute norm and probabilities (handles batched phsp)
+        norm, _ = self._compute_norm_batched(params)
         norm = float(norm)
         _, _, P_data = self.kernel.compute(params, self.data_holder, norm=norm)
-        _, _, P_phsp = self.kernel.compute(params, self.phsp_holder, norm=None)
+
+        # Compute P_phsp (handle batched mode)
+        if self._phsp_buffer is not None:
+            # Batched mode: compute P per batch, concatenate
+            P_phsp_list = []
+            bs = self._phsp_batch_size
+            n_batches = (self._phsp_n + bs - 1) // bs
+            for b in range(n_batches):
+                start = b * bs
+                end = min(start + bs, self._phsp_n)
+                self._phsp_scratch.attach_input_slice(
+                    self._phsp_buffer, start, end,
+                    self._phsp_np["mass"].shape[1], self._phsp_np["q"].shape[1])
+                _, _, P_b = self.kernel.compute(params, self._phsp_scratch, norm=None)
+                P_phsp_list.append(P_b)
+            P_phsp = np.concatenate(P_phsp_list)
+        else:
+            _, _, P_phsp = self.kernel.compute(params, self.phsp_holder, norm=None)
 
         data_np = self._data_np
         phsp_np = self._phsp_np
