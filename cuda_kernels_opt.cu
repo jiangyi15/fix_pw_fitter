@@ -366,7 +366,7 @@ __global__ void compute_main_kernel(
             dQ_dP[event_idx] = weight_val;
         } else {
             Q_out[event_idx] = -weight_val * log(P / norm + bkg_val);
-            dQ_dP[event_idx] = -weight_val / (P / norm + bkg_val);
+            dQ_dP[event_idx] = -weight_val / (P + bkg_val * norm);
         }
     }
 }
