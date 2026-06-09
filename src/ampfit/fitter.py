@@ -232,23 +232,36 @@ class Fitter:
     # Constraint setup
     # ------------------------------------------------------------------
     def set_fixed(self, fixed_params):
-        """Set fixed (constant) parameters: {name: value}.
+        """Set fixed (constant) parameter slots: {slot_name: value}.
         
-        Works for all parameter types: ck (complex), m0/g0 (real), scalar (real).
-        Fixed params are excluded from the VariableRegistry and flat vector x.
+        Slot naming (matches free_param_names()):
+          '{name}r' — magnitude of complex parameter
+          '{name}i' — phase of complex parameter  
+          '{name}'  — real parameter (scalar, mass, or width)
+        
+        Also accepts complex base names '{name}' for ck parameters
+        (fixes both magnitude and phase).
+        
+        Examples:
+          fitter.set_fixed({"B->..._g_ls_0": 1+0j})  # both r and i
+          fitter.set_fixed({"B->..._g_ls_0r": 1.0})    # magnitude only
+          fitter.set_fixed({"gamma": 0.0})              # real scalar
         """
-        ck_fixed = {}
-        scalar_fixed = {}
-        scalar_names = {"gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"}
-        m0_names = set(self.config.m0_phys_name)
-        g0_names = set(self.config.g0_phys_name)
+        self._fixed_slots = {}
+        # Force-build pc to have ck names available
+        ck_names = set(self.pc.free_param_names())
         for name, val in fixed_params.items():
-            if name in scalar_names or name in m0_names or name in g0_names:
-                scalar_fixed[name] = float(val)
+            if name in ck_names:
+                # Complex base name → fix both r and i
+                if isinstance(val, complex):
+                    r, i = abs(val), np.angle(val)
+                else:
+                    r, i = float(val), 0.0
+                self._fixed_slots[name + 'r'] = r
+                self._fixed_slots[name + 'i'] = i
             else:
-                ck_fixed[name] = val
-        self._fixed_params = ck_fixed
-        self._fixed_scalars = scalar_fixed
+                self._fixed_slots[name] = float(val)
+        # Rebuild pc (which also rebuilds the variable registry)
         self._rebuild_pc()
 
     def set_same(self, same_params):
@@ -338,26 +351,25 @@ class Fitter:
         )
 
     def _rebuild_var_registry(self):
-        """Build or rebuild the VariableRegistry after constraint changes.
-        
-        All params (ck, mass, width, scalar) are added as variables by default.
-        Fixed params are excluded from the registry.
-        """
+        """Build the VariableRegistry from all non-fixed parameter slots."""
         self._var_registry = VariableRegistry()
-        # Add free ck parameters (complex, from pc)
+        # Ck parameters (complex) — skip if both r and i are fixed
         for name in self.pc.free_param_names():
-            self._var_registry.add_complex(name, ('ck', name))
-        # Add m0 parameters (real), excluding fixed ones
+            r_fixed = (name + 'r') in self._fixed_slots
+            i_fixed = (name + 'i') in self._fixed_slots
+            if not (r_fixed and i_fixed):
+                self._var_registry.add_complex(name, ('ck', name))
+        # M0 parameters (real)
         for name in self.config.m0_phys_name:
-            if name not in self._fixed_scalars:
+            if name not in self._fixed_slots:
                 self._var_registry.add_real(name, ('m0', name))
-        # Add g0 parameters (real), excluding fixed ones
+        # G0 parameters (real)
         for name in self.config.g0_phys_name:
-            if name not in self._fixed_scalars:
+            if name not in self._fixed_slots:
                 self._var_registry.add_real(name, ('g0', name))
-        # Add scalar/time parameters (real), excluding fixed ones
+        # Scalar/time parameters (real)
         for name in ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
-            if name not in self._fixed_scalars:
+            if name not in self._fixed_slots:
                 self._var_registry.add_real(name, ('scalar', name))
 
     def _n_flat_vars(self):
@@ -490,8 +502,32 @@ class Fitter:
         # 1. Apply bound transforms
         x_mapped = apply_bounds(x, self._bound_transforms)
 
-        # 2. Extract ck vars for ParameterConstraint.build_ck
+        # 2. Extract ck vars and merge fixed r/θ slots
         x_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
+        # For partially-fixed ck vars, reinsert fixed r or θ values
+        # pc.build_ck expects [r0, θ0, r1, θ1, ...] in pc.free_param_names() order
+        fixed_ck_r = {}  # {name: fixed_r}
+        fixed_ck_i = {}  # {name: fixed_i}
+        for slot, val in self._fixed_slots.items():
+            if slot.endswith('r') and slot[:-1] in self.pc.free_param_names():
+                fixed_ck_r[slot[:-1]] = val
+            elif slot.endswith('i') and slot[:-1] in self.pc.free_param_names():
+                fixed_ck_i[slot[:-1]] = val
+        if fixed_ck_r or fixed_ck_i:
+            # Rebuild x_ck with fixed values merged
+            new_x_ck = []
+            idx = 0
+            for name in self.pc.free_param_names():
+                in_reg = name in self._var_registry._name_to_entry
+                if in_reg:
+                    r = x_ck[idx]; th = x_ck[idx + 1]
+                    idx += 2
+                else:
+                    r = th = 0.0  # both fixed, shouldn't reach here
+                r = fixed_ck_r.get(name, r)
+                th = fixed_ck_i.get(name, th)
+                new_x_ck.extend([r, th])
+            x_ck = np.array(new_x_ck)
 
         # 3. Build m0, g0, scalar arrays from x + fixed values
         scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
@@ -510,14 +546,17 @@ class Fitter:
         else:
             scalar_arr = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
 
-        # Override with fixed values
-        for name, val in self._fixed_scalars.items():
-            if name in self.config.m0_phys_name:
-                m0_arr[self.config.m0_phys_name.index(name)] = val
-            elif name in self.config.g0_phys_name:
-                g0_arr[self.config.g0_phys_name.index(name)] = val
-            elif name in scalar_names:
-                scalar_arr[scalar_names.index(name)] = val
+        # Override with fixed slot values (r/i for complex parts, names for reals)
+        # Fixed scalars go directly into m0/g0/scalar arrays
+        for slot_name, val in self._fixed_slots.items():
+            base = slot_name.rstrip('ri') if slot_name[-1] in 'ri' and slot_name[-2] not in 'ri' else slot_name
+            if False: pass
+            elif base in self.config.m0_phys_name and slot_name == base:
+                m0_arr[self.config.m0_phys_name.index(base)] = val
+            elif base in self.config.g0_phys_name and slot_name == base:
+                g0_arr[self.config.g0_phys_name.index(base)] = val
+            elif base in scalar_names and slot_name == base:
+                scalar_arr[scalar_names.index(base)] = val
 
         # Override with free values from x (those in the registry)
         vals = self._var_registry.extract_real_dict(x_mapped)
@@ -556,8 +595,15 @@ class Fitter:
         else:
             grad_flat = grad_ck.copy()
 
-        # 7. Apply bound gradient correction
+        # 7. Apply bound gradient correction (before fixed-slot zeroing)
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
+
+        # 8. Zero gradients for fixed slots (after bound correction)
+        flat_names = self._var_registry.flat_names
+        for slot_name in self._fixed_slots:
+            if slot_name in flat_names:
+                idx = flat_names.index(slot_name)
+                grad_flat[idx] = 0.0
 
         return nll, grad_flat
 
