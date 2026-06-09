@@ -806,6 +806,65 @@ class Fitter:
         )
         return result
 
+    def _params_from_fit(self, fit_result, return_bounded=True):
+        """Build dicts of parameter values and errors from a BFGS fit result.
+        
+        Args:
+            fit_result: OptimizeResult from fit() method.
+            return_bounded: if True, transform values back through
+                            BoundTransform (physical space).
+                            if False, return raw unbounded optimizer values.
+        
+        Returns:
+            (values_dict, errors_dict) where each maps slot_name -> float.
+            values_dict: best-fit parameter values.
+            errors_dict: 1-sigma uncertainties from Hessian diagonal.
+        """
+        from ampfit.boundary import BoundTransform
+
+        x_best = fit_result.x
+        hess_inv = fit_result.hess_inv
+        raw_errors = np.sqrt(np.diag(hess_inv))
+        names = self._var_registry.flat_names
+
+        values = {}
+        errors = {}
+
+        for i, name in enumerate(names):
+            val = x_best[i]
+            err = raw_errors[i]
+
+            if return_bounded and i in self._bound_transforms:
+                bt = self._bound_transforms[i]
+                val_b = bt(val)
+                err_b = bt.trans_err(val, err)
+                values[name] = val_b
+                errors[name] = err_b
+            else:
+                values[name] = val
+                errors[name] = err
+
+        return values, errors
+
+    def get_uncertainties(self, fit_result, return_bounded=True):
+        """Compute parameter uncertainties from a BFGS fit result.
+        
+        Uses the inverse Hessian (fit_result.hess_inv) to compute
+        1-sigma uncertainties. Bound transforms are automatically
+        propagated for parameters set via set_range().
+        
+        Args:
+            fit_result: OptimizeResult from fit() method.
+            return_bounded: if True (default), returns values and errors
+                            in the physical (bounded) space.
+                            if False, returns raw optimizer space values.
+        
+        Returns:
+            dict of {slot_name: (value, error)} for every free parameter.
+        """
+        values, errors = self._params_from_fit(fit_result, return_bounded)
+        return {name: (values[name], errors[name]) for name in values}
+
     # ------------------------------------------------------------------
     # Convenience / utility
     # ------------------------------------------------------------------
