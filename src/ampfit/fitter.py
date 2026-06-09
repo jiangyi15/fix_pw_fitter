@@ -230,6 +230,12 @@ class Fitter:
         self._default_g0_arr = None   # built from config particle widths
         self.default_scalar = None    # user-set scalar defaults
 
+        # Background / purity parameters (computed during set_phsp/set_data)
+        self._purity = None           # purity fraction from config
+        self._N_b = None              # sum(phsp_weight * bkg) / sum(phsp_weight)
+        self._bkg_scale = None        # (1-purity)/purity / N_b for bkg scaling
+        self._log_purity_const = 0.0  # -log(purity) * sum(data_weight)
+
         # Bound transforms and fixed slots
         self._bound_transforms = {}        # {flat_idx: BoundTransform}
         self._fixed_slots = {}             # {slot_name: value}
@@ -287,15 +293,46 @@ class Fitter:
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
         
+        Reads purity from config and scales bkg:
+          bkg_scaled = (1-purity)/purity * bkg_raw / N_b
+        where N_b is the average phsp background (computed in set_phsp).
+        
+        Also stores -log(purity)*sum(weights) as a constant NLL offset.
+        
         Args:
             data: dict with keys 'mass', 'q', 'angle', 'frac', 'time',
                   'weight', 'bkg' (optional).
         """
+        # Read purity from config
+        purity = self.config.dic.get('purity')
+        if purity is None:
+            purity = self.config.dic.get('data', {}).get('purity',
+                     self.config.dic.get('data', {}).get('bg_frac', None))
+        self._purity = float(purity) if purity is not None else None
+
+        # Copy data and scale bkg if we have purity + phsp background
+        data = dict(data)
+        if self._purity is not None and self._N_b is not None and self._N_b > 0:
+            bkg_raw = data.get("bkg", 0.0)
+            if np.isscalar(bkg_raw):
+                bkg_raw = np.full(data["mass"].shape[0], bkg_raw, dtype=np.float64)
+            p = self._purity
+            self._bkg_scale = (1.0 - p) / p / self._N_b
+            data["bkg"] = bkg_raw * self._bkg_scale
+            self._log_purity_const = -np.log(p) * np.sum(data.get("weight", np.ones(data["mass"].shape[0])))
+        else:
+            self._bkg_scale = None
+            self._log_purity_const = 0.0
+
         self._data_np = data
         self.data_holder = self.kernel.load_data(data)
 
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.
+        
+        Normalizes phsp weights to sum to 1 and computes N_b = mean bkg
+        (weighted average of phsp bkg). These are used by set_data for
+        the purity-based background scaling.
         
         Auto-batches if phsp is too large for GPU memory.
         All input data stays on GPU permanently across get_nll calls.
@@ -304,6 +341,19 @@ class Fitter:
             phsp: dict with same structure as data.
         """
         from ampfit._cuda import GPUDataBuffer, GPUDataHolder
+
+        # Normalize phsp weights to sum to 1
+        phsp = dict(phsp)
+        w = phsp.get("weight", np.ones(phsp["mass"].shape[0]))
+        w_sum = np.sum(w)
+        if w_sum > 0:
+            phsp["weight"] = w / w_sum
+
+        # Compute N_b = weighted average of bkg over phsp
+        b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
+        if np.isscalar(b):
+            b = np.full(phsp["mass"].shape[0], b, dtype=np.float64)
+        self._N_b = float(np.sum(phsp["weight"] * b)) if w_sum > 0 else 0.0
 
         self._phsp_np = phsp
         n = phsp["mass"].shape[0]
@@ -621,7 +671,16 @@ class Fitter:
         # 3. dNLL/dnorm
         dNLL_dnorm = self._compute_norm_derivative(norm, P, self._data_np)
 
-        # 4. Combine gradients: total = direct + norm_chain
+        # 4. Add purity constant: -log(purity) * sum(weight)
+        # Kernel computes -w*log(P/norm + bkg_scaled).
+        # With bkg_scaled = (1-purity)/purity * bkg_raw/N_b, we get:
+        #   Q_kernel = -w*log(P/norm + (1-p)/p * b/N_b)
+        #            = -w*log(p*P/norm + (1-p)*b/N_b) + w*log(p)
+        # So Q_true = Q_kernel - w*log(purity)
+        # NLL_true = NLL_kernel - log(purity)*sum(w)
+        nll = nll + self._log_purity_const
+
+        # 5. Combine gradients: total = direct + norm_chain
         total_grads = {}
         for key in grads:
             if key == "ck":
