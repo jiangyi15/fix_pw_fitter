@@ -266,33 +266,8 @@ class ParameterConstraint:
 # ================================================================
 # Bound constraint helper: maps unbounded -> bounded via sin transform
 # ================================================================
-class BoundTransform:
-    """Transforms unbounded variables to a bounded [a, b] range.
-    
-    Uses: y = k * sin(x/k) + bias  where k = (b-a)/2, bias = (b+a)/2
-    This is bijective and has simple gradient: cos(x/k)
-    """
-
-    def __init__(self, a, b):
-        self.a = float(min(a, b))
-        self.b = float(max(a, b))
-        self.k = (self.b - self.a) / 2.0
-        self.bias = (self.b + self.a) / 2.0
-
-    def forward(self, x):
-        """Unbounded x -> bounded y."""
-        return self.k * np.sin(x / self.k) + self.bias
-
-    def grad(self, x):
-        """Gradient dy/dx at x."""
-        return np.cos(x / self.k)
-
-    def inverse(self, y):
-        """Bounded y -> unbounded x."""
-        y_clipped = np.clip(y, self.a, self.b)
-        t = (y_clipped - self.bias) / self.k
-        t = np.clip(t, -1.0, 1.0)
-        return np.arcsin(t) * self.k
+# Re-export BoundTransform from boundary module (complete implementation)
+from ampfit.boundary import BoundTransform  # noqa: F401
 
 
 # ================================================================
