@@ -204,7 +204,7 @@ def main():
         import json
         with open(args.init) as f:
             init_data = json.load(f)
-        x0 = fitter.values_from_dict(init_data.get("value", init_data))
+        x0 = fitter.values_from_dict(init_data)
         print(f"Initialized from {args.init}")
     else:
         x0 = fitter.initial_values(seed=42)

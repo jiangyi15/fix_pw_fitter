@@ -507,33 +507,33 @@ class Fitter:
         _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
-    def values_from_dict(self, values):
-        """Build the flat x vector from a dict of {slot_name: bounded_value}.
+    def values_from_dict(self, data):
+        """Build the flat x vector from a save_params JSON dict.
         
-        Useful for restarting from a previous fit result JSON.
-        The values are in physical (bounded) space; bound transforms are
-        inverted automatically.
+        Reads physical (bounded) values from the 'value' section and
+        inverts bound transforms to get optimizer-space x.
+        The arctan-based BoundTransform is exactly bijective, so
+        the roundtrip is lossless.
         
         Args:
-            values: dict of {slot_name: value}, e.g. from save_params() JSON.
+            data: dict from save_params() JSON (keys 'value', 'error', ...).
         
         Returns:
             flat vector x suitable for get_nll() or fit().
         """
         _ = self.pc
         names = self._var_registry.flat_names
+        values = data.get("value", data) if isinstance(data, dict) else data
         x = np.empty(len(names))
 
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
-                # Invert bound transform if present
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
                 x[i] = val
             else:
-                # Parameter not in dict — use random initial value
                 x[i] = self._var_registry.build_initial()[i]
 
         return x
@@ -1171,7 +1171,6 @@ class Fitter:
         values, errors = self._params_from_fit(fit_result, return_bounded=True)
         flat_names = self._var_registry.flat_names
 
-        # Build value and error dicts (start with free params from fit)
         out = {"value": {}, "error": {}}
         for name in flat_names:
             out["value"][name] = float(values[name])

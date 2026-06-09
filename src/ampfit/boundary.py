@@ -23,10 +23,14 @@ import numpy as np
 class BoundTransform:
     """Transform unbounded variables to a bounded [a, b] range.
     
-    Uses: y = k * sin(x/k) + bias  where k = (b-a)/2, bias = (b+a)/2
-    This is smooth, bijective, and has a simple gradient: cos(x/k).
+    Uses: y = bias + k*(2/π)*arctan(x*π/(2*k))
+    where k = (b-a)/2, bias = (b+a)/2.
     
-    The inverse maps bounded values back to the unbounded range.
+    This is BIJECTIVE over all real numbers (unlike sin which wraps).
+    Forward: (-∞, +∞) → (a, b)  smooth, monotonic.
+    Inverse: (a, b) → (-∞, +∞)  exact, no periodicity.
+    Gradient at x=0 is 1 (same scaling as the original sin transform).
+    
     trans_err propagates covariance through the transform.
     """
 
@@ -35,28 +39,29 @@ class BoundTransform:
         self.b = float(max(a, b))
         self.k = (self.b - self.a) / 2.0
         self.bias = (self.b + self.a) / 2.0
+        self._c = np.pi / (2.0 * (self.b - self.a)) * 2.0  # π/(2*k)
+        # Actually: c = π / (2*k)
+        # But k = (b-a)/2, so 2*k = b-a
+        # c = π / (b-a)
 
     def forward(self, x):
-        """Unbounded x -> bounded y in [a, b]."""
-        return self.k * np.sin(x / self.k) + self.bias
+        """Unbounded x -> bounded y in (a, b). Bijective over all x."""
+        c = np.pi / (self.b - self.a)
+        return self.bias + (self.b - self.a) / np.pi * np.arctan(x * c)
 
     def __call__(self, x):
-        """Alias for forward()."""
         return self.forward(x)
 
     def grad(self, x):
         """Gradient dy/dx at x (for chain rule in gradient backprop)."""
-        return np.cos(x / self.k)
+        c = np.pi / (self.b - self.a)
+        return 1.0 / (1.0 + (x * c) ** 2)
 
     def inverse(self, y):
-        """Bounded y in [a, b] -> unbounded x.
-        
-        Handles periodic wrapping: values outside [a, b] are folded back in.
-        """
-        y_clipped = np.clip(y, self.a, self.b)
-        t = (y_clipped - self.bias) / self.k
-        t = np.clip(t, -1.0, 1.0)
-        return np.arcsin(t) * self.k
+        """Bounded y in (a, b) -> unbounded x. Exact inverse."""
+        c = np.pi / (self.b - self.a)
+        yc = np.clip(y, self.a, self.b)
+        return np.tan((yc - self.bias) * c) / c
 
     def trans_err(self, x, error):
         """Propagate error through the transform.
