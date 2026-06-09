@@ -455,28 +455,32 @@ class Fitter:
             self._default_m0_arr = np.array(m0, dtype=np.float64)
 
         if self._default_g0_arr is None:
+            from ampfit.particle_model import build_particle
             g0 = []
             for name in self.config.g0_phys_name:
+                # Find the particle that this g0 name belongs to
                 particle = None
                 for p in self.config.dic.get('particle', {}):
                     if name.startswith(p):
                         particle = p
                         break
-                val = 0.1
                 if particle is not None:
-                    pdic = self.config.dic['particle'][particle]
-                    # Try width first (simple resonance)
-                    w = pdic.get('width')
-                    if w is not None:
-                        val = float(w)
-                    else:
-                        # Try Flatte coupling: name like 'f0(980)_g0' → key 'g_0'
-                        suffix = name[len(particle):]  # e.g. '_g0' → 'g_0'
-                        if suffix.startswith('_g'):
-                            gkey = 'g_' + suffix[2:]  # '_g0' → 'g_0', '_g1' → 'g_1'
-                            if gkey in pdic:
-                                val = float(pdic[gkey])
-                g0.append(val)
+                    # Build the particle model and ask for its gamma defaults
+                    try:
+                        pmodel = build_particle(particle,
+                            **self.config.dic['particle'][particle])
+                        defaults = pmodel.get_gamma_defaults()
+                        gnames = pmodel.get_gamma_name()
+                        # Match this g0 name to an index in the model
+                        if name in gnames:
+                            idx = gnames.index(name)
+                            g0.append(float(defaults[idx]))
+                        else:
+                            g0.append(0.1)
+                    except Exception:
+                        g0.append(0.1)
+                else:
+                    g0.append(0.1)
             self._default_g0_arr = np.array(g0, dtype=np.float64)
 
     @property
