@@ -507,6 +507,37 @@ class Fitter:
         _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
+    def values_from_dict(self, values):
+        """Build the flat x vector from a dict of {slot_name: bounded_value}.
+        
+        Useful for restarting from a previous fit result JSON.
+        The values are in physical (bounded) space; bound transforms are
+        inverted automatically.
+        
+        Args:
+            values: dict of {slot_name: value}, e.g. from save_params() JSON.
+        
+        Returns:
+            flat vector x suitable for get_nll() or fit().
+        """
+        _ = self.pc
+        names = self._var_registry.flat_names
+        x = np.empty(len(names))
+
+        for i, name in enumerate(names):
+            if name in values:
+                val = float(values[name])
+                # Invert bound transform if present
+                if i in self._bound_transforms:
+                    bt = self._bound_transforms[i]
+                    val = bt.inverse(val)
+                x[i] = val
+            else:
+                # Parameter not in dict — use random initial value
+                x[i] = self._var_registry.build_initial()[i]
+
+        return x
+
     def free_param_names(self):
         """Slot-level names of all free variables. Length matches x0.
         

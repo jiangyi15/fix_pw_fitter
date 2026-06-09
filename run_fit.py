@@ -132,6 +132,8 @@ def main():
                         default=None, help="Plot distributions (optional: output dir)")
     parser.add_argument("--fix-mass-width", action="store_true",
                         help="Fix all mass and width parameters to config defaults")
+    parser.add_argument("--init", type=str, default=None,
+                        help="Initial parameters JSON file (from save_params output)")
     args = parser.parse_args()
 
     # ==================================================================
@@ -198,7 +200,14 @@ def main():
     print("COMPUTING NLL")
     print("=" * 70)
 
-    x0 = fitter.initial_values(seed=42)
+    if args.init:
+        import json
+        with open(args.init) as f:
+            init_data = json.load(f)
+        x0 = fitter.values_from_dict(init_data.get("value", init_data))
+        print(f"Initialized from {args.init}")
+    else:
+        x0 = fitter.initial_values(seed=42)
     print(f"x0 shape: {x0.shape}")
 
     t0 = time.time()
