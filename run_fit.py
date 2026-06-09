@@ -153,7 +153,10 @@ def main():
             fitter.set_range(name, val - 0.1, val + 0.1)
     for name in fitter.config.g0_phys_name:
         if name not in fitter._fixed_slots:
-            fitter.set_range(name, 0.0, 2.0)
+            val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
+            lo = max(0.0, val - 0.1)
+            hi = min(2.0, val + 0.1)
+            fitter.set_range(name, lo, hi)
 
     # ==================================================================
     # 2. Load data
