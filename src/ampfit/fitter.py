@@ -983,8 +983,14 @@ class Fitter:
         if x0 is None:
             x0 = self.initial_values()
 
+        # Cache the last evaluation — the callback reads from here
+        # instead of re-running the expensive GPU forward+backward pass.
+        _last = {'nll': None, 'grad': None}
+
         def nll_and_grad(x):
             nll, grad = self.get_nll(x)
+            _last['nll'] = nll
+            _last['grad'] = grad
             return nll, grad.astype(np.float64)
 
         # Default callback: print NLL + timing at each iteration
@@ -999,9 +1005,8 @@ class Fitter:
                 dt = t_now - self.t_last
                 t_elapsed = t_now - self.t_start
                 self.t_last = t_now
-                nll, grad = nll_and_grad(xk)
-                gn = np.linalg.norm(grad)
-                print(f"  iter {self.n:4d}: NLL = {nll:.11f}, |grad| = {gn:.4e}, +{dt:.2f}s [{t_elapsed:.1f}s]")
+                gn = np.linalg.norm(_last['grad'])
+                print(f"  iter {self.n:4d}: NLL = {_last['nll']:.11f}, |grad| = {gn:.4e}, +{dt:.2f}s [{t_elapsed:.1f}s]")
                 return False
 
         tracker = IterTracker()
