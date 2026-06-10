@@ -488,15 +488,101 @@ class PWAONNXBuilder:
         wlog = self._node("Mul", [weight, logP])
         wsum = self._node("ReduceSum", [wlog], axes=[0], keepdims=0)
         Q = self._node("Neg", [wsum], outputs="Q")
-        P_out = self._name("P_final")
         self._node("Identity", [P], outputs="P")
 
-        # ──── outputs ────
+        # ════════════════════════════════════════════════════════
+        # BACKWARD PASS — gradients
+        # ════════════════════════════════════════════════════════
+
+        # dQ_dP = -weight / (P/norm + bkg) * (1/norm)
+        #        = -weight / (P + bkg*norm)
+        P_norm = self._node("Mul", [P, self._node("Reciprocal", [norm])])
+        # Actually simpler: dQ_dP = -weight / (P + bkg*norm) * norm
+        # Even simpler from numpy: dQ_dP = -weight / (P/norm + bkg) / norm
+        # Let's use: dQ_dP = -weight / (P + bkg * norm)
+        bkg_norm = self._node("Mul", [bkg, norm])
+        P_plus_bn = self._node("Add", [P, bkg_norm])
+        dQ_dP = self._node("Neg", [self._node("Div", [weight, P_plus_bn])])
+
+        # dP/dpb, dP/dpbbar, dP/dAp
+        dP_dpb = self._node("Mul", [frac, self._node("Sub", [c1, A_prod])])
+        dP_dpbbar = self._node("Mul", [self._node("Sub", [c1, frac]), self._node("Add", [c1, A_prod])])
+        neg_frac = self._node("Neg", [frac])
+        dP_dAp = self._node("Sub", [
+            self._node("Mul", [neg_frac, pb]),
+            self._node("Mul", [self._node("Sub", [c1, frac]), pbbar]),
+        ])
+
+        dQ_dpb = self._node("Mul", [dQ_dP, dP_dpb])
+        dQ_dpbbar = self._node("Mul", [dQ_dP, dP_dpbbar])
+        dQ_dAp = self._node("ReduceSum", [self._node("Mul", [dQ_dP, dP_dAp])], axes=[0], keepdims=0)
+
+        # Wirtinger gradients for |pap|² and |pam|²
+        # d_pb_dpap = conj(pap)  — Wirtinger: ∂|pap|²/∂pap = pap̄
+        # d_pbbar_dpam = conj(pam)
+        conj_pap_r = pap_r
+        conj_pap_i = self._node("Neg", [pap_i])
+        conj_pam_r = pam_r
+        conj_pam_i = self._node("Neg", [pam_i])
+
+        # dQ/dpap (Wirtinger) = dQ/dpb * d_pb_dpap
+        dQ_dpap_r, dQ_dpap_i = self._complex_mul_real(conj_pap_r, conj_pap_i, dQ_dpb, "dQ_dpap")
+        dQ_dpam_r, dQ_dpam_i = self._complex_mul_real(conj_pam_r, conj_pam_i, dQ_dpbbar, "dQ_dpam")
+
+        # Chain through pap = gp*ap + gm*poq*am
+        # Wirtinger chain: dQ/d(ap) = dQ/d(pap)·gp + dQ/d(pam)·(gm/poq)
+        #                   dQ/d(am) = dQ/d(pap)·(gm·poq) + dQ/d(pam)·gp
+        # Note: these use DIRECT derivatives, not conjugates.
+        d1_r, d1_i = self._complex_mul(dQ_dpap_r, dQ_dpap_i, gp_r, gp_i, "d1")
+        cgm_cpoq_r, cgm_cpoq_i = self._complex_div(gm_r, gm_i, poq_r, poq_i, "cgm_cpoq")
+        d2_r, d2_i = self._complex_mul(dQ_dpam_r, dQ_dpam_i, cgm_cpoq_r, cgm_cpoq_i, "d2")
+        dQ_dap_r = self._node("Add", [d1_r, d2_r])
+        dQ_dap_i = self._node("Add", [d1_i, d2_i])
+
+        gm_poq_r2, gm_poq_i2 = self._complex_mul(gm_r, gm_i, poq_r, poq_i, "gm_poq")
+        d3_r, d3_i = self._complex_mul(dQ_dpap_r, dQ_dpap_i, gm_poq_r2, gm_poq_i2, "d3")
+        d4_r, d4_i = self._complex_mul(dQ_dpam_r, dQ_dpam_i, gp_r, gp_i, "d4")
+        dQ_dam_r = self._node("Add", [d3_r, d4_r])
+        dQ_dam_i = self._node("Add", [d3_i, d4_i])
+
+        # Expand dQ_dap, dQ_dam from (N,) to (N, n_half)
+        # ap = sum(a[:, :n_half], axis=-1), am = sum(a[:, n_half:], axis=-1)
+        # dQ/da[:, :n_half] = dQ_dap (broadcast)
+        dQ_dap_r_2d = self._node("Unsqueeze", [dQ_dap_r], axes=[1])
+        dQ_dap_i_2d = self._node("Unsqueeze", [dQ_dap_i], axes=[1])
+        dQ_dam_r_2d = self._node("Unsqueeze", [dQ_dam_r], axes=[1])
+        dQ_dam_i_2d = self._node("Unsqueeze", [dQ_dam_i], axes=[1])
+
+        # Tile to (N, n_half)
+        sh_half = self._shape_2d(batch_size, n_half)
+        dQ_dap_r_e = self._node("Expand", [dQ_dap_r_2d, sh_half])
+        dQ_dap_i_e = self._node("Expand", [dQ_dap_i_2d, sh_half])
+        dQ_dam_r_e = self._node("Expand", [dQ_dam_r_2d, sh_half])
+        dQ_dam_i_e = self._node("Expand", [dQ_dam_i_2d, sh_half])
+
+        # dQ/da = concat(dQ_dap, dQ_dam) along axis=1
+        dQ_da_r_full = self._node("Concat", [dQ_dap_r_e, dQ_dam_r_e], axis=1)
+        dQ_da_i_full = self._node("Concat", [dQ_dap_i_e, dQ_dam_i_e], axis=1)
+
+        # Gradient for ck: a = ck * common → dQ/d(ck) = sum(dQ/da * common, axis=0)
+        # (Wirtinger: d(ck·common)/d(ck) = common since it's holomorphic)
+        g_ck_r, g_ck_i = self._complex_mul(dQ_da_r_full, dQ_da_i_full, cf_r, cf_i, "g_ck")
+        gck_r_sum = self._node("ReduceSum", [g_ck_r], axes=[0], keepdims=0)
+        gck_i_sum = self._node("ReduceSum", [g_ck_i], axes=[0], keepdims=0)
+        # ∂Q/∂Re(ck) = 2·Re(dQ/d(ck))
+        grad_ck_real = self._node("Mul", [gck_r_sum, self._scalar(2.0)])
+        # ∂Q/∂Im(ck) = -2·Im(dQ/d(ck)) — negate the imag Wirtinger component
+        grad_ck_imag = self._node("Mul", [self._node("Neg", [gck_i_sum]), self._scalar(2.0)])
+        self._node("Identity", [grad_ck_real], outputs="grad_ck_real")
+        self._node("Identity", [grad_ck_imag], outputs="grad_ck_imag")
+
+        # ── outputs ──
         Q_vi = helper.make_tensor_value_info("Q", TensorProto.FLOAT, [])
         P_vi = helper.make_tensor_value_info("P", TensorProto.FLOAT, [batch_size])
-        self._value_info.append(Q_vi)
-        self._value_info.append(P_vi)
-        graph_outputs = [Q_vi, P_vi]
+        gck_r_vi = helper.make_tensor_value_info("grad_ck_real", TensorProto.FLOAT, [n_wave])
+        gck_i_vi = helper.make_tensor_value_info("grad_ck_imag", TensorProto.FLOAT, [n_wave])
+        self._value_info.extend([Q_vi, P_vi, gck_r_vi, gck_i_vi])
+        graph_outputs = [Q_vi, P_vi, gck_r_vi, gck_i_vi]
 
         input_names = set(["ck_real", "ck_imag", "m0", "g0",
                        "mass", "q", "angle", "frac", "time", "weight", "bkg",
@@ -520,11 +606,12 @@ def main():
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--output", default="pwa_forward.onnx")
     parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args()
 
-    print("Building ONNX graph...")
+    print(f"Building ONNX graph (batch_size={args.batch_size})...")
     builder = PWAONNXBuilder(args.config)
-    model = builder.build()
+    model = builder.build(batch_size=args.batch_size)
     onnx.save(model, args.output)
     print(f"✓ Saved to {args.output}")
     print(f"  Inputs: {len(model.graph.input)}")
