@@ -30,29 +30,17 @@ class ParameterConstraint:
         self.all_comb = list(all_comb)
         self.n_wave = len(all_comb)
 
+        # Collect every possible ck parameter name from comb structure
+        self.all_names = set()
+        for comb in all_comb:
+            for p in comb:
+                if isinstance(p, str):
+                    self.all_names.add(p)
+
         # Constraint attributes — set directly or via ConstraintManager
         self.fixed = {}          # {canonical_name: complex_value}
         self.same_map = {}       # {alias_name: canonical_name}
-
-        # Built by configure()
-        self.free_names = []     # canonical names of free parameters
-        self.n_free = 0
-
-    def configure(self, all_names):
-        """Build ``free_names`` from current ``fixed`` / ``same_map``.
-
-        Args:
-            all_names: iterable of every possible parameter name.
-        """
-        fixed_set = set(self.fixed.keys())
-        self.free_names = []
-        seen = set()
-        for name in sorted(all_names):
-            canon = self.same_map.get(name, name)
-            if canon in fixed_set or canon in seen:
-                continue
-            seen.add(canon)
-            self.free_names.append(canon)
+        self.free_names = sorted(self.all_names)   # initially all free
         self.n_free = len(self.free_names)
 
     # ── queries ─────────────────────────────────────────────────
@@ -477,7 +465,19 @@ class ConstraintManager:
 
         self.pc.fixed = pc_fixed
         self.pc.same_map = self._alias_to_canon
-        self.pc.configure(all_ck_names)
+
+        # Build free_names for pc (inline — no separate configure() call)
+        fixed_set = set(pc_fixed.keys())
+        rebuilt = []
+        seen = set()
+        for name in sorted(all_ck_names):
+            canon = self._alias_to_canon.get(name, name)
+            if canon in fixed_set or canon in seen:
+                continue
+            seen.add(canon)
+            rebuilt.append(canon)
+        self.pc.free_names = rebuilt
+        self.pc.n_free = len(rebuilt)
 
         # 4. Rebuild VariableRegistry
         self._var_registry = VariableRegistry()
@@ -586,7 +586,17 @@ if __name__ == "__main__":
             if nonbar in all_params:
                 same_map[bar_name] = nonbar
     pc.same_map = same_map
-    pc.configure(all_params)
+    fixed_set = set(pc.fixed.keys())
+    rebuilt = []
+    seen = set()
+    for name in sorted(all_params):
+        canon = pc.same_map.get(name, name)
+        if canon in fixed_set or canon in seen:
+            continue
+        seen.add(canon)
+        rebuilt.append(canon)
+    pc.free_names = rebuilt
+    pc.n_free = len(rebuilt)
 
     print(f"n_wave = {pc.n_wave}")
     print(f"n_free = {pc.n_free}")
