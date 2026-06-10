@@ -154,6 +154,13 @@ def main():
             val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
             fixed_slots[name] = val
 
+    fixed_slots["gamma"] = 0.0
+    fixed_slots["delta_gamma"] = 0.0
+    fixed_slots["delta_m"]= 0.506
+    fixed_slots["A_prod"] = 0.0
+    fixed_slots["poqr"] = 1.0
+    fixed_slots["poqi"] = 0.0
+
     fitter.set_fixed(fixed_slots)
     fitter.set_same(same_params)
     fitter.set_scale(scale_params)

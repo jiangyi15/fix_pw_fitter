@@ -205,8 +205,7 @@ class Fitter:
         self.n_m0 = len(self.config.m0_phys_name)
         self.n_g0 = len(self.config.g0_phys_name)
 
-        # Constraint storage (built lazily)
-        self._fixed_params = {}
+        # Constraint storage (built lazily, additive by default)
         self._same_params = []
         self._scale_params = {}
         self._pc = None  # ParameterConstraint (built when needed)
@@ -241,40 +240,127 @@ class Fitter:
         self._fixed_slots = {}             # {slot_name: value}
 
     # ------------------------------------------------------------------
-    # Constraint setup
+    # Constraint setup — all additive/interactive by default
     # ------------------------------------------------------------------
-    def set_fixed(self, fixed_slots):
-        """Set fixed parameter slots: {slot_name: value}.
-        
+    def set_fixed(self, fixed_slots, reset=False):
+        """Fix parameter slot(s) to a constant value. *Additive* — call multiple times.
+
         Slot names match free_param_names():
           '{name}r' — magnitude of complex parameter
           '{name}i' — phase of complex parameter
           '{name}'  — real parameter (scalar, mass, or width)
-        
-        Examples:
-          fitter.set_fixed({"B->..._g_ls_0r": 1.0})   # magnitude only
-          fitter.set_fixed({"B->..._g_ls_0i": 0.0})   # phase only
-          fitter.set_fixed({"gamma": 0.0})             # real scalar
+
+        Pass ``reset=True`` to clear all previously fixed slots first.
+
+        Examples::
+
+            fitter.set_fixed({"B->..._g_ls_0r": 1.0})     # magnitude fixed
+            fitter.set_fixed({"B->..._g_ls_0i": 0.0})     # phase fixed separately
+            fitter.set_fixed({"gamma": 0.0})               # real scalar fixed
+            fitter.set_fixed({"delta_m": 0.506, "A_prod": 0.0})  # multiple at once
         """
-        self._fixed_slots = {k: float(v) for k, v in fixed_slots.items()}
+        if reset:
+            self._fixed_slots = {}
+        self._fixed_slots.update({k: float(v) for k, v in fixed_slots.items()})
         self._rebuild_pc()
 
-    def set_same(self, same_params):
-        """Set same-parameter groups: [[name_a, name_b, ...], ...]."""
-        self._same_params = list(same_params)
+    def set_same(self, same_params, reset=False):
+        """Share a value across parameter names. *Additive* — call multiple times.
+
+        Each group is a list of parameter names that share a single optimised value
+        (the first name is the canonical representative).
+
+        Pass ``reset=True`` to clear all previously registered groups first.
+
+        Example::
+
+            fitter.set_same([["B->a1p->rhoA_g_ls_1", "B->a1m->rhoA_g_ls_1"]])
+            fitter.set_same([["B->a1p->f0_total_0", "B->a1m->f0_total_0"]])
+        """
+        if reset:
+            self._same_params = []
+        self._same_params.extend(list(same_params))
         self._rebuild_pc()
 
-    def set_scale(self, scale_params):
-        """Set scale factors: {name: scale_factor}."""
-        self._scale_params = dict(scale_params)
+    def set_scale(self, scale_params, reset=False):
+        """Multiply a parameter by a real scale factor. *Additive* — call multiple times.
+
+        The scale is applied to the *original* name (before alias→canonical mapping),
+        matching the archive ``pw_cfit5_td6_fix29.py`` convention.
+
+        Pass ``reset=True`` to clear all previously registered scale factors first.
+
+        Example::
+
+            fitter.set_scale({"B->a1m->rhoA_g_ls_0": -1})   # flip sign
+        """
+        if reset:
+            self._scale_params = {}
+        self._scale_params.update(dict(scale_params))
         self._rebuild_pc()
+
+    def set_free(self, name):
+        """Unfix a previously fixed parameter so it becomes free again.
+
+        Removes *name* (and the corresponding ``'r'`` / ``'i'`` slots for complex
+        parameters) from the fixed set.  Also removes *name* from any
+        same‑parameter group or scale mapping.
+
+        Parameters not previously set via any ``set_*`` method are free by
+        default, so this is only needed to reverse an earlier ``set_fixed``,
+        ``set_same``, or ``set_scale`` call.
+
+        Example::
+
+            fitter.set_fixed({"gamma": 0.0})
+            fitter.set_free("gamma")           # now free again
+        """
+        # Remove from fixed slots
+        name_r = name + 'r'
+        name_i = name + 'i'
+        for key in (name, name_r, name_i):
+            self._fixed_slots.pop(key, None)
+
+        # Remove from same-parameter groups
+        self._same_params = [
+            g for g in self._same_params if name not in g
+        ]
+
+        # Remove from scale factors
+        self._scale_params.pop(name, None)
+
+        self._rebuild_pc()
+
+    def unset_range(self, name):
+        """Remove the bound (arctan) constraint on *name*, making it unbounded.
+
+        Example::
+
+            fitter.set_range("gamma", -0.3, 0.3)
+            fitter.unset_range("gamma")      # back to unbounded
+        """
+        try:
+            si, ei = self.var_registry.flat_index(name)
+            for idx in range(si, ei):
+                self._bound_transforms.pop(idx, None)
+            return
+        except KeyError:
+            pass
+
+        flat_n = self.var_registry.flat_names
+        for i, n in enumerate(flat_n):
+            if n == name:
+                self._bound_transforms.pop(i, None)
+                return
+
+        # Not an error — silently ignore unknown names (they weren't bound)
 
     def _rebuild_pc(self):
         """Build or rebuild the ParameterConstraint."""
         from ampfit.param_constraint import ParameterConstraint
         self._pc = ParameterConstraint(
             self.all_comb,
-            fixed_params=self._fixed_params,
+            fixed_params={},          # complex-level fixes handled by _fixed_slots in get_nll()
             same_params=self._same_params,
             scale_params=self._scale_params,
         )
@@ -421,7 +507,7 @@ class Fitter:
 
         # Try base name first (e.g. 'gamma' → one slot, 'B->...total_0' → two slots)
         try:
-            si, ei = self._var_registry.flat_index(name)
+            si, ei = self.var_registry.flat_index(name)
             for idx in range(si, ei):
                 self._bound_transforms[idx] = bt
             return
@@ -429,7 +515,7 @@ class Fitter:
             pass
 
         # Try flat slot name (e.g. 'B->...total_0r')
-        flat_n = self._var_registry.flat_names
+        flat_n = self.var_registry.flat_names
         for i, n in enumerate(flat_n):
             if n == name:
                 self._bound_transforms[i] = bt
@@ -437,7 +523,7 @@ class Fitter:
 
         raise ValueError(
             f"Unknown parameter '{name}'. "
-            f"Available: {self._var_registry.flat_names[:6]}... "
+            f"Available: {self.var_registry.flat_names[:6]}... "
         )
 
     def _build_alias_map(self):
@@ -541,6 +627,12 @@ class Fitter:
 
         return x
 
+    @property
+    def var_registry(self):
+        """Lazily-built VariableRegistry (built by _rebuild_pc)."""
+        _ = self.pc  # trigger lazy build
+        return self._var_registry
+
     def free_param_names(self):
         """Slot-level names of all free variables. Length matches x0.
         
@@ -549,7 +641,7 @@ class Fitter:
         
         Example: ['B->...total_0r', 'B->...total_0i', 'gamma', ...]
         """
-        return self._var_registry.flat_names
+        return self.var_registry.flat_names
 
     def _extract_config_defaults(self):
         """Build default m0/g0 arrays from config.yml particle definitions.
@@ -1071,7 +1163,7 @@ class Fitter:
                     self._phsp_buffer, start, end,
                     self._phsp_np["mass"].shape[1], self._phsp_np["q"].shape[1])
                 _, _, P_b = self.kernel.compute(params, self._phsp_scratch, norm=None)
-                P_phsp_list.append(P_b)
+                P_phsp_list.append(P_b[:self._phsp_scratch.n_events])
             P_phsp = np.concatenate(P_phsp_list)
         else:
             _, _, P_phsp = self.kernel.compute(params, self.phsp_holder, norm=None)

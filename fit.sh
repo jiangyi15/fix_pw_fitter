@@ -20,9 +20,10 @@ python run_fit.py \
     --config "$CONFIG" \
     --data "$DATA" \
     --phsp "$PHSP" \
-    --fit --maxiter 1000 \
+    --fit --maxiter 10 \
     --save "$PREFIX/results.json" \
-    --plot "$PREFIX/plots/"
+    --plot "$PREFIX/plots/" \
+    --fix-mass-width
 
 echo ""
 echo "=== done ==="
