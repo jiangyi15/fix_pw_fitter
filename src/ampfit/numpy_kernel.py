@@ -41,6 +41,24 @@ class NumpyKernelCorrect:
         self.n_res = self.bw_order.size // self.n_wave
         self.n_decay = self.fl_order.size // self.n_wave
 
+        # Precompute scatter matrices for gradient accumulation
+        n_unique_bw = len(self.m0_index)
+        n_wave_n_res = self.bw_order.size
+        self._bw_scatter = np.zeros((n_wave_n_res, n_unique_bw), dtype=np.float64)
+        for k, bw_idx in enumerate(self.bw_order):
+            self._bw_scatter[k, bw_idx] = 1.0
+
+        n_m0_unique = int(np.max(self.m0_index)) + 1
+        self._m0_scatter = np.zeros((n_unique_bw, n_m0_unique), dtype=np.float64)
+        for i, m_idx in enumerate(self.m0_index):
+            self._m0_scatter[i, m_idx] = 1.0
+
+        n_gamma_rows = len(self.g0_index)
+        n_g0_unique = int(np.max(self.g0_index)) + 1
+        self._g0_scatter = np.zeros((n_gamma_rows, n_g0_unique), dtype=np.float64)
+        for i, g_idx in enumerate(self.g0_index):
+            self._g0_scatter[i, g_idx] = 1.0
+
     def interp(self, table, types, x, xmin, xdelta):
         """Vectorized linear interpolation"""
         diff = (x - xmin) / xdelta
@@ -201,79 +219,41 @@ class NumpyKernelCorrect:
         # ==================== GRADIENT FOR bw_p (COMPLEX) ====================
         # a = ck * (1/bw_p) * constant
         # ∂a/∂bw_p = -ck / bw_p² * constant = -ck * one_over_bw * common_amp_factor
-        
+
         dQ_dbw_p = dQ_da_flat * (-ck * one_over_bw * common_amp_factor)
-        
-        # BW gradients through product
-        dQ_dbw_dom_all = np.zeros_like(bw_dom_all_reshaped)
-        for i in range(self.n_res):
-            mask = np.ones(self.n_res, dtype=bool)
-            mask[i] = False
-            prod_except_i = np.prod(bw_dom_all_reshaped[:, :, mask], axis=-1)
-            dQ_dbw_dom_all[:, :, i] = dQ_dbw_p * prod_except_i
-        
-        # Scatter gradients
-        dQ_dbw_dom = np.zeros_like(bw_dom)
-        for wave_idx in range(self.n_wave):
-            for res_idx in range(self.n_res):
-                order_idx = wave_idx * self.n_res + res_idx
-                bw_idx = self.bw_order[order_idx]
-                dQ_dbw_dom[:, bw_idx] += dQ_dbw_dom_all[:, wave_idx, res_idx]
-        
+
+        # BW gradients through product (vectorized for n_res=2)
+        dQ_dbw_dom_all = np.stack([
+            dQ_dbw_p * bw_dom_all_reshaped[:, :, 1],
+            dQ_dbw_p * bw_dom_all_reshaped[:, :, 0],
+        ], axis=-1)
+
+        # Scatter gradients via MatMul with scatter matrix
+        dQ_dbw_flat = dQ_dbw_dom_all.reshape(n_events, -1)
+        dQ_dbw_dom = dQ_dbw_flat @ self._bw_scatter
+
         # ==================== GRADIENT FOR m0 (REAL PARAMETER) ====================
         # bw_dom = m0² - m² - 1j*m0*g_bw
         # ∂bw_dom/∂m0 = 2*m0 - 1j*g_bw (complex derivative)
-        
-        # For REAL m0 with complex bw_dom, using Wirtinger calculus:
-        # ∂Q/∂m0 = ∂Q/∂bw_dom * ∂bw_dom/∂m0 + ∂Q/∂bw_dom* * ∂bw_dom*/∂m0
-        #         = ∂Q/∂bw_dom * (2*m0 - 1j*g_bw) + conj(∂Q/∂bw_dom) * (2*m0 + 1j*g_bw)
-        #         = 2*Re(∂Q/∂bw_dom * (2*m0 - 1j*g_bw))
-        
-        # Compute the gradient using Wirtinger formula:
+
         dbw_dom_dm0 = 2 * m0_all - 1j * g_bw  # shape: (n_events, n_unique_bw)
-        
-        grad_m0 = np.zeros_like(m0)
-        for bw_idx in range(len(self.m0_index)):
-            m0_param_idx = self.m0_index[bw_idx]
-            # Wirtinger gradient for real parameter:
-            # ∂Q/∂m0 = 2*Re(∂Q/∂bw_dom * ∂bw_dom/∂m0)
-            grad_m0[m0_param_idx] += 2 * np.sum(np.real(
-                dQ_dbw_dom[:, bw_idx] * dbw_dom_dm0[:, bw_idx]
-            ))
-        
+
+        # Scatter by m0_index via MatMul
+        dm0_raw = 2 * np.real(dQ_dbw_dom * dbw_dom_dm0)  # (n_events, n_unique_bw)
+        dm0_sum = np.sum(dm0_raw, axis=0)                  # (n_unique_bw,)
+        grad_m0 = dm0_sum @ self._m0_scatter               # (n_m0_unique,)
+
         # ==================== GRADIENT FOR g0 (REAL PARAMETER) ====================
-        # Chain: g0 (real) -> g (complex) -> g_bw (complex) -> bw_dom (complex) -> Q (real)
-        #
-        # For Wirtinger calculus with real parameter g0:
-        # ∂Q/∂g0 = 2*Re(∂Q/∂g * ∂g/∂g0)
-        #
-        # where:
-        # g = g0_all * g_interp (complex)
-        # ∂g/∂g0_all = g_interp
-        #
-        # And:
-        # g_bw = dot(g, matrix_gamma)
-        # ∂g_bw/∂g = matrix_gamma
-        #
-        # So: ∂Q/∂g = ∂Q/∂g_bw * matrix_gamma
-        
-        # First, compute ∂Q/∂g_bw:
-        # bw_dom = m0² - m² - 1j*m0*g_bw
-        # ∂bw_dom/∂g_bw = -1j*m0
-        
+        # First, compute ∂Q/∂g_bw:  ∂bw_dom/∂g_bw = -1j*m0
         dQ_dg_bw = dQ_dbw_dom * (-1j * m0_all)
-        
-        # Then ∂Q/∂g:
-        dQ_dg = np.dot(dQ_dg_bw, self.matrix_gamma.T)
-        
-        # Finally, gradient for g0 (REAL parameter):
-        grad_g0 = np.zeros_like(g0)
-        for gamma_idx in range(len(self.g0_index)):
-            g0_param_idx = self.g0_index[gamma_idx]
-            # ∂Q/∂g0 = 2*Re(∂Q/∂g * ∂g/∂g0) = 2*Re(∂Q/∂g * g_interp)
-            grad_g0[g0_param_idx] += 2 * np.sum(np.real(
-                dQ_dg[:, gamma_idx] * g_interp[:, gamma_idx]
-            ))
+
+        # Then ∂Q/∂g = ∂Q/∂g_bw @ matrix_gamma.T
+        dQ_dg = dQ_dg_bw @ self.matrix_gamma.T
+
+        # Scatter by g0_index via MatMul
+        dg0_raw = 2 * np.real(dQ_dg * g_interp)  # (n_events, n_gamma_rows)
+        dg0_sum = np.sum(dg0_raw, axis=0)          # (n_gamma_rows,)
+        grad_g0 = dg0_sum @ self._g0_scatter       # (n_g0_unique,)
         
         # ==================== GRADIENTS FOR TIME EVOLUTION PARAMETERS ====================
         # Gamma, Delta_Gamma, Delta_m are REAL parameters
