@@ -32,13 +32,31 @@ class ParameterConstraint:
         self.all_comb = list(all_comb)
         self.n_wave = len(all_comb)
 
-    def build_ck(self, param_dict):
+    def _get_val(self, slot_dict, name):
+        """Get the complex value for a term from slot-level dict.
+        
+        If the dict has ``name + 'r'`` / ``name + 'i'`` slots, treat
+        as a complex ck parameter: ``r·exp(j·θ)``.
+        Otherwise use ``name`` directly (real/m0/g0/scalar).
+        """
+        if name + 'r' in slot_dict:
+            r = slot_dict[name + 'r']
+            theta = slot_dict.get(name + 'i', 0.0)
+            return r * np.exp(1j * theta)
+        return slot_dict.get(name, 1.0 + 0.0j)
+
+    def build_ck(self, slot_dict):
+        """Compute ck from slot-level real dict.
+
+        Slot dict has ``{name_r: mag, name_i: phase}`` for complex
+        ck parameters and ``{name: value}`` for real parameters.
+        """
         ck = np.empty(self.n_wave, dtype=complex)
         for i, comb in enumerate(self.all_comb):
             prod = 1.0 + 0.0j
             for term in comb:
                 if isinstance(term, str):
-                    prod *= param_dict.get(term, 1.0 + 0.0j)
+                    prod *= self._get_val(slot_dict, term)
                 else:
                     prod *= term
             ck[i] = prod
@@ -53,9 +71,19 @@ class ParameterConstraint:
                     names.add(p)
         return sorted(names)
 
-    def backprop_grad(self, param_dict, grad_ck):
-        """Wirtinger gradient ``dQ/d(name)`` for each name in ``all_comb``."""
-        ck = self.build_ck(param_dict)
+    def backprop_grad(self, slot_dict, grad_ck):
+        """Gradient w.r.t. each slot from kernel's ``grad_ck``.
+
+        Returns ``{name_r: dQ/dr, name_i: dQ/dθ}`` for complex ck
+        params, ``{name: dQ/dval}`` for real params.
+
+        Uses Wirtinger calculus: for a real-valued Q, the chain rule
+        through ``ck = r·exp(j·θ)`` gives::
+
+            dQ/dr = 2 · Re( Σ grad_ck · order · ck / r )
+            dQ/dθ = 2 · Re( Σ grad_ck · j · order · ck )
+        """
+        ck = self.build_ck(slot_dict)
         grads = {}
         for i, comb in enumerate(self.all_comb):
             counts = {}
@@ -63,8 +91,14 @@ class ParameterConstraint:
                 if isinstance(term, str):
                     counts[term] = counts.get(term, 0) + 1
             for name, order in counts.items():
-                dck = order * ck[i] / param_dict[name]
-                grads[name] = grads.get(name, 0j) + grad_ck[i] * dck
+                dck = order * ck[i]
+                if name + 'r' in slot_dict:
+                    r = slot_dict[name + 'r']
+                    grads[name + 'r'] = grads.get(name + 'r', 0.0) + 2.0 * np.real(grad_ck[i] * dck / r)
+                    grads[name + 'i'] = grads.get(name + 'i', 0.0) + 2.0 * np.real(grad_ck[i] * dck * 1j)
+                else:
+                    v = slot_dict.get(name, 1.0)
+                    grads[name] = grads.get(name, 0.0) + 2.0 * np.real(grad_ck[i] * dck / v)
         return grads
 
 
@@ -133,41 +167,41 @@ class VariableRegistry:
                 idx += 1
         return x
 
-    # ── forward ─────────────────────────────────────────────────
+    # ── forward: flat x → {slot_name: real_value} ──────────────
 
     def to_dict(self, x):
-        """Flat vector ``→ {name: complex_or_real}``."""
+        """Flat vector → slot-level real dict.
+
+        Complex ck params: ``{name_r: mag, name_i: phase}``.
+        Real params: ``{name: value}``.
+        """
         result = {}
         idx = 0
         for e in self._entries:
             if e['kind'] == 'complex':
-                r, theta = x[idx], x[idx + 1]
-                result[e['name']] = r * np.exp(1j * theta)
+                result[e['name'] + 'r'] = x[idx]
+                result[e['name'] + 'i'] = x[idx + 1]
                 idx += 2
             else:
                 result[e['name']] = x[idx]
                 idx += 1
         return result
 
-    # ── backward ────────────────────────────────────────────────
+    # ── backward: {slot_name: grad} → flat gradient ────────────
 
     def flat_gradient(self, x, grad_dict):
-        """``{name: Wirtinger_grad} → flat real gradient``.
+        """Copies slot-level gradients into the flat vector.
 
-        For complex vars (Wirtinger)::
-
-            dQ/dr = 2·Re(grad·exp(j·θ))
-            dQ/dθ = 2·Re(grad·j·r·exp(j·θ))
+        Complex params: ``flat[i] = grad[name_r]``,
+        ``flat[i+1] = grad[name_i]``.
+        Real params: ``flat[i] = grad[name]``.
         """
         flat = np.zeros(self.n_flat)
         idx = 0
         for e in self._entries:
             if e['kind'] == 'complex':
-                r, theta = x[idx], x[idx + 1]
-                gc = grad_dict.get(e['name'], 0j)
-                ejt = np.exp(1j * theta)
-                flat[idx] = 2.0 * np.real(gc * ejt)
-                flat[idx + 1] = 2.0 * np.real(gc * 1j * r * ejt)
+                flat[idx] = grad_dict.get(e['name'] + 'r', 0.0)
+                flat[idx + 1] = grad_dict.get(e['name'] + 'i', 0.0)
                 idx += 2
             else:
                 flat[idx] = grad_dict.get(e['name'], 0.0)
@@ -221,27 +255,48 @@ class NameResolution:
                 for alias in group[1:]:
                     self.map[alias] = canon
 
+    def _resolve_slot(self, key):
+        """Resolve a slot-level key through the alias map.
+        
+        ``'nr'`` → ``(canon + 'r')`` if *name* is an alias.
+        ``'ni'`` → ``(canon + 'i')`` if *name* is an alias.
+        Otherwise returns the key unchanged.
+        """
+        if key.endswith('r') and key[:-1] in self.map:
+            return self.map[key[:-1]] + 'r'
+        if key.endswith('i') and key[:-1] in self.map:
+            return self.map[key[:-1]] + 'i'
+        if key in self.map:
+            return self.map[key]
+        return key
+
     def apply(self, d):
-        # Canonical names first
-        result = {self.map.get(k, k): v for k, v in d.items()}
-        # Also inject alias names with the same value — all_comb may
-        # reference either the alias or the canonical name.
+        result = {}
+        for k, v in d.items():
+            result[self._resolve_slot(k)] = v
+        # Inject alias slot names too — all_comb may reference them
         for alias, canon in self.map.items():
+            for suffix in ('r', 'i'):
+                if canon + suffix in result:
+                    result[alias + suffix] = result[canon + suffix]
             if canon in result:
                 result[alias] = result[canon]
         return result
 
     def chain_grad(self, grad_out, d_in):
-        """grad_out was w.r.t. resolved dict; d_in is the input dict."""
+        """Reverse of :meth:`apply` — maps resolved grads back to raw keys."""
         result = {}
-        for name in d_in:
-            canon = self.map.get(name, name)
-            if canon in grad_out:
-                result[name] = grad_out[canon]
-            # Also add alias contributions: grad[alias] = grad[canon]
-            for alias, cn in self.map.items():
-                if cn == canon and alias in grad_out:
-                    result[name] = result.get(name, 0.0) + grad_out[alias]
+        for key in d_in:
+            resolved = self._resolve_slot(key)
+            g = grad_out.get(resolved, 0.0)
+            # Also accumulate contributions from aliases that map here
+            for alias, canon in self.map.items():
+                for suffix in ('r', 'i'):
+                    if canon + suffix == resolved and alias + suffix in grad_out:
+                        g += grad_out[alias + suffix]
+                if canon == resolved and alias in grad_out:
+                    g += grad_out[alias]
+            result[key] = g
         return result
 
 
@@ -265,14 +320,19 @@ class ScaleTransform:
     def apply(self, d):
         d = dict(d)
         for name, sf in self.factors.items():
-            if name in d:
+            # Scale only applies to magnitude (name_r), not phase (name_i)
+            if name + 'r' in d:
+                d[name + 'r'] = d[name + 'r'] * sf
+            elif name in d:
                 d[name] = d[name] * sf
         return d
 
     def chain_grad(self, grad_out, d_in):
         grad = dict(grad_out)
         for name, sf in self.factors.items():
-            if name in grad:
+            if name + 'r' in grad:
+                grad[name + 'r'] = grad[name + 'r'] * sf
+            elif name in grad:
                 grad[name] = grad[name] * sf
         return grad
 
@@ -282,10 +342,12 @@ class ScaleTransform:
 # ================================================================
 
 class FixedOverride:
-    """Injects fixed (constant) values into the param dict.
+    """Injects fixed (constant) values into the slot-level param dict.
 
-    Handles both canonical names (``'gamma': 0.0``) and slot-level
-    r/i pairs (``{'nr': 1.0, 'ni': 0.0}`` → ``'n': 1+0j``).
+    Works with slot-level names (``name_r``, ``name_i`` for complex ck
+    params, ``name`` for real params).  Only overrides keys that exist
+    in the dict — fully-fixed ck params are already excluded from the
+    registry, so their slot names won't appear.
     """
 
     def __init__(self):
@@ -294,29 +356,17 @@ class FixedOverride:
     def set_fixed(self, fixed):
         self.values = dict(fixed)
 
-    def _fixed_complex(self):
-        """Build ``{canon: complex}`` for fully-fixed r/i slot pairs."""
-        result = {}
-        for name in list(self.values.keys()):
-            if name.endswith('r') and name[:-1] + 'i' in self.values:
-                canon = name[:-1]
-                result[canon] = self.values[canon + 'r'] + 1j * self.values[canon + 'i']
-        return result
-
     def apply(self, d):
         d = dict(d)
         for name, val in self.values.items():
             if name in d:
                 d[name] = val
-        d.update(self._fixed_complex())
         return d
 
     def chain_grad(self, grad_out, d_in):
         grad = dict(grad_out)
         for name in self.values:
-            grad.pop(name, None)          # remove slot-level names
-        for canon in self._fixed_complex():
-            grad.pop(canon, None)         # remove composite canonical names
+            grad.pop(name, None)
         return grad
 
 
@@ -566,44 +616,54 @@ if __name__ == "__main__":
     all_comb = config.get_ck_map()
     ck_names = sorted({p for comb in all_comb for p in comb if isinstance(p, str)})
 
-    # Independent pipeline stages
     pc = ParameterConstraint(all_comb)
     name_res = NameResolution()
     scale_tr = ScaleTransform()
     fixed_tr = FixedOverride()
 
-    # Configure them independently
-    fixed_tr.set_fixed({n: 1.0 + 0.0j for n in ck_names if n.endswith("g_ls_0")})
-    # (no same, no scale for this test)
-
+    # Build a slot-level dict (as produced by VariableRegistry.to_dict)
+    # ck params: {name_r: mag, name_i: phase}
     np.random.seed(42)
-    raw = {n: np.random.randn() + 1j * np.random.randn() for n in ck_names}
-    resolved = fixed_tr.apply(raw)    # same → scale → fixed
-    ck = pc.build_ck(resolved)
+    raw = {}
+    for n in ck_names:
+        raw[n + 'r'] = np.random.uniform(0.5, 2.0)
+        raw[n + 'i'] = np.random.uniform(-np.pi, np.pi)
+
+    # Test resolve pipeline on slot-level dict
+    d = name_res.apply(raw)
+    d = scale_tr.apply(d)
+    d = fixed_tr.apply(d)
+    ck = pc.build_ck(d)
     print(f"ck shape: {ck.shape}, ck[:3]: {ck[:3]}")
 
-    # Gradient test
+    # Gradient test: verify backprop_grad against numerical diff
     test_vec = np.random.randn(pc.n_wave) + 1j * np.random.randn(pc.n_wave)
-    Q_fn = lambda pd: np.real(np.sum(pc.build_ck(pd) * np.conj(test_vec)))
+
+    def Q(slot_dict):
+        return np.real(np.sum(pc.build_ck(slot_dict) * np.conj(test_vec)))
+
     grad_ck_exact = 0.5 * np.conj(test_vec)
 
-    grad_pc = pc.backprop_grad(resolved, grad_ck_exact)
-    grad = fixed_tr.chain_grad(grad_pc, resolved)
-    # grad now in raw space
+    # Analytical gradient w.r.t. the resolved slot dict
+    grad_resolved = pc.backprop_grad(d, grad_ck_exact)
+    # Chain back through fixed → scale → same → raw
+    grad = fixed_tr.chain_grad(grad_resolved, d)
+    grad = scale_tr.chain_grad(grad, d)
+    grad = name_res.chain_grad(grad, raw)
 
     eps = 1e-6
     errs = []
-    for name in ck_names[:5]:
-        pd = raw.copy()
-        pd[name] += eps
-        Qp = Q_fn(fixed_tr.apply(pd))
-        pd[name] -= 2 * eps
-        Qm = Q_fn(fixed_tr.apply(pd))
+    for key in list(raw.keys())[:10]:   # test first 10 slots
+        sd = raw.copy()
+        sd[key] += eps
+        Qp = Q(fixed_tr.apply(scale_tr.apply(name_res.apply(sd))))
+        sd[key] -= 2 * eps
+        Qm = Q(fixed_tr.apply(scale_tr.apply(name_res.apply(sd))))
         num = (Qp - Qm) / (2 * eps)
-        ana = grad.get(name, 0j)
-        err = abs(2.0 * ana.real - num)
+        ana = grad.get(key, 0.0)
+        err = abs(ana - num)
         errs.append(err)
-        print(f"  {name[:35]:35s} 2·Re(ana)={2*ana.real:+.6e} num={num:+.6e} err={err:.2e}")
-    print(f"Max error: {max(errs):.2e}")
+        print(f"  {key:35s} ana={ana:+.6e} num={num:+.6e} err={err:.2e}")
+    print(f"Max error (first 10): {max(errs):.2e}")
     assert max(errs) < 1e-5
-    print("✓ Pipeline stages verified")
+    print("✓ Full pipeline gradient verified")
