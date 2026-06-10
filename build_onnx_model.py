@@ -105,6 +105,10 @@ class PWAONNXBuilder:
             outputs = [self._name(op_type.lower())]
         elif isinstance(outputs, str):
             outputs = [outputs]
+        if outputs is None:
+            outputs = [self._name(op_type.lower())]
+        elif isinstance(outputs, str):
+            outputs = [outputs]
         # Opset 11: Squeeze/Unsqueeze/Reduce* use axes as attributes.
         # Only Slice uses axes as tensor input[3] - handled by _slice_axis.
         node = helper.make_node(op_type, inputs, outputs, **attrs)
@@ -147,14 +151,15 @@ class PWAONNXBuilder:
         return self._node("Add", [sr, si])
 
     def _complex_div(self, ar, ai, br, bi, prefix):
-        """(a_r + j*a_i) / (b_r + j*b_i)."""
+        """(a_r + j*a_i) / (b_r + j*b_i) = (a+jb)(c-jd)/(c²+d²)."""
         denom = self._complex_abs2(br, bi, "den")
-        conj_r = br
-        conj_i = self._node("Neg", [bi])
-        num_r = self._node("Add", [self._node("Mul", [ar, conj_r]),
-                                   self._node("Mul", [ai, conj_i])])
-        num_i = self._node("Sub", [self._node("Mul", [ai, conj_r]),
-                                   self._node("Mul", [ar, conj_i])])
+        # num = (a*c + b*d) + j(b*c - a*d)
+        ac = self._node("Mul", [ar, br])
+        bd = self._node("Mul", [ai, bi])
+        bc = self._node("Mul", [ai, br])
+        ad = self._node("Mul", [ar, bi])
+        num_r = self._node("Add", [ac, bd])
+        num_i = self._node("Sub", [bc, ad])
         r = self._node("Div", [num_r, denom])
         i = self._node("Div", [num_i, denom])
         return r, i
@@ -491,17 +496,17 @@ class PWAONNXBuilder:
         P_vi = helper.make_tensor_value_info("P", TensorProto.FLOAT, [batch_size])
         self._value_info.append(Q_vi)
         self._value_info.append(P_vi)
+        graph_outputs = [Q_vi, P_vi]
 
-        # Inputs list (excluding constants)
-        input_names = ["ck_real", "ck_imag", "m0", "g0",
+        input_names = set(["ck_real", "ck_imag", "m0", "g0",
                        "mass", "q", "angle", "frac", "time", "weight", "bkg",
                        "norm",
-                       "Gamma", "Delta_Gamma", "Delta_m", "A_prod", "poq_rho", "pop_phi"]
+                       "Gamma", "Delta_Gamma", "Delta_m", "A_prod", "poq_rho", "pop_phi"])
         inputs_vi = [vi for vi in self._value_info if vi.name in input_names]
 
         graph = helper.make_graph(self._nodes, self._graph_name,
                                   inputs_vi,
-                                  [Q_vi, P_vi],
+                                  graph_outputs,
                                   list(self._consts.values()))
         model = helper.make_model(graph, opset_imports=[
             helper.make_opsetid("", 11)
