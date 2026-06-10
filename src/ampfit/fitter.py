@@ -785,27 +785,9 @@ class Fitter:
             raise ValueError("Provide result, x, or params.")
         if x is not None:
             x_mapped = apply_bounds(x, self._bound_transforms)
-            raw_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
-            pc_names = set(self.pc.free_param_names())
-            f_ck_r = {}
-            f_ck_i = {}
-            for slot, val in self._fixed_slots.items():
-                base = slot[:-1]
-                canon = self._alias_to_canon.get(base, base)
-                if slot.endswith('r') and canon in pc_names:
-                    f_ck_r[canon] = val
-                elif slot.endswith('i') and canon in pc_names:
-                    f_ck_i[canon] = val
-            if f_ck_r or f_ck_i:
-                new_x = []; idx = 0
-                for name in self.pc.free_param_names():
-                    in_reg = name in self._var_registry._name_to_entry
-                    r = raw_ck[idx] if in_reg else 0.0
-                    th = raw_ck[idx + 1] if in_reg else 0.0
-                    if in_reg: idx += 2
-                    new_x.extend([f_ck_r.get(name, r), f_ck_i.get(name, th)])
-                raw_ck = np.array(new_x)
-            ck = self.pc.build_ck(raw_ck)
+            slot_dict = self._var_registry.to_dict(x_mapped)
+            resolved = self.cm.resolve(slot_dict)
+            ck = self.cm.pc.build_ck(resolved)
             params = self._build_base_params(ck, None, None, None)
 
         # Compute norm and probabilities (handles batched phsp)
