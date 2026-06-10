@@ -188,17 +188,27 @@ def main():
     max_data = 1000 if args.debug else None
     max_phsp = 10000 if args.debug else None
 
+    t0 = time.time()
     data_np, n_data = load_npz(args.data, max_events=max_data)
     phsp_np, n_phsp = load_npz(args.phsp, max_events=max_phsp)
+    load_time = time.time() - t0
+    print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
 
 
+    t0 = time.time()
     fitter.set_phsp(phsp_np)
+    phsp_gpu_time = time.time() - t0
+    print(f"  Phsp → GPU: {phsp_gpu_time:.2f}s")
+
+    t0 = time.time()
     fitter.set_data(data_np)
+    data_gpu_time = time.time() - t0
+    print(f"  Data → GPU: {data_gpu_time:.2f}s")
 
     # m0 and g0 default values come from config.yml particle definitions
     # (lazy-loaded by Fitter.default_m0 / Fitter.default_g0)
     n_free = len(fitter.free_param_names())
-    print(f"Free slots: {n_free}")
+    print(f"  Free params: {n_free}")
 
     # ==================================================================
     # 3. Compute NLL
@@ -244,6 +254,8 @@ def main():
     # ==================================================================
     # 5. Fit (optional)
     # ==================================================================
+    result = None
+    fit_time = 0.0
     if args.fit:
         print("\n" + "=" * 70)
         print("FITTING")
@@ -285,11 +297,19 @@ def main():
     # 6. Summary
     # ==================================================================
     print("\n" + "=" * 70)
-    print(f"  Data: {n_data:>10,}   Phsp: {n_phsp:>10,}   Free: {n_free:>4}")
+    print("  SUMMARY")
+    print("─" * 70)
+    print(f"    Data       {n_data:>10,}")
+    print(f"    Phsp       {n_phsp:>10,}")
+    print(f"    Free vars  {n_free:>10,}")
+    print(f"    Load time  {load_time:>10.2f}s")
     if args.fit:
-        print(f"  Fit NLL: {result.fun:.4f}   nfev: {result.nfev}   nit: {result.nit}")
+        print(f"    Fit time   {fit_time:>10.2f}s")
+        print(f"    Fit NLL    {result.fun:>10.6f}")
+        print(f"    nfev/nit   {result.nfev:>4d} / {result.nit}")
     else:
-        print(f"  NLL: {nll:>10.4f}   Time: {elapsed:>6.2f}s")
+        print(f"    NLL        {nll:>10.6f}")
+        print(f"    Compute    {elapsed:>10.2f}s")
     print("=" * 70)
 
     fitter.free()

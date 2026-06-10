@@ -22,6 +22,7 @@ Usage:
     nll, grads = fitter.get_nll_raw(params_dict)
 """
 
+import time
 import numpy as np
 
 
@@ -986,15 +987,21 @@ class Fitter:
             nll, grad = self.get_nll(x)
             return nll, grad.astype(np.float64)
 
-        # Default callback: print NLL at each iteration
+        # Default callback: print NLL + timing at each iteration
         class IterTracker:
             def __init__(self):
                 self.n = 0
+                self.t_start = time.time()
+                self.t_last = time.time()
             def __call__(self, xk):
                 self.n += 1
+                t_now = time.time()
+                dt = t_now - self.t_last
+                t_elapsed = t_now - self.t_start
+                self.t_last = t_now
                 nll, grad = nll_and_grad(xk)
                 gn = np.linalg.norm(grad)
-                print(f"  iter {self.n:4d}: NLL = {nll:.6f}, |grad| = {gn:.4e}")
+                print(f"  iter {self.n:4d}: NLL = {nll:.11f}, |grad| = {gn:.4e}, +{dt:.2f}s [{t_elapsed:.1f}s]")
                 return False
 
         tracker = IterTracker()

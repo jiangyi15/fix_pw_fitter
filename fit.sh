@@ -20,7 +20,7 @@ python run_fit.py \
     --config "$CONFIG" \
     --data "$DATA" \
     --phsp "$PHSP" \
-    --fit --maxiter 10 \
+    --fit --maxiter 1000 \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/" \
     --fix-mass-width
