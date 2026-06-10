@@ -72,6 +72,7 @@ class PWAONNXBuilder:
         self.gamma_delta = float(kc["gamma_delta"])
         self.fl_min = float(kc["fl_min"])
         self.fl_delta = float(kc["fl_delta"])
+        self.kc = kc
 
         # Gather shorthands
         self._n_bins_gamma = kc["gamma_table"].shape[-1]
@@ -276,8 +277,10 @@ class PWAONNXBuilder:
         # ──── inputs ────
         ck_r = self._input("ck_real", [n_wave])
         ck_i = self._input("ck_imag", [n_wave])
-        m0 = self._input("m0", [self.n_unique_bw])
-        g0 = self._input("g0", [n_gamma_rows])
+        n_m0_unique = len(np.unique(self.kc["m0_index"]))
+        m0 = self._input("m0", [n_m0_unique])
+        n_g0_unique = len(np.unique(self.kc["g0_index"]))
+        g0 = self._input("g0", [n_g0_unique])
         mass = self._input("mass", [N, 48])
         q = self._input("q", [N, 72])
         angle = self._input("angle", [N, 24, 3])
@@ -515,7 +518,7 @@ class PWAONNXBuilder:
         dP_dpb = self._node("Mul", [frac, self._node("Sub", [c1, A_prod])])
         dP_dpbbar = self._node("Mul", [self._node("Sub", [c1, frac]), self._node("Add", [c1, A_prod])])
         neg_frac = self._node("Neg", [frac])
-        dP_dAp = self._node("Sub", [
+        dP_dAp = self._node("Add", [
             self._node("Mul", [neg_frac, pb]),
             self._node("Mul", [self._node("Sub", [c1, frac]), pbbar]),
         ])
@@ -583,13 +586,209 @@ class PWAONNXBuilder:
         self._node("Identity", [grad_ck_real], outputs="grad_ck_real")
         self._node("Identity", [grad_ck_imag], outputs="grad_ck_imag")
 
-        # ── outputs (forward + ck gradients only; m0/g0/scalar pending) ──
+        # ════════════════════════════════════════════════════════
+        # dQ/dbw_p — backprop through BW product and scatter
+        # ════════════════════════════════════════════════════════
+
+        # dQ/dbw_p = -dQ/da * a / bw_p  (Wirtinger derivative)
+        # a = ck * cf, da/d(1/bw_p) = ck * fa * fl_p
+        # From numpy: dQ_dbw_p = dQ/da * (-ck/bw_p²*fa*fl_p) = -dQ/da*a/bw_p
+        neg_da_r, neg_da_i = self._node("Neg", [dQ_da_r_full]), self._node("Neg", [dQ_da_i_full])
+        a_r, a_i = self._complex_mul(ck_r_2d, ck_i_2d, cf_r, cf_i, "a_bw")
+        abw_r, abw_i = self._complex_div(a_r, a_i, bw_p_r, bw_p_i, "abw")
+        dQ_dbw_p_r, dQ_dbw_p_i = self._complex_mul(neg_da_r, neg_da_i, abw_r, abw_i, "dQ_dbw_p")
+
+        # Backprop through product: for n_res=2
+        # bw_p = bw_dom_0 * bw_dom_1 → dQ/d(bw_dom_0) = dQ/d(bw_p) * bw_dom_1
+        bw_f1_r = self._slice_axis(bw_3d_r, 2, 1, 2, "bf1r")
+        bw_f1_i = self._slice_axis(bw_3d_i, 2, 1, 2, "bf1i")
+        dQ_dd0_r, dQ_dd0_i = self._complex_mul(dQ_dbw_p_r, dQ_dbw_p_i, bw_f1_r, bw_f1_i, "dd0")
+        bw_f0_r = self._slice_axis(bw_3d_r, 2, 0, 1, "bf0r")
+        bw_f0_i = self._slice_axis(bw_3d_i, 2, 0, 1, "bf0i")
+        dQ_dd1_r, dQ_dd1_i = self._complex_mul(dQ_dbw_p_r, dQ_dbw_p_i, bw_f0_r, bw_f0_i, "dd1")
+
+        # Stack dQ_dd0 and dQ_dd1 → (N, n_wave, 2)
+        d0_3d_r = self._node("Unsqueeze", [dQ_dd0_r], axes=[2])
+        d0_3d_i = self._node("Unsqueeze", [dQ_dd0_i], axes=[2])
+        d1_3d_r = self._node("Unsqueeze", [dQ_dd1_r], axes=[2])
+        d1_3d_i = self._node("Unsqueeze", [dQ_dd1_i], axes=[2])
+        dQ_dbw_3d_r = self._node("Concat", [d0_3d_r, d1_3d_r], axis=2)
+        dQ_dbw_3d_i = self._node("Concat", [d0_3d_i, d1_3d_i], axis=2)
+        # Reshape to (N, n_wave * n_res)
+        dQ_dbw_flat_r = self._node("Reshape", [dQ_dbw_3d_r, self._shape_2d(N, n_wave * n_res)])
+        dQ_dbw_flat_i = self._node("Reshape", [dQ_dbw_3d_i, self._shape_2d(N, n_wave * n_res)])
+
+        # Scatter by bw_order using MatMul with a constant scatter matrix
+        # S: (n_wave * n_res, n_unique_bw) where S[k, j] = 1 if bw_order[k] == j
+        scatter_S = np.zeros((n_wave * n_res, n_unique_bw), dtype=np.float32)
+        for k, bw_idx in enumerate(self.kc["bw_order"]):
+            scatter_S[k, bw_idx] = 1.0
+        self._embed("scatter_S", scatter_S)
+
+        dQ_dbd_r = self._node("MatMul", [dQ_dbw_flat_r, "scatter_S"])
+        dQ_dbd_i = self._node("MatMul", [dQ_dbw_flat_i, "scatter_S"])
+
+        # ════════════════════════════════════════════════════════
+        # grad_m0
+        # ════════════════════════════════════════════════════════
+        # dQ/dm0 = 2·Re(Σ dQ/dbw_dom · (2·m0 - 1j·g_bw), axis=0)
+        # (2·m0 - 1j·g_bw) complex derivative of bw_dom w.r.t m0
+        # -1j*(g_bw_r + j*g_bw_i) = -j*g_bw_r + g_bw_i
+        # So dbw_dm0 = (2*m0 + g_bw_i) + j*(-g_bw_r)
+        two_m0 = self._node("Mul", [m0_all_2d, self._scalar(2.0)])
+        dbw_dm0_r = self._node("Add", [two_m0, self._node("Mul", [m0_all_2d, g_bw_i])])
+        dbw_dm0_i = self._node("Neg", [self._node("Mul", [m0_all_2d, g_bw_r])])
+
+        # ∂Q/∂m0 = 2·Re(dQ/d(bw_dom) · ∂bw_dom/∂m0)  (Wirtinger for real param)
+        n_m0_unique = len(np.unique(self.kc["m0_index"]))
+        m0_scatter = np.zeros((n_unique_bw, n_m0_unique), dtype=np.float32)
+        for i, m_idx in enumerate(self.kc["m0_index"]):
+            m0_scatter[i, m_idx] = 1.0
+        self._embed("m0_scatter", m0_scatter)
+
+        dm0_r, dm0_i = self._complex_mul(dQ_dbd_r, dQ_dbd_i, dbw_dm0_r, dbw_dm0_i, "dm0")
+        dm0_sum = self._node("ReduceSum", [dm0_r], axes=[0], keepdims=0)
+        # Scatter from (N, n_unique_bw) to (N, n_m0_unique) via m0_index
+        dm0_scat = self._node("MatMul", [dm0_sum, "m0_scatter"])
+        grad_m0 = self._node("Mul", [dm0_scat, self._scalar(2.0)])
+
+        # ════════════════════════════════════════════════════════
+        # grad_g0
+        # ════════════════════════════════════════════════════════
+        # dQ/dg_bw = dQ/dbw_dom * (-1j·m0)  (chain through bw_dom)
+        # -1j·m0 = (0 + j*(-m0))
+        # (dQ_r + j*dQ_i) * (0 - j*m0) = (dQ_i*m0) + j*(-dQ_r*m0)
+        dQ_dgbw_r = self._node("Mul", [dQ_dbd_i, m0_all_2d])
+        neg_m0 = self._node("Neg", [m0_all_2d])
+        dQ_dgbw_i = self._node("Mul", [dQ_dbd_r, neg_m0])
+
+        # dQ/dg = dQ/dg_bw @ matrix_gamma.T  (chain through g_bw = g @ matrix_gamma)
+        mg_t = self._node("Transpose", ["matrix_gamma"])
+        dQ_dg_r = self._node("MatMul", [dQ_dgbw_r, mg_t])
+        dQ_dg_i = self._node("MatMul", [dQ_dgbw_i, mg_t])
+
+        # ∂Q/∂g0 = 2·Re(Σ dQ/dg · ∂g/∂g0, axis=0)  (Wirtinger for real param)
+        # ∂g/∂g0 = g_interp (g = g0 * g_interp)
+        n_g0_unique = len(np.unique(self.kc["g0_index"]))
+        g0_scatter = np.zeros((n_gamma_rows, n_g0_unique), dtype=np.float32)
+        for i, g_idx in enumerate(self.kc["g0_index"]):
+            g0_scatter[i, g_idx] = 1.0
+        self._embed("g0_scatter", g0_scatter)
+
+        gg_r, gg_i = self._complex_mul(dQ_dg_r, dQ_dg_i, g_interp_r, g_interp_i, "gg")
+        gg_sum = self._node("ReduceSum", [gg_r], axes=[0], keepdims=0)
+        gg_scat = self._node("MatMul", [gg_sum, "g0_scatter"])
+        grad_g0 = self._node("Mul", [gg_scat, self._scalar(2.0)])
+
+        # ════════════════════════════════════════════════════════
+        # Scalar gradients
+        # ════════════════════════════════════════════════════════
+        # dQ/dgp = dQ/dpb·pap̄·ap + dQ/dpbbar·pam̄·am  (Wirtinger)
+        dpg_r, dpg_i = self._complex_mul_real(conj_pap_r, conj_pap_i, dQ_dpb, "dpg")
+        dpg2_r, dpg2_i = self._complex_mul(dpg_r, dpg_i, ap_r, ap_i, "dpg2")
+        dpg3_r, dpg3_i = self._complex_mul_real(conj_pam_r, conj_pam_i, dQ_dpbbar, "dpg3")
+        dpg4_r, dpg4_i = self._complex_mul(dpg3_r, dpg3_i, am_r, am_i, "dpg4")
+        dQ_dgp_r = self._node("Add", [dpg2_r, dpg4_r])
+        dQ_dgp_i = self._node("Add", [dpg2_i, dpg4_i])
+
+        # dQ/dgm = dQ/dpb·pap̄·poq·am + dQ/dpbbar·pam̄·ap/poq
+        # dpg already includes dQ_dpb factor
+        dmg_r, dmg_i = self._complex_mul(dpg_r, dpg_i, poq_r, poq_i, "dmg")
+        dmg2_r, dmg2_i = self._complex_mul(dmg_r, dmg_i, am_r, am_i, "dmg2")
+        # dpg3 = conj(pam) * dQ_dpbbar (real*complex, dpg3 already has dQ_dpbbar)
+        dmg5_r, dmg5_i = self._complex_div(dpg3_r, dpg3_i, poq_r, poq_i, "dmg5")
+        dmg6_r, dmg6_i = self._complex_mul(dmg5_r, dmg5_i, ap_r, ap_i, "dmg6")
+        dQ_dgm_r = self._node("Add", [dmg2_r, dmg6_r])
+        dQ_dgm_i = self._node("Add", [dmg2_i, dmg6_i])
+
+        half_t = self._node("Mul", [time, half])
+        qua_t = self._node("Mul", [time, self._scalar(0.25)])
+
+        # dG = 2·Re(Σ dQ/dgp·(-t/2·gp) + dQ/dgm·(-t/2·gm))
+        # But for scalar param: dQ/dΓ = 2·Re(Σ dQ/dgp · dgp/dΓ + dQ/dgm · dgm/dΓ)
+        def _grad_time(dgp_r, dgp_i, dgm_r, dgm_i):
+            p1_r, p1_i = self._complex_mul(dQ_dgp_r, dQ_dgp_i, dgp_r, dgp_i, "gt1")
+            p2_r, p2_i = self._complex_mul(dQ_dgm_r, dQ_dgm_i, dgm_r, dgm_i, "gt2")
+            sr = self._node("ReduceSum", [self._node("Add", [p1_r, p2_r])], axes=[0], keepdims=0)
+            return self._node("Mul", [sr, self._scalar(2.0)])
+
+        nht = self._node("Neg", [half_t])
+        nqt = self._node("Neg", [qua_t])
+        ggpr_r, ggpr_i = self._complex_mul_real(gp_r, gp_i, nht, "ggpr")
+        ggmr_r, ggmr_i = self._complex_mul_real(gm_r, gm_i, nht, "ggmr")
+        grad_Gamma = _grad_time(ggpr_r, ggpr_i, ggmr_r, ggmr_i)
+
+        gdgr_r, gdgr_i = self._complex_mul_real(gm_r, gm_i, nqt, "gdgr")
+        gdgm_r, gdgm_i = self._complex_mul_real(gp_r, gp_i, nqt, "gdgm")
+        grad_DeltaGamma = _grad_time(gdgr_r, gdgr_i, gdgm_r, gdgm_i)
+
+        # dgp/dΔm = j·t/2·gm, dgm/dΔm = j·t/2·gp
+        # j*gm = (0+1j)*(gm_r+j*gm_i) = -gm_i + j*gm_r
+        htgm_r = self._node("Neg", [self._node("Mul", [gm_i, half_t])])
+        htgm_i = self._node("Mul", [gm_r, half_t])
+        htgp_r = self._node("Neg", [self._node("Mul", [gp_i, half_t])])
+        htgp_i = self._node("Mul", [gp_r, half_t])
+        grad_DeltaM = _grad_time(htgm_r, htgm_i, htgp_r, htgp_i)
+
+        # A_prod gradient
+        grad_A_prod = dQ_dAp
+
+        # poq gradients: dQ/dpoq = dQ/dpb·pap̄·gm·am + dQ/dpbbar·pam̄·(-gm/poq²)·ap
+        pd_r, pd_i = self._complex_mul(conj_pap_r, conj_pap_i, gm_r, gm_i, "pd")
+        pd_r, pd_i = self._complex_mul(pd_r, pd_i, am_r, am_i, "pd2")
+        pd_r = self._node("Mul", [pd_r, dQ_dpb]); pd_i = self._node("Mul", [pd_i, dQ_dpb])
+        one_r = self._scalar(1.0); one_i = self._scalar(0.0)
+        inv_poq_r, inv_poq_i = self._complex_div(one_r, one_i, poq_r, poq_i, "ipoq")
+        inv_poq_sq_r, inv_poq_sq_i = self._complex_mul(inv_poq_r, inv_poq_i, inv_poq_r, inv_poq_i, "ipoq_sq")
+        gm_poq_sq_r, gm_poq_sq_i = self._complex_mul(gm_r, gm_i, inv_poq_sq_r, inv_poq_sq_i, "gps")
+        neg_gps_r = self._node("Neg", [gm_poq_sq_r])
+        pdd_r, pdd_i = self._complex_mul(conj_pam_r, conj_pam_i, neg_gps_r, gm_poq_sq_i, "pdd")
+        pdd_r, pdd_i = self._complex_mul(pdd_r, pdd_i, ap_r, ap_i, "pdd2")
+        pdd_r = self._node("Mul", [pdd_r, dQ_dpbbar]); pdd_i = self._node("Mul", [pdd_i, dQ_dpbbar])
+        dQ_dpoq_r = self._node("Add", [pd_r, pdd_r])
+        dQ_dpoq_i = self._node("Add", [pd_i, pdd_i])
+
+        # dQ/dρ = 2·Re(Σ dQ/dpoq · exp(j·ϕ))
+        pop_phi_1d = self._node("Reshape", [pop_phi, self._shape_1d(1)])
+        poq_rho_1d = self._node("Reshape", [poq_rho, self._shape_1d(1)])
+        cos_phi2 = self._node("Cos", [pop_phi_1d])
+        sin_phi2 = self._node("Sin", [pop_phi_1d])
+        # Expand to per-event for broadcasting with dQ_dpoq (N,)
+        cos_phi_e = self._node("Expand", [cos_phi2, self._shape_1d(N)])
+        sin_phi_e = self._node("Expand", [sin_phi2, self._shape_1d(N)])
+        epr_r, epr_i = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, cos_phi_e, sin_phi_e, "epr")
+        grad_poq_rho = self._node("Mul", [self._node("ReduceSum", [epr_r], axes=[0], keepdims=0),
+                                          self._scalar(2.0)])
+
+        # dQ/dϕ = 2·Re(Σ dQ/dpoq · ρ·j·exp(j·ϕ))
+        jep_r = self._node("Neg", [sin_phi_e])
+        jep_i = cos_phi_e
+        jep2_r, jep2_i = self._complex_mul_real(jep_r, jep_i, poq_rho_1d, "jep2")
+        jep2_r_e = self._node("Expand", [jep2_r, self._shape_1d(N)])
+        jep2_i_e = self._node("Expand", [jep2_i, self._shape_1d(N)])
+        ppr_r, ppr_i = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, jep2_r_e, jep2_i_e, "ppr")
+        grad_pop_phi = self._node("Mul", [self._node("ReduceSum", [ppr_r], axes=[0], keepdims=0),
+                                          self._scalar(2.0)])
+
+        # ── output with Identity ──
+        self._node("Identity", [grad_m0], outputs="grad_m0")
+        self._node("Identity", [grad_g0], outputs="grad_g0")
+        gsc_list = [self._node("Reshape", [g, self._shape_1d(1)]) for g in
+                    [grad_Gamma, grad_DeltaGamma, grad_DeltaM, grad_A_prod, grad_poq_rho, grad_pop_phi]]
+        self._node("Identity", [self._node("Concat", gsc_list, axis=0)], outputs="grad_scalar")
+
+        # ── outputs ──
         Q_vi = helper.make_tensor_value_info("Q", TensorProto.FLOAT, [])
         P_vi = helper.make_tensor_value_info("P", TensorProto.FLOAT, [batch_size])
         gck_r_vi = helper.make_tensor_value_info("grad_ck_real", TensorProto.FLOAT, [n_wave])
         gck_i_vi = helper.make_tensor_value_info("grad_ck_imag", TensorProto.FLOAT, [n_wave])
-        self._value_info.extend([Q_vi, P_vi, gck_r_vi, gck_i_vi])
-        graph_outputs = [Q_vi, P_vi, gck_r_vi, gck_i_vi]
+        n_m0_unique = len(np.unique(self.kc["m0_index"]))
+        gm0_vi = helper.make_tensor_value_info("grad_m0", TensorProto.FLOAT, [n_m0_unique])
+        n_g0_unique = len(np.unique(self.kc["g0_index"]))
+        gg0_vi = helper.make_tensor_value_info("grad_g0", TensorProto.FLOAT, [n_g0_unique])
+        gsc_vi = helper.make_tensor_value_info("grad_scalar", TensorProto.FLOAT, [6])
+        self._value_info.extend([Q_vi, P_vi, gck_r_vi, gck_i_vi, gm0_vi, gg0_vi, gsc_vi])
+        graph_outputs = [Q_vi, P_vi, gck_r_vi, gck_i_vi, gm0_vi, gg0_vi, gsc_vi]
 
         input_names = set(["ck_real", "ck_imag", "m0", "g0",
                        "mass", "q", "angle", "frac", "time", "weight", "bkg",
