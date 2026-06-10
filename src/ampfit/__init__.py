@@ -21,6 +21,7 @@ except Exception:
     CUDAKernel = None
 
 from .fitter import Fitter
+from . import backends
 
 __all__ = [
     "Config",
@@ -31,4 +32,5 @@ __all__ = [
     "VariableRegistry",
     "ConstraintManager",
     "Fitter",
+    "backends",
 ]
