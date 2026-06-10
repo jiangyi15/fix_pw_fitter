@@ -519,38 +519,21 @@ class Fitter:
 
         return nll, total_grads
 
-    def get_nll(self, x, m0=None, g0=None):
-        """Compute NLL and gradient w.r.t. the flat variable vector.
+    # ── unified pipeline (forward + backward) ─────────────────────
 
-        The flat vector ``x`` contains all free variables in the order
-        given by :meth:`free_param_names`.
+    def _build_params(self, x):
+        """Full forward pipeline: flat x → kernel params dict.
 
-        Pipeline::
-
-            x → apply_bounds → to_dict → resolve (same→scale→fixed)
-            → build ck + kernel params → kernel
-            → gradients → chain_gradient → flat_gradient → flat grad
-
-        Args:
-            x: flat variable vector (length = ``free_param_names()``).
-
-        Returns:
-            ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
+        Returns ``(params, resolved, raw, x_mapped)``.
         """
-        from ampfit.boundary import apply_bounds, apply_bound_grads
+        from ampfit.boundary import apply_bounds
 
-        # 1. Apply bound transforms
         x_mapped = apply_bounds(x, self._bound_transforms)
-
-        # 2. Convert flat → named dict, then resolve constraints
         raw = self._var_registry.to_dict(x_mapped)
         resolved = self.cm.resolve(raw)
-
-        # 3. Build kernel params from resolved dict
-        #    ck — from pc.build_ck which uses named values
         ck = self.cm.pc.build_ck(resolved)
 
-        #    m0, g0 — from config defaults overridden by resolved values
+        # Build m0, g0, scalar from defaults + resolved values
         m0_arr = self.default_m0.copy()
         g0_arr = self.default_g0.copy()
         scalar_names = self.cm.SCALAR_NAMES
@@ -568,14 +551,18 @@ class Fitter:
                 scalar_arr[scalar_names.index(name)] = val
 
         params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
+        return params, resolved, raw, x_mapped
 
-        # 4. Compute NLL with norm
-        nll, total_grads = self.get_nll_raw(params)
+    def _flat_gradient(self, total_grads, resolved, raw, x_mapped, x):
+        """Full backward pipeline: kernel grads → flat gradient."""
+        from ampfit.boundary import apply_bound_grads
 
-        # 5. Build per-name gradient dict from kernel output
+        scalar_names = self.cm.SCALAR_NAMES
+
+        # Per-name grads from ck combinatorics
         grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
 
-        # Merge m0, g0, scalar gradients → same dict
+        # Merge m0, g0, scalar gradients
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
                                     ('scalar', scalar_names)]:
@@ -583,21 +570,34 @@ class Fitter:
             for i, name in enumerate(names_list):
                 grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
 
-        # 6. Chain gradients back through the constraint pipeline
+        # Chain back through constraints
         grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
-
-        # 7. Convert to flat gradient via Wirtinger chain (r, θ → real)
         grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-
-        # 8. Apply bound gradient correction
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
 
-        # 9. Zero gradients for fixed slots
+        # Zero fixed slots
         for slot_name in self._fixed_slots:
             if slot_name in self._var_registry.flat_names:
                 idx = self._var_registry.flat_names.index(slot_name)
                 grad_flat[idx] = 0.0
+        return grad_flat
 
+    def get_nll(self, x, m0=None, g0=None):
+        """Compute NLL and gradient w.r.t. the flat variable vector.
+
+        Pipeline::
+
+            x → _build_params → kernel → _flat_gradient → (nll, grad)
+
+        Args:
+            x: flat variable vector (length = ``free_param_names()``).
+
+        Returns:
+            ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
+        """
+        params, resolved, raw, x_mapped = self._build_params(x)
+        nll, total_grads = self.get_nll_raw(params)
+        grad_flat = self._flat_gradient(total_grads, resolved, raw, x_mapped, x)
         return nll, grad_flat
 
     # ------------------------------------------------------------------
@@ -784,11 +784,7 @@ class Fitter:
         if x is None and params is None:
             raise ValueError("Provide result, x, or params.")
         if x is not None:
-            x_mapped = apply_bounds(x, self._bound_transforms)
-            slot_dict = self._var_registry.to_dict(x_mapped)
-            resolved = self.cm.resolve(slot_dict)
-            ck = self.cm.pc.build_ck(resolved)
-            params = self._build_base_params(ck, None, None, None)
+            params, _, _, _ = self._build_params(x)
 
         # Compute norm and probabilities (handles batched phsp)
         norm, _ = self._compute_norm_batched(params)
