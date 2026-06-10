@@ -952,7 +952,7 @@ class Fitter:
     # ------------------------------------------------------------------
     # Optimization
     # ------------------------------------------------------------------
-    def fit(self, x0=None, maxiter=1000, ftol=1e-8, gtol=1e-8, callback=None,
+    def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
             method='BFGS', disp=True, **kwargs):
         """Minimize NLL using BFGS (default) or any scipy optimizer.
         
@@ -1183,8 +1183,20 @@ class Fitter:
         data_np = self._data_np
         phsp_np = self._phsp_np
         dw = data_np["weight"]
-        pw = phsp_np["weight"] * P_phsp
         ne_d, ne_p = len(P_data), len(P_phsp)
+
+        # Signal and background weights for phsp model histograms
+        purity = self._purity if self._purity is not None else 1.0
+        data_total = float(np.sum(dw))
+
+        pw_sig = phsp_np["weight"] * P_phsp                  # unnormalized signal
+        pw_bkg = phsp_np["weight"] * phsp_np.get("bkg", np.zeros(ne_p))
+
+        sig_norm = float(np.sum(pw_sig))                     # = ∫P·w  (norm)
+        bkg_norm = float(np.sum(pw_bkg))                     # = ∫bkg·w (N_b)
+
+        sig_scale = data_total * purity / sig_norm if sig_norm > 0 else 0.0
+        bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
 
         # Ensure output directory
         os.makedirs(prefix, exist_ok=True)
@@ -1203,16 +1215,19 @@ class Fitter:
             data_w2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
             data_err = np.sqrt(data_w2)
 
+            # Model components (histogram over phsp)
+            sig_y, _ = np.histogram(p, bins=bins, weights=pw_sig * sig_scale)
+            bkg_y, _ = np.histogram(p, bins=bins, weights=pw_bkg * bkg_scale)
+
+            # Stacked bar: background at bottom, signal on top
+            ax.bar(bin_c, bkg_y, width=bin_w * 0.9, alpha=0.5,
+                   color='C3', label='bkg', align='center')
+            ax.bar(bin_c, sig_y, width=bin_w * 0.9, alpha=0.5,
+                   color='C1', label='signal', align='center', bottom=bkg_y)
+
+            # Data points on top
             ax.errorbar(bin_c, data_y, yerr=data_err, fmt='o',
                         color='C0', label='data', markersize=3, capsize=2)
-
-            # Phsp: histogram weighted by pw, scaled to match data integral
-            phsp_y, _ = np.histogram(p, bins=bins, weights=pw)
-            data_total = data_y.sum()
-            phsp_total = phsp_y.sum()
-            scale = data_total / phsp_total if phsp_total > 0 else 1.0
-            ax.bar(bin_c, phsp_y * scale, width=bin_w * 0.9,
-                   alpha=0.4, color='C1', label='phsp×P', align='center')
 
             ax.set_xlabel(label, fontsize=7)
             ax.tick_params(labelsize=6)
