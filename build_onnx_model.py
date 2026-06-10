@@ -636,8 +636,10 @@ class PWAONNXBuilder:
         # -1j*(g_bw_r + j*g_bw_i) = -j*g_bw_r + g_bw_i
         # So dbw_dm0 = (2*m0 + g_bw_i) + j*(-g_bw_r)
         two_m0 = self._node("Mul", [m0_all_2d, self._scalar(2.0)])
-        dbw_dm0_r = self._node("Add", [two_m0, self._node("Mul", [m0_all_2d, g_bw_i])])
-        dbw_dm0_i = self._node("Neg", [self._node("Mul", [m0_all_2d, g_bw_r])])
+        # ∂bw_dom/∂m0 = 2*m0 - j*g_bw = (2*m0 + g_bw_i) + j*(-g_bw_r)
+        # Note: g_bw_i and g_bw_r are NOT multiplied by m0 again
+        dbw_dm0_r = self._node("Add", [two_m0, g_bw_i])
+        dbw_dm0_i = self._node("Neg", [g_bw_r])
 
         # ∂Q/∂m0 = 2·Re(dQ/d(bw_dom) · ∂bw_dom/∂m0)  (Wirtinger for real param)
         n_m0_unique = len(np.unique(self.kc["m0_index"]))
@@ -740,35 +742,39 @@ class PWAONNXBuilder:
         one_r = self._scalar(1.0); one_i = self._scalar(0.0)
         inv_poq_r, inv_poq_i = self._complex_div(one_r, one_i, poq_r, poq_i, "ipoq")
         inv_poq_sq_r, inv_poq_sq_i = self._complex_mul(inv_poq_r, inv_poq_i, inv_poq_r, inv_poq_i, "ipoq_sq")
+        # Expand scalar poq terms to (N,) for proper ONNX broadcasting
+        inv_poq_sq_r = self._node("Expand", [inv_poq_sq_r, self._shape_1d(N)])
+        inv_poq_sq_i = self._node("Expand", [inv_poq_sq_i, self._shape_1d(N)])
         gm_poq_sq_r, gm_poq_sq_i = self._complex_mul(gm_r, gm_i, inv_poq_sq_r, inv_poq_sq_i, "gps")
         neg_gps_r = self._node("Neg", [gm_poq_sq_r])
-        pdd_r, pdd_i = self._complex_mul(conj_pam_r, conj_pam_i, neg_gps_r, gm_poq_sq_i, "pdd")
+        neg_gps_i = self._node("Neg", [gm_poq_sq_i])
+        pdd_r, pdd_i = self._complex_mul(conj_pam_r, conj_pam_i, neg_gps_r, neg_gps_i, "pdd")
         pdd_r, pdd_i = self._complex_mul(pdd_r, pdd_i, ap_r, ap_i, "pdd2")
         pdd_r = self._node("Mul", [pdd_r, dQ_dpbbar]); pdd_i = self._node("Mul", [pdd_i, dQ_dpbbar])
         dQ_dpoq_r = self._node("Add", [pd_r, pdd_r])
         dQ_dpoq_i = self._node("Add", [pd_i, pdd_i])
+        # Debug: save dQ_dpoq mean for comparison
 
         # dQ/dρ = 2·Re(Σ dQ/dpoq · exp(j·ϕ))
-        pop_phi_1d = self._node("Reshape", [pop_phi, self._shape_1d(1)])
-        poq_rho_1d = self._node("Reshape", [poq_rho, self._shape_1d(1)])
-        cos_phi2 = self._node("Cos", [pop_phi_1d])
-        sin_phi2 = self._node("Sin", [pop_phi_1d])
-        # Expand to per-event for broadcasting with dQ_dpoq (N,)
-        cos_phi_e = self._node("Expand", [cos_phi2, self._shape_1d(N)])
-        sin_phi_e = self._node("Expand", [sin_phi2, self._shape_1d(N)])
-        epr_r, epr_i = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, cos_phi_e, sin_phi_e, "epr")
-        grad_poq_rho = self._node("Mul", [self._node("ReduceSum", [epr_r], axes=[0], keepdims=0),
-                                          self._scalar(2.0)])
+        cos_phi2 = self._node("Cos", [self._node("Reshape", [pop_phi, self._shape_1d(1)])])
+        sin_phi2 = self._node("Sin", [self._node("Reshape", [pop_phi, self._shape_1d(1)])])
+        # Expand to per-event rank
+        cphi = self._node("Expand", [cos_phi2, self._shape_1d(N)])
+        sphi = self._node("Expand", [sin_phi2, self._shape_1d(N)])
+        # dQ_dpoq * exp(jϕ) → complex mul
+        er, ei = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, cphi, sphi, "er")
+        grad_poq_rho = self._node("Mul", [self._node("ReduceSum", [er], axes=[0], keepdims=0), self._scalar(2.0)])
 
         # dQ/dϕ = 2·Re(Σ dQ/dpoq · ρ·j·exp(j·ϕ))
-        jep_r = self._node("Neg", [sin_phi_e])
-        jep_i = cos_phi_e
-        jep2_r, jep2_i = self._complex_mul_real(jep_r, jep_i, poq_rho_1d, "jep2")
-        jep2_r_e = self._node("Expand", [jep2_r, self._shape_1d(N)])
-        jep2_i_e = self._node("Expand", [jep2_i, self._shape_1d(N)])
-        ppr_r, ppr_i = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, jep2_r_e, jep2_i_e, "ppr")
-        grad_pop_phi = self._node("Mul", [self._node("ReduceSum", [ppr_r], axes=[0], keepdims=0),
-                                          self._scalar(2.0)])
+        # j·exp(jϕ) = j·cos ϕ - sin ϕ = (-sin ϕ) + j·cos ϕ
+        jcphi_r = self._node("Neg", [sphi])
+        jcphi_i = cphi
+        pr_1d = self._node("Reshape", [poq_rho, self._shape_1d(1)])
+        jcphi_pr_r, jcphi_pr_i = self._complex_mul_real(jcphi_r, jcphi_i, pr_1d, "jc")
+        jcphi_pr_r = self._node("Expand", [jcphi_pr_r, self._shape_1d(N)])
+        jcphi_pr_i = self._node("Expand", [jcphi_pr_i, self._shape_1d(N)])
+        pr_r, pr_i = self._complex_mul(dQ_dpoq_r, dQ_dpoq_i, jcphi_pr_r, jcphi_pr_i, "pr")
+        grad_pop_phi = self._node("Mul", [self._node("ReduceSum", [pr_r], axes=[0], keepdims=0), self._scalar(2.0)])
 
         # ── output with Identity ──
         self._node("Identity", [grad_m0], outputs="grad_m0")
