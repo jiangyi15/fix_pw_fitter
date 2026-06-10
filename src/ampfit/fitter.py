@@ -521,78 +521,45 @@ class Fitter:
 
     def get_nll(self, x, m0=None, g0=None):
         """Compute NLL and gradient w.r.t. the flat variable vector.
-        
-        The flat vector x contains all free variables:
-          [ck0_r, ck0_θ, ..., m0_0, m0_1, ..., g0_0, g0_1, ..., scalar_0, ...]
-        
+
+        The flat vector ``x`` contains all free variables in the order
+        given by :meth:`free_param_names`.
+
+        Pipeline::
+
+            x → apply_bounds → to_dict → resolve (same→scale→fixed)
+            → build ck + kernel params → kernel
+            → gradients → chain_gradient → flat_gradient → flat grad
+
         Args:
-            x: flat variable vector (length = free_param_names()).
-        
+            x: flat variable vector (length = ``free_param_names()``).
+
         Returns:
-            (nll, grad_x) where grad_x has the same shape as x.
+            ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
         """
         from ampfit.boundary import apply_bounds, apply_bound_grads
 
         # 1. Apply bound transforms
         x_mapped = apply_bounds(x, self._bound_transforms)
 
-        # 2. Extract ck vars and merge fixed r/θ slots
-        x_ck = self._var_registry.extract_by_target(x_mapped, 'ck')
-        # For partially-fixed ck vars, reinsert fixed r or θ values
-        # Resolve alias names to canonical via _alias_to_canon
-        pc_names = set(self.pc.free_param_names())
-        fixed_ck_r = {}  # {name: fixed_r}
-        fixed_ck_i = {}  # {name: fixed_i}
-        for slot, val in self._fixed_slots.items():
-            base = slot[:-1]  # e.g., 'name' from 'namer' or 'namei'
-            # Resolve alias to canonical
-            canon = self._alias_to_canon.get(base, base)
-            if slot.endswith('r') and canon in pc_names:
-                fixed_ck_r[canon] = val
-            elif slot.endswith('i') and canon in pc_names:
-                fixed_ck_i[canon] = val
-        if fixed_ck_r or fixed_ck_i:
-            # Rebuild x_ck with fixed values merged
-            new_x_ck = []
-            idx = 0
-            for name in self.pc.free_param_names():
-                in_reg = name in self._var_registry._name_to_entry
-                if in_reg:
-                    r = x_ck[idx]; th = x_ck[idx + 1]
-                    idx += 2
-                else:
-                    r = th = 0.0  # both fixed, shouldn't reach here
-                r = fixed_ck_r.get(name, r)
-                th = fixed_ck_i.get(name, th)
-                new_x_ck.extend([r, th])
-            x_ck = np.array(new_x_ck)
+        # 2. Convert flat → named dict, then resolve constraints
+        raw = self._var_registry.to_dict(x_mapped)
+        resolved = self.cm.resolve(raw)
 
-        # 3. Build m0, g0, scalar arrays from x + fixed values
-        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+        # 3. Build kernel params from resolved dict
+        #    ck — from pc.build_ck which uses named values
+        ck = self.cm.pc.build_ck(resolved)
 
-        # Start from config.yml defaults (lazy-built from particle definitions)
-        m0_arr = self.default_m0.copy()      # masses from config
-        g0_arr = self.default_g0.copy()      # widths from config
+        #    m0, g0 — from config defaults overridden by resolved values
+        m0_arr = self.default_m0.copy()
+        g0_arr = self.default_g0.copy()
+        scalar_names = self.cm.SCALAR_NAMES
         if self.default_scalar is not None:
             scalar_arr = list(self.default_scalar)
         else:
             scalar_arr = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
 
-        # Override with fixed slot values (r/i for complex parts, names for reals)
-        # Fixed scalars go directly into m0/g0/scalar arrays
-        for slot_name, val in self._fixed_slots.items():
-            base = slot_name.rstrip('ri') if slot_name[-1] in 'ri' and slot_name[-2] not in 'ri' else slot_name
-            if False: pass
-            elif base in self.config.m0_phys_name and slot_name == base:
-                m0_arr[self.config.m0_phys_name.index(base)] = val
-            elif base in self.config.g0_phys_name and slot_name == base:
-                g0_arr[self.config.g0_phys_name.index(base)] = val
-            elif base in scalar_names and slot_name == base:
-                scalar_arr[scalar_names.index(base)] = val
-
-        # Override with free values from x (those in the registry)
-        vals = self._var_registry.extract_real_dict(x_mapped)
-        for name, val in vals.items():
+        for name, val in resolved.items():
             if name in self.config.m0_phys_name:
                 m0_arr[self.config.m0_phys_name.index(name)] = val
             elif name in self.config.g0_phys_name:
@@ -600,48 +567,35 @@ class Fitter:
             elif name in scalar_names:
                 scalar_arr[scalar_names.index(name)] = val
 
-        # 4. Build ck + params
-        ck = self.pc.build_ck(x_ck)
         params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
 
-        # 5. Compute NLL with norm
+        # 4. Compute NLL with norm
         nll, total_grads = self.get_nll_raw(params)
 
-        # 6. Build flat gradient matching the registry order.
-        # grad_ck from pc.backprop_grad covers ALL pc.free_param_names()
-        # (including fully-fixed vars). We filter to only registry entries.
-        full_grad_ck = self.pc.backprop_grad(x_ck, total_grads["ck"])
+        # 5. Build per-name gradient dict from kernel output
+        grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
 
-        # Lookup: name → gradient in backprop_grad output (r/θ pairs)
-        ck_grad_map = {}
-        idx = 0
-        for name in self.pc.free_param_names():
-            ck_grad_map[name + 'r'] = full_grad_ck[idx]
-            ck_grad_map[name + 'i'] = full_grad_ck[idx + 1]
-            idx += 2
-
-        # m0, g0, scalar gradients by name
-        extra_grad_map = {}
+        # Merge m0, g0, scalar gradients → same dict
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
                                     ('scalar', scalar_names)]:
             arr = np.asarray(total_grads[target])
-            for name in names_list:
-                extra_grad_map[name] = arr[list(names_list).index(name)]
+            for i, name in enumerate(names_list):
+                grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
 
-        # Build flat gradient from registry entries only
-        flat_names = self._var_registry.flat_names
-        grad_flat = np.array([ck_grad_map.get(n, extra_grad_map.get(n, 0.0))
-                               for n in flat_names])
+        # 6. Chain gradients back through the constraint pipeline
+        grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
 
-        # 7. Apply bound gradient correction (before fixed-slot zeroing)
+        # 7. Convert to flat gradient via Wirtinger chain (r, θ → real)
+        grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
+
+        # 8. Apply bound gradient correction
         grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
 
-        # 8. Zero gradients for fixed slots (after bound correction)
-        flat_names = self._var_registry.flat_names
+        # 9. Zero gradients for fixed slots
         for slot_name in self._fixed_slots:
-            if slot_name in flat_names:
-                idx = flat_names.index(slot_name)
+            if slot_name in self._var_registry.flat_names:
+                idx = self._var_registry.flat_names.index(slot_name)
                 grad_flat[idx] = 0.0
 
         return nll, grad_flat

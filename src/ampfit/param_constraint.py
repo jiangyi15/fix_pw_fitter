@@ -1,182 +1,95 @@
 """
-Standalone parameter constraint module for partial wave analysis.
+Independent pipeline stages for parameter constraints.
 
-Maps named complex parameters (with constraints) to the partial wave
-amplitude array (ck) consumed by the NumPy/CUDA kernels.
+Each stage is a small object with ``apply(dict)`` (forward) and
+``chain_grad(grad_dict, original_dict)`` (backward):
 
-Parameter encoding:
-  Free variables are stored as [r0, θ0, r1, θ1, ...] where each
-  complex parameter = r * exp(i * θ).
-
-Constraints:
-  fixed: {name: complex_value} — constant values, not optimized
-  same:  [[name_a, name_b, ...], ...] — groups sharing one value
-  scale: {name: scale_factor} — multiply value by real factor
+    raw = registry.to_dict(x)
+    d   = name_res.apply(raw)       # alias → canonical (same)
+    d   = scale_tr.apply(d)         # multiply by scale factors
+    d   = fixed_tr.apply(d)         # inject constant values
+    ck  = pc.build_ck(d)            # partial-wave amplitudes
+    ...
+    grad = pc.backprop_grad(d, grad_ck)
+    grad = fixed_tr.chain_grad(grad, d)
+    grad = scale_tr.chain_grad(grad, d)
+    grad = name_res.chain_grad(grad, raw)
+    flat = registry.flat_gradient(x, grad)
 """
 
 import numpy as np
 
 
 class ParameterConstraint:
-    """Maps free complex parameters → partial wave amplitudes (ck).
+    """Pure combinatorics: named values → partial-wave amplitudes (ck).
 
-    No precomputed index — computes ck directly from ``all_comb`` on every
-    call.  With ~200 parameters the direct loop is effectively free.
-    Constraints (``fixed``, ``same_map``) are plain dict attributes; set
-    them and call ``configure()`` to rebuild the free-parameter list.
+    ::
+
+        ck[i] = ∏_{term ∈ comb[i]} term_value
     """
 
     def __init__(self, all_comb):
         self.all_comb = list(all_comb)
         self.n_wave = len(all_comb)
 
-        # Collect every possible ck parameter name from comb structure
-        self.all_names = set()
-        for comb in all_comb:
-            for p in comb:
-                if isinstance(p, str):
-                    self.all_names.add(p)
-
-        # Constraint attributes — set directly or via ConstraintManager
-        self.fixed = {}          # {canonical_name: complex_value}
-        self.same_map = {}       # {alias_name: canonical_name}
-        self.free_names = sorted(self.all_names)   # initially all free
-        self.n_free = len(self.free_names)
-
-    # ── queries ─────────────────────────────────────────────────
-
-    def free_param_names(self):
-        """Canonical names of free parameters."""
-        return list(self.free_names)
-
-    def name_to_idx(self, name):
-        """Index in the free-parameter list for *name*."""
-        try:
-            return self.free_names.index(name)
-        except ValueError:
-            raise KeyError(name)
-
-    def initial_values(self, seed=None):
-        """Random initial guess ``[r0, θ0, r1, θ1, …]``."""
-        if seed is not None:
-            np.random.seed(seed)
-        x = np.empty(2 * self.n_free)
-        x[0::2] = np.random.uniform(0.5, 2.0, self.n_free)
-        x[1::2] = np.random.uniform(-np.pi, np.pi, self.n_free)
-        return x
-
-    # ── compute ─────────────────────────────────────────────────
-
-    def _flat_to_dict(self, x, scale):
-        """Convert flat vector ``[r0, θ0, …]`` → ``{name: complex}`` dict.
-
-        Also returns the index mapping and r/theta arrays.
-        """
-        r = x[0::2]
-        theta = x[1::2]
-        vals = {n: r[i] * np.exp(1j * theta[i])
-                for i, n in enumerate(self.free_names)}
-        return r, theta, vals
-
-    def _eval_comb(self, comb, vals):
-        """Evaluate one combination, returning (product, {canon→count}) for free vars.
-
-        Returns:
-            prod: complex product including fixed, scale, and free contributions.
-            counts: dict mapping canonical free-name → multiplicity.
-        """
-        prod = 1.0 + 0.0j
-        counts = {}
-        for term in comb:
-            if isinstance(term, str):
-                canon = self.same_map.get(term, term)
-                if canon in self.fixed:
-                    prod *= self.fixed[canon]
-                else:
-                    v = vals.get(canon, 1.0 + 0.0j)
-                    # Scale on ORIGINAL name (before canonical mapping),
-                    # matching archive pw_cfit5_td6_fix29.py behaviour.
-                    prod *= v
-                    counts[canon] = counts.get(canon, 0) + 1
-            else:
-                prod *= term          # non-string numeric factor in combo
-        return prod, counts
-
-    def build_ck(self, x):
-        """Compute partial-wave amplitudes from flat free-parameter vector.
-
-        Args:
-            x: array ``[r0, θ0, r1, θ1, …]``  (length ``2 × n_free``).
-
-        Returns:
-            ck: complex array ``(n_wave,)``.
-        """
-        _, _, vals = self._flat_to_dict(x, {})
-
+    def build_ck(self, param_dict):
         ck = np.empty(self.n_wave, dtype=complex)
         for i, comb in enumerate(self.all_comb):
-            prod, _ = self._eval_comb(comb, vals)
+            prod = 1.0 + 0.0j
+            for term in comb:
+                if isinstance(term, str):
+                    prod *= param_dict.get(term, 1.0 + 0.0j)
+                else:
+                    prod *= term
             ck[i] = prod
         return ck
 
-    def backprop_grad(self, x, grad_ck):
-        """Backpropagate kernel gradient through the constraint map.
+    def free_param_names(self):
+        """All canonical parameter names from the comb structure (compat)."""
+        names = set()
+        for comb in self.all_comb:
+            for p in comb:
+                if isinstance(p, str):
+                    names.add(p)
+        return sorted(names)
 
-        Args:
-            x: flat free-parameter vector ``(2 × n_free,)``.
-            grad_ck: complex gradient from kernel ``(n_wave,)``.
-
-        Returns:
-            grad_x: real gradient ``(2 × n_free,)``
-                    ``[dQ/dr₀, dQ/dθ₀, dQ/dr₁, dQ/dθ₁, …]``.
-        """
-        r, theta, vals = self._flat_to_dict(x, {})
-        name_to_idx = {n: i for i, n in enumerate(self.free_names)}
-
-        # tmp[k] = Σᵢ grad_ck[i] · d(ck[i])/d(varₖ)
-        tmp = np.zeros(self.n_free, dtype=complex)
-
+    def backprop_grad(self, param_dict, grad_ck):
+        """Wirtinger gradient ``dQ/d(name)`` for each name in ``all_comb``."""
+        ck = self.build_ck(param_dict)
+        grads = {}
         for i, comb in enumerate(self.all_comb):
-            prod, counts = self._eval_comb(comb, vals)
-            for canon, order in counts.items():
-                k = name_to_idx[canon]
-                tmp[k] += grad_ck[i] * order * prod / vals[canon]
-
-        # Wirtinger chain: dQ/dr = 2·Re(exp(jθ) · tmp)
-        #                 dQ/dθ = 2·Re(j · r·exp(jθ) · tmp)
-        exp_theta = np.exp(1j * theta)
-        dQ_dr = 2.0 * np.real(exp_theta * tmp)
-        dQ_dtheta = 2.0 * np.real(1j * r * exp_theta * tmp)
-
-        grad_x = np.empty(2 * self.n_free)
-        grad_x[0::2] = dQ_dr
-        grad_x[1::2] = dQ_dtheta
-        return grad_x
+            counts = {}
+            for term in comb:
+                if isinstance(term, str):
+                    counts[term] = counts.get(term, 0) + 1
+            for name, order in counts.items():
+                dck = order * ck[i] / param_dict[name]
+                grads[name] = grads.get(name, 0j) + grad_ck[i] * dck
+        return grads
 
 
 # ================================================================
-# VariableRegistry: maps named variables to flat (optimiser) space
+# VariableRegistry — flat vector ↔ named dict
 # ================================================================
 
 class VariableRegistry:
-    """Maps named variables to the flat vector ``x``.
+    """Maps named variables to the flat real vector ``x``.
 
-    Complex parameters occupy 2 slots ``[r, θ]``, real parameters 1 slot.
+    Complex parameters → 2 slots ``[r, θ]``.
+    Real parameters     → 1 slot.
     """
 
     def __init__(self):
-        self._entries = []          # (name, kind, target)
+        self._entries = []
         self._name_to_entry = {}
 
-    def add_complex(self, name, target):
-        entry = {'name': name, 'kind': 'complex', 'target': target}
-        self._entries.append(entry)
-        self._name_to_entry[name] = entry
+    def add_complex(self, name, target=None):
+        self._entries.append({'name': name, 'kind': 'complex', 'target': target})
+        self._name_to_entry[name] = self._entries[-1]
 
-    def add_real(self, name, target):
-        entry = {'name': name, 'kind': 'real', 'target': target}
-        self._entries.append(entry)
-        self._name_to_entry[name] = entry
+    def add_real(self, name, target=None):
+        self._entries.append({'name': name, 'kind': 'real', 'target': target})
+        self._name_to_entry[name] = self._entries[-1]
 
     @property
     def names(self):
@@ -184,7 +97,6 @@ class VariableRegistry:
 
     @property
     def flat_names(self):
-        """Slot-level names — ``'{name}r'`` / ``'{name}i'`` for complex."""
         result = []
         for e in self._entries:
             if e['kind'] == 'complex':
@@ -199,17 +111,14 @@ class VariableRegistry:
         return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
 
     def flat_index(self, name):
-        """``(start, end)`` slice in the flat vector for *name*."""
         idx = 0
         for e in self._entries:
             if e['name'] == name:
-                end = idx + (2 if e['kind'] == 'complex' else 1)
-                return (idx, end)
+                return (idx, idx + (2 if e['kind'] == 'complex' else 1))
             idx += 2 if e['kind'] == 'complex' else 1
         raise KeyError(f"Unknown variable: {name}")
 
     def build_initial(self, seed=None):
-        """Random initial guess for the flat vector."""
         if seed is not None:
             np.random.seed(seed)
         x = np.empty(self.n_flat)
@@ -224,28 +133,15 @@ class VariableRegistry:
                 idx += 1
         return x
 
-    def extract_complex_dict(self, x):
-        """``{name: complex}`` for all complex variables."""
-        result = {}
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
-                result[e['name']] = r * np.exp(1j * theta)
-                idx += 2
-            else:
-                idx += 1
-        return result
+    # ── forward ─────────────────────────────────────────────────
 
-    def extract_real_dict(self, x):
-        """``{name: value}`` for all variables (complex → ``r·exp(jθ)``)."""
+    def to_dict(self, x):
+        """Flat vector ``→ {name: complex_or_real}``."""
         result = {}
         idx = 0
         for e in self._entries:
             if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
+                r, theta = x[idx], x[idx + 1]
                 result[e['name']] = r * np.exp(1j * theta)
                 idx += 2
             else:
@@ -253,12 +149,42 @@ class VariableRegistry:
                 idx += 1
         return result
 
+    # ── backward ────────────────────────────────────────────────
+
+    def flat_gradient(self, x, grad_dict):
+        """``{name: Wirtinger_grad} → flat real gradient``.
+
+        For complex vars (Wirtinger)::
+
+            dQ/dr = 2·Re(grad·exp(j·θ))
+            dQ/dθ = 2·Re(grad·j·r·exp(j·θ))
+        """
+        flat = np.zeros(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r, theta = x[idx], x[idx + 1]
+                gc = grad_dict.get(e['name'], 0j)
+                ejt = np.exp(1j * theta)
+                flat[idx] = 2.0 * np.real(gc * ejt)
+                flat[idx + 1] = 2.0 * np.real(gc * 1j * r * ejt)
+                idx += 2
+            else:
+                flat[idx] = grad_dict.get(e['name'], 0.0)
+                idx += 1
+        return flat
+
+    # ── compat shims ────────────────────────────────────────────
+
+    def extract_real_dict(self, x):
+        return self.to_dict(x)
+
     def extract_by_target(self, x, target_type):
-        """Flat sub-vector for entries whose target type matches."""
         result = []
         idx = 0
         for e in self._entries:
-            if e['target'][0] == target_type:
+            take = (e['target'] is not None and e['target'][0] == target_type)
+            if take:
                 if e['kind'] == 'complex':
                     result.extend([x[idx], x[idx + 1]])
                     idx += 2
@@ -267,59 +193,150 @@ class VariableRegistry:
                     idx += 1
             else:
                 idx += 2 if e['kind'] == 'complex' else 1
-        return np.array(result) if result else np.array([])
+        return np.array(result)
 
     def backprop_grad(self, x, grad_dict):
-        """Flat gradient from per-variable dict.
-
-        For complex vars uses Wirtinger::
-
-            dQ/dr = 2·Re(grad · exp(j·θ))
-            dQ/dθ = 2·Re(grad · j·r·exp(j·θ))
-        """
-        flat_grad = np.zeros(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            name = e['name']
-            if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
-                gc = grad_dict.get(name, 0j)
-                e_jt = np.exp(1j * theta)
-                flat_grad[idx] = 2.0 * np.real(gc * e_jt)
-                flat_grad[idx + 1] = 2.0 * np.real(gc * 1j * r * e_jt)
-                idx += 2
-            else:
-                flat_grad[idx] = grad_dict.get(name, 0.0)
-                idx += 1
-        return flat_grad
+        return self.flat_gradient(x, grad_dict)
 
 
 # ================================================================
-# Bound constraint helper
+# NameResolution — alias→canonical (same-parameter groups)
+# ================================================================
+
+class NameResolution:
+    """Resolves alias names to canonical names.
+
+    Forward: ``d[canon] = raw[alias]`` (last alias wins for each canon).
+    Backward: ``grad[alias] = grad_out[canon]``.
+    """
+
+    def __init__(self):
+        self.map = {}          # {alias: canonical}
+
+    def set_same(self, groups):
+        self.map = {}
+        for group in groups:
+            if group:
+                canon = group[0]
+                for alias in group[1:]:
+                    self.map[alias] = canon
+
+    def apply(self, d):
+        # Canonical names first
+        result = {self.map.get(k, k): v for k, v in d.items()}
+        # Also inject alias names with the same value — all_comb may
+        # reference either the alias or the canonical name.
+        for alias, canon in self.map.items():
+            if canon in result:
+                result[alias] = result[canon]
+        return result
+
+    def chain_grad(self, grad_out, d_in):
+        """grad_out was w.r.t. resolved dict; d_in is the input dict."""
+        result = {}
+        for name in d_in:
+            canon = self.map.get(name, name)
+            if canon in grad_out:
+                result[name] = grad_out[canon]
+            # Also add alias contributions: grad[alias] = grad[canon]
+            for alias, cn in self.map.items():
+                if cn == canon and alias in grad_out:
+                    result[name] = result.get(name, 0.0) + grad_out[alias]
+        return result
+
+
+# ================================================================
+# ScaleTransform — multiply values by scale factors
+# ================================================================
+
+class ScaleTransform:
+    """Applies scale factors (on *original* name before alias resolution).
+
+    Forward: ``d[name] = d[name] * scale[name]`` (if scale[name] exists).
+    Backward: ``grad[name] = grad_out[name] * scale[name]``.
+    """
+
+    def __init__(self):
+        self.factors = {}      # {original_name: float}
+
+    def set_scale(self, scale):
+        self.factors = dict(scale)
+
+    def apply(self, d):
+        d = dict(d)
+        for name, sf in self.factors.items():
+            if name in d:
+                d[name] = d[name] * sf
+        return d
+
+    def chain_grad(self, grad_out, d_in):
+        grad = dict(grad_out)
+        for name, sf in self.factors.items():
+            if name in grad:
+                grad[name] = grad[name] * sf
+        return grad
+
+
+# ================================================================
+# FixedOverride — inject constant parameter values
+# ================================================================
+
+class FixedOverride:
+    """Injects fixed (constant) values into the param dict.
+
+    Handles both canonical names (``'gamma': 0.0``) and slot-level
+    r/i pairs (``{'nr': 1.0, 'ni': 0.0}`` → ``'n': 1+0j``).
+    """
+
+    def __init__(self):
+        self.values = {}       # {slot_name: value}
+
+    def set_fixed(self, fixed):
+        self.values = dict(fixed)
+
+    def _fixed_complex(self):
+        """Build ``{canon: complex}`` for fully-fixed r/i slot pairs."""
+        result = {}
+        for name in list(self.values.keys()):
+            if name.endswith('r') and name[:-1] + 'i' in self.values:
+                canon = name[:-1]
+                result[canon] = self.values[canon + 'r'] + 1j * self.values[canon + 'i']
+        return result
+
+    def apply(self, d):
+        d = dict(d)
+        for name, val in self.values.items():
+            if name in d:
+                d[name] = val
+        d.update(self._fixed_complex())
+        return d
+
+    def chain_grad(self, grad_out, d_in):
+        grad = dict(grad_out)
+        for name in self.values:
+            grad.pop(name, None)          # remove slot-level names
+        for canon in self._fixed_complex():
+            grad.pop(canon, None)         # remove composite canonical names
+        return grad
+
+
+# ================================================================
+# Bound constraint helper (re-export)
 # ================================================================
 from ampfit.boundary import BoundTransform  # noqa: F401
 
 
 # ================================================================
-# ConstraintManager — standalone constraint API
+# ConstraintManager — coordinates the pipeline stages
 # ================================================================
 
 class ConstraintManager:
-    """Owns :class:`ParameterConstraint`, :class:`VariableRegistry`, bounds.
+    """Owns :class:`ParameterConstraint`, :class:`VariableRegistry`,
+    and the constraint pipeline stages (:class:`NameResolution`,
+    :class:`ScaleTransform`, :class:`FixedOverride`).
 
-    Constraint state is stored in plain dicts/lists (``.fixed``, ``.same``,
-    ``.scale``, ``.bounds``).  Every ``set_*`` call simply updates the
-    relevant dict/list and calls ``_rebuild()`` — trivially fast for ~200
-    parameters.
-
-    Usage::
-
-        cm = ConstraintManager(all_comb, m0_names, g0_names)
-        cm.set_fixed({"gamma": 0.0})
-        cm.set_same([["a", "b"]])
-        print(cm.free_param_names())
-        x0 = cm.initial_values()
+    Every ``set_*`` method updates the relevant stage and rebuilds
+    the registry — trivial for ~200 parameters.
     """
 
     SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
@@ -329,15 +346,16 @@ class ConstraintManager:
         self.m0_names = list(m0_names)
         self.g0_names = list(g0_names)
 
-        # Constraint state — set directly or via set_* methods
-        self.fixed = {}          # {slot_name: value}
-        self.same = []           # [[name_a, name_b, ...], ...]
-        self.scale = {}          # {name: float}
-        self.bounds = {}         # {flat_idx: BoundTransform}
-        self._alias_to_canon = {}
-
-        # Derived state
+        # Pipeline stages (independent objects)
         self.pc = ParameterConstraint(all_comb)
+        self.name_res = NameResolution()
+        self.scale_tr = ScaleTransform()
+        self.fixed_tr = FixedOverride()
+
+        # Bound transforms (flat-index → BoundTransform)
+        self.bounds = {}
+
+        # Variable registry (rebuilt on constraint change)
         self._var_registry = None
 
         self._rebuild()
@@ -350,58 +368,64 @@ class ConstraintManager:
 
     @property
     def alias_to_canon(self):
-        return self._alias_to_canon
+        return self.name_res.map
 
     @property
     def bound_transforms(self):
         return self.bounds
 
+    # Backward-compat property aliases
     @property
     def fixed_slots(self):
-        return self.fixed
+        return self.fixed_tr.values
 
     @property
     def same_params(self):
-        return self.same
+        return self.name_res.map
 
     @property
     def scale_params(self):
-        return self.scale
+        return self.scale_tr.factors
 
     def free_param_names(self):
         return self.var_registry.flat_names
 
     def initial_values(self, seed=None):
-        _ = self.pc  # ensure pc is current
         return self.var_registry.build_initial(seed=seed)
 
-    # ── modifiers (each updates dict + calls _rebuild) ──────────
+    # ── modifiers ──────────────────────────────────────────────
 
     def set_fixed(self, fixed_slots, reset=False):
         if reset:
-            self.fixed = {}
-        self.fixed.update({k: float(v) for k, v in fixed_slots.items()})
+            self.fixed_tr.values = {}
+        self.fixed_tr.values.update({k: float(v) for k, v in fixed_slots.items()})
         self._rebuild()
 
     def set_same(self, same_params, reset=False):
         if reset:
-            self.same = []
-        self.same.extend(list(same_params))
+            self.name_res.map = {}
+        for group in same_params:
+            if group:
+                canon = group[0]
+                for alias in group[1:]:
+                    self.name_res.map[alias] = canon
         self._rebuild()
 
     def set_scale(self, scale_params, reset=False):
         if reset:
-            self.scale = {}
-        self.scale.update(dict(scale_params))
+            self.scale_tr.factors = {}
+        self.scale_tr.factors.update(dict(scale_params))
         self._rebuild()
 
     def set_free(self, name):
         name_r = name + 'r'
         name_i = name + 'i'
         for key in (name, name_r, name_i):
-            self.fixed.pop(key, None)
-        self.same = [g for g in self.same if name not in g]
-        self.scale.pop(name, None)
+            self.fixed_tr.values.pop(key, None)
+        # Remove from same groups
+        self.name_res.map = {k: v for k, v in self.name_res.map.items()
+                             if k != name and v != name}
+        self.scale_tr.factors.pop(name, None)
         self._rebuild()
 
     def set_range(self, name, lo, hi):
@@ -430,79 +454,59 @@ class ConstraintManager:
                 if n == name:
                     self.bounds.pop(i, None)
 
-    # ── rebuild (always, no dirty flags — trivial for ~200 vars) ─
+    # ── forward pipeline ───────────────────────────────────────
+
+    def resolve(self, raw_dict):
+        """Run the full constraint pipeline: same → scale → fixed."""
+        d = self.name_res.apply(raw_dict)
+        d = self.scale_tr.apply(d)
+        d = self.fixed_tr.apply(d)
+        return d
+
+    # ── backward pipeline ──────────────────────────────────────
+
+    def chain_gradient(self, grad_resolved, resolved, raw):
+        """Reverse of :meth:`resolve`."""
+        grad = self.fixed_tr.chain_grad(grad_resolved, resolved)
+        grad = self.scale_tr.chain_grad(grad, resolved)
+        grad = self.name_res.chain_grad(grad, raw)
+        return grad
+
+    # ── rebuild ─────────────────────────────────────────────────
 
     def _rebuild(self):
-        # 1. Build alias map (from self.same)
-        self._alias_to_canon = {}
-        for group in self.same:
-            if group:
-                canon = group[0]
-                for a in group[1:]:
-                    self._alias_to_canon[a] = canon
-
-        # 2. Collect all ck parameter names from all_comb
+        # 1. Collect all ck param names from comb structure
         all_ck_names = set()
         for comb in self.all_comb:
             for p in comb:
                 if isinstance(p, str):
                     all_ck_names.add(p)
 
-        # 3. Determine which ck params are fully fixed → pc.fixed
-        pc_fixed = {}
-        for name in all_ck_names:
-            canon = self._alias_to_canon.get(name, name)
-            r_fixed = (canon + 'r') in self.fixed
-            i_fixed = (canon + 'i') in self.fixed
-            if r_fixed and i_fixed:
-                pc_fixed[canon] = self.fixed[canon + 'r'] * np.exp(
-                    1j * self.fixed[canon + 'i'])
-            elif r_fixed:
-                # Partially fixed (r only) — still free, handled by Fitter
-                pass
-            elif i_fixed:
-                pass  # partially fixed (θ only) — still free
-
-        self.pc.fixed = pc_fixed
-        self.pc.same_map = self._alias_to_canon
-
-        # Build free_names for pc (inline — no separate configure() call)
-        fixed_set = set(pc_fixed.keys())
-        rebuilt = []
-        seen = set()
-        for name in sorted(all_ck_names):
-            canon = self._alias_to_canon.get(name, name)
-            if canon in fixed_set or canon in seen:
-                continue
-            seen.add(canon)
-            rebuilt.append(canon)
-        self.pc.free_names = rebuilt
-        self.pc.n_free = len(rebuilt)
-
-        # 4. Rebuild VariableRegistry
+        # 2. Build VariableRegistry
         self._var_registry = VariableRegistry()
 
         def _slot_fixed(name, suffix=''):
-            if (name + suffix) in self.fixed:
+            if (name + suffix) in self.fixed_tr.values:
                 return True
-            for a in self._alias_to_canon.get(name, []):
-                if (a + suffix) in self.fixed:
+            for a in self.name_res.map.get(name, []):
+                if (a + suffix) in self.fixed_tr.values:
                     return True
             return False
 
         def _name_fixed(name):
-            if name in self.fixed:
+            if name in self.fixed_tr.values:
                 return True
-            for a in self._alias_to_canon.get(name, []):
-                if a in self.fixed:
+            for a in self.name_res.map.get(name, []):
+                if a in self.fixed_tr.values:
                     return True
             return False
 
-        for name in self.pc.free_param_names():
-            r_fixed = _slot_fixed(name, 'r')
-            i_fixed = _slot_fixed(name, 'i')
+        for name in sorted(all_ck_names):
+            canon = self.name_res.map.get(name, name)
+            r_fixed = _slot_fixed(canon, 'r')
+            i_fixed = _slot_fixed(canon, 'i')
             if not (r_fixed and i_fixed):
-                self._var_registry.add_complex(name, ('ck', name))
+                self._var_registry.add_complex(canon, ('ck', canon))
 
         for name in self.m0_names:
             if not _name_fixed(name):
@@ -554,97 +558,52 @@ class ParameterizedObjective:
 
 
 # ================================================================
-# Self-test / verification
+# Self-test
 # ================================================================
 if __name__ == "__main__":
     from ampfit.config_loader import Config
-
     config = Config("config_angle.yml")
     all_comb = config.get_ck_map()
+    ck_names = sorted({p for comb in all_comb for p in comb if isinstance(p, str)})
 
-    all_params = set()
-    for comb in all_comb:
-        for p in comb:
-            if isinstance(p, str):
-                all_params.add(p)
-
+    # Independent pipeline stages
     pc = ParameterConstraint(all_comb)
+    name_res = NameResolution()
+    scale_tr = ScaleTransform()
+    fixed_tr = FixedOverride()
 
-    # Fixed params
-    fixed = {}
-    for p in sorted(all_params):
-        if p.endswith("g_ls_0"):
-            fixed[p] = 1.0 + 0.0j
-    pc.fixed = fixed
+    # Configure them independently
+    fixed_tr.set_fixed({n: 1.0 + 0.0j for n in ck_names if n.endswith("g_ls_0")})
+    # (no same, no scale for this test)
 
-    # Same params (example)
-    same_map = {}
-    for p in sorted(all_params):
-        if "total" in p and "bar" in p:
-            bar_name = p
-            nonbar = p.replace("bar", "")
-            if nonbar in all_params:
-                same_map[bar_name] = nonbar
-    pc.same_map = same_map
-    fixed_set = set(pc.fixed.keys())
-    rebuilt = []
-    seen = set()
-    for name in sorted(all_params):
-        canon = pc.same_map.get(name, name)
-        if canon in fixed_set or canon in seen:
-            continue
-        seen.add(canon)
-        rebuilt.append(canon)
-    pc.free_names = rebuilt
-    pc.n_free = len(rebuilt)
-
-    print(f"n_wave = {pc.n_wave}")
-    print(f"n_free = {pc.n_free}")
-    print(f"Free params: {pc.free_param_names()[:5]}...")
-
-    x = pc.initial_values(seed=42)
-    ck = pc.build_ck(x)
+    np.random.seed(42)
+    raw = {n: np.random.randn() + 1j * np.random.randn() for n in ck_names}
+    resolved = fixed_tr.apply(raw)    # same → scale → fixed
+    ck = pc.build_ck(resolved)
     print(f"ck shape: {ck.shape}, ck[:3]: {ck[:3]}")
 
-    # Jacobian verification (via build_ck + numerical)
-    eps = 1e-6
-    jac_num = np.zeros((pc.n_wave, pc.n_free), dtype=complex)
-    for k in range(pc.n_free):
-        idx_r = 2 * k
-        xp = x.copy(); xp[idx_r] += eps
-        xm = x.copy(); xm[idx_r] -= eps
-        jac_num[:, k] = (pc.build_ck(xp) - pc.build_ck(xm)) / (2 * eps)
-        jac_num[:, k] *= np.exp(-1j * x[idx_r + 1])  # remove r→var chain
-
-    # Analytical Jacobian (via backprop_grad against unit basis)
-    J = np.zeros((pc.n_wave, pc.n_free), dtype=complex)
-    for k in range(pc.n_free):
-        g = np.zeros(pc.n_wave, dtype=complex)
-        g[:] = 0.0
-        # We need d(ck)/d(var_k).  The backprop_grad gives d(Q)/d(r,θ), not d(ck)/d(var).
-        # Instead, compute by perturbing x and using build_ck.
-        pass  # skip Jacobian test for now — ck verification covers correctness
-
-    # Gradient backprop verification
-    np.random.seed(123)
-    grad_ck_test = np.random.randn(pc.n_wave) + 1j * np.random.randn(pc.n_wave)
-    grad_x = pc.backprop_grad(x, grad_ck_test)
-    print(f"grad_x shape: {grad_x.shape}")
-
+    # Gradient test
     test_vec = np.random.randn(pc.n_wave) + 1j * np.random.randn(pc.n_wave)
+    Q_fn = lambda pd: np.real(np.sum(pc.build_ck(pd) * np.conj(test_vec)))
     grad_ck_exact = 0.5 * np.conj(test_vec)
-    Q_fn = lambda ck: np.real(np.sum(ck * np.conj(test_vec)))
 
-    grad_x_ana = pc.backprop_grad(x, grad_ck_exact)
-    grad_x_num = np.empty(2 * pc.n_free)
-    for k in range(2 * pc.n_free):
-        xp = x.copy(); xp[k] += eps
-        Qp = Q_fn(pc.build_ck(xp))
-        xm = x.copy(); xm[k] -= eps
-        Qm = Q_fn(pc.build_ck(xm))
-        grad_x_num[k] = (Qp - Qm) / (2 * eps)
+    grad_pc = pc.backprop_grad(resolved, grad_ck_exact)
+    grad = fixed_tr.chain_grad(grad_pc, resolved)
+    # grad now in raw space
 
-    err = np.max(np.abs(grad_x_ana - grad_x_num))
-    print(f"Gradient max error: {err:.2e}")
-    assert err < 1e-5, f"Gradient verification failed: {err}"
-    print("✓ All checks passed!")
+    eps = 1e-6
+    errs = []
+    for name in ck_names[:5]:
+        pd = raw.copy()
+        pd[name] += eps
+        Qp = Q_fn(fixed_tr.apply(pd))
+        pd[name] -= 2 * eps
+        Qm = Q_fn(fixed_tr.apply(pd))
+        num = (Qp - Qm) / (2 * eps)
+        ana = grad.get(name, 0j)
+        err = abs(2.0 * ana.real - num)
+        errs.append(err)
+        print(f"  {name[:35]:35s} 2·Re(ana)={2*ana.real:+.6e} num={num:+.6e} err={err:.2e}")
+    print(f"Max error: {max(errs):.2e}")
+    assert max(errs) < 1e-5
+    print("✓ Pipeline stages verified")
