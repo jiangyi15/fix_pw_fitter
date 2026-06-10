@@ -16,7 +16,7 @@ OP = onnx.helper.make_node
 
 
 def float_type():
-    return TensorProto.DOUBLE
+    return TensorProto.FLOAT
 
 
 def int64():
@@ -58,14 +58,14 @@ class PWAONNXBuilder:
         self._embed("bw_order", kc["bw_order"].astype(np.int64))
         self._embed("fl_order", kc["fl_order"].astype(np.int64))
         self._embed("angle_index", kc["angle_index"].astype(np.int64))
-        self._embed("matrix_angle_real", np.real(kc["matrix_angle"]))
-        self._embed("matrix_angle_imag", np.imag(kc["matrix_angle"]))
-        self._embed("matrix_gamma", kc["matrix_gamma"])
-        self._embed("gamma_table_real", np.real(kc["gamma_table"]))
-        self._embed("gamma_table_imag", np.imag(kc["gamma_table"]))
-        self._embed("fl_table", kc["fl_table"])
+        self._embed("matrix_angle_real", np.real(kc["matrix_angle"]).astype(np.float32))
+        self._embed("matrix_angle_imag", np.imag(kc["matrix_angle"]).astype(np.float32))
+        self._embed("matrix_gamma", kc["matrix_gamma"].astype(np.float32))
+        self._embed("gamma_table_real", np.real(kc["gamma_table"]).astype(np.float32))
+        self._embed("gamma_table_imag", np.imag(kc["gamma_table"]).astype(np.float32))
+        self._embed("fl_table", kc["fl_table"].astype(np.float32))
         self._embed("angle_k", kc["angle_k"])
-        self._embed("angle_b", kc["angle_b"])
+        self._embed("angle_b", kc["angle_b"].astype(np.float32))
 
         # Interpolation configs
         self.gamma_min = float(kc["gamma_min"])
@@ -87,15 +87,15 @@ class PWAONNXBuilder:
         t = numpy_helper.from_array(np.asarray(arr), name=name)
         self._consts[name] = t
 
-    def _input(self, name, shape, dtype=TensorProto.DOUBLE):
+    def _input(self, name, shape, dtype=TensorProto.FLOAT):
         vi = helper.make_tensor_value_info(name, dtype, shape)
         self._value_info.append(vi)
         return name
 
-    def _scalar(self, value, dtype=TensorProto.DOUBLE):
+    def _scalar(self, value, dtype=TensorProto.FLOAT):
         name = self._name(f"c{value}")
-        if dtype == TensorProto.DOUBLE:
-            self._embed(name, np.array(value, dtype=np.float64))
+        if dtype == TensorProto.FLOAT:
+            self._embed(name, np.array(value, dtype=np.float32))
         else:
             self._embed(name, np.array(value, dtype=np.int64))
         return name
@@ -116,7 +116,10 @@ class PWAONNXBuilder:
 
     def _scalar(self, value, dtype=TensorProto.FLOAT):
         name = self._name(f"c{value}")
-        self._embed(name, np.array(value, dtype=np.float64 if dtype == TensorProto.FLOAT else np.int64))
+        if dtype == TensorProto.FLOAT:
+            self._embed(name, np.array(value, dtype=np.float32))
+        else:
+            self._embed(name, np.array(value, dtype=np.int64))
         return name
 
     # ── complex arithmetic on (r, i) pairs ──────────────────────
@@ -201,11 +204,11 @@ class PWAONNXBuilder:
         xbin_floor = self._node("Floor", [xbin_f])
 
         # Clamp xbin to [0, n_bins-2] via Min/Max on float
-        xbin_float = self._node("Cast", [xbin_floor], to=TensorProto.DOUBLE)
-        zero_d = self._scalar(0.0)
-        nbm2_d = self._scalar(float(n_bins - 2))
-        xbin_max = self._node("Max", [xbin_float, zero_d])
-        xbin_clip_f = self._node("Min", [xbin_max, nbm2_d])
+        xbin_float = self._node("Cast", [xbin_floor], to=TensorProto.FLOAT)
+        zero_f = self._scalar(0.0)
+        nbm2_f = self._scalar(float(n_bins - 2))
+        xbin_max = self._node("Max", [xbin_float, zero_f])
+        xbin_clip_f = self._node("Min", [xbin_max, nbm2_f])
         xbin_clip = self._node("Cast", [xbin_clip_f], to=TensorProto.INT64)
 
         delta = self._node("Sub", [xbin_f, xbin_floor])
@@ -355,13 +358,10 @@ class PWAONNXBuilder:
         ang = self._node("Gather", [angle, "angle_index"], axis=1)
 
         # ka = cos(ang * angle_k + angle_b).prod(axis=-1)
-        angle_k_f = self._node("Cast", ["angle_k"], to=TensorProto.DOUBLE)
+        angle_k_f = self._node("Cast", ["angle_k"], to=TensorProto.FLOAT)
         ang_k_mul = self._node("Mul", [ang, angle_k_f])
         ang_kb = self._node("Add", [ang_k_mul, "angle_b"])
-        # Cos/Sin not implemented for DOUBLE in some ORT builds; cast to FLOAT
-        ang_kb_f = self._node("Cast", [ang_kb], to=TensorProto.FLOAT)
-        cos_a_f = self._node("Cos", [ang_kb_f])
-        cos_a = self._node("Cast", [cos_a_f], to=TensorProto.DOUBLE)
+        cos_a = self._node("Cos", [ang_kb])
         ka = self._node("ReduceProd", [cos_a], axes=[2], keepdims=0)
 
         # fa = ka @ matrix_angle (complex matmul)
@@ -403,11 +403,8 @@ class PWAONNXBuilder:
 
         # ──── 8. Time evolution ────
         # poq = poq_rho * exp(j*pop_phi)
-        phi_f = self._node("Cast", [pop_phi], to=TensorProto.FLOAT)
-        cos_phi_f = self._node("Cos", [phi_f])
-        sin_phi_f = self._node("Sin", [phi_f])
-        cos_phi = self._node("Cast", [cos_phi_f], to=TensorProto.DOUBLE)
-        sin_phi = self._node("Cast", [sin_phi_f], to=TensorProto.DOUBLE)
+        cos_phi = self._node("Cos", [pop_phi])
+        sin_phi = self._node("Sin", [pop_phi])
         poq_r = self._node("Mul", [poq_rho, cos_phi])
         poq_i = self._node("Mul", [poq_rho, sin_phi])
 
@@ -434,15 +431,9 @@ class PWAONNXBuilder:
             """exp(-j*t*(a + j*b)) = exp(t*b) * (cos(t*a) - j*sin(t*a))."""
             ta = self._node("Mul", [t_t, a])
             tb = self._node("Mul", [t_t, b])
-            # Exp/Cos/Sin on FLOAT for ORT compatibility
-            tb_f = self._node("Cast", [tb], to=TensorProto.FLOAT)
-            ta_f = self._node("Cast", [ta], to=TensorProto.FLOAT)
-            exp_tb_f = self._node("Exp", [tb_f])
-            cos_ta_f = self._node("Cos", [ta_f])
-            sin_ta_f = self._node("Sin", [ta_f])
-            exp_tb = self._node("Cast", [exp_tb_f], to=TensorProto.DOUBLE)
-            cos_ta = self._node("Cast", [cos_ta_f], to=TensorProto.DOUBLE)
-            sin_ta = self._node("Cast", [sin_ta_f], to=TensorProto.DOUBLE)
+            exp_tb = self._node("Exp", [tb])
+            cos_ta = self._node("Cos", [ta])
+            sin_ta = self._node("Sin", [ta])
             return (self._node("Mul", [exp_tb, cos_ta]),
                     self._node("Neg", [self._node("Mul", [exp_tb, sin_ta])]))
 
@@ -496,8 +487,8 @@ class PWAONNXBuilder:
         self._node("Identity", [P], outputs="P")
 
         # ──── outputs ────
-        Q_vi = helper.make_tensor_value_info("Q", TensorProto.DOUBLE, [])
-        P_vi = helper.make_tensor_value_info("P", TensorProto.DOUBLE, [batch_size])
+        Q_vi = helper.make_tensor_value_info("Q", TensorProto.FLOAT, [])
+        P_vi = helper.make_tensor_value_info("P", TensorProto.FLOAT, [batch_size])
         self._value_info.append(Q_vi)
         self._value_info.append(P_vi)
 
