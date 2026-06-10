@@ -105,6 +105,12 @@ class PWAONNXBuilder:
             outputs = [self._name(op_type.lower())]
         elif isinstance(outputs, str):
             outputs = [outputs]
+        named = attrs.pop('named_as', None)
+        if named:
+            # Use identity to create a named alias
+            aid = self._name("alias")
+            self._nodes.append(helper.make_node("Identity", [outputs[0]], [named]))
+            return named
         if outputs is None:
             outputs = [self._name(op_type.lower())]
         elif isinstance(outputs, str):
@@ -364,8 +370,10 @@ class PWAONNXBuilder:
 
         # ka = cos(ang * angle_k + angle_b).prod(axis=-1)
         angle_k_f = self._node("Cast", ["angle_k"], to=TensorProto.FLOAT)
-        ang_k_mul = self._node("Mul", [ang, angle_k_f])
-        ang_kb = self._node("Add", [ang_k_mul, "angle_b"])
+        angle_k_3d = self._node("Unsqueeze", [angle_k_f], axes=[0])
+        ang_k_mul = self._node("Mul", [ang, angle_k_3d])
+        angle_b_3d = self._node("Unsqueeze", ["angle_b"], axes=[0])
+        ang_kb = self._node("Add", [ang_k_mul, angle_b_3d])
         cos_a = self._node("Cos", [ang_kb])
         ka = self._node("ReduceProd", [cos_a], axes=[2], keepdims=0)
 
@@ -377,11 +385,10 @@ class PWAONNXBuilder:
         # inv_bw = 1/bw_p (complex division)
         one_r = self._scalar(1.0)
         one_i = self._scalar(0.0)
-        inv_r, inv_i = self._complex_div(
-            self._node("Expand", [one_r, self._shape_1d(n_wave)]),
-            self._node("Expand", [one_i, self._shape_1d(n_wave)]),
-            bw_p_r, bw_p_i, "inv"
-        )
+        # Expand one_r/one_i to (1, n_wave) for proper 2D broadcasting
+        one_r_2d = self._node("Expand", [one_r, self._shape_2d(1, n_wave)])
+        one_i_2d = self._node("Expand", [one_i, self._shape_2d(1, n_wave)])
+        inv_r, inv_i = self._complex_div(one_r_2d, one_i_2d, bw_p_r, bw_p_i, "inv")
         # common = inv_bw * fa * fl_p
         ca_r, ca_i = self._complex_mul_real(inv_r, inv_i, fl_p, "c_fl")
         cf_r, cf_i = self._complex_mul(ca_r, ca_i, fa_r, fa_i, "cf")
@@ -576,7 +583,7 @@ class PWAONNXBuilder:
         self._node("Identity", [grad_ck_real], outputs="grad_ck_real")
         self._node("Identity", [grad_ck_imag], outputs="grad_ck_imag")
 
-        # ── outputs ──
+        # ── outputs (forward + ck gradients only; m0/g0/scalar pending) ──
         Q_vi = helper.make_tensor_value_info("Q", TensorProto.FLOAT, [])
         P_vi = helper.make_tensor_value_info("P", TensorProto.FLOAT, [batch_size])
         gck_r_vi = helper.make_tensor_value_info("grad_ck_real", TensorProto.FLOAT, [n_wave])
