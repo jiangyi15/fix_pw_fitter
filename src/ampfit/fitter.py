@@ -1219,10 +1219,10 @@ class Fitter:
             sig_y, _ = np.histogram(p, bins=bins, weights=pw_sig * sig_scale)
             bkg_y, _ = np.histogram(p, bins=bins, weights=pw_bkg * bkg_scale)
 
-            # Stacked bar: background at bottom, signal on top
-            ax.bar(bin_c, bkg_y, width=bin_w * 0.9, alpha=0.5,
+            # Stacked histogram: background at bottom, signal on top
+            ax.bar(bin_c, bkg_y, width=bin_w, alpha=0.5,
                    color='C3', label='bkg', align='center')
-            ax.bar(bin_c, sig_y, width=bin_w * 0.9, alpha=0.5,
+            ax.bar(bin_c, sig_y, width=bin_w, alpha=0.5,
                    color='C1', label='signal', align='center', bottom=bkg_y)
 
             # Data points on top
