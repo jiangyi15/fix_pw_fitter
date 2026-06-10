@@ -107,11 +107,12 @@ Q, grads, P = ck.compute(params, dh)
 
 ## Performance
 
-| Backend | 1000 ev (fwd+bwd) | Notes |
-|---------|------------------:|-------|
-| **NumPy** | 170.9 ms | reference, float64 |
-| **ONNX Runtime** | 19.1 ms | **9× vs NumPy**, float32, CPU only |
-| **CUDA** (RTX 3070 Ti) | 6.9 ms | 2.8× vs ONNX, native GPU |
+| Backend | 1000 ev (fwd+bwd) | vs NumPy | Notes |
+|---------|------------------:|:--------:|-------|
+| **NumPy float64** | 170.6 ms | 1× | reference |
+| **NumPy float32** | 152.1 ms | 1.1× | numpy promotes complex64 internally |
+| **ONNX Runtime** (CPU) | 22.5 ms | **7.6×** | fused ops, float32 |
+| **CUDA native** (RTX 3070 Ti) | 6.9 ms | **25×** | GPU-optimized kernel |
 
 The ONNX model (`pwa_forward.onnx`) has 637 nodes, opset 11, float32, and outputs all 7 gradients (Q, P, grad_ck, grad_m0, grad_g0, grad_scalar) matching the numpy kernel to ~1e-05. Build with `python build_onnx_model.py --batch-size 1000`. Runs anywhere without CUDA Toolkit — just `pip install onnxruntime`.
 
