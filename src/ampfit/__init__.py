@@ -10,7 +10,10 @@ Provides a complete pipeline for partial wave amplitude analysis:
 
 from .config_loader import Config
 from .numpy_kernel import NumpyKernelCorrect as NumpyKernel
-from .param_constraint import ParameterConstraint, BoundTransform
+from .param_constraint import (
+    ParameterConstraint, BoundTransform,
+    VariableRegistry, ConstraintManager,
+)
 
 try:
     from ._cuda import CUDAKernel
@@ -25,5 +28,7 @@ __all__ = [
     "CUDAKernel",
     "ParameterConstraint",
     "BoundTransform",
+    "VariableRegistry",
+    "ConstraintManager",
     "Fitter",
 ]

@@ -26,164 +26,6 @@ import time
 import numpy as np
 
 
-class VariableRegistry:
-    """Maps named variables to flat vector indices and kernel slots."""
-    
-    def __init__(self):
-        self._entries = []  # list of (name, kind, target)
-        self._name_to_entry = {}  # name -> entry
-    
-    def add_complex(self, name, target):
-        """Add a complex variable (2 flat slots: name_r, name_i)."""
-        entry = {'name': name, 'kind': 'complex', 'target': target}
-        self._entries.append(entry)
-        self._name_to_entry[name] = entry
-    
-    def add_real(self, name, target):
-        """Add a real variable (1 flat slot: name)."""
-        entry = {'name': name, 'kind': 'real', 'target': target}
-        self._entries.append(entry)
-        self._name_to_entry[name] = entry
-    
-    @property
-    def names(self):
-        return [e['name'] for e in self._entries]
-    
-    @property
-    def flat_names(self):
-        """Slot-level names: '{name}r', '{name}i' for complex, '{name}' for real.
-        
-        Length matches n_flat (and the flat vector x).
-        Example: ['B->...total_0r', 'B->...total_0i', 'gamma', ...]
-        """
-        result = []
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                result.append(e['name'] + 'r')
-                result.append(e['name'] + 'i')
-            else:
-                result.append(e['name'])
-        return result
-    
-    @property
-    def n_flat(self):
-        """Total number of real values in the flat vector."""
-        return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
-    
-    def flat_index(self, name):
-        """Return (start, end) indices in the flat vector for a named variable.
-        
-        For real: returns (i, i+1)
-        For complex: returns (i, i+2) where i = r, i+1 = imag
-        """
-        idx = 0
-        for e in self._entries:
-            if e['name'] == name:
-                end = idx + (2 if e['kind'] == 'complex' else 1)
-                return (idx, end)
-            idx += 2 if e['kind'] == 'complex' else 1
-        raise KeyError(f"Unknown variable: {name}")
-    
-    def build_initial(self, seed=None):
-        """Build initial flat vector with random values."""
-        import numpy as np
-        if seed is not None:
-            np.random.seed(seed)
-        x = np.empty(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                r = np.random.uniform(0.5, 2.0)
-                theta = np.random.uniform(-np.pi, np.pi)
-                x[idx] = r
-                x[idx + 1] = theta
-                idx += 2
-            else:
-                x[idx] = np.random.uniform(-0.5, 0.5)
-                idx += 1
-        return x
-    
-    def extract_complex_dict(self, x):
-        """Extract {name: complex} for all complex variables from flat x."""
-        result = {}
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
-                result[e['name']] = r * np.exp(1j * theta)
-                idx += 2
-            else:
-                idx += 1
-        return result
-    
-    def extract_real_dict(self, x):
-        """Extract {name: value} for all real variables from flat x."""
-        result = {}
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
-                result[e['name']] = r * np.exp(1j * theta)
-                idx += 2
-            else:
-                result[e['name']] = x[idx]
-                idx += 1
-        return result
-    
-    def extract_by_target(self, x, target_type):
-        """Extract flat sub-vector for all entries with matching target type.
-        
-        Args:
-            x: flat vector with all variables
-            target_type: string like 'ck', 'scalar', 'm0', 'g0'
-        
-        Returns:
-            flat sub-vector with only matching entries (in order they appear)
-        """
-        result = []
-        idx = 0
-        for e in self._entries:
-            if e['target'][0] == target_type:
-                if e['kind'] == 'complex':
-                    result.extend([x[idx], x[idx + 1]])
-                    idx += 2
-                else:
-                    result.append(x[idx])
-                    idx += 1
-            else:
-                idx += 2 if e['kind'] == 'complex' else 1
-        return np.array(result) if result else np.array([])
-    
-    def backprop_grad(self, x, grad_dict):
-        """Build flat gradient from dict of {name: complex_grad} or {name: real_grad}.
-        
-        For complex vars: grad_dict[name] = dQ/d(var) (complex Wirtinger derivative)
-        The real gradient w.r.t. r, theta is:
-          dQ/dr = 2 * Re(dQ/d(var) * exp(j*theta))
-          dQ/dtheta = 2 * Re(dQ/d(var) * j * r * exp(j*theta))
-        """
-        import numpy as np
-        flat_grad = np.zeros(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            name = e['name']
-            if e['kind'] == 'complex':
-                r = x[idx]
-                theta = x[idx + 1]
-                grad_complex = grad_dict.get(name, 0j)
-                # Wirtinger: dQ/dr = 2*Re(grad * exp(j*θ)), dQ/dθ = 2*Re(grad * j * r * exp(j*θ))
-                exp_theta = np.exp(1j * theta)
-                flat_grad[idx] = 2.0 * np.real(grad_complex * exp_theta)
-                flat_grad[idx + 1] = 2.0 * np.real(grad_complex * 1j * r * exp_theta)
-                idx += 2
-            else:
-                flat_grad[idx] = grad_dict.get(name, 0.0)
-                idx += 1
-        return flat_grad
-
-
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
@@ -192,7 +34,7 @@ class Fitter:
         # Lazy imports so this module can be imported without CUDA etc.
         from ampfit.config_loader import Config
         from ampfit._cuda import CUDAKernel
-        from ampfit.param_constraint import ParameterConstraint
+        from ampfit.param_constraint import ConstraintManager
 
         self.config = Config(config_file)
         self.kernel_config = self.config.build_all_index()
@@ -206,10 +48,12 @@ class Fitter:
         self.n_m0 = len(self.config.m0_phys_name)
         self.n_g0 = len(self.config.g0_phys_name)
 
-        # Constraint storage (built lazily, additive by default)
-        self._same_params = []
-        self._scale_params = {}
-        self._pc = None  # ParameterConstraint (built when needed)
+        # Standalone constraint manager (no rebuild on PC — fine-grained dirty flags)
+        self.cm = ConstraintManager(
+            self.all_comb,
+            self.config.m0_phys_name,
+            self.config.g0_phys_name,
+        )
 
         # Data holders (created by set_data / set_phsp)
         self.data_holder = None
@@ -236,156 +80,99 @@ class Fitter:
         self._bkg_scale = None        # (1-purity)/purity / N_b for bkg scaling
         self._log_purity_const = 0.0  # -log(purity) * sum(data_weight)
 
-        # Bound transforms and fixed slots
-        self._bound_transforms = {}        # {flat_idx: BoundTransform}
-        self._fixed_slots = {}             # {slot_name: value}
-
     # ------------------------------------------------------------------
-    # Constraint setup — all additive/interactive by default
+    # Constraint setup — all delegated to ConstraintManager
     # ------------------------------------------------------------------
     def set_fixed(self, fixed_slots, reset=False):
-        """Fix parameter slot(s) to a constant value. *Additive* — call multiple times.
+        """Fix parameter slot(s) to a constant value.  *Additive* — call multiple times.
 
-        Slot names match free_param_names():
-          '{name}r' — magnitude of complex parameter
-          '{name}i' — phase of complex parameter
-          '{name}'  — real parameter (scalar, mass, or width)
-
-        Pass ``reset=True`` to clear all previously fixed slots first.
-
-        Examples::
-
-            fitter.set_fixed({"B->..._g_ls_0r": 1.0})     # magnitude fixed
-            fitter.set_fixed({"B->..._g_ls_0i": 0.0})     # phase fixed separately
-            fitter.set_fixed({"gamma": 0.0})               # real scalar fixed
-            fitter.set_fixed({"delta_m": 0.506, "A_prod": 0.0})  # multiple at once
+        Delegates to :attr:`cm` (marks only variable-registry dirty).
         """
-        if reset:
-            self._fixed_slots = {}
-        self._fixed_slots.update({k: float(v) for k, v in fixed_slots.items()})
-        self._rebuild_pc()
+        self.cm.set_fixed(fixed_slots, reset=reset)
 
     def set_same(self, same_params, reset=False):
-        """Share a value across parameter names. *Additive* — call multiple times.
+        """Share a value across parameter names.  *Additive*.
 
-        Each group is a list of parameter names that share a single optimised value
-        (the first name is the canonical representative).
-
-        Pass ``reset=True`` to clear all previously registered groups first.
-
-        Example::
-
-            fitter.set_same([["B->a1p->rhoA_g_ls_1", "B->a1m->rhoA_g_ls_1"]])
-            fitter.set_same([["B->a1p->f0_total_0", "B->a1m->f0_total_0"]])
+        Delegates to :attr:`cm` (marks PC + variable-registry dirty).
         """
-        if reset:
-            self._same_params = []
-        self._same_params.extend(list(same_params))
-        self._rebuild_pc()
+        self.cm.set_same(same_params, reset=reset)
 
     def set_scale(self, scale_params, reset=False):
-        """Multiply a parameter by a real scale factor. *Additive* — call multiple times.
+        """Multiply a parameter by a real scale factor.  *Additive*.
 
-        The scale is applied to the *original* name (before alias→canonical mapping),
-        matching the archive ``pw_cfit5_td6_fix29.py`` convention.
-
-        Pass ``reset=True`` to clear all previously registered scale factors first.
-
-        Example::
-
-            fitter.set_scale({"B->a1m->rhoA_g_ls_0": -1})   # flip sign
+        Delegates to :attr:`cm` (marks only PC dirty).
         """
-        if reset:
-            self._scale_params = {}
-        self._scale_params.update(dict(scale_params))
-        self._rebuild_pc()
+        self.cm.set_scale(scale_params, reset=reset)
 
     def set_free(self, name):
         """Unfix a previously fixed parameter so it becomes free again.
 
-        Removes *name* (and the corresponding ``'r'`` / ``'i'`` slots for complex
-        parameters) from the fixed set.  Also removes *name* from any
-        same‑parameter group or scale mapping.
-
-        Parameters not previously set via any ``set_*`` method are free by
-        default, so this is only needed to reverse an earlier ``set_fixed``,
-        ``set_same``, or ``set_scale`` call.
-
-        Example::
-
-            fitter.set_fixed({"gamma": 0.0})
-            fitter.set_free("gamma")           # now free again
+        Delegates to :attr:`cm`.
         """
-        # Remove from fixed slots
-        name_r = name + 'r'
-        name_i = name + 'i'
-        for key in (name, name_r, name_i):
-            self._fixed_slots.pop(key, None)
+        self.cm.set_free(name)
 
-        # Remove from same-parameter groups
-        self._same_params = [
-            g for g in self._same_params if name not in g
-        ]
+    def set_range(self, name, lo, hi):
+        """Bound a parameter via bijective arctan transform.  *Additive*.
 
-        # Remove from scale factors
-        self._scale_params.pop(name, None)
-
-        self._rebuild_pc()
+        Delegates to :attr:`cm` (no dirty flags touched).
+        """
+        self.cm.set_range(name, lo, hi)
 
     def unset_range(self, name):
-        """Remove the bound (arctan) constraint on *name*, making it unbounded.
+        """Remove the arctan bound on *name*.
 
-        Example::
-
-            fitter.set_range("gamma", -0.3, 0.3)
-            fitter.unset_range("gamma")      # back to unbounded
+        Delegates to :attr:`cm`.
         """
-        try:
-            si, ei = self.var_registry.flat_index(name)
-            for idx in range(si, ei):
-                self._bound_transforms.pop(idx, None)
-            return
-        except KeyError:
-            pass
+        self.cm.unset_range(name)
 
-        flat_n = self.var_registry.flat_names
-        for i, n in enumerate(flat_n):
-            if n == name:
-                self._bound_transforms.pop(i, None)
-                return
-
-        # Not an error — silently ignore unknown names (they weren't bound)
-
-    def _rebuild_pc(self):
-        """Build or rebuild the ParameterConstraint."""
-        from ampfit.param_constraint import ParameterConstraint
-        self._pc = ParameterConstraint(
-            self.all_comb,
-            fixed_params={},          # complex-level fixes handled by _fixed_slots in get_nll()
-            same_params=self._same_params,
-            scale_params=self._scale_params,
-        )
-        self._rebuild_var_registry()
-
+    # ------------------------------------------------------------------
+    # Backward-compat property aliases → cm
+    # ------------------------------------------------------------------
     @property
     def pc(self):
-        """Lazily built ParameterConstraint (empty if not explicitly configured)."""
-        if self._pc is None:
-            self._rebuild_pc()
-        return self._pc
+        """Lazily built :class:`ParameterConstraint` (via :attr:`cm`)."""
+        return self.cm.pc
+
+    @property
+    def _var_registry(self):
+        return self.cm.var_registry
+
+    @property
+    def _fixed_slots(self):
+        return self.cm.fixed_slots
+
+    @property
+    def _same_params(self):
+        return self.cm.same_params
+
+    @property
+    def _scale_params(self):
+        return self.cm.scale_params
+
+    @property
+    def _bound_transforms(self):
+        return self.cm.bound_transforms
+
+    @property
+    def _alias_to_canon(self):
+        return self.cm.alias_to_canon
+
+    @property
+    def var_registry(self):
+        return self.cm.var_registry
 
     # ------------------------------------------------------------------
     # Data setup
     # ------------------------------------------------------------------
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
-        
+
         Reads purity from config and scales bkg:
           bkg_scaled = (1-purity)/purity * bkg_raw / N_b
         where N_b is the average phsp background (computed in set_phsp).
-        
+
         Also stores -log(purity)*sum(weights) as a constant NLL offset.
-        
+
         Args:
             data: dict with keys 'mass', 'q', 'angle', 'frac', 'time',
                   'weight', 'bkg' (optional).
@@ -416,14 +203,14 @@ class Fitter:
 
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.
-        
+
         Normalizes phsp weights to sum to 1 and computes N_b = mean bkg
         (weighted average of phsp bkg). These are used by set_data for
         the purity-based background scaling.
-        
+
         Auto-batches if phsp is too large for GPU memory.
         All input data stays on GPU permanently across get_nll calls.
-        
+
         Args:
             phsp: dict with same structure as data.
         """
@@ -490,96 +277,6 @@ class Fitter:
 
         # Keep phsp_holder as None when batching
         self.phsp_holder = None
-
-    # ------------------------------------------------------------------
-    # Bound constraints on parameters
-    # ------------------------------------------------------------------
-    def set_range(self, name, lo, hi):
-        """Set a bound constraint on a parameter via sin-transform.
-        
-        Args:
-            name: parameter name (base name or slot name with r/i suffix).
-                  Examples: 'gamma', 'B->...total_0', 'B->...total_0r'
-            lo: lower bound.
-            hi: upper bound.
-        """
-        from ampfit.boundary import BoundTransform
-        bt = BoundTransform(lo, hi)
-
-        # Try base name first (e.g. 'gamma' → one slot, 'B->...total_0' → two slots)
-        try:
-            si, ei = self.var_registry.flat_index(name)
-            for idx in range(si, ei):
-                self._bound_transforms[idx] = bt
-            return
-        except KeyError:
-            pass
-
-        # Try flat slot name (e.g. 'B->...total_0r')
-        flat_n = self.var_registry.flat_names
-        for i, n in enumerate(flat_n):
-            if n == name:
-                self._bound_transforms[i] = bt
-                return
-
-        raise ValueError(
-            f"Unknown parameter '{name}'. "
-            f"Available: {self.var_registry.flat_names[:6]}... "
-        )
-
-    def _build_alias_map(self):
-        """Build alias→canonical name map from same_params."""
-        alias_to_canon = {}
-        for group in self._same_params:
-            if group:
-                canon = group[0]
-                for a in group[1:]:
-                    alias_to_canon[a] = canon
-        self._alias_to_canon = alias_to_canon
-
-    def _rebuild_var_registry(self):
-        """Build the VariableRegistry from all non-fixed parameter slots.
-        
-        Handles alias name mapping: if a slot is fixed under an alias name,
-        the canonical name is also recognized as fixed.
-        """
-        self._build_alias_map()
-
-        def _slot_fixed(name, suffix=''):
-            if (name + suffix) in self._fixed_slots:
-                return True
-            for a in self._alias_to_canon.get(name, []):
-                if (a + suffix) in self._fixed_slots:
-                    return True
-            return False
-
-        def _name_fixed(name):
-            if name in self._fixed_slots:
-                return True
-            for a in self._alias_to_canon.get(name, []):
-                if a in self._fixed_slots:
-                    return True
-            return False
-
-        self._var_registry = VariableRegistry()
-        # Ck parameters (complex) — skip if both r and i are fixed
-        for name in self.pc.free_param_names():
-            r_fixed = _slot_fixed(name, 'r')
-            i_fixed = _slot_fixed(name, 'i')
-            if not (r_fixed and i_fixed):
-                self._var_registry.add_complex(name, ('ck', name))
-        # M0 parameters (real)
-        for name in self.config.m0_phys_name:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('m0', name))
-        # G0 parameters (real)
-        for name in self.config.g0_phys_name:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('g0', name))
-        # Scalar/time parameters (real)
-        for name in ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('scalar', name))
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""

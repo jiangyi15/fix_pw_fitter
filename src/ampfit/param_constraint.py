@@ -265,10 +265,397 @@ class ParameterConstraint:
 
 
 # ================================================================
-# Bound constraint helper: maps unbounded -> bounded via sin transform
+# VariableRegistry: maps named variables to flat vector indices
 # ================================================================
-# Re-export BoundTransform from boundary module (complete implementation)
+
+class VariableRegistry:
+    """Maps named variables to flat vector (optimizer-space) indices.
+
+    Complex parameters occupy 2 slots [r, θ], real parameters occupy 1 slot.
+    The registry works with a flat ``x`` vector of real values.
+    """
+
+    def __init__(self):
+        self._entries = []          # (name, kind, target)
+        self._name_to_entry = {}
+
+    def add_complex(self, name, target):
+        """Add a complex variable (2 slots: ``name_r``, ``name_i``)."""
+        entry = {'name': name, 'kind': 'complex', 'target': target}
+        self._entries.append(entry)
+        self._name_to_entry[name] = entry
+
+    def add_real(self, name, target):
+        """Add a real variable (1 slot: ``name``)."""
+        entry = {'name': name, 'kind': 'real', 'target': target}
+        self._entries.append(entry)
+        self._name_to_entry[name] = entry
+
+    @property
+    def names(self):
+        return [e['name'] for e in self._entries]
+
+    @property
+    def flat_names(self):
+        """Slot-level names — ``'{name}r'`` / ``'{name}i'`` for complex."""
+        result = []
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                result.append(e['name'] + 'r')
+                result.append(e['name'] + 'i')
+            else:
+                result.append(e['name'])
+        return result
+
+    @property
+    def n_flat(self):
+        return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
+
+    def flat_index(self, name):
+        """Return ``(start, end)`` slice in the flat vector for *name*."""
+        idx = 0
+        for e in self._entries:
+            if e['name'] == name:
+                end = idx + (2 if e['kind'] == 'complex' else 1)
+                return (idx, end)
+            idx += 2 if e['kind'] == 'complex' else 1
+        raise KeyError(f"Unknown variable: {name}")
+
+    def build_initial(self, seed=None):
+        """Random initial guess for all variables in the flat vector."""
+        if seed is not None:
+            np.random.seed(seed)
+        x = np.empty(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                x[idx] = np.random.uniform(0.5, 2.0)
+                x[idx + 1] = np.random.uniform(-np.pi, np.pi)
+                idx += 2
+            else:
+                x[idx] = np.random.uniform(-0.5, 0.5)
+                idx += 1
+        return x
+
+    def extract_complex_dict(self, x):
+        """Return ``{name: complex}`` for all complex variables."""
+        result = {}
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                result[e['name']] = r * np.exp(1j * theta)
+                idx += 2
+            else:
+                idx += 1
+        return result
+
+    def extract_real_dict(self, x):
+        """Return ``{name: value_or_complex}`` for all variables."""
+        result = {}
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                result[e['name']] = r * np.exp(1j * theta)
+                idx += 2
+            else:
+                result[e['name']] = x[idx]
+                idx += 1
+        return result
+
+    def extract_by_target(self, x, target_type):
+        """Flat sub-vector for entries whose target matches *target_type*."""
+        result = []
+        idx = 0
+        for e in self._entries:
+            if e['target'][0] == target_type:
+                if e['kind'] == 'complex':
+                    result.extend([x[idx], x[idx + 1]])
+                    idx += 2
+                else:
+                    result.append(x[idx])
+                    idx += 1
+            else:
+                idx += 2 if e['kind'] == 'complex' else 1
+        return np.array(result) if result else np.array([])
+
+    def backprop_grad(self, x, grad_dict):
+        """Build flat gradient from per-variable dict.
+
+        For complex vars uses Wirtinger::
+
+            dQ/dr      = 2·Re(grad · exp(j·θ))
+            dQ/dθ      = 2·Re(grad · j·r·exp(j·θ))
+        """
+        flat_grad = np.zeros(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            name = e['name']
+            if e['kind'] == 'complex':
+                r = x[idx]
+                theta = x[idx + 1]
+                grad_complex = grad_dict.get(name, 0j)
+                exp_theta = np.exp(1j * theta)
+                flat_grad[idx] = 2.0 * np.real(grad_complex * exp_theta)
+                flat_grad[idx + 1] = 2.0 * np.real(grad_complex * 1j * r * exp_theta)
+                idx += 2
+            else:
+                flat_grad[idx] = grad_dict.get(name, 0.0)
+                idx += 1
+        return flat_grad
+
+
+# ================================================================
+# Bound constraint helper: maps unbounded -> bounded via arctan
+# ================================================================
 from ampfit.boundary import BoundTransform  # noqa: F401
+
+
+# ================================================================
+# ConstraintManager — standalone constraint API
+# ================================================================
+
+class ConstraintManager:
+    """Standalone parameter constraint manager.
+
+    Owns the :class:`ParameterConstraint` (partial-wave amplitude coefficients),
+    the :class:`VariableRegistry` (flat variable space), bound transforms,
+    fixed slots, same-parameter groups, scale factors, and alias maps.
+
+    Each ``set_*`` method only marks the relevant subsystem dirty
+    (either *pc* or the variable registry), avoiding unnecessary rebuilds.
+
+    Usage::
+
+        cm = ConstraintManager(all_comb, config.m0_phys_name, config.g0_phys_name)
+        cm.set_fixed({"gamma": 0.0})
+        cm.set_same([["a", "b"]])
+        cm.set_scale({"x": -1})
+        cm.set_range("delta_m", 0.3, 0.8)
+        print(cm.free_param_names())
+        x0 = cm.initial_values()
+    """
+
+    SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+
+    def __init__(self, all_comb, m0_names, g0_names):
+        self.all_comb = list(all_comb)
+        self.m0_names = list(m0_names)
+        self.g0_names = list(g0_names)
+
+        # Constraint state
+        self._fixed_slots = {}
+        self._same_params = []
+        self._scale_params = {}
+        self._bound_transforms = {}          # {flat_idx: BoundTransform}
+        self._alias_to_canon = {}
+
+        # Lazy-built with per-subsystem dirty flags
+        self._pc = None
+        self._var_registry = None
+        self._pc_dirty = True
+        self._vr_dirty = True
+
+    # ── Public read access ──────────────────────────────────────
+
+    @property
+    def pc(self):
+        """Lazy :class:`ParameterConstraint` (rebuilt when same/scale change)."""
+        if self._pc_dirty:
+            self._rebuild_pc()
+        return self._pc
+
+    @property
+    def var_registry(self):
+        """Lazy :class:`VariableRegistry` (rebuilt when free-variable space changes)."""
+        if self._vr_dirty:
+            self._rebuild_var_registry()
+        return self._var_registry
+
+    @property
+    def fixed_slots(self):
+        return self._fixed_slots
+
+    @property
+    def same_params(self):
+        return self._same_params
+
+    @property
+    def scale_params(self):
+        return self._scale_params
+
+    @property
+    def bound_transforms(self):
+        return self._bound_transforms
+
+    @property
+    def alias_to_canon(self):
+        return self._alias_to_canon
+
+    # ── Constraint modifiers (fine-grained dirty flags) ─────────
+
+    def set_fixed(self, fixed_slots, reset=False):
+        """Fix parameter slot(s).  *Additive* — call multiple times.
+
+        Only marks the variable registry dirty (``ParameterConstraint``
+        always uses ``fixed_params={}`` at this level).
+        """
+        if reset:
+            self._fixed_slots = {}
+        self._fixed_slots.update({k: float(v) for k, v in fixed_slots.items()})
+        self._vr_dirty = True
+
+    def set_same(self, same_params, reset=False):
+        """Share a value across parameter names. *Additive*."""
+        if reset:
+            self._same_params = []
+        self._same_params.extend(list(same_params))
+        self._pc_dirty = True       # canonical mapping changes
+        self._vr_dirty = True       # alias map changes
+
+    def set_scale(self, scale_params, reset=False):
+        """Multiply a parameter by a real scale factor. *Additive*.
+
+        Only marks ``ParameterConstraint`` dirty (scale changes
+        ``_comb_fixed_scale``); the variable registry is unaffected.
+        """
+        if reset:
+            self._scale_params = {}
+        self._scale_params.update(dict(scale_params))
+        self._pc_dirty = True
+
+    def set_free(self, name):
+        """Unfix a parameter — removes from fixed/same/scale."""
+        name_r = name + 'r'
+        name_i = name + 'i'
+        for key in (name, name_r, name_i):
+            self._fixed_slots.pop(key, None)
+
+        was_same = any(name in g for g in self._same_params)
+        self._same_params = [g for g in self._same_params if name not in g]
+
+        was_scaled = name in self._scale_params
+        self._scale_params.pop(name, None)
+
+        self._vr_dirty = True
+        if was_same or was_scaled:
+            self._pc_dirty = True
+
+    def set_range(self, name, lo, hi):
+        """Bound a parameter via bijective arctan transform.  *Additive*.
+
+        Does **not** dirty either subsystem — only updates
+        ``_bound_transforms``.
+        """
+        from ampfit.boundary import BoundTransform as _BT
+        bt = _BT(lo, hi)
+        try:
+            si, ei = self.var_registry.flat_index(name)
+            for idx in range(si, ei):
+                self._bound_transforms[idx] = bt
+        except KeyError:
+            for i, n in enumerate(self.var_registry.flat_names):
+                if n == name:
+                    self._bound_transforms[i] = bt
+                    return
+            raise ValueError(
+                f"Unknown parameter '{name}'. "
+                f"Available: {self.var_registry.flat_names[:6]}...")
+
+    def unset_range(self, name):
+        """Remove the arctan bound on *name*."""
+        try:
+            si, ei = self.var_registry.flat_index(name)
+            for idx in range(si, ei):
+                self._bound_transforms.pop(idx, None)
+        except KeyError:
+            for i, n in enumerate(self.var_registry.flat_names):
+                if n == name:
+                    self._bound_transforms.pop(i, None)
+
+    # ── Queries ─────────────────────────────────────────────────
+
+    def free_param_names(self):
+        """Slot-level names of all free variables."""
+        return self.var_registry.flat_names
+
+    def initial_values(self, seed=None):
+        """Random initial guess in the flat variable space."""
+        _ = self.pc          # ensure PC is built
+        return self.var_registry.build_initial(seed=seed)
+
+    # ── Internal rebuilds ───────────────────────────────────────
+
+    def _build_alias_map(self):
+        alias_to_canon = {}
+        for group in self._same_params:
+            if group:
+                canon = group[0]
+                for a in group[1:]:
+                    alias_to_canon[a] = canon
+        self._alias_to_canon = alias_to_canon
+
+    def _rebuild_pc(self):
+        self._build_alias_map()
+        self._pc = ParameterConstraint(
+            self.all_comb,
+            fixed_params={},          # complex-level fixes handled by _fixed_slots
+            same_params=self._same_params,
+            scale_params=self._scale_params,
+        )
+        self._pc_dirty = False
+
+    def _rebuild_var_registry(self):
+        # Ensure pc and alias map are current
+        if self._pc_dirty:
+            self._rebuild_pc()
+        elif not self._alias_to_canon:
+            self._build_alias_map()
+
+        def _slot_fixed(name, suffix=''):
+            if (name + suffix) in self._fixed_slots:
+                return True
+            for a in self._alias_to_canon.get(name, []):
+                if (a + suffix) in self._fixed_slots:
+                    return True
+            return False
+
+        def _name_fixed(name):
+            if name in self._fixed_slots:
+                return True
+            for a in self._alias_to_canon.get(name, []):
+                if a in self._fixed_slots:
+                    return True
+            return False
+
+        self._var_registry = VariableRegistry()
+
+        # Ck parameters (complex) — skip if both r and i fully fixed
+        for name in self._pc.free_param_names():
+            r_fixed = _slot_fixed(name, 'r')
+            i_fixed = _slot_fixed(name, 'i')
+            if not (r_fixed and i_fixed):
+                self._var_registry.add_complex(name, ('ck', name))
+
+        # M0 parameters (real)
+        for name in self.m0_names:
+            if not _name_fixed(name):
+                self._var_registry.add_real(name, ('m0', name))
+
+        # G0 parameters (real)
+        for name in self.g0_names:
+            if not _name_fixed(name):
+                self._var_registry.add_real(name, ('g0', name))
+
+        # Scalar/time parameters (real)
+        for name in self.SCALAR_NAMES:
+            if not _name_fixed(name):
+                self._var_registry.add_real(name, ('scalar', name))
+
+        self._vr_dirty = False
 
 
 # ================================================================
