@@ -107,13 +107,13 @@ Q, grads, P = ck.compute(params, dh)
 
 ## Performance
 
-| Events | NumPy (ms) | CUDA (ms) | ONNX (ms) | Speedup ONNX vs NumPy |
-|--------|-----------|-----------|-----------|----------------------|
-| 1000   | 185       | 7.3       | 16.5      | **11×** |
+| Backend | 1000 ev (fwd+bwd) | Notes |
+|---------|------------------:|-------|
+| **NumPy** | 170.9 ms | reference, float64 |
+| **ONNX Runtime** | 19.1 ms | **9× vs NumPy**, float32, CPU only |
+| **CUDA** (RTX 3070 Ti) | 6.9 ms | 2.8× vs ONNX, native GPU |
 
-System: NVIDIA GeForce RTX 3070 Ti Laptop GPU, ONNX Runtime 1.26.
-
-ONNX model is pure forward (no gradients). The ONNX model (ops=252, opset=11) loads in ONNX Runtime and runs on any CPU/GPU without CUDA Toolkit. Batch size 1000 baked into the graph — rebuild for other sizes.
+The ONNX model (`pwa_forward.onnx`) has 637 nodes, opset 11, float32, and outputs all 7 gradients (Q, P, grad_ck, grad_m0, grad_g0, grad_scalar) matching the numpy kernel to ~1e-05. Build with `python build_onnx_model.py --batch-size 1000`. Runs anywhere without CUDA Toolkit — just `pip install onnxruntime`.
 
 ## Architecture
 
