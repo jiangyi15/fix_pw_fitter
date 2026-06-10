@@ -127,6 +127,49 @@ class ParameterConstraint:
             self._comb_vars.append(comb_vars)
             self._comb_fixed_scale.append(fixed_scale)
 
+    def set_scale(self, scale_params):
+        """Update scale factors *incrementally* — no full index rebuild.
+
+        Only ``_comb_fixed_scale`` changes; ``_comb_vars``, ``_var_index``,
+        ``_free_params`` all stay the same.
+        """
+        self.scale_params = dict(scale_params)
+        for i, comb in enumerate(self.all_comb):
+            scale = 1.0 + 0.0j
+            for p in comb:
+                if isinstance(p, str):
+                    canon = self._canonical_map.get(p, p)
+                    sv = self.scale_params.get(p)
+                    if sv is not None:
+                        scale *= sv
+                    fv = self.fixed_params.get(p) or self.fixed_params.get(canon)
+                    if fv is not None:
+                        scale *= fv
+                else:
+                    scale *= p
+            self._comb_fixed_scale[i] = scale
+
+    def set_same(self, same_params):
+        """Update same-parameter groups *incrementally* — rebuilds index
+        (canonical map changed) but does **not** recreate the object.
+        """
+        self.same_params = list(same_params)
+        self._canonical_map = {}
+        for group in self.same_params:
+            if group:
+                canon = group[0]
+                for name in group[1:]:
+                    self._canonical_map[name] = canon
+        self._free_params = []
+        for p in sorted(self._all_params):
+            canon = self._canonical_map.get(p, p)
+            if canon in self.fixed_params:
+                continue
+            if canon not in self._free_params:
+                self._free_params.append(canon)
+        self.n_free_vars = len(self._free_params)
+        self._build_index()
+
     def free_param_names(self):
         """Return list of free parameter names (canonical)."""
         return list(self._free_params)
@@ -509,23 +552,37 @@ class ConstraintManager:
         self._vr_dirty = True
 
     def set_same(self, same_params, reset=False):
-        """Share a value across parameter names. *Additive*."""
+        """Share a value across parameter names. *Additive*.
+
+        Updates the :class:`ParameterConstraint` **incrementally** (calls
+        ``set_same()`` on the existing object, which rebuilds the index
+        in-place) unless a full rebuild was already pending.
+        """
         if reset:
             self._same_params = []
         self._same_params.extend(list(same_params))
-        self._pc_dirty = True       # canonical mapping changes
-        self._vr_dirty = True       # alias map changes
+        if not self._pc_dirty:
+            if self._pc is not None:
+                self._pc.set_same(self._same_params)
+            else:
+                self._pc_dirty = True
+        self._vr_dirty = True       # alias map always changes
 
     def set_scale(self, scale_params, reset=False):
         """Multiply a parameter by a real scale factor. *Additive*.
 
-        Only marks ``ParameterConstraint`` dirty (scale changes
-        ``_comb_fixed_scale``); the variable registry is unaffected.
+        Updates ``_comb_fixed_scale`` **incrementally** on the existing
+        :class:`ParameterConstraint` — no full rebuild unless the PC
+        hasn't been built yet or was already dirty.
         """
         if reset:
             self._scale_params = {}
         self._scale_params.update(dict(scale_params))
-        self._pc_dirty = True
+        if not self._pc_dirty:
+            if self._pc is not None:
+                self._pc.set_scale(self._scale_params)
+            else:
+                self._pc_dirty = True
 
     def set_free(self, name):
         """Unfix a parameter — removes from fixed/same/scale."""
@@ -541,7 +598,9 @@ class ConstraintManager:
         self._scale_params.pop(name, None)
 
         self._vr_dirty = True
-        if was_same or was_scaled:
+        if was_scaled and not self._pc_dirty and self._pc is not None:
+            self._pc.set_scale(self._scale_params)
+        elif was_same or was_scaled:
             self._pc_dirty = True
 
     def set_range(self, name, lo, hi):
