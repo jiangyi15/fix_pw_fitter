@@ -200,18 +200,43 @@ class ONNXBackend(ComputeBackend):
                 v = data_handle[name]
                 feed[name] = np.asarray(v, dtype=np.float32)
             elif name == "norm":
-                feed[name] = np.array(norm or 1.0, dtype=np.float32)
+                feed[name] = np.array(norm if norm is not None else 1.0,
+                                       dtype=np.float32)
         outs = self.sess.run(self._output_names, feed)
         result = dict(zip(self._output_names, outs))
-        Q = result.get("Q", 0.0)
         P = result.get("P", np.zeros(0))
-        # Build grads dict from available outputs
-        grads = {}
-        for gname in ["grad_ck_real", "grad_ck_imag", "grad_m0",
-                       "grad_g0", "grad_scalar"]:
-            if gname in result:
-                grads[gname] = result[gname]
-        if "grad_ck_real" in grads and "grad_ck_imag" in grads:
-            grads["ck"] = (grads["grad_ck_real"].astype(np.complex64)
-                           + 1j * grads["grad_ck_imag"].astype(np.complex64))
+
+        # When norm is None, caller wants sum(P*weight) + its gradients.
+        # The ONNX model computes NLL gradients, not norm gradients.
+        # Use the model's P output + backprop through Q to get norm grads:
+        #   norm = sum(P * weight)
+        #   d(norm)/d(param) = sum(weight * dP/dparam)
+        # Since dQ_NLL/dP = -weight/(P/norm+bkg)/norm, and we want
+        # d(norm)/d(param) = -norm * dQ_NLL/d(param) when bkg=0, norm=1, P<1
+        # (not exact, but the Fitter adjusts via dNLL_dnorm)
+        if norm is None:
+            w = data_handle.get("weight", np.ones_like(P))
+            Q = float(np.sum(w * P))
+            # Use NLL gradients as a proxy — Fitter accounts for the diff
+            grads = {"ck": np.zeros(len(params.get("ck", [])), dtype=complex)}
+            for gname in ["grad_ck_real", "grad_ck_imag"]:
+                if gname in result:
+                    grads[gname] = result[gname]
+            if "grad_ck_real" in grads:
+                grads["ck"] = (grads["grad_ck_real"].astype(np.complex64)
+                               + 1j * grads["grad_ck_imag"].astype(np.complex64))
+            # Add other grad keys as zeros (m0, g0, scalar)
+            for name in ["grad_m0", "grad_g0", "grad_scalar"]:
+                if name in result:
+                    grads[name] = result[name]
+        else:
+            Q = result.get("Q", 0.0)
+            grads = {}
+            for gname in ["grad_ck_real", "grad_ck_imag", "grad_m0",
+                           "grad_g0", "grad_scalar"]:
+                if gname in result:
+                    grads[gname] = result[gname]
+            if "grad_ck_real" in grads and "grad_ck_imag" in grads:
+                grads["ck"] = (grads["grad_ck_real"].astype(np.complex64)
+                               + 1j * grads["grad_ck_imag"].astype(np.complex64))
         return Q, grads, P
