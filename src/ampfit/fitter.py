@@ -1195,10 +1195,25 @@ class Fitter:
             if hi - lo < 1e-12:
                 hi = lo + 1.0
             bins = np.linspace(lo, hi, n_bins + 1)
-            ax.hist(d, bins=bins, weights=dw, alpha=0.6, label='data',
-                    color='C0', density=True)
-            ax.hist(p, bins=bins, weights=pw, alpha=0.6, label='phsp×P',
-                    color='C1', density=True, histtype='step', linewidth=2)
+            bin_w = bins[1] - bins[0]
+            bin_c = (bins[:-1] + bins[1:]) / 2
+
+            # Data: weighted counts with sqrt(sum(w²)) error bars
+            data_y, _ = np.histogram(d, bins=bins, weights=dw)
+            data_w2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
+            data_err = np.sqrt(data_w2)
+
+            ax.errorbar(bin_c, data_y, yerr=data_err, fmt='o',
+                        color='C0', label='data', markersize=3, capsize=2)
+
+            # Phsp: histogram weighted by pw, scaled to match data integral
+            phsp_y, _ = np.histogram(p, bins=bins, weights=pw)
+            data_total = data_y.sum()
+            phsp_total = phsp_y.sum()
+            scale = data_total / phsp_total if phsp_total > 0 else 1.0
+            ax.bar(bin_c, phsp_y * scale, width=bin_w * 0.9,
+                   alpha=0.4, color='C1', label='phsp×P', align='center')
+
             ax.set_xlabel(label, fontsize=7)
             ax.tick_params(labelsize=6)
 
