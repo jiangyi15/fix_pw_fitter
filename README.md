@@ -107,15 +107,13 @@ Q, grads, P = ck.compute(params, dh)
 
 ## Performance
 
-| Events | NumPy (ms) | CUDA (ms) | Speedup |
-|--------|-----------|-----------|---------|
-| 100    | 23        | 1.4       | **16×** |
-| 500    | 90        | 4.1       | **22×** |
-| 1000   | 178       | 7.4       | **24×** |
-| 10000  | 1500      | 54        | **28×** |
-| 100000 | —         | 543       | 184K ev/s |
+| Events | NumPy (ms) | CUDA (ms) | ONNX (ms) | Speedup ONNX vs NumPy |
+|--------|-----------|-----------|-----------|----------------------|
+| 1000   | 185       | 7.3       | 16.5      | **11×** |
 
-System: NVIDIA GeForce RTX 3070 Ti Laptop GPU, CUDA 13.2.
+System: NVIDIA GeForce RTX 3070 Ti Laptop GPU, ONNX Runtime 1.26.
+
+ONNX model is pure forward (no gradients). The ONNX model (ops=252, opset=11) loads in ONNX Runtime and runs on any CPU/GPU without CUDA Toolkit. Batch size 1000 baked into the graph — rebuild for other sizes.
 
 ## Architecture
 
