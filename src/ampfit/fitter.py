@@ -29,16 +29,37 @@ import numpy as np
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
-    def __init__(self, config_file="config_angle.yml"):
-        """Load config, create kernel and parameter constraint."""
-        # Lazy imports so this module can be imported without CUDA etc.
+    def __init__(self, config_file="config_angle.yml", backend=None):
+        """Load config, create kernel and parameter constraint.
+
+        Args:
+            config_file: path to YAML config.
+            backend: a :class:`ComputeBackend` instance, or a string shortcut.
+                     Strings: ``"cuda"`` (default), ``"cuda32"``, ``"numpy"``,
+                     ``"onnx"`` (expects ``pwa_forward.onnx``).
+        """
         from ampfit.config_loader import Config
-        from ampfit._cuda import CUDAKernel
         from ampfit.param_constraint import ConstraintManager
+        from ampfit.backends import CUDABackend, NumpyBackend
 
         self.config = Config(config_file)
         self.kernel_config = self.config.build_all_index()
-        self.kernel = CUDAKernel(self.kernel_config)
+
+        # Resolve backend
+        if backend is None or backend == "cuda":
+            backend = CUDABackend(self.kernel_config, dtype="float64")
+        elif isinstance(backend, str):
+            if backend == "cuda32":
+                backend = CUDABackend(self.kernel_config, dtype="float32")
+            elif backend == "numpy":
+                backend = NumpyBackend(self.kernel_config)
+            elif backend == "onnx":
+                from ampfit.backends import ONNXBackend
+                backend = ONNXBackend("pwa_forward.onnx")
+            else:
+                raise ValueError(f"Unknown backend: {backend}")
+        # 'backend' is now a ComputeBackend instance
+        self.backend = backend
 
         # ck_map (list of param name tuples, one per partial wave)
         self.all_comb = self.config.get_ck_map()
@@ -199,7 +220,7 @@ class Fitter:
             self._log_purity_const = 0.0
 
         self._data_np = data
-        self.data_holder = self.kernel.load_data(data)
+        self.data_holder = self.backend.load_data(data)
 
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.
@@ -208,14 +229,12 @@ class Fitter:
         (weighted average of phsp bkg). These are used by set_data for
         the purity-based background scaling.
 
-        Auto-batches if phsp is too large for GPU memory.
+        Auto-batches if phsp is too large for GPU memory (CUDA backend).
         All input data stays on GPU permanently across get_nll calls.
 
         Args:
             phsp: dict with same structure as data.
         """
-        from ampfit._cuda import GPUDataBuffer, GPUDataHolder
-
         # Normalize phsp weights to sum to 1
         phsp = dict(phsp)
         w = phsp.get("weight", np.ones(phsp["mass"].shape[0]))
@@ -233,50 +252,16 @@ class Fitter:
         n = phsp["mass"].shape[0]
         self._phsp_n = n
 
-        # Estimate memory: ~36KB per event for intermediates + ~1.5KB for inputs
-        # VRAM budget: ~70% of 8GB ≈ 5.6GB usable
-        est_intermediates_mb = n * 36 / 1024  # MB for full intermediates
-        if est_intermediates_mb < 4000:  # fits comfortably in VRAM
-            self._phsp_buffer = None
-            self._phsp_scratch = None
-            self.phsp_holder = self.kernel.load_data(phsp)
-            return
+        # Check if backend supports batched phsp (CUDA with large datasets)
+        if hasattr(self.backend, 'prepare_phsp_batched'):
+            est_mb = n * 36 / 1024
+            if est_mb >= 4000:
+                self.backend.prepare_phsp_batched(phsp, n)
+                self.phsp_holder = None
+                return
 
-        # Too large for one batch → use batching with zero-copy slices
-        print(f"  Phsp too large for single batch ({est_intermediates_mb:.0f} MB), "
-              f"using batches of {self._phsp_batch_size}")
-
-        # Pre-load ALL input data into one contiguous GPU buffer
-        gc = self.kernel.gpu_config
-        lib = self.kernel.lib
-        ne = n
-        bkg = phsp.get("bkg", 0.0)
-        if np.isscalar(bkg):
-            bkg = np.full(ne, bkg, dtype=np.float64)
-        self._phsp_buffer = GPUDataBuffer(lib, [
-            ("mass",   ((ne, phsp["mass"].shape[1]), np.float64)),
-            ("q",      ((ne, phsp["q"].shape[1]), np.float64)),
-            ("angle",  ((phsp["angle"].size,), np.float64)),
-            ("frac",   ((ne,), np.float64)),
-            ("time",   ((ne,), np.float64)),
-            ("weight", ((ne,), np.float64)),
-            ("bkg",    ((ne,), np.float64)),
-        ])
-        self._phsp_buffer.set("mass", phsp["mass"])
-        self._phsp_buffer.set("q", phsp["q"])
-        self._phsp_buffer.set("angle", phsp["angle"].flatten().astype(np.float64))
-        self._phsp_buffer.set("frac", phsp["frac"].astype(np.float64))
-        self._phsp_buffer.set("time", phsp["time"].astype(np.float64))
-        self._phsp_buffer.set("weight", phsp["weight"].astype(np.float64))
-        self._phsp_buffer.set("bkg", bkg.astype(np.float64))
-        print(f"  Phsp data on GPU: {self._phsp_buffer.total_bytes/1024/1024:.0f} MB")
-
-        # Create scratch holder with batch-sized intermediates
-        self._phsp_scratch = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
-        self._phsp_scratch.alloc_intermediates(self._phsp_batch_size)
-
-        # Keep phsp_holder as None when batching
-        self.phsp_holder = None
+        # Default: load directly
+        self.phsp_holder = self.backend.load_data(phsp)
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
@@ -443,15 +428,19 @@ class Fitter:
         """Compute norm over ALL phsp events, batching if needed."""
         if self._phsp_buffer is None:
             # Single-batch: use phsp_holder directly
-            norm, grads, _ = self.kernel.compute(params, self.phsp_holder, norm=None)
+            norm, grads, _ = self.backend.compute(params, self.phsp_holder, norm=None)
             return float(norm), grads
 
-        # Batched mode: iterate over phsp buffer via zero-copy slices
+        # Batched mode: delegate to backend
+        if hasattr(self.backend, 'compute_norm_batched'):
+            return self.backend.compute_norm_batched(params)
+
+        # Fallback: iterate manually
         total_norm = 0.0
         total_grads = None
         bs = self._phsp_batch_size
         n_batches = (self._phsp_n + bs - 1) // bs
-        gc = self.kernel.gpu_config
+        gc = self.backend.kernel.gpu_config
 
         for b in range(n_batches):
             start = b * bs
@@ -461,7 +450,7 @@ class Fitter:
                 self._phsp_np["mass"].shape[1] if self._phsp_np is not None else 0,
                 self._phsp_np["q"].shape[1] if self._phsp_np is not None else 0,
             )
-            n_b, g_b, _ = self.kernel.compute(params, self._phsp_scratch, norm=None)
+            n_b, g_b, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
             total_norm += float(n_b)
             if total_grads is None:
                 total_grads = {k: v.copy() for k, v in g_b.items()}
@@ -488,7 +477,7 @@ class Fitter:
         norm = float(norm)
 
         # 2. NLL from data (with norm)
-        nll, grads, P = self.kernel.compute(
+        nll, grads, P = self.backend.compute(
             params, self.data_holder, norm=norm
         )
 
@@ -507,13 +496,10 @@ class Fitter:
         # 5. Combine gradients: total = direct + norm_chain
         total_grads = {}
         for key in grads:
-            if key == "ck":
-                # ck gradient: direct + norm_chain
-                total_grads[key] = grads[key] + dNLL_dnorm * norm_grads[key]
-            elif key == "scalar":
-                total_grads[key] = grads[key] + dNLL_dnorm * norm_grads[key]
-            elif key in ("m0", "g0"):
-                total_grads[key] = grads[key] + dNLL_dnorm * norm_grads[key]
+            if key in ("ck", "scalar", "m0", "g0"):
+                g = np.asarray(grads[key])
+                ng = np.asarray(norm_grads[key])
+                total_grads[key] = g + dNLL_dnorm * ng
             else:
                 total_grads[key] = grads[key]
 
@@ -789,7 +775,7 @@ class Fitter:
         # Compute norm and probabilities (handles batched phsp)
         norm, _ = self._compute_norm_batched(params)
         norm = float(norm)
-        _, _, P_data = self.kernel.compute(params, self.data_holder, norm=norm)
+        _, _, P_data = self.backend.compute(params, self.data_holder, norm=norm)
 
         # Compute P_phsp (handle batched mode)
         if self._phsp_buffer is not None:
@@ -803,11 +789,11 @@ class Fitter:
                 self._phsp_scratch.attach_input_slice(
                     self._phsp_buffer, start, end,
                     self._phsp_np["mass"].shape[1], self._phsp_np["q"].shape[1])
-                _, _, P_b = self.kernel.compute(params, self._phsp_scratch, norm=None)
+                _, _, P_b = self.backend.compute(params, self._phsp_scratch, norm=None)
                 P_phsp_list.append(P_b[:self._phsp_scratch.n_events])
             P_phsp = np.concatenate(P_phsp_list)
         else:
-            _, _, P_phsp = self.kernel.compute(params, self.phsp_holder, norm=None)
+            _, _, P_phsp = self.backend.compute(params, self.phsp_holder, norm=None)
 
         data_np = self._data_np
         phsp_np = self._phsp_np
@@ -1017,18 +1003,14 @@ class Fitter:
     # Convenience / utility
     # ------------------------------------------------------------------
     def free(self):
-        """Free all GPU memory."""
-        if self.data_holder is not None:
+        """Free all memory held by the backend."""
+        if self.data_holder is not None and hasattr(self.data_holder, 'free'):
             self.data_holder.free()
-        if self.phsp_holder is not None:
+        if self.phsp_holder is not None and hasattr(self.phsp_holder, 'free'):
             self.phsp_holder.free()
-        if self._phsp_scratch is not None:
-            self._phsp_scratch.free()
-            self._phsp_scratch = None
-        if self._phsp_buffer is not None:
-            self._phsp_buffer.free()
-            self._phsp_buffer = None
-        self.kernel.free()
+        self.backend.free()
+        self.data_holder = None
+        self.phsp_holder = None
 
 
 # ====================================================================
