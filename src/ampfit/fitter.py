@@ -94,8 +94,7 @@ class Fitter:
         self._data_np = None
         self._phsp_np = None
 
-        # Phsp batching (for phsp larger than GPU memory)
-        self._phsp_buffer = None   # GPUDataBuffer with all phsp input data
+        # Phsp batching — always used (backends split into GPU-sized batches)
         self._phsp_scratch = None  # GPUDataHolder with batch-sized intermediates
         self._phsp_batch_size = 50000  # events per batch
         self._phsp_n = 0               # total phsp events
@@ -262,17 +261,13 @@ class Fitter:
         n = phsp["mass"].shape[0]
         self._phsp_n = n
 
-        # Check if backend supports batched phsp (CUDA with large datasets)
+        # Always use batched mode (split into GPU-sized chunks)
         if hasattr(self.backend, 'prepare_phsp_batched'):
-            est_mb = n * 36 / 1024
-            if est_mb >= 4000:
-                self.backend.prepare_phsp_batched(phsp, n)
-                self.phsp_holder = None
-                self._phsp_buffer = True  # flag for _check_data_loaded
-                return
-
-        # Default: load directly
-        self.phsp_holder = self.backend.load_data(phsp)
+            self.backend.prepare_phsp_batched(phsp, n)
+        else:
+            # Backends without batched support fallback to manual batching
+            self._phsp_scratch = self.backend.load_data(phsp)
+            # phsp_buffer is None → _compute_norm_batched uses fallback loop
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
@@ -402,7 +397,7 @@ class Fitter:
         """Raise if data or phsp not set."""
         if self.data_holder is None:
             raise RuntimeError("Data not set. Call set_data() first.")
-        phsp_ok = self.phsp_holder is not None or self._phsp_buffer is not None
+        phsp_ok = self._phsp_n > 0
         if not phsp_ok:
             raise RuntimeError("Phase space not set. Call set_phsp() first.")
 
@@ -437,39 +432,12 @@ class Fitter:
 
     def _compute_norm_batched(self, params):
         """Compute norm over ALL phsp events, batching if needed."""
-        if self._phsp_buffer is None:
-            # Single-batch: use phsp_holder directly
-            norm, grads, _ = self.backend.compute(params, self.phsp_holder, norm=None)
-            return float(norm), grads
-
-        # Batched mode: delegate to backend
         if hasattr(self.backend, 'compute_norm_batched'):
             return self.backend.compute_norm_batched(params)
 
-        # Fallback: iterate manually
-        total_norm = 0.0
-        total_grads = None
-        bs = self._phsp_batch_size
-        n_batches = (self._phsp_n + bs - 1) // bs
-        gc = self.backend.kernel.gpu_config
-
-        for b in range(n_batches):
-            start = b * bs
-            end = min(start + bs, self._phsp_n)
-            self._phsp_scratch.attach_input_slice(
-                self._phsp_buffer, start, end,
-                self._phsp_np["mass"].shape[1] if self._phsp_np is not None else 0,
-                self._phsp_np["q"].shape[1] if self._phsp_np is not None else 0,
-            )
-            n_b, g_b, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
-            total_norm += float(n_b)
-            if total_grads is None:
-                total_grads = {k: v.copy() for k, v in g_b.items()}
-            else:
-                for k in g_b:
-                    total_grads[k] += g_b[k]
-
-        return total_norm, total_grads
+        # Single-batch: backends without batched support load all at once
+        norm, grads, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
+        return float(norm), grads
 
     def get_nll_raw(self, params):
         """Compute NLL from full params dict (no constraint transformation).
