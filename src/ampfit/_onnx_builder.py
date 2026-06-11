@@ -677,7 +677,7 @@ class PWAONNXBuilder:
         dQ_dgbw_i = self._node("Mul", [dQ_dbd_r, neg_m0])
 
         # dQ/dg = dQ/dg_bw @ matrix_gamma.T  (chain through g_bw = g @ matrix_gamma)
-        mg_t = self._node("Transpose", ["matrix_gamma"])
+        mg_t = self._node("Transpose", ["matrix_gamma"], perm=[1, 0])
         dQ_dg_r = self._node("MatMul", [dQ_dgbw_r, mg_t])
         dQ_dg_i = self._node("MatMul", [dQ_dgbw_i, mg_t])
 
