@@ -268,6 +268,7 @@ class Fitter:
             if est_mb >= 4000:
                 self.backend.prepare_phsp_batched(phsp, n)
                 self.phsp_holder = None
+                self._phsp_buffer = True  # flag for _check_data_loaded
                 return
 
         # Default: load directly

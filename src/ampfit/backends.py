@@ -134,6 +134,8 @@ class CUDABackend(ComputeBackend):
         self._phsp_buffer.set("bkg", b.astype(self._dtype))
 
         self._phsp_scratch = GPUDataHolder(lib, gc.n_wave, gc.n_unique_bw, gc.n_gamma_rows)
+        self._phsp_scratch.n_mass = phsp["mass"].shape[1]
+        self._phsp_scratch.n_momentum = phsp["q"].shape[1]
         self._phsp_scratch.alloc_intermediates(self._phsp_batch_size)
         self._phsp_n = ne
 
@@ -152,7 +154,7 @@ class CUDABackend(ComputeBackend):
             end = min(start + bs, self._phsp_n)
             self._phsp_scratch.attach_input_slice(
                 self._phsp_buffer, start, end,
-                None, None)
+                self._phsp_scratch.n_mass, self._phsp_scratch.n_momentum)
             n_b, g_b, _ = self.kernel.compute(params, self._phsp_scratch, norm=None)
             total_norm += float(n_b)
             if total_grads is None:
