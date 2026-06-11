@@ -1,6 +1,6 @@
 # ampfit — Amplitude Analysis Fitting Framework
 
-A Python package for partial wave amplitude analysis with NumPy and CUDA backends,
+A Python package for partial wave amplitude analysis with NumPy, CUDA, and ONNX Runtime backends,
 full Wirtinger-calculus gradients, parameter constraints, and a global Fitter class.
 
 ## Package Structure
@@ -10,22 +10,29 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 ├── fit.sh                          # One-command fit pipeline
 ├── run_fit.py                      # Full fit script with archive-compatible constraints
 ├── config_angle.yml                # Example configuration
+├── build_onnx_model.py             # CLI to export ONNX models to file (optional)
 ├── src/ampfit/
-│   ├── __init__.py                 # Exports: Config, Fitter, NumpyKernel, CUDAKernel, ...
+│   ├── __init__.py                 # Exports: Config, Fitter, backends, ...
 │   ├── config_loader.py            # YAML config → index arrays for kernels
 │   ├── particle_model.py           # Particle property definitions + get_gamma_defaults()
 │   ├── angular_formula.py          # Angular distribution formulas
 │   ├── numpy_kernel.py             # NumPy reference kernel (Wirtinger gradients)
-│   ├── param_constraint.py         # Parameter constraints: fixed, same, scale
-│   ├── boundary.py                 # BoundTransform (arctan-based, bijective)
+│   ├── backends.py                 # ComputeBackend base + 4 backends
+│   ├── _cuda.py                    # CUDA Python bindings (CFFI), float64 kernel
+│   ├── _cuda_f32.py                # CUDA float32 kernel (2-4× faster)
+│   ├── _onnx_builder.py            # In-memory ONNX graph builder (no PyTorch)
+│   ├── cuda/
+│   │   ├── kernels.cu              # Optimized CUDA C kernels (forward + backward)
+│   │   └── build.py                # Auto-build on first import
 │   ├── fitter.py                   # Fitter: NLL → BFGS fit → save_params → plot
-│   ├── _cuda.py                    # CUDA Python bindings (CFFI) + GPUDataBuffer
-│   └── cuda/
-│       ├── kernels.cu              # Optimized CUDA C kernels (forward + backward)
-│       └── build.py                # Auto-build on first import
+│   ├── param_constraint.py         # Parameter constraints: fixed, same, scale
+│   └── boundary.py                 # BoundTransform (arctan-based, bijective)
 ├── tests/
 │   ├── test_cuda_kernel.py
-│   └── ...
+│   ├── test_onnx_cuda.py           # ONNX CUDA smoke tests
+│   ├── test_fitter_constraints.py
+│   ├── benchmark_backends.py       # Cross-backend performance benchmark
+│   └── validate_gradients.py       # 3-point numerical gradient verification
 └── archive/                        # Historical files (TensorFlow reference)
 ```
 
@@ -34,6 +41,7 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 ```bash
 pip install -e .                  # Install in development mode
 # CUDA builds automatically on first use (requires nvcc)
+# ONNX Runtime: pip install onnxruntime onnx  (GPU: onnxruntime-gpu)
 ```
 
 ## Usage
@@ -59,7 +67,13 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ```python
 from ampfit import Fitter
 
-fitter = Fitter("config_angle.yml")
+# Backend selection via string shortcut
+fitter = Fitter("config_angle.yml")              # default: CUDA f64
+fitter = Fitter("config_angle.yml", backend="cuda32")   # CUDA f32
+fitter = Fitter("config_angle.yml", backend="numpy")    # NumPy f64
+fitter = Fitter("config_angle.yml", backend="onnx_cpu") # ONNX CPU
+fitter = Fitter("config_angle.yml", backend="onnx_cuda")# ONNX CUDA
+
 fitter.set_data(data)
 fitter.set_phsp(phsp)
 
@@ -90,34 +104,58 @@ fitter.plot(result, prefix="plots/")
 ### Low-level: Direct kernel
 
 ```python
-from ampfit import Config, NumpyKernel, CUDAKernel
+from ampfit import Config
+from ampfit.backends import NumpyBackend, CUDABackend, ONNXBackend
 
 config = Config("config_angle.yml")
-kernel_config = config.build_all_index()
+kc = config.build_all_index()
 
 # NumPy reference
-nk = NumpyKernel(kernel_config)
-Q, grads, P = nk._compute(params, data)
+nk = NumpyBackend(kc)
+Q, grads, P = nk.compute(params, data)
 
-# CUDA accelerated
-ck = CUDAKernel(kernel_config)
+# CUDA accelerated (f64 or f32)
+ck = CUDABackend(kc, dtype="float64")
 dh = ck.load_data(data)
 Q, grads, P = ck.compute(params, dh)
+
+# ONNX Runtime (CPU or CUDA) — builds model in-memory
+onnx = ONNXBackend(kernel_config=kc, providers=["CUDAExecutionProvider"])
+dh = onnx.load_data(data)
+Q, grads, P = onnx.compute(params, dh)
 ```
 
 ## Performance
 
-| Backend | 1000 ev (fwd+bwd) | vs NumPy | Notes |
-|---------|------------------:|:--------:|-------|
-| **NumPy float64** | 170.6 ms | 1× | reference |
-| **NumPy float32** | 152.1 ms | 1.1× | numpy promotes complex64 internally |
-| **ONNX Runtime** (CPU) | 22.5 ms | **7.6×** | fused ops, float32 |
-| **CUDA float64** (RTX 3070 Ti) | 7.2 ms | **23×** | double precision |
-| **CUDA float32** (RTX 3070 Ti) | **1.8 ms** | **90×** | **4× faster than f64** |
+All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher is better):
 
-The ONNX model (`pwa_forward.onnx`) has 637 nodes, opset 11, float32, and outputs all 7 gradients (Q, P, grad_ck, grad_m0, grad_g0, grad_scalar) matching the numpy kernel to ~1e-05. Build with `python build_onnx_model.py --batch-size 1000`. Runs anywhere without CUDA Toolkit — just `pip install onnxruntime`.
+| Backend | 64 | 256 | 1024 | 8192 | vs NumPy (max) |
+|---------|:---:|:---:|:----:|:----:|:--------------:|
+| **NumPy f64** CPU | 5.5K | 5.6K | 5.3K | 5.2K | 1× |
+| **CUDA f64** GPU | 66K | 110K | 162K | 183K | **33×** |
+| **CUDA f32** GPU | 119K | 336K | 681K | 798K | **145×** |
+| **ONNX f32** CPU | 3K | 11K | 40K | 32K | 8× |
+| **ONNX f32** CUDA | 21K | 79K | 355K | 338K | **64×** |
 
-## Architecture
+**Latency** (forward + backward pass, 1024 events):
+
+| Backend | Time | Speedup |
+|---------|:----:|:-------:|
+| **NumPy f64** CPU | 193 ms | 1× |
+| **ONNX** CPU | 26 ms | 7.4× |
+| **ONNX** CUDA | **2.9 ms** | **67×** |
+| **CUDA f64** GPU | 6.3 ms | 31× |
+| **CUDA f32** GPU | **1.5 ms** | **129×** |
+
+### Key observations
+
+- **CUDA f32** is the fastest overall: **145× vs NumPy**, **4× faster than CUDA f64**
+- **ONNX CUDA** offers 64× speedup without requiring CUDA Toolkit at build time
+- **ONNX CPU** is 8× vs NumPy — useful on machines without GPU
+- Custom CUDA kernels outperform ONNX because they are purpose-built for this computation
+- ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
+
+## Backend Architecture
 
 ```
 x (flat vector)
@@ -125,23 +163,48 @@ x (flat vector)
 ├─ VariableRegistry: names → indices
 ├─ ParameterConstraint: ck = build_ck(x_ck)  (combination products)
 ├─ apply_bounds: arctan transform for bounded params
-├─ kernel.compute: forward + backward pass (CUDA or NumPy)
-│   ├─ g_bw, bw_p, angular factors, amplitudes
-│   ├─ time evolution, probability, NLL
-│   └─ Wirtinger gradients for all params
-├─ norm from phsp (batched if phsp > GPU memory)
+├─ backend.compute: forward + backward pass
+│   │
+│   ├─ NumPyBackend   — pure NumPy f64, reference implementation
+│   ├─ CUDABackend    — custom CUDA C kernels (f64 or f32)
+│   └─ ONNXBackend    — ONNX Runtime (CPU/CUDA), dual-model:
+│       ├─ norm model: Q = sum(P·weight), norm gradients
+│       └─ forward model: NLL + NLL gradients
+│
+├─ norm from phsp (batched for large datasets)
 ├─ purity-based likelihood: -log(purity·P/norm + (1-purity)·bkg/Nb)
 ├─ gradient combination: direct + norm chain
 └─ BFGS fit → Hessian → uncertainties → JSON export
 ```
 
-All gradients verified to machine precision (< 1e-10) using 3-point numerical method.
+### ONNXBackend Design
+
+The ONNX backend uses **two ONNX models** built in-memory:
+
+- **Norm model** (`norm_model=True`): computes `Q = sum(P·weight)` with correct norm gradients — used internally for normalisation integral computation
+- **Forward model** (`norm_model=False`): computes full NLL `Q = -Σw·log(P/norm + bkg)` with NLL gradients — used for likelihood evaluation during fitting
+
+Both models are built from `kernel_config` at a moderate fixed batch size (default 1024). The `compute()` method handles arbitrarily large datasets by **splitting into fixed-size batches** with weight-0 masking on the final partial batch.
+
+## Gradient Validation
+
+All backends validated against a **3-point central-difference numerical reference**:
+
+| Backend | norm=None | norm=NLL |
+|---------|:---------:|:--------:|
+| NumPy f64 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
+| CUDA f64 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
+| CUDA f32 | 1e-7 to 3e-8 | 1e-7 to 5e-8 |
+| ONNX f32 | 1e-4 to 3e-4 | 2e-4 to 5e-4 |
+
+ONNX f32 precision (~1e-4) is limited by float32 vs the float64 numerical reference.
 Bound transforms use bijective arctan (not sin) for exact save/restore roundtrip.
 
 ## Requirements
 
 - Python ≥ 3.10
 - numpy, pyyaml, cffi
+- onnx, onnxruntime or onnxruntime-gpu (for ONNX backend)
 - CUDA Toolkit (for GPU acceleration, auto-builds on first use)
 - scipy (for BFGS fit)
 - matplotlib (for plot)
