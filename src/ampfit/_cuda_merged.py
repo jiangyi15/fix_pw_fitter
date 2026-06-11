@@ -1,13 +1,15 @@
 """
-CUDA merged-index kernel — wraps libcuda_kernels_merged.so.
+CUDA merged-index kernel — struct-based unified API.
 
-This variant pre-merges m0_index/mass_index with bw_order, eliminating
+This variant uses pre-merged m0_index/mass_index with bw_order, eliminating
 the scatter step. BW is computed at all 896 positions directly.
 
 Usage:
     kernel = CUDAMergedKernel(config)
-    kernel.load_data(data)
-    Q, grads, P = kernel.compute(params)
+    dh = kernel.load_data(data_np)
+    Q, grads, P = kernel.compute(params, dh, norm=None)
+    dh.free()
+    kernel.free()
 """
 import numpy as np
 from cffi import FFI
@@ -22,101 +24,68 @@ int cuda_free(void* ptr);
 int cuda_memcpy_to_device(void* dst, const void* src, unsigned long size);
 int cuda_memcpy_to_host(void* dst, const void* src, unsigned long size);
 int cuda_memset(void* ptr, int value, unsigned long size);
-
 int cuda_get_device_count();
 int cuda_get_device_name(char* name, int len);
 
-/* g_bw computation (same as original) */
-void launch_compute_g_bw(
-    const double* mass, const double* g0,
-    const int* g0_index, const int* g0_mass_index,
-    const double* matrix_gamma,
-    const double* gamma_table_real, const double* gamma_table_imag,
-    double gamma_min, double gamma_delta,
-    int n_gamma_rows, int n_unique_bw, int n_mass, int gamma_table_bins,
-    double* g_interp_real, double* g_interp_imag,
-    double* g_bw_real, double* g_bw_imag,
-    int n_events);
+/* Struct-based unified compute API */
+typedef struct {
+    const double* mass; const double* momentum; const double* angle;
+    const double* frac; const double* time; const double* weight; const double* bkg;
+    const double* ck_real; const double* ck_imag; const double* m0; const double* g0;
+    double Gamma; double Delta_Gamma; double Delta_m;
+    double A_prod; double poq_rho; double pop_phi;
+    double norm_val; int use_norm;
+} ComputeData;
 
-/* Merged-index main forward kernel */
-void launch_compute_main_merged(
-    const double* mass, const double* momentum, const double* angle,
-    const double* frac, const double* time, const double* weight, const double* bkg,
-    const int* bw_m0_index, const int* fl_type,
-    const int* bw_mass_index, const int* fl_q_index,
-    const int* fl_order, const int* angle_index,
-    const double* angle_k, const double* angle_b,
-    const double* matrix_angle_real, const double* matrix_angle_imag,
-    const double* g_bw_real, const double* g_bw_imag,
-    const double* fl_table,
-    double fl_min, double fl_delta,
-    int n_wave, int n_res, int n_decay, int n_total_positions,
-    int n_mass, int n_momentum, int n_angle_k, int n_angle_total,
-    int fl_table_bins,
-    const double* ck_real, const double* ck_imag, const double* m0,
-    double Gamma, double Delta_Gamma, double Delta_m,
-    double A_p, double poq_rho, double pop_phi,
-    double* Q_out, double* P_out,
-    double* pap_real, double* pap_imag, double* pam_real, double* pam_imag,
-    double* gp_real, double* gp_imag, double* gm_real, double* gm_imag,
-    double* poq_real, double* poq_imag,
-    double* bw_p_real, double* bw_p_imag,
-    double* common_amp_factor_real, double* common_amp_factor_imag,
-    double* ap_real, double* ap_imag, double* am_real, double* am_imag,
-    double* dQ_dP,
-    double* bw_dom_real, double* bw_dom_imag,
-    int n_events, int use_norm, double norm);
+typedef struct {
+    const int* bw_m0_index; const int* bw_mass_index;
+    const int* fl_type; const int* fl_q_index;
+    const int* fl_order; const int* angle_index;
+    const int* g0_index; const int* g0_mass_index;
+    const int* bw_pos_gamma_idx; const int* bw_pos_gamma_off;
+    const int* m0_index; const int* bw_order;
+} ComputeIndices;
 
-/* Merged-index gradient kernel */
-void launch_gradient_merged(
-    const double* P,
-    const double* pap_real, const double* pap_imag,
-    const double* pam_real, const double* pam_imag,
-    const double* gp_real, const double* gp_imag,
-    const double* gm_real, const double* gm_imag,
-    const double* poq_real, const double* poq_imag,
-    const double* bw_p_real, const double* bw_p_imag,
-    const double* common_amp_factor_real,
-    const double* common_amp_factor_imag,
-    const double* ap_real, const double* ap_imag,
-    const double* am_real, const double* am_imag,
-    const double* dQ_dP,
-    const double* bw_dom_real, const double* bw_dom_imag,
-    const double* g_interp_real, const double* g_interp_imag,
-    const double* g_bw_real, const double* g_bw_imag,
-    const double* frac, const double* time,
-    const int* m0_index, const int* g0_index,
-    const int* bw_order,
-    const double* matrix_gamma,
-    const double* m0, const double* g0,
-    const double* ck_real, const double* ck_imag,
-    double Gamma, double Delta_Gamma, double Delta_m,
-    double A_p, double poq_rho, double pop_phi,
-    int n_wave, int n_res, int n_unique_bw, int n_total_positions,
-    int n_gamma_rows, int n_mass,
-    double* grad_ck_real_partial,
-    double* grad_ck_imag_partial,
-    double* grad_m0_partial,
-    double* grad_g0_partial,
-    double* grad_Gamma_partial,
-    double* grad_DeltaGamma_partial,
-    double* grad_DeltaM_partial,
-    double* grad_Ap_partial,
-    double* grad_poq_rho_partial,
-    double* grad_pop_phi_partial,
-    int n_events);
+typedef struct {
+    const double* angle_k; const double* angle_b;
+    const double* matrix_angle_real; const double* matrix_angle_imag;
+    const double* gamma_table_real; const double* gamma_table_imag;
+    double gamma_min; double gamma_delta; int gamma_table_bins;
+    const double* matrix_gamma;
+    const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+} ComputeConstants;
 
-/* Scatter-indexed g_bw: interpolates gamma + scatters to (N, n_total_positions) */
-void launch_compute_g_bw_scatter(
-    const double* mass, const double* g0,
-    const int* g0_index, const int* g0_mass_index,
-    const double* gamma_table_real, const double* gamma_table_imag,
-    double gamma_min, double gamma_delta,
-    int n_gamma_rows, int n_total_positions, int n_mass, int gamma_table_bins,
-    const int* bw_pos_gamma_idx, const int* bw_pos_gamma_off,
-    double* g_interp_real, double* g_interp_imag,
-    double* g_bw_real, double* g_bw_imag,
-    int n_events);
+typedef struct {
+    int n_events; int n_wave; int n_res; int n_decay;
+    int n_total_positions; int n_unique_bw; int n_gamma_rows;
+    int n_mass; int n_momentum; int n_angle_k; int n_angle_total;
+} ComputeDims;
+
+typedef struct {
+    double* g_interp_real; double* g_interp_imag;
+    double* g_bw_real; double* g_bw_imag;
+    double* Q_out; double* P_out;
+    double* pap_real; double* pap_imag;
+    double* pam_real; double* pam_imag;
+    double* gp_real; double* gp_imag;
+    double* gm_real; double* gm_imag;
+    double* poq_real; double* poq_imag;
+    double* bw_p_real; double* bw_p_imag;
+    double* common_amp_factor_real; double* common_amp_factor_imag;
+    double* ap_real; double* ap_imag;
+    double* am_real; double* am_imag;
+    double* dQ_dP;
+    double* bw_dom_real; double* bw_dom_imag;
+    double* grad_ck_real_partial; double* grad_ck_imag_partial;
+    double* grad_m0_partial; double* grad_g0_partial;
+    double* grad_Gamma_partial; double* grad_DeltaGamma_partial;
+    double* grad_DeltaM_partial; double* grad_Ap_partial;
+    double* grad_poq_rho_partial; double* grad_pop_phi_partial;
+} ComputeScratch;
+
+void launch_compute_all(const ComputeData* d, const ComputeIndices* idx,
+                        const ComputeConstants* c, const ComputeDims* dim,
+                        ComputeScratch* s);
 """
 
 ffi.cdef(CDEF)
@@ -129,143 +98,58 @@ def _load_lib():
     return ffi.dlopen(lib_path)
 
 
-class GPUDataBuffer:
-    """Manages a set of GPU buffers that can be uploaded in bulk."""
-    def __init__(self, lib, fields):
+def _upload_arr(lib, arr):
+    """Upload a numpy array to GPU, return GPU pointer."""
+    arr = np.ascontiguousarray(arr)
+    nbytes = arr.nbytes
+    ptr = ffi.new("void**")
+    lib.cuda_alloc(ptr, nbytes)
+    lib.cuda_memcpy_to_device(ptr[0], ffi.from_buffer(arr), nbytes)
+    return ptr[0]
+
+
+def _download_arr(lib, ptr, shape, dtype):
+    """Download GPU array to host numpy array."""
+    nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    buf = ffi.new(f"char[{nbytes}]")
+    lib.cuda_memcpy_to_host(buf, ptr, nbytes)
+    return np.frombuffer(ffi.buffer(buf), dtype=dtype).reshape(shape).copy()
+
+
+class _DataHandle:
+    """Holds GPU data and scratch for a single dataset."""
+    
+    def __init__(self, lib, data_ptr, scratch_ptr, n_events):
         self.lib = lib
-        self._ptrs = {}
-        self._sizes = {}
-        for name, (shape, dtype) in fields:
-            nelem = int(np.prod(shape))
-            nbytes = nelem * np.dtype(dtype).itemsize
-            ptr = ffi.new("void**")
-            lib.cuda_alloc(ptr, nbytes)
-            self._ptrs[name] = ptr[0]
-            self._sizes[name] = nbytes
-
-    def set(self, name, arr):
-        arr = np.ascontiguousarray(arr)
-        assert arr.nbytes <= self._sizes[name], f"{name}: {arr.nbytes} > {self._sizes[name]}"
-        self.lib.cuda_memcpy_to_device(self._ptrs[name], ffi.from_buffer(arr), arr.nbytes)
-
-    def ptr(self, name):
-        return self._ptrs[name]
-
+        self.data = data_ptr
+        self.scratch = scratch_ptr
+        self.n_events = n_events
+        # Store pointers for cleanup (filled by load_data)
+        self._event_ptrs = []
+        self._scratch_ptrs = []
+    
     def free(self):
-        for p in self._ptrs.values():
+        for p in self._event_ptrs:
             self.lib.cuda_free(p)
-        self._ptrs.clear()
-
-
-class GPUDataHolder:
-    """Holds pointers for a single dataset loaded on GPU, plus scratch space."""
-    def __init__(self, lib, n_wave, n_unique_bw, n_gamma_rows, n_total_positions):
-        self.lib = lib
-        self.n_wave = n_wave
-        self.n_unique_bw = n_unique_bw
-        self.n_gamma_rows = n_gamma_rows
-        self.n_total_positions = n_total_positions  # n_wave * n_res
-
-        # Global device pointers (set by load_data)
-        self.d_mass = None
-        self.d_momentum = None
-        self.d_angle = None
-        self.d_frac = None
-        self.d_time = None
-        self.d_weight = None
-        self.d_bkg = None
-        self.d_bw_m0_index = None   # merged index
-        self.d_bw_mass_index = None  # merged index
-        self.d_bw_order = None       # still needed for backward scatter
-        self.d_m0_index = None       # still needed for backward
-        self.d_n_events = 0
-        self._scratch = None
-
-    def alloc_intermediates(self, n_events):
-        lib = self.lib
-        def _alloc(shape, dtype):
-            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-            ptr = ffi.new("void**")
-            lib.cuda_alloc(ptr, nbytes)
-            return ptr[0]
-
-        nw = self.n_wave
-        nu = self.n_unique_bw
-        ng = self.n_gamma_rows
-        nt = self.n_total_positions
-
-        self._scratch = {
-            # g_bw intermediates (unique positions)
-            "g_interp_real": _alloc((n_events, ng), np.float64),
-            "g_interp_imag": _alloc((n_events, ng), np.float64),
-            "g_bw_real": _alloc((n_events, nt), np.float64),   # per-position layout
-            "g_bw_imag": _alloc((n_events, nt), np.float64),
-
-            # Forward outputs
-            "Q_out": _alloc((n_events,), np.float64),
-            "P_out": _alloc((n_events,), np.float64),
-            "pap_real": _alloc((n_events,), np.float64),
-            "pap_imag": _alloc((n_events,), np.float64),
-            "pam_real": _alloc((n_events,), np.float64),
-            "pam_imag": _alloc((n_events,), np.float64),
-            "gp_real": _alloc((n_events,), np.float64),
-            "gp_imag": _alloc((n_events,), np.float64),
-            "gm_real": _alloc((n_events,), np.float64),
-            "gm_imag": _alloc((n_events,), np.float64),
-            "poq_real": _alloc((n_events,), np.float64),
-            "poq_imag": _alloc((n_events,), np.float64),
-            "bw_p_real": _alloc((n_events, nw), np.float64),
-            "bw_p_imag": _alloc((n_events, nw), np.float64),
-            "common_amp_factor_real": _alloc((n_events, nw), np.float64),
-            "common_amp_factor_imag": _alloc((n_events, nw), np.float64),
-            "ap_real": _alloc((n_events,), np.float64),
-            "ap_imag": _alloc((n_events,), np.float64),
-            "am_real": _alloc((n_events,), np.float64),
-            "am_imag": _alloc((n_events,), np.float64),
-            "dQ_dP": _alloc((n_events,), np.float64),
-            # Per-position bw_dom (n_total_positions per event)
-            "bw_dom_real": _alloc((n_events, nt), np.float64),
-            "bw_dom_imag": _alloc((n_events, nt), np.float64),
-            # Gradient partials
-            "grad_ck_real_partial": _alloc((n_events, nw), np.float64),
-            "grad_ck_imag_partial": _alloc((n_events, nw), np.float64),
-            "grad_m0_partial": _alloc((n_events, nu), np.float64),
-            "grad_g0_partial": _alloc((n_events, ng), np.float64),
-            "grad_Gamma_partial": _alloc((n_events,), np.float64),
-            "grad_DeltaGamma_partial": _alloc((n_events,), np.float64),
-            "grad_DeltaM_partial": _alloc((n_events,), np.float64),
-            "grad_Ap_partial": _alloc((n_events,), np.float64),
-            "grad_poq_rho_partial": _alloc((n_events,), np.float64),
-            "grad_pop_phi_partial": _alloc((n_events,), np.float64),
-        }
-
-    def free(self):
-        for p in self._scratch.values():
+        for p in self._scratch_ptrs:
             self.lib.cuda_free(p)
-        self._scratch = None
-        for attr in ['d_mass', 'd_momentum', 'd_angle', 'd_frac',
-                      'd_time', 'd_weight', 'd_bkg',
-                      'd_bw_m0_index', 'd_bw_mass_index', 'd_bw_order',
-                      'd_m0_index']:
-            p = getattr(self, attr, None)
-            if p is not None:
-                self.lib.cuda_free(p)
-                setattr(self, attr, None)
+        self._event_ptrs.clear()
+        self._scratch_ptrs.clear()
 
 
 class CUDAMergedKernel:
-    """CUDA kernel with merged-index BW computation."""
+    """CUDA kernel with struct-based unified API."""
 
     def __init__(self, config):
         self.lib = _load_lib()
-
+        
         # Detect GPU
         name_buf = ffi.new("char[256]")
         self.lib.cuda_get_device_name(name_buf, 256)
         gpu_name = ffi.string(name_buf).decode()
         print(f"✓ Using GPU: {gpu_name}")
-
-        # Config dimensions
+        
+        # Extract dimensions from config
         self.n_wave = config["matrix_angle"].shape[1]
         self.n_res = config["bw_order"].size // self.n_wave
         self.n_decay = config["fl_order"].size // self.n_wave
@@ -276,298 +160,315 @@ class CUDAMergedKernel:
         self.n_total_positions = self.n_wave * self.n_res  # 896
         self.n_m0_unique = int(np.max(config["m0_index"])) + 1
         self.n_g0_unique = int(np.max(config["g0_index"])) + 1
-        self.scalar_n = 6
-
+        
+        # Compute n_mass and n_momentum from indices
+        self.n_mass = int(np.max(config["mass_index"])) + 1 if len(config["mass_index"]) > 0 else 0
+        self.n_momentum = int(np.max(config["fl_q_index"])) + 1 if len(config["fl_q_index"]) > 0 else 0
+        
         # Pre-compute merged indices (CPU)
         bo = config["bw_order"]
-        self._bw_m0_index = np.ascontiguousarray(
-            config["m0_index"][bo].astype(np.int32))
-        self._bw_mass_index = np.ascontiguousarray(
-            config["mass_index"][bo].astype(np.int32))
+        self._bw_m0_index = np.ascontiguousarray(config["m0_index"][bo].astype(np.int32))
+        self._bw_mass_index = np.ascontiguousarray(config["mass_index"][bo].astype(np.int32))
         self._bw_order = np.ascontiguousarray(bo.astype(np.int32))
         self._m0_index = np.ascontiguousarray(config["m0_index"].astype(np.int32))
-
+        
         # Pre-compute per-position gamma scatter indices
-        mg = config["matrix_gamma"]  # (288, 216)
+        mg = config["matrix_gamma"]
         bw_pos_gamma_idx = []
         bw_pos_gamma_off = [0]
         for pos in range(len(bo)):
             rows = np.where(mg[:, bo[pos]] != 0)[0]
             bw_pos_gamma_idx.extend(rows.tolist())
             bw_pos_gamma_off.append(len(bw_pos_gamma_idx))
-        self._bw_pos_gamma_idx = np.ascontiguousarray(
-            np.array(bw_pos_gamma_idx, dtype=np.int32))
-        self._bw_pos_gamma_off = np.ascontiguousarray(
-            np.array(bw_pos_gamma_off, dtype=np.int32))
-
+        self._bw_pos_gamma_idx = np.ascontiguousarray(np.array(bw_pos_gamma_idx, dtype=np.int32))
+        self._bw_pos_gamma_off = np.ascontiguousarray(np.array(bw_pos_gamma_off, dtype=np.int32))
+        
         # Upload constant index arrays to GPU
-        def _upload(arr):
-            nbytes = arr.nbytes
-            ptr = ffi.new("void**")
-            self.lib.cuda_alloc(ptr, nbytes)
-            self.lib.cuda_memcpy_to_device(ptr[0], ffi.from_buffer(arr), nbytes)
-            return ptr[0]
-
-        self.d_bw_m0_index = _upload(self._bw_m0_index)
-        self.d_bw_mass_index = _upload(self._bw_mass_index)
-        self.d_bw_order = _upload(self._bw_order)
-        self.d_m0_index = _upload(self._m0_index)
-        self.d_bw_pos_gamma_idx = _upload(self._bw_pos_gamma_idx)
-        self.d_bw_pos_gamma_off = _upload(self._bw_pos_gamma_off)
-
-        # Upload constant physical arrays
-        self._matrix_gamma = np.ascontiguousarray(config["matrix_gamma"].astype(np.float64))
-        self._matrix_angle_real = np.ascontiguousarray(np.real(config["matrix_angle"]).astype(np.float64))
-        self._matrix_angle_imag = np.ascontiguousarray(np.imag(config["matrix_angle"]).astype(np.float64))
-        self._gamma_table_real = np.ascontiguousarray(np.real(config["gamma_table"]).astype(np.float64))
-        self._gamma_table_imag = np.ascontiguousarray(np.imag(config["gamma_table"]).astype(np.float64))
-        self._fl_table = np.ascontiguousarray(config["fl_table"].astype(np.float64))
-        self._angle_k = np.ascontiguousarray(config["angle_k"].astype(np.float64))
-        self._angle_b = np.ascontiguousarray(config["angle_b"].astype(np.float64))
+        self.d_bw_m0_index = _upload_arr(self.lib, self._bw_m0_index)
+        self.d_bw_mass_index = _upload_arr(self.lib, self._bw_mass_index)
+        self.d_bw_order = _upload_arr(self.lib, self._bw_order)
+        self.d_m0_index = _upload_arr(self.lib, self._m0_index)
+        self.d_bw_pos_gamma_idx = _upload_arr(self.lib, self._bw_pos_gamma_idx)
+        self.d_bw_pos_gamma_off = _upload_arr(self.lib, self._bw_pos_gamma_off)
+        
+        # Upload other index arrays
+        self.d_fl_type = _upload_arr(self.lib, np.ascontiguousarray(config["fl_type"].astype(np.int32)))
+        self.d_fl_q_index = _upload_arr(self.lib, np.ascontiguousarray(config["fl_q_index"].astype(np.int32)))
+        self.d_fl_order = _upload_arr(self.lib, np.ascontiguousarray(config["fl_order"].astype(np.int32)))
+        self.d_angle_index = _upload_arr(self.lib, np.ascontiguousarray(config["angle_index"].astype(np.int32)))
         self._g0_index = np.ascontiguousarray(config["g0_index"].astype(np.int32))
-        self._g0_mass_index = np.ascontiguousarray(config["g0_mass_index"].astype(np.int32))
-        self._fl_type = np.ascontiguousarray(config["fl_type"].astype(np.int32))
-        self._fl_q_index = np.ascontiguousarray(config["fl_q_index"].astype(np.int32))
-        self._mass_index = np.ascontiguousarray(config["mass_index"].astype(np.int32))
-        self._angle_index = np.ascontiguousarray(config["angle_index"].astype(np.int32))
-        self._fl_order = np.ascontiguousarray(config["fl_order"].astype(np.int32))
-
-        def _upload_const(arr):
-            nbytes = arr.nbytes
-            ptr = ffi.new("void**")
-            self.lib.cuda_alloc(ptr, nbytes)
-            self.lib.cuda_memcpy_to_device(ptr[0], ffi.from_buffer(arr), nbytes)
-            return ptr[0]
-
-        self.d_matrix_gamma = _upload_const(self._matrix_gamma)
-        self.d_matrix_angle_real = _upload_const(self._matrix_angle_real)
-        self.d_matrix_angle_imag = _upload_const(self._matrix_angle_imag)
-        self.d_gamma_table_real = _upload_const(self._gamma_table_real)
-        self.d_gamma_table_imag = _upload_const(self._gamma_table_imag)
-        self.d_fl_table = _upload_const(self._fl_table)
-        self.d_angle_k = _upload_const(self._angle_k)
-        self.d_angle_b = _upload_const(self._angle_b)
-        self.d_g0_index = _upload_const(self._g0_index)
-        self.d_g0_mass_index = _upload_const(self._g0_mass_index)
-        self.d_fl_type = _upload_const(self._fl_type)
-        self.d_fl_q_index = _upload_const(self._fl_q_index)
-        self.d_mass_index = _upload_const(self._mass_index)
-        self.d_angle_index = _upload_const(self._angle_index)
-        self.d_fl_order = _upload_const(self._fl_order)
-
+        self.d_g0_index = _upload_arr(self.lib, self._g0_index)
+        self.d_g0_mass_index = _upload_arr(self.lib, np.ascontiguousarray(config["g0_mass_index"].astype(np.int32)))
+        
+        # Upload constant physical arrays
+        self.d_matrix_gamma = _upload_arr(self.lib, np.ascontiguousarray(config["matrix_gamma"].astype(np.float64)))
+        self.d_matrix_angle_real = _upload_arr(self.lib, np.ascontiguousarray(np.real(config["matrix_angle"]).astype(np.float64)))
+        self.d_matrix_angle_imag = _upload_arr(self.lib, np.ascontiguousarray(np.imag(config["matrix_angle"]).astype(np.float64)))
+        self.d_gamma_table_real = _upload_arr(self.lib, np.ascontiguousarray(np.real(config["gamma_table"]).astype(np.float64)))
+        self.d_gamma_table_imag = _upload_arr(self.lib, np.ascontiguousarray(np.imag(config["gamma_table"]).astype(np.float64)))
+        self.d_fl_table = _upload_arr(self.lib, np.ascontiguousarray(config["fl_table"].astype(np.float64)))
+        self.d_angle_k = _upload_arr(self.lib, np.ascontiguousarray(config["angle_k"].astype(np.float64)))
+        self.d_angle_b = _upload_arr(self.lib, np.ascontiguousarray(config["angle_b"].astype(np.float64)))
+        
+        # Store scalar constants
         self.gamma_min = float(config["gamma_min"])
         self.gamma_delta = float(config["gamma_delta"])
         self.fl_min = float(config["fl_min"])
         self.fl_delta = float(config["fl_delta"])
         self._n_bins_gamma = config["gamma_table"].shape[-1]
         self._n_bins_fl = config["fl_table"].shape[-1]
-
-        self._gpu_data = None  # set by load_data
-
+        
+        # Build persistent structs with GPU pointers
+        self._ctx_idx = ffi.new("ComputeIndices*")
+        self._ctx_idx.bw_m0_index = self.d_bw_m0_index
+        self._ctx_idx.bw_mass_index = self.d_bw_mass_index
+        self._ctx_idx.fl_type = self.d_fl_type
+        self._ctx_idx.fl_q_index = self.d_fl_q_index
+        self._ctx_idx.fl_order = self.d_fl_order
+        self._ctx_idx.angle_index = self.d_angle_index
+        self._ctx_idx.g0_index = self.d_g0_index
+        self._ctx_idx.g0_mass_index = self.d_g0_mass_index
+        self._ctx_idx.bw_pos_gamma_idx = self.d_bw_pos_gamma_idx
+        self._ctx_idx.bw_pos_gamma_off = self.d_bw_pos_gamma_off
+        self._ctx_idx.m0_index = self.d_m0_index
+        self._ctx_idx.bw_order = self.d_bw_order
+        
+        self._ctx_c = ffi.new("ComputeConstants*")
+        self._ctx_c.angle_k = self.d_angle_k
+        self._ctx_c.angle_b = self.d_angle_b
+        self._ctx_c.matrix_angle_real = self.d_matrix_angle_real
+        self._ctx_c.matrix_angle_imag = self.d_matrix_angle_imag
+        self._ctx_c.gamma_table_real = self.d_gamma_table_real
+        self._ctx_c.gamma_table_imag = self.d_gamma_table_imag
+        self._ctx_c.gamma_min = self.gamma_min
+        self._ctx_c.gamma_delta = self.gamma_delta
+        self._ctx_c.gamma_table_bins = self._n_bins_gamma
+        self._ctx_c.matrix_gamma = self.d_matrix_gamma
+        self._ctx_c.fl_table = self.d_fl_table
+        self._ctx_c.fl_min = self.fl_min
+        self._ctx_c.fl_delta = self.fl_delta
+        self._ctx_c.fl_table_bins = self._n_bins_fl
+        
+        self._ctx_dim = ffi.new("ComputeDims*")
+        self._ctx_dim.n_events = 0  # Set per-dataset
+        self._ctx_dim.n_wave = self.n_wave
+        self._ctx_dim.n_res = self.n_res
+        self._ctx_dim.n_decay = self.n_decay
+        self._ctx_dim.n_total_positions = self.n_total_positions
+        self._ctx_dim.n_unique_bw = self.n_unique_bw
+        self._ctx_dim.n_gamma_rows = self.n_gamma_rows
+        self._ctx_dim.n_mass = self.n_mass
+        self._ctx_dim.n_momentum = self.n_momentum
+        self._ctx_dim.n_angle_k = self.n_angle_k
+        self._ctx_dim.n_angle_total = self.n_angle_total
+        
+        self._handles = []
+    
     def load_data(self, data_np):
-        """Upload event data to GPU, create scratch buffers."""
+        """Upload event data to GPU, create scratch buffers, return DataHandle."""
         lib = self.lib
         n = data_np["mass"].shape[0]
-        gpu = GPUDataHolder(lib, self.n_wave, self.n_unique_bw,
-                            self.n_gamma_rows, self.n_total_positions)
-        gpu.d_n_events = n
-        gpu.alloc_intermediates(n)
-
-        def _upload(arr):
-            arr = np.ascontiguousarray(arr.astype(np.float64))
-            nbytes = arr.nbytes
+        
+        # Create ComputeData struct
+        data = ffi.new("ComputeData*")
+        
+        # Upload event data
+        d_mass = _upload_arr(lib, np.ascontiguousarray(data_np["mass"].astype(np.float64)))
+        d_momentum = _upload_arr(lib, np.ascontiguousarray(data_np["q"].astype(np.float64)))
+        d_angle = _upload_arr(lib, np.ascontiguousarray(data_np["angle"].astype(np.float64)))
+        d_frac = _upload_arr(lib, np.ascontiguousarray(data_np["frac"].astype(np.float64)))
+        d_time = _upload_arr(lib, np.ascontiguousarray(data_np["time"].astype(np.float64)))
+        d_weight = _upload_arr(lib, np.ascontiguousarray(data_np["weight"].astype(np.float64)))
+        bkg = data_np.get("bkg", np.zeros(n, dtype=np.float64))
+        d_bkg = _upload_arr(lib, np.ascontiguousarray(bkg.astype(np.float64)))
+        
+        data.mass = d_mass
+        data.momentum = d_momentum
+        data.angle = d_angle
+        data.frac = d_frac
+        data.time = d_time
+        data.weight = d_weight
+        data.bkg = d_bkg
+        
+        # Create ComputeScratch struct with GPU buffers
+        scratch = ffi.new("ComputeScratch*")
+        scratch_ptrs = []
+        
+        def _alloc_scratch(shape, dtype):
+            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
             ptr = ffi.new("void**")
             lib.cuda_alloc(ptr, nbytes)
-            lib.cuda_memcpy_to_device(ptr[0], ffi.from_buffer(arr), nbytes)
+            scratch_ptrs.append(ptr[0])
             return ptr[0]
-
-        gpu.d_mass = _upload(data_np["mass"])
-        gpu.d_momentum = _upload(data_np["q"])
-        gpu.d_angle = _upload(data_np["angle"])
-        gpu.d_frac = _upload(data_np["frac"])
-        gpu.d_time = _upload(data_np["time"])
-        gpu.d_weight = _upload(data_np["weight"])
-        bkg = data_np.get("bkg", np.zeros(n, dtype=np.float64))
-        gpu.d_bkg = _upload(np.asarray(bkg))
-
-        self._gpu_data = gpu
-        return gpu
-
-    def free(self):
-        if self._gpu_data is not None:
-            self._gpu_data.free()
-            self._gpu_data = None
-
-    def compute(self, params, data_handle, norm=None):
-        """Run forward + backward pass on GPU."""
-        lib = self.lib
-        gpu = data_handle
-        n = gpu.d_n_events
-
-        scratch = gpu._scratch
+        
         nw = self.n_wave
         nu = self.n_unique_bw
         ng = self.n_gamma_rows
         nt = self.n_total_positions
-
-        def _upload(arr):
-            arr = np.ascontiguousarray(arr.astype(np.float64))
-            nbytes = arr.nbytes
-            ptr = ffi.new("void**")
-            lib.cuda_alloc(ptr, nbytes)
-            lib.cuda_memcpy_to_device(ptr[0], ffi.from_buffer(arr), nbytes)
-            return ptr[0]
-
-        d_g0 = _upload(np.asarray(params["g0"]))
-
-        # 1. Compute g_bw at per-position layout via scatter-indexed kernel
-        #    (interpolates gamma + scatters directly to 896 positions)
-        lib.launch_compute_g_bw_scatter(
-            gpu.d_mass, d_g0,
-            self.d_g0_index, self.d_g0_mass_index,
-            self.d_gamma_table_real, self.d_gamma_table_imag,
-            self.gamma_min, self.gamma_delta,
-            ng, nt, 48, self._n_bins_gamma,
-            self.d_bw_pos_gamma_idx, self.d_bw_pos_gamma_off,
-            scratch["g_interp_real"], scratch["g_interp_imag"],
-            scratch["g_bw_real"], scratch["g_bw_imag"],
-            n)
-
-        # 2. Merged-index main forward
-        use_norm = 0 if norm is None else 1
-        norm_val = norm if norm is not None else 1.0
-
+        
+        scratch.g_interp_real = _alloc_scratch((n, ng), np.float64)
+        scratch.g_interp_imag = _alloc_scratch((n, ng), np.float64)
+        scratch.g_bw_real = _alloc_scratch((n, nt), np.float64)
+        scratch.g_bw_imag = _alloc_scratch((n, nt), np.float64)
+        
+        scratch.Q_out = _alloc_scratch((n,), np.float64)
+        scratch.P_out = _alloc_scratch((n,), np.float64)
+        scratch.pap_real = _alloc_scratch((n,), np.float64)
+        scratch.pap_imag = _alloc_scratch((n,), np.float64)
+        scratch.pam_real = _alloc_scratch((n,), np.float64)
+        scratch.pam_imag = _alloc_scratch((n,), np.float64)
+        scratch.gp_real = _alloc_scratch((n,), np.float64)
+        scratch.gp_imag = _alloc_scratch((n,), np.float64)
+        scratch.gm_real = _alloc_scratch((n,), np.float64)
+        scratch.gm_imag = _alloc_scratch((n,), np.float64)
+        scratch.poq_real = _alloc_scratch((n,), np.float64)
+        scratch.poq_imag = _alloc_scratch((n,), np.float64)
+        scratch.bw_p_real = _alloc_scratch((n, nw), np.float64)
+        scratch.bw_p_imag = _alloc_scratch((n, nw), np.float64)
+        scratch.common_amp_factor_real = _alloc_scratch((n, nw), np.float64)
+        scratch.common_amp_factor_imag = _alloc_scratch((n, nw), np.float64)
+        scratch.ap_real = _alloc_scratch((n,), np.float64)
+        scratch.ap_imag = _alloc_scratch((n,), np.float64)
+        scratch.am_real = _alloc_scratch((n,), np.float64)
+        scratch.am_imag = _alloc_scratch((n,), np.float64)
+        scratch.dQ_dP = _alloc_scratch((n,), np.float64)
+        scratch.bw_dom_real = _alloc_scratch((n, nt), np.float64)
+        scratch.bw_dom_imag = _alloc_scratch((n, nt), np.float64)
+        
+        scratch.grad_ck_real_partial = _alloc_scratch((n, nw), np.float64)
+        scratch.grad_ck_imag_partial = _alloc_scratch((n, nw), np.float64)
+        scratch.grad_m0_partial = _alloc_scratch((n, nu), np.float64)
+        scratch.grad_g0_partial = _alloc_scratch((n, ng), np.float64)
+        scratch.grad_Gamma_partial = _alloc_scratch((n,), np.float64)
+        scratch.grad_DeltaGamma_partial = _alloc_scratch((n,), np.float64)
+        scratch.grad_DeltaM_partial = _alloc_scratch((n,), np.float64)
+        scratch.grad_Ap_partial = _alloc_scratch((n,), np.float64)
+        scratch.grad_poq_rho_partial = _alloc_scratch((n,), np.float64)
+        scratch.grad_pop_phi_partial = _alloc_scratch((n,), np.float64)
+        
+        # Create handle
+        handle = _DataHandle(lib, data, scratch, n)
+        handle._event_ptrs = [d_mass, d_momentum, d_angle, d_frac, d_time, d_weight, d_bkg]
+        handle._scratch_ptrs = scratch_ptrs
+        handle._weight_ptr = d_weight  # Store for norm computation
+        
+        self._handles.append(handle)
+        return handle
+    
+    def compute(self, params, dh, norm=None):
+        """Run forward + backward pass on GPU using single unified call."""
+        lib = self.lib
+        n = dh.n_events
+        data = dh.data
+        scratch = dh.scratch
+        
+        nw = self.n_wave
+        nu = self.n_unique_bw
+        ng = self.n_gamma_rows
+        
+        # Upload per-call params
         ck_real = np.ascontiguousarray(np.real(params["ck"]).astype(np.float64))
         ck_imag = np.ascontiguousarray(np.imag(params["ck"]).astype(np.float64))
         m0_arr = np.ascontiguousarray(params["m0"].astype(np.float64))
+        g0_arr = np.ascontiguousarray(params["g0"].astype(np.float64))
         scalar = params["scalar"]
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi = scalar
-
-        d_ck_real = _upload(ck_real)
-        d_ck_imag = _upload(ck_imag)
-        d_m0 = _upload(m0_arr)
-        d_g0 = _upload(np.asarray(params["g0"]))
-
-        lib.launch_compute_main_merged(
-            gpu.d_mass, gpu.d_momentum, gpu.d_angle,
-            gpu.d_frac, gpu.d_time, gpu.d_weight, gpu.d_bkg,
-            self.d_bw_m0_index, self.d_fl_type,
-            self.d_bw_mass_index, self.d_fl_q_index,
-            self.d_fl_order, self.d_angle_index,
-            self.d_angle_k, self.d_angle_b,
-            self.d_matrix_angle_real, self.d_matrix_angle_imag,
-            scratch["g_bw_real"], scratch["g_bw_imag"],
-            self.d_fl_table,
-            self.fl_min, self.fl_delta,
-            nw, self.n_res, self.n_decay, nt,
-            48, 72, self.n_angle_k, self.n_angle_total,
-            self._n_bins_fl,
-            d_ck_real, d_ck_imag, d_m0,
-            Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
-            scratch["Q_out"], scratch["P_out"],
-            scratch["pap_real"], scratch["pap_imag"],
-            scratch["pam_real"], scratch["pam_imag"],
-            scratch["gp_real"], scratch["gp_imag"],
-            scratch["gm_real"], scratch["gm_imag"],
-            scratch["poq_real"], scratch["poq_imag"],
-            scratch["bw_p_real"], scratch["bw_p_imag"],
-            scratch["common_amp_factor_real"], scratch["common_amp_factor_imag"],
-            scratch["ap_real"], scratch["ap_imag"],
-            scratch["am_real"], scratch["am_imag"],
-            scratch["dQ_dP"],
-            scratch["bw_dom_real"], scratch["bw_dom_imag"],
-            n, use_norm, norm_val)
-
+        
+        d_ck_real = _upload_arr(lib, ck_real)
+        d_ck_imag = _upload_arr(lib, ck_imag)
+        d_m0 = _upload_arr(lib, m0_arr)
+        d_g0 = _upload_arr(lib, g0_arr)
+        
+        # Fill ComputeData with params
+        data.ck_real = d_ck_real
+        data.ck_imag = d_ck_imag
+        data.m0 = d_m0
+        data.g0 = d_g0
+        data.Gamma = Gamma
+        data.Delta_Gamma = Delta_Gamma
+        data.Delta_m = Delta_m
+        data.A_prod = A_p
+        data.poq_rho = poq_rho
+        data.pop_phi = pop_phi
+        data.use_norm = 0 if norm is None else 1
+        data.norm_val = norm if norm is not None else -1e100
+        
+        # Update n_events in dims
+        self._ctx_dim.n_events = n
+        
+        # Single unified call
+        lib.launch_compute_all(data, self._ctx_idx, self._ctx_c, self._ctx_dim, scratch)
+        
+        # Free per-call params
         lib.cuda_free(d_ck_real)
         lib.cuda_free(d_ck_imag)
         lib.cuda_free(d_m0)
         lib.cuda_free(d_g0)
-
-        # 4. Merged-index gradient
-        lib.launch_gradient_merged(
-            scratch["P_out"],
-            scratch["pap_real"], scratch["pap_imag"],
-            scratch["pam_real"], scratch["pam_imag"],
-            scratch["gp_real"], scratch["gp_imag"],
-            scratch["gm_real"], scratch["gm_imag"],
-            scratch["poq_real"], scratch["poq_imag"],
-            scratch["bw_p_real"], scratch["bw_p_imag"],
-            scratch["common_amp_factor_real"], scratch["common_amp_factor_imag"],
-            scratch["ap_real"], scratch["ap_imag"],
-            scratch["am_real"], scratch["am_imag"],
-            scratch["dQ_dP"],
-            scratch["bw_dom_real"], scratch["bw_dom_imag"],
-            scratch["g_interp_real"], scratch["g_interp_imag"],
-            scratch["g_bw_real"], scratch["g_bw_imag"],
-            gpu.d_frac, gpu.d_time,
-            self.d_m0_index, self.d_g0_index,
-            self.d_bw_order,
-            self.d_matrix_gamma,
-            d_m0, ffi.NULL,  # m0 and g0 — g0 is not used in merged gradient
-            d_ck_real, d_ck_imag,
-            Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
-            nw, self.n_res, nu, nt, ng, 48,
-            scratch["grad_ck_real_partial"], scratch["grad_ck_imag_partial"],
-            scratch["grad_m0_partial"],
-            scratch["grad_g0_partial"],
-            scratch["grad_Gamma_partial"],
-            scratch["grad_DeltaGamma_partial"],
-            scratch["grad_DeltaM_partial"],
-            scratch["grad_Ap_partial"],
-            scratch["grad_poq_rho_partial"],
-            scratch["grad_pop_phi_partial"],
-            n)
-
-        # 5. Download results
-        def _download(ptr, shape, dtype):
-            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-            buf = ffi.new(f"char[{nbytes}]")
-            lib.cuda_memcpy_to_host(buf, ptr, nbytes)
-            return np.frombuffer(ffi.buffer(buf), dtype=dtype).reshape(shape)
-
-        Q_val = float(np.sum(_download(scratch["Q_out"], (n,), np.float64)))
-        P_arr = _download(scratch["P_out"], (n,), np.float64)
-
+        
+        # Download results
+        Q_val = float(np.sum(_download_arr(lib, scratch.Q_out, (n,), np.float64)))
+        P_arr = _download_arr(lib, scratch.P_out, (n,), np.float64)
+        
         # Accumulate gradients
-        grad_ck_real = _download(scratch["grad_ck_real_partial"], (n, nw), np.float64).sum(axis=0)
-        grad_ck_imag = _download(scratch["grad_ck_imag_partial"], (n, nw), np.float64).sum(axis=0)
-        grad_m0 = _download(scratch["grad_m0_partial"], (n, nu), np.float64).sum(axis=0)
-        grad_g0 = _download(scratch["grad_g0_partial"], (n, ng), np.float64).sum(axis=0)
-
+        grad_ck_real = _download_arr(lib, scratch.grad_ck_real_partial, (n, nw), np.float64).sum(axis=0)
+        grad_ck_imag = _download_arr(lib, scratch.grad_ck_imag_partial, (n, nw), np.float64).sum(axis=0)
+        grad_m0 = _download_arr(lib, scratch.grad_m0_partial, (n, nu), np.float64).sum(axis=0)
+        grad_g0 = _download_arr(lib, scratch.grad_g0_partial, (n, ng), np.float64).sum(axis=0)
+        
         # Scatter m0 gradient by m0_index
         m0_scatter = np.zeros((nu, self.n_m0_unique), dtype=np.float64)
         for i, m_idx in enumerate(self._m0_index):
             m0_scatter[i, m_idx] = 1.0
         grad_m0 = grad_m0 @ m0_scatter
-
+        
         # Scatter g0 gradient by g0_index
         g0_scatter = np.zeros((ng, self.n_g0_unique), dtype=np.float64)
         for i, g_idx in enumerate(self._g0_index):
             g0_scatter[i, g_idx] = 1.0
         grad_g0 = grad_g0 @ g0_scatter
-
+        
         # Scalar grads
-        g_Gamma = float(_download(scratch["grad_Gamma_partial"], (n,), np.float64).sum())
-        g_DGamma = float(_download(scratch["grad_DeltaGamma_partial"], (n,), np.float64).sum())
-        g_DM = float(_download(scratch["grad_DeltaM_partial"], (n,), np.float64).sum())
-        g_Ap = float(_download(scratch["grad_Ap_partial"], (n,), np.float64).sum())
-        g_poq_rho = float(_download(scratch["grad_poq_rho_partial"], (n,), np.float64).sum())
-        g_pop_phi = float(_download(scratch["grad_pop_phi_partial"], (n,), np.float64).sum())
-
+        g_Gamma = float(_download_arr(lib, scratch.grad_Gamma_partial, (n,), np.float64).sum())
+        g_DGamma = float(_download_arr(lib, scratch.grad_DeltaGamma_partial, (n,), np.float64).sum())
+        g_DM = float(_download_arr(lib, scratch.grad_DeltaM_partial, (n,), np.float64).sum())
+        g_Ap = float(_download_arr(lib, scratch.grad_Ap_partial, (n,), np.float64).sum())
+        g_poq_rho = float(_download_arr(lib, scratch.grad_poq_rho_partial, (n,), np.float64).sum())
+        g_pop_phi = float(_download_arr(lib, scratch.grad_pop_phi_partial, (n,), np.float64).sum())
+        
         grads = {
             "ck": grad_ck_real.astype(np.complex128) + 1j * grad_ck_imag.astype(np.complex128),
             "m0": grad_m0,
             "g0": grad_g0,
             "scalar": np.array([g_Gamma, g_DGamma, g_DM, g_Ap, g_poq_rho, g_pop_phi]),
         }
-
+        
         # Handle norm case properly
         if norm is not None:
             Q_val = Q_val  # already NLL
         else:
             # Q = sum(P * weight) for norm computation
-            w = data_handle.d_weight
-            w_host = _download(w, (n,), np.float64)
+            w_host = _download_arr(lib, dh._weight_ptr, (n,), np.float64)
             Q_val = float(np.sum(w_host * P_arr))
-
+        
         return Q_val, grads, P_arr
+    
+    def free(self):
+        """Free all GPU memory."""
+        # Free per-handle data
+        for h in self._handles:
+            h.free()
+        self._handles.clear()
+        
+        # Free constant/index arrays
+        ptrs = [
+            self.d_bw_m0_index, self.d_bw_mass_index, self.d_bw_order,
+            self.d_m0_index, self.d_bw_pos_gamma_idx, self.d_bw_pos_gamma_off,
+            self.d_fl_type, self.d_fl_q_index, self.d_fl_order,
+            self.d_angle_index, self.d_g0_index, self.d_g0_mass_index,
+            self.d_matrix_gamma, self.d_matrix_angle_real, self.d_matrix_angle_imag,
+            self.d_gamma_table_real, self.d_gamma_table_imag,
+            self.d_fl_table, self.d_angle_k, self.d_angle_b,
+        ]
+        for p in ptrs:
+            if p is not None:
+                self.lib.cuda_free(p)
