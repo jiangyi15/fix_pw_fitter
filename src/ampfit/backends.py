@@ -301,13 +301,13 @@ class ONNXBackend(ComputeBackend):
             elif name in self._SCALAR_NAMES:
                 scalar = params.get("scalar", np.zeros(6, dtype=np.float32))
                 idx = self._SCALAR_NAMES.index(name)
-                feed[name] = np.asarray(scalar[idx], dtype=np.float32)
+                feed[name] = np.asarray([scalar[idx]], dtype=np.float32)
             elif name in params:
                 feed[name] = np.asarray(params[name], dtype=np.float32)
             elif name in data_slice:
                 feed[name] = np.asarray(data_slice[name], dtype=np.float32)
             elif name == "norm":
-                feed[name] = np.array(norm if norm is not None else 1.0,
+                feed[name] = np.array([norm if norm is not None else 1.0],
                                       dtype=np.float32)
         return feed
 

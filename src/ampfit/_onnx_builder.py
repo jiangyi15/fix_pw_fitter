@@ -113,13 +113,15 @@ class PWAONNXBuilder:
 
     def _scalar(self, value, dtype=TensorProto.FLOAT):
         name = self._name(f"c{value}")
-        # Use 1-D shape [1] instead of 0-D for ATC/CANN compatibility.
-        # ATC internally converts Mul(scalar, tensor) to unsupported Muls op.
         if dtype == TensorProto.FLOAT:
             self._embed(name, np.array([value], dtype=np.float32))
         else:
             self._embed(name, np.array([value], dtype=np.int64))
-        return name
+        # Wrap in Identity to prevent ATC from detecting this as a scalar
+        # constant in Mul ops (which triggers unsupported Muls conversion).
+        id_name = self._name("scid")
+        self._nodes.append(helper.make_node("Identity", [name], [id_name]))
+        return id_name
 
     # ── complex arithmetic on (r, i) pairs ──────────────────────
 
@@ -294,13 +296,13 @@ class PWAONNXBuilder:
         weight = self._input("weight", [N])
         if not norm_model:
             bkg = self._input("bkg", [N])
-            norm = self._input("norm", [])
-        Gamma = self._input("Gamma", [])
-        Delta_Gamma = self._input("Delta_Gamma", [])
-        Delta_m = self._input("Delta_m", [])
-        A_prod = self._input("A_prod", [])
-        poq_rho = self._input("poq_rho", [])
-        pop_phi = self._input("pop_phi", [])
+            norm = self._input("norm", [1])
+        Gamma = self._input("Gamma", [1])
+        Delta_Gamma = self._input("Delta_Gamma", [1])
+        Delta_m = self._input("Delta_m", [1])
+        A_prod = self._input("A_prod", [1])
+        poq_rho = self._input("poq_rho", [1])
+        pop_phi = self._input("pop_phi", [1])
 
         # ──── 1. Gamma interpolation → g_bw ────
         # g0_all = g0[g0_index]
