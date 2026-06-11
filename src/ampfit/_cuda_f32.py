@@ -936,14 +936,15 @@ class CUDAKernel32:
 
         n_m0_params = len(np.unique(c["m0_index"]))
         n_g0_params = len(np.unique(c["g0_index"]))
-        grad_m0 = np.zeros(n_m0_params, dtype=np.float32)
-        grad_g0 = np.zeros(n_g0_params, dtype=np.float32)
+        # Use float64 to avoid overflow in scatter accumulation
+        grad_m0 = np.zeros(n_m0_params, dtype=np.float64)
+        grad_g0 = np.zeros(n_g0_params, dtype=np.float64)
 
         for bw_idx in range(gc.n_unique_bw):
-            grad_m0[c["m0_index"][bw_idx]] += grad_m0_partial[bw_idx]
+            grad_m0[c["m0_index"][bw_idx]] += float(grad_m0_partial[bw_idx])
 
         for gamma_idx in range(gc.n_gamma_rows):
-            grad_g0[c["g0_index"][gamma_idx]] += grad_g0_partial[gamma_idx]
+            grad_g0[c["g0_index"][gamma_idx]] += float(grad_g0_partial[gamma_idx])
 
         grad_Gamma = np.sum(dh.grad_Gamma_partial.get())
         grad_DeltaGamma = np.sum(dh.grad_DeltaGamma_partial.get())

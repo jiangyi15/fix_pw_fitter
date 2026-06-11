@@ -104,7 +104,11 @@ class CUDABackend(ComputeBackend):
 
     def prepare_phsp_batched(self, phsp_np, n_events):
         """Set up batched phsp computation for large datasets."""
-        from ampfit._cuda import GPUDataBuffer, GPUDataHolder
+        is_f32 = self._dtype == np.float32
+        if is_f32:
+            from ampfit._cuda_f32 import GPUDataBuffer32 as GPUDataBuffer, GPUDataHolder32 as GPUDataHolder
+        else:
+            from ampfit._cuda import GPUDataBuffer, GPUDataHolder
         gc = self.kernel.gpu_config
         lib = self.kernel.lib
 

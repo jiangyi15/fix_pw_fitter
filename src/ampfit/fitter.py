@@ -427,6 +427,10 @@ class Fitter:
         bkg = data.get("bkg", 0.0)
         if np.isscalar(bkg):
             bkg = np.full_like(weight, bkg)
+        # Use float64 to avoid overflow with f32 backends
+        P = np.asarray(P, dtype=np.float64)
+        weight = np.asarray(weight, dtype=np.float64)
+        bkg = np.asarray(bkg, dtype=np.float64)
         denom = norm * (P + bkg * norm)
         return np.sum(weight * P / denom)
 
