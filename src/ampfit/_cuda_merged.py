@@ -106,12 +106,17 @@ void launch_gradient_merged(
     double* grad_pop_phi_partial,
     int n_events);
 
-/* GPU-side scatter: copy g_bw from (N, n_unique_bw) to (N, n_total_positions) via bw_order */
-void launch_scatter_g_bw(
-    const double* src_real, const double* src_imag,
-    const int* bw_order,
-    int n_events, int n_unique_bw, int n_total_positions,
-    double* dst_real, double* dst_imag);
+/* Scatter-indexed g_bw: interpolates gamma + scatters to (N, n_total_positions) */
+void launch_compute_g_bw_scatter(
+    const double* mass, const double* g0,
+    const int* g0_index, const int* g0_mass_index,
+    const double* gamma_table_real, const double* gamma_table_imag,
+    double gamma_min, double gamma_delta,
+    int n_gamma_rows, int n_total_positions, int n_mass, int gamma_table_bins,
+    const int* bw_pos_gamma_idx, const int* bw_pos_gamma_off,
+    double* g_interp_real, double* g_interp_imag,
+    double* g_bw_real, double* g_bw_imag,
+    int n_events);
 """
 
 ffi.cdef(CDEF)
@@ -193,11 +198,9 @@ class GPUDataHolder:
             # g_bw intermediates (unique positions)
             "g_interp_real": _alloc((n_events, ng), np.float64),
             "g_interp_imag": _alloc((n_events, ng), np.float64),
-            "g_bw_real": _alloc((n_events, nu), np.float64),
-            "g_bw_imag": _alloc((n_events, nu), np.float64),
-            # g_bw scattered to all positions
-            "g_bw_scat_real": _alloc((n_events, nt), np.float64),
-            "g_bw_scat_imag": _alloc((n_events, nt), np.float64),
+            "g_bw_real": _alloc((n_events, nt), np.float64),   # per-position layout
+            "g_bw_imag": _alloc((n_events, nt), np.float64),
+
             # Forward outputs
             "Q_out": _alloc((n_events,), np.float64),
             "P_out": _alloc((n_events,), np.float64),
@@ -276,12 +279,26 @@ class CUDAMergedKernel:
         self.scalar_n = 6
 
         # Pre-compute merged indices (CPU)
+        bo = config["bw_order"]
         self._bw_m0_index = np.ascontiguousarray(
-            config["m0_index"][config["bw_order"]].astype(np.int32))
+            config["m0_index"][bo].astype(np.int32))
         self._bw_mass_index = np.ascontiguousarray(
-            config["mass_index"][config["bw_order"]].astype(np.int32))
-        self._bw_order = np.ascontiguousarray(config["bw_order"].astype(np.int32))
+            config["mass_index"][bo].astype(np.int32))
+        self._bw_order = np.ascontiguousarray(bo.astype(np.int32))
         self._m0_index = np.ascontiguousarray(config["m0_index"].astype(np.int32))
+
+        # Pre-compute per-position gamma scatter indices
+        mg = config["matrix_gamma"]  # (288, 216)
+        bw_pos_gamma_idx = []
+        bw_pos_gamma_off = [0]
+        for pos in range(len(bo)):
+            rows = np.where(mg[:, bo[pos]] != 0)[0]
+            bw_pos_gamma_idx.extend(rows.tolist())
+            bw_pos_gamma_off.append(len(bw_pos_gamma_idx))
+        self._bw_pos_gamma_idx = np.ascontiguousarray(
+            np.array(bw_pos_gamma_idx, dtype=np.int32))
+        self._bw_pos_gamma_off = np.ascontiguousarray(
+            np.array(bw_pos_gamma_off, dtype=np.int32))
 
         # Upload constant index arrays to GPU
         def _upload(arr):
@@ -295,6 +312,8 @@ class CUDAMergedKernel:
         self.d_bw_mass_index = _upload(self._bw_mass_index)
         self.d_bw_order = _upload(self._bw_order)
         self.d_m0_index = _upload(self._m0_index)
+        self.d_bw_pos_gamma_idx = _upload(self._bw_pos_gamma_idx)
+        self.d_bw_pos_gamma_off = _upload(self._bw_pos_gamma_off)
 
         # Upload constant physical arrays
         self._matrix_gamma = np.ascontiguousarray(config["matrix_gamma"].astype(np.float64))
@@ -401,25 +420,20 @@ class CUDAMergedKernel:
 
         d_g0 = _upload(np.asarray(params["g0"]))
 
-        # 1. Compute g_bw at unique positions (same as original)
-        lib.launch_compute_g_bw(
+        # 1. Compute g_bw at per-position layout via scatter-indexed kernel
+        #    (interpolates gamma + scatters directly to 896 positions)
+        lib.launch_compute_g_bw_scatter(
             gpu.d_mass, d_g0,
             self.d_g0_index, self.d_g0_mass_index,
-            self.d_matrix_gamma,
             self.d_gamma_table_real, self.d_gamma_table_imag,
             self.gamma_min, self.gamma_delta,
-            ng, nu, 48, self._n_bins_gamma,
+            ng, nt, 48, self._n_bins_gamma,
+            self.d_bw_pos_gamma_idx, self.d_bw_pos_gamma_off,
             scratch["g_interp_real"], scratch["g_interp_imag"],
             scratch["g_bw_real"], scratch["g_bw_imag"],
             n)
 
-        # 2. Scatter g_bw to all positions
-        lib.launch_scatter_g_bw(
-            scratch["g_bw_real"], scratch["g_bw_imag"],
-            self.d_bw_order, n, nu, nt,
-            scratch["g_bw_scat_real"], scratch["g_bw_scat_imag"])
-
-        # 3. Merged-index main forward
+        # 2. Merged-index main forward
         use_norm = 0 if norm is None else 1
         norm_val = norm if norm is not None else 1.0
 
@@ -442,7 +456,7 @@ class CUDAMergedKernel:
             self.d_fl_order, self.d_angle_index,
             self.d_angle_k, self.d_angle_b,
             self.d_matrix_angle_real, self.d_matrix_angle_imag,
-            scratch["g_bw_scat_real"], scratch["g_bw_scat_imag"],
+            scratch["g_bw_real"], scratch["g_bw_imag"],
             self.d_fl_table,
             self.fl_min, self.fl_delta,
             nw, self.n_res, self.n_decay, nt,

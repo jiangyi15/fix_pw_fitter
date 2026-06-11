@@ -404,9 +404,9 @@ __global__ void compute_main_merged_kernel(
     const double* __restrict__ time,
     const double* __restrict__ weight,
     const double* __restrict__ bkg,
-    const int* __restrict__ bw_m0_index,      // replaces m0_index + bw_order; (n_total_positions,)
+    const int* __restrict__ bw_m0_index,      // merged m0 index per position
     const int* __restrict__ fl_type,
-    const int* __restrict__ bw_mass_index,    // replaces mass_index + bw_order; (n_total_positions,)
+    const int* __restrict__ bw_mass_index,    // merged mass index per position
     const int* __restrict__ fl_q_index,
     const int* __restrict__ fl_order,
     const int* __restrict__ angle_index,
@@ -414,7 +414,7 @@ __global__ void compute_main_merged_kernel(
     const double* __restrict__ angle_b,
     const double* __restrict__ matrix_angle_real,
     const double* __restrict__ matrix_angle_imag,
-    const double* __restrict__ g_bw_real,     // pre-scattered (N, n_total_positions)
+    const double* __restrict__ g_bw_real,     // (N, n_total_positions) — per-position g_bw
     const double* __restrict__ g_bw_imag,
     const double* __restrict__ fl_table,
     double fl_min, double fl_delta,
@@ -485,7 +485,7 @@ __global__ void compute_main_merged_kernel(
             double mass_sq = mass_val * mass_val;
 
             complex g_bw_val(
-                g_bw_real[event_idx * n_total_positions + pos],  // pre-scattered
+                g_bw_real[event_idx * n_total_positions + pos],   // per-position (scatter-indexed)
                 g_bw_imag[event_idx * n_total_positions + pos]
             );
 
@@ -1006,10 +1006,10 @@ __global__ void gradient_merged_kernel(
             atomicAdd(&s_dQ_dbw_dom_real[bw_idx], dQ_dbw_dom_contrib.real());
             atomicAdd(&s_dQ_dbw_dom_imag[bw_idx], dQ_dbw_dom_contrib.imag());
 
-            // m0 gradient (atomic: multiple wave/res pairs can map to same bw_idx)
+            // m0 gradient — g_bw is per-position (N, n_total_positions)
             double m0_val = m0[m0_index[bw_idx]];
-            complex g_bw_val(g_bw_real[event_idx * n_unique_bw + bw_idx],
-                             g_bw_imag[event_idx * n_unique_bw + bw_idx]);
+            complex g_bw_val(g_bw_real[event_idx * n_total_positions + pos],
+                             g_bw_imag[event_idx * n_total_positions + pos]);
             complex dbw_dom_dm0 = complex(2.0 * m0_val, 0.0) - complex(0.0, 1.0) * g_bw_val;
             atomicAdd(&grad_m0_partial[event_idx * n_unique_bw + bw_idx],
                 2.0 * (dQ_dbw_dom_contrib * dbw_dom_dm0).real());
@@ -1202,6 +1202,89 @@ void launch_compute_g_bw(
         gamma_table_real, gamma_table_imag,
         gamma_min, gamma_delta,
         n_gamma_rows, n_unique_bw, n_mass, gamma_table_bins,
+        g_interp_real, g_interp_imag,
+        g_bw_real, g_bw_imag, n_events);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// Scatter-indexed g_bw: computes g from gamma interpolation, then scatters
+// directly to (N, n_total_positions) via bw_pos_gamma_idx/off.
+// Replaces compute_g_bw_kernel + scatter_g_bw_kernel, eliminating n_unique_bw.
+__global__ void compute_g_bw_scatter_kernel(
+    const double* __restrict__ mass,
+    const double* __restrict__ g0,
+    const int* __restrict__ g0_index,
+    const int* __restrict__ g0_mass_index,
+    const double* __restrict__ gamma_table_real,
+    const double* __restrict__ gamma_table_imag,
+    double gamma_min, double gamma_delta,
+    int n_gamma_rows, int n_total_positions, int n_mass, int gamma_table_bins,
+    const int* __restrict__ bw_pos_gamma_idx,
+    const int* __restrict__ bw_pos_gamma_off,
+    double* __restrict__ g_interp_real,
+    double* __restrict__ g_interp_imag,
+    double* __restrict__ g_bw_real,
+    double* __restrict__ g_bw_imag,
+    int n_events) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+
+    __shared__ double s_g_real[288];
+    __shared__ double s_g_imag[288];
+
+    // Phase 1: Compute g for all gamma rows (same as original)
+    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
+        int g0_idx = g0_index[gamma_idx];
+        double g0_val = g0[g0_idx];
+        double mass_val = mass[event_idx * n_mass + g0_mass_index[gamma_idx]];
+        complex g_interp = interp_complex_device(
+            gamma_table_real, gamma_table_imag,
+            g0_idx, mass_val,
+            gamma_min, gamma_delta, gamma_table_bins);
+        g_interp_real[event_idx * n_gamma_rows + gamma_idx] = g_interp.real();
+        g_interp_imag[event_idx * n_gamma_rows + gamma_idx] = g_interp.imag();
+        complex g_val = g0_val * g_interp;
+        s_g_real[gamma_idx] = g_val.real();
+        s_g_imag[gamma_idx] = g_val.imag();
+    }
+    __syncthreads();
+
+    // Phase 2: Scatter g to per-position g_bw via bw_pos_gamma_idx/off
+    int pos_per_thread = (n_total_positions + block_sz - 1) / block_sz;
+    int pos_start = tid * pos_per_thread;
+    int pos_end = min(pos_start + pos_per_thread, n_total_positions);
+    for (int pos = pos_start; pos < pos_end; pos++) {
+        double sum_r = 0.0, sum_i = 0.0;
+        int off = bw_pos_gamma_off[pos];
+        int cnt = bw_pos_gamma_off[pos + 1] - off;
+        for (int k = 0; k < cnt; k++) {
+            int g_idx = bw_pos_gamma_idx[off + k];
+            sum_r += s_g_real[g_idx];
+            sum_i += s_g_imag[g_idx];
+        }
+        g_bw_real[event_idx * n_total_positions + pos] = sum_r;
+        g_bw_imag[event_idx * n_total_positions + pos] = sum_i;
+    }
+}
+
+void launch_compute_g_bw_scatter(
+    const double* mass, const double* g0,
+    const int* g0_index, const int* g0_mass_index,
+    const double* gamma_table_real, const double* gamma_table_imag,
+    double gamma_min, double gamma_delta,
+    int n_gamma_rows, int n_total_positions, int n_mass, int gamma_table_bins,
+    const int* bw_pos_gamma_idx, const int* bw_pos_gamma_off,
+    double* g_interp_real, double* g_interp_imag,
+    double* g_bw_real, double* g_bw_imag,
+    int n_events) {
+    int block_size = 256;
+    compute_g_bw_scatter_kernel<<<n_events, block_size>>>(
+        mass, g0, g0_index, g0_mass_index,
+        gamma_table_real, gamma_table_imag,
+        gamma_min, gamma_delta,
+        n_gamma_rows, n_total_positions, n_mass, gamma_table_bins,
+        bw_pos_gamma_idx, bw_pos_gamma_off,
         g_interp_real, g_interp_imag,
         g_bw_real, g_bw_imag, n_events);
     CUDA_CHECK(cudaGetLastError());
