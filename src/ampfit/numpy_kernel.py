@@ -152,7 +152,8 @@ class NumpyKernelCorrect:
             dQ_dP = weight
         else:
             Q = -np.sum(weight * np.log(P / norm + bkg))
-            dQ_dP = -weight / (P / norm + bkg)
+            # dQ/dP = -w / (P/norm + bkg) * (1/norm) = -w / (P + bkg*norm)
+            dQ_dP = -weight / (P + bkg * norm)
         
         # ==================== BACKWARD PASS ====================
         # Use Wirtinger calculus consistently

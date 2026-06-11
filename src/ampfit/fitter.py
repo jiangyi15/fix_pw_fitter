@@ -35,12 +35,13 @@ class Fitter:
         Args:
             config_file: path to YAML config.
             backend: a :class:`ComputeBackend` instance, or a string shortcut.
-                     Strings: ``"cuda"`` (default), ``"cuda32"``, ``"numpy"``,
-                     ``"onnx"`` (expects ``pwa_forward.onnx``).
+                     Strings: ``"cuda"`` (default f64), ``"cuda32"`` (f32),
+                     ``"cuda64"``, ``"numpy"``, ``"onnx"``/``"onnx_cpu"``,
+                     ``"onnx_cuda"``.
         """
         from ampfit.config_loader import Config
         from ampfit.param_constraint import ConstraintManager
-        from ampfit.backends import CUDABackend, NumpyBackend
+        from ampfit.backends import CUDABackend, NumpyBackend, ONNXBackend
 
         self.config = Config(config_file)
         self.kernel_config = self.config.build_all_index()
@@ -49,13 +50,22 @@ class Fitter:
         if backend is None or backend == "cuda":
             backend = CUDABackend(self.kernel_config, dtype="float64")
         elif isinstance(backend, str):
-            if backend == "cuda32":
+            if backend == "cuda64":
+                backend = CUDABackend(self.kernel_config, dtype="float64")
+            elif backend == "cuda32":
                 backend = CUDABackend(self.kernel_config, dtype="float32")
             elif backend == "numpy":
                 backend = NumpyBackend(self.kernel_config)
-            elif backend == "onnx":
-                from ampfit.backends import ONNXBackend
-                backend = ONNXBackend("pwa_forward.onnx")
+            elif backend in ("onnx", "onnx_cpu"):
+                backend = ONNXBackend(
+                    kernel_config=self.kernel_config,
+                    providers=["CPUExecutionProvider"],
+                )
+            elif backend == "onnx_cuda":
+                backend = ONNXBackend(
+                    kernel_config=self.kernel_config,
+                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                )
             else:
                 raise ValueError(f"Unknown backend: {backend}")
         # 'backend' is now a ComputeBackend instance

@@ -11,6 +11,7 @@ Usage:
     fitter = Fitter("config.yml", backend=CUDABackend("float64"))
 """
 import numpy as np
+import onnx
 
 
 class DataHandle:
@@ -177,66 +178,225 @@ class CUDABackend(ComputeBackend):
 # ── ONNX Runtime backend ───────────────────────────────────────
 
 class ONNXBackend(ComputeBackend):
-    """ONNX Runtime backend (float32, CPU/GPU via onnxruntime)."""
+    """ONNX Runtime backend (float32, CPU/GPU via onnxruntime).
 
-    def __init__(self, model_path="pwa_forward.onnx", providers=None):
+    Uses **two** ONNX models under the hood:
+
+    * ``pwa_forward_norm.onnx`` — the *norm model* — computes
+      ``Q = sum(P * weight)`` with correct norm gradients.  Used when the
+      caller passes ``norm=None``.
+    * ``pwa_forward.onnx`` — the *forward model* — computes the full negative
+      log-likelihood ``Q = -Σ w·log(P/norm + bkg)`` with NLL gradients.  Used
+      when the caller passes a numeric ``norm`` value.
+
+    Handles arbitrarily large datasets by splitting into fixed-size batches
+    matching the ONNX model's static batch dimension (8192 by default).  The
+    final (partial) batch is padded with zeros and masked via ``weight=0``,
+    which correctly contributes nothing to the loss or gradients.
+    """
+
+    _SCALAR_NAMES = ["Gamma", "Delta_Gamma", "Delta_m",
+                     "A_prod", "poq_rho", "pop_phi"]
+
+    _GRAD_MAP = {
+        "grad_ck_real": "ck",
+        "grad_ck_imag": "ck",
+        "grad_m0": "m0",
+        "grad_g0": "g0",
+        "grad_scalar": "scalar",
+    }
+
+    def __init__(self, kernel_config=None, model_path=None,
+                 norm_model_path="pwa_forward_norm.onnx",
+                 batch_size=8192, providers=None):
+        """
+        Parameters
+        ----------
+        kernel_config : dict, optional
+            Kernel configuration dict (from Config.build_all_index()).
+            If provided, builds both models in memory instead of loading
+            from file.
+        model_path : str, optional
+            Path to the forward ONNX model (NLL + NLL gradients).
+            Required when kernel_config is not provided.
+        norm_model_path : str
+            Path to the norm ONNX model (sum(P*weight) + norm gradients).
+        batch_size : int
+            Batch size for in-memory model building (default 8192).
+        providers : list of str, optional
+            ONNX Runtime execution providers (default: CPU only).
+        """
         import onnxruntime as ort
         if providers is None:
             providers = ['CPUExecutionProvider']
-        self.sess = ort.InferenceSession(model_path, providers=providers)
+
+        if kernel_config is not None:
+            # Build both models in memory from kernel_config
+            from ampfit._onnx_builder import PWAONNXBuilder
+            builder = PWAONNXBuilder(kernel_config)
+
+            forward_model = builder.build(batch_size=batch_size,
+                                          norm_model=False)
+            norm_model = builder.build(batch_size=batch_size,
+                                       norm_model=True)
+
+            self.sess = ort.InferenceSession(
+                forward_model.SerializeToString(), providers=providers)
+            self.sess_norm = ort.InferenceSession(
+                norm_model.SerializeToString(), providers=providers)
+        else:
+            # Backward compat: load from file paths
+            if model_path is None:
+                raise ValueError(
+                    "model_path is required when kernel_config is not provided"
+                )
+            self.sess = ort.InferenceSession(model_path, providers=providers)
+            self.sess_norm = ort.InferenceSession(norm_model_path,
+                                                  providers=providers)
+
         self._input_names = [i.name for i in self.sess.get_inputs()]
         self._output_names = [o.name for o in self.sess.get_outputs()]
+        self._input_names_norm = [i.name for i in self.sess_norm.get_inputs()]
+
+        # Infer batch size from either model (they should agree)
+        self._onnx_batch = batch_size if kernel_config is not None else 0
+        for inp in self.sess.get_inputs():
+            if inp.name == "mass":
+                self._onnx_batch = inp.shape[0]
+                break
+        if self._onnx_batch is None or self._onnx_batch == 0:
+            raise RuntimeError(
+                "Could not infer ONNX batch size from model inputs"
+            )
 
     def load_data(self, data_np):
         return data_np
 
-    def compute(self, params, data_handle, norm=None):
+    # ── helpers ─────────────────────────────────────────────────
+
+    def _build_feed(self, input_names, data_slice, params, norm):
+        """Build an ONNX feed dict for one batch.
+
+        Parameters
+        ----------
+        input_names : list of str
+            Expected input names (from the session being used).
+        data_slice : dict
+            Sliced event data for this batch.
+        params : dict
+            Fit parameters (ck, m0, g0, scalar).
+        norm : float or None
+            Normalisation value (only passed when the model expects it).
+        """
         feed = {}
-        for name in self._input_names:
-            if name in params:
-                v = params[name]
-                feed[name] = np.asarray(v, dtype=np.float32)
-            elif name in data_handle:
-                v = data_handle[name]
-                feed[name] = np.asarray(v, dtype=np.float32)
+        for name in input_names:
+            if name == "ck_real":
+                feed[name] = np.asarray(np.real(params.get("ck", 0)),
+                                        dtype=np.float32)
+            elif name == "ck_imag":
+                feed[name] = np.asarray(np.imag(params.get("ck", 0)),
+                                        dtype=np.float32)
+            elif name in self._SCALAR_NAMES:
+                scalar = params.get("scalar", np.zeros(6, dtype=np.float32))
+                idx = self._SCALAR_NAMES.index(name)
+                feed[name] = np.asarray(scalar[idx], dtype=np.float32)
+            elif name in params:
+                feed[name] = np.asarray(params[name], dtype=np.float32)
+            elif name in data_slice:
+                feed[name] = np.asarray(data_slice[name], dtype=np.float32)
             elif name == "norm":
                 feed[name] = np.array(norm if norm is not None else 1.0,
-                                       dtype=np.float32)
-        outs = self.sess.run(self._output_names, feed)
-        result = dict(zip(self._output_names, outs))
-        P = result.get("P", np.zeros(0))
+                                      dtype=np.float32)
+        return feed
 
-        # When norm is None, caller wants sum(P*weight) + its gradients.
-        # The ONNX model computes NLL gradients, not norm gradients.
-        # Use the model's P output + backprop through Q to get norm grads:
-        #   norm = sum(P * weight)
-        #   d(norm)/d(param) = sum(weight * dP/dparam)
-        # Since dQ_NLL/dP = -weight/(P/norm+bkg)/norm, and we want
-        # d(norm)/d(param) = -norm * dQ_NLL/d(param) when bkg=0, norm=1, P<1
-        # (not exact, but the Fitter adjusts via dNLL_dnorm)
+    def _run_batch(self, sess, output_names, feed):
+        outs = sess.run(output_names, feed)
+        return dict(zip(output_names, outs))
+
+    def _extract_grads(self, result):
+        grads = {}
+        if "grad_ck_real" in result and "grad_ck_imag" in result:
+            grads["ck"] = (result["grad_ck_real"].astype(np.complex64)
+                           + 1j * result["grad_ck_imag"].astype(np.complex64))
+        for onnx_name, key in self._GRAD_MAP.items():
+            if onnx_name in result and key != "ck":
+                grads[key] = result[onnx_name]
+        return grads
+
+    @staticmethod
+    def _is_event_array(key, array, n_total):
+        return (isinstance(array, np.ndarray)
+                and array.ndim >= 1
+                and array.shape[0] == n_total)
+
+    # ── main compute ────────────────────────────────────────────
+
+    def compute(self, params, data_handle, norm=None):
+        n_total = data_handle["mass"].shape[0]
+        bs = self._onnx_batch
+        n_batches = (n_total + bs - 1) // bs
+
+        # Select which model session to use
         if norm is None:
-            w = data_handle.get("weight", np.ones_like(P))
-            Q = float(np.sum(w * P))
-            # Use NLL gradients as a proxy — Fitter accounts for the diff
-            grads = {"ck": np.zeros(len(params.get("ck", [])), dtype=complex)}
-            for gname in ["grad_ck_real", "grad_ck_imag"]:
-                if gname in result:
-                    grads[gname] = result[gname]
-            if "grad_ck_real" in grads:
-                grads["ck"] = (grads["grad_ck_real"].astype(np.complex64)
-                               + 1j * grads["grad_ck_imag"].astype(np.complex64))
-            # Add other grad keys as zeros (m0, g0, scalar)
-            for name in ["grad_m0", "grad_g0", "grad_scalar"]:
-                if name in result:
-                    grads[name] = result[name]
+            # Norm model: Q = sum(P*weight), proper norm gradients
+            sess = self.sess_norm
+            input_names = self._input_names_norm
+            output_names = self._output_names  # same outputs
         else:
-            Q = result.get("Q", 0.0)
-            grads = {}
-            for gname in ["grad_ck_real", "grad_ck_imag", "grad_m0",
-                           "grad_g0", "grad_scalar"]:
-                if gname in result:
-                    grads[gname] = result[gname]
-            if "grad_ck_real" in grads and "grad_ck_imag" in grads:
-                grads["ck"] = (grads["grad_ck_real"].astype(np.complex64)
-                               + 1j * grads["grad_ck_imag"].astype(np.complex64))
-        return Q, grads, P
+            # Forward model: NLL + NLL gradients
+            sess = self.sess
+            input_names = self._input_names
+            output_names = self._output_names
+
+        total_Q = 0.0
+        total_grads = None
+        all_P = []
+
+        for i in range(n_batches):
+            start = i * bs
+            end = min(start + bs, n_total)
+            n_valid = end - start
+
+            # Slice / pad event-level arrays
+            batch_data = {}
+            for k, v in data_handle.items():
+                if self._is_event_array(k, v, n_total):
+                    if n_valid == bs:
+                        batch_data[k] = v[start:end]
+                    else:
+                        full = np.zeros((bs,) + v.shape[1:], dtype=v.dtype)
+                        full[:n_valid] = v[start:end]
+                        if k == "weight":
+                            full[n_valid:] = 0.0
+                        batch_data[k] = full
+                else:
+                    batch_data[k] = v
+
+            feed = self._build_feed(input_names, batch_data, params, norm)
+            result = self._run_batch(sess, output_names, feed)
+            P_batch = result.get("P", np.zeros(n_valid, dtype=np.float32))
+
+            if norm is None:
+                # Norm model Q = sum(P * weight)
+                w = batch_data.get("weight", np.ones(bs, dtype=np.float32))
+                total_Q += float(np.sum(w[:n_valid] * P_batch[:n_valid]))
+            else:
+                # Forward model Q = NLL (already summed by the model)
+                total_Q += float(result.get("Q", 0.0))
+
+            # Accumulate gradients
+            grads = self._extract_grads(result)
+            if total_grads is None:
+                total_grads = {k: v.copy() for k, v in grads.items()}
+            else:
+                for k in grads:
+                    total_grads[k] = total_grads[k] + grads[k]
+
+            all_P.append(P_batch[:n_valid])
+
+        if len(all_P) == 1:
+            P_all = all_P[0]
+        else:
+            P_all = np.concatenate(all_P, axis=0)
+
+        return total_Q, total_grads, P_all
