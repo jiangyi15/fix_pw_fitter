@@ -981,4 +981,192 @@ void launch_compute_all(
         data->n_events);
 }
 
+// ── Upload helpers (plain C) ──
+static void* _up_int(const int* src, int n) {
+    int* d; cudaMalloc(&d, n * sizeof(int));
+    cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
+}
+static void* _up_dbl(const double* src, int n) {
+    double* d; cudaMalloc(&d, n * sizeof(double));
+    cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice); return d;
+}
+
+// ── High-level void* API ──
+
+void* cuda_create_context(
+    const int* m0_i, int nm0, const int* g0_i, int ng0,
+    const int* g0_m, int ng0m, const int* mass_i, int nmassi,
+    const int* fl_t, int nflt_, const int* fl_q, int nflq,
+    const int* bw_o, int nbwo, const int* fl_o, int nflo,
+    const int* ang_i, int nangi,
+    const double* ak, int nak, const double* ab, int nab,
+    const double* mar, int nmar, const double* mai, int nmai,
+    const double* gtr, int ngtr, const double* gti, int ngti,
+    double gmin, double gdel, int gbins,
+    const double* mg, int nmg,
+    const double* ft, int nft, double flmin, double fldel, int fbins,
+    int nw, int nr, int nd, int nub, int ngr,
+    int nm, int nmom, int nak_, int nat
+) {
+    ComputeContext* c = (ComputeContext*)malloc(sizeof(ComputeContext));
+    c->m0_index = (int*)_up_int(m0_i, nm0);
+    c->g0_index = (int*)_up_int(g0_i, ng0);
+    c->g0_mass_index = (int*)_up_int(g0_m, ng0m);
+    c->mass_index = (int*)_up_int(mass_i, nmassi);
+    c->fl_type = (int*)_up_int(fl_t, nflt_);
+    c->fl_q_index = (int*)_up_int(fl_q, nflq);
+    c->bw_order = (int*)_up_int(bw_o, nbwo);
+    c->fl_order = (int*)_up_int(fl_o, nflo);
+    c->angle_index = (int*)_up_int(ang_i, nangi);
+    c->angle_k = (double*)_up_dbl(ak, nak);
+    c->angle_b = (double*)_up_dbl(ab, nab);
+    c->matrix_angle_real = (double*)_up_dbl(mar, nmar);
+    c->matrix_angle_imag = (double*)_up_dbl(mai, nmai);
+    c->gamma_table_real = (double*)_up_dbl(gtr, ngtr);
+    c->gamma_table_imag = (double*)_up_dbl(gti, ngti);
+    c->gamma_min = gmin; c->gamma_delta = gdel; c->gamma_table_bins = gbins;
+    c->matrix_gamma = (double*)_up_dbl(mg, nmg);
+    c->fl_table = (double*)_up_dbl(ft, nft);
+    c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
+    c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
+    c->n_unique_bw = nub; c->n_gamma_rows = ngr;
+    c->n_mass = nm; c->n_momentum = nmom;
+    c->n_angle_k = nak_; c->n_angle_total = nat;
+    return c;
+}
+
+void* cuda_load_data(void* vctx, const double* mass, const double* mom,
+    const double* ang, const double* frac, const double* time,
+    const double* wgt, const double* bkg, int ne
+) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    ComputeData* d = (ComputeData*)malloc(sizeof(ComputeData));
+    d->mass = (double*)_up_dbl(mass, ne * c->n_mass);
+    d->momentum = (double*)_up_dbl(mom, ne * c->n_momentum);
+    d->angle = (double*)_up_dbl(ang, ne * c->n_angle_total * 3);
+    d->frac = (double*)_up_dbl(frac, ne);
+    d->time = (double*)_up_dbl(time, ne);
+    d->weight = (double*)_up_dbl(wgt, ne);
+    d->bkg = (double*)_up_dbl(bkg, ne);
+    d->n_events = ne;
+    // Allocate scratch inside data handle (one-time)
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+#define S(f) cudaMalloc(&d->f, ne * sizeof(double))
+#define S2(f,n) cudaMalloc(&d->f, ne * (n) * sizeof(double))
+    S2(g_interp_real, ng); S2(g_interp_imag, ng);
+    S2(g_bw_real, nu); S2(g_bw_imag, nu);
+    S(Q_out); S(P_out);
+    S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+    S(gp_real); S(gp_imag); S(gm_real); S(gm_imag);
+    S(poq_real); S(poq_imag);
+    S2(bw_p_real, nw); S2(bw_p_imag, nw);
+    S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
+    S(ap_real); S(ap_imag); S(am_real); S(am_imag);
+    S(dQ_dP);
+    S2(bw_dom_real, nu); S2(bw_dom_imag, nu);
+    S2(grad_ck_real_partial, nw); S2(grad_ck_imag_partial, nw);
+    S2(grad_m0_partial, nu); S2(grad_g0_partial, ng);
+    S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
+    S(grad_DeltaM_partial); S(grad_Ap_partial);
+    S(grad_poq_rho_partial); S(grad_pop_phi_partial);
+#undef S
+    return d;
+}
+
+void cuda_compute(void* vctx, void* vdh,
+    const double* ck_r, const double* ck_i,
+    const double* m0, const double* g0,
+    double Gamma, double DG, double DM,
+    double Ap, double pr, double pp,
+    double norm_val, int use_norm,
+    double* Q_out, double* P_out,
+    double* gck_r, double* gck_i,
+    double* gm0_out, double* gg0_out,
+    double* gsc_out,
+    int n_wave, int n_unique_bw, int n_gamma_rows
+) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    ComputeData* d = (ComputeData*)vdh;
+    int ne = d->n_events;
+
+    // Upload per-call params
+    ComputeParams p;
+    p.ck_real = (double*)_up_dbl(ck_r, n_wave);
+    p.ck_imag = (double*)_up_dbl(ck_i, n_wave);
+    p.m0 = (double*)_up_dbl(m0, n_unique_bw);
+    p.g0 = (double*)_up_dbl(g0, n_gamma_rows);
+    p.Gamma = Gamma; p.Delta_Gamma = DG; p.Delta_m = DM;
+    p.A_prod = Ap; p.poq_rho = pr; p.pop_phi = pp;
+
+    // Run kernels
+    launch_compute_all(c, d, &p, norm_val, use_norm);
+
+    // Download results
+    cudaMemcpy(Q_out, d->Q_out, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(P_out, d->P_out, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gck_r, d->grad_ck_real_partial, ne * n_wave * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gck_i, d->grad_ck_imag_partial, ne * n_wave * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gm0_out, d->grad_m0_partial, ne * n_unique_bw * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gg0_out, d->grad_g0_partial, ne * n_gamma_rows * sizeof(double), cudaMemcpyDeviceToHost);
+
+    double buf[6];
+    cudaMemcpy(buf, d->grad_Gamma_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[0]=0; for(int i=0;i<ne;i++) gsc_out[0]+=buf[i];
+    cudaMemcpy(buf, d->grad_DeltaGamma_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[1]=0; for(int i=0;i<ne;i++) gsc_out[1]+=buf[i];
+    cudaMemcpy(buf, d->grad_DeltaM_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[2]=0; for(int i=0;i<ne;i++) gsc_out[2]+=buf[i];
+    cudaMemcpy(buf, d->grad_Ap_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[3]=0; for(int i=0;i<ne;i++) gsc_out[3]+=buf[i];
+    cudaMemcpy(buf, d->grad_poq_rho_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[4]=0; for(int i=0;i<ne;i++) gsc_out[4]+=buf[i];
+    cudaMemcpy(buf, d->grad_pop_phi_partial, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    gsc_out[5]=0; for(int i=0;i<ne;i++) gsc_out[5]+=buf[i];
+
+    // Free per-call param GPU memory
+    cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
+    cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+}
+
+void cuda_free_context(void* vctx) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    cudaFree((void*)c->m0_index); cudaFree((void*)c->g0_index);
+    cudaFree((void*)c->g0_mass_index); cudaFree((void*)c->mass_index);
+    cudaFree((void*)c->fl_type); cudaFree((void*)c->fl_q_index);
+    cudaFree((void*)c->bw_order); cudaFree((void*)c->fl_order);
+    cudaFree((void*)c->angle_index);
+    cudaFree((void*)c->angle_k); cudaFree((void*)c->angle_b);
+    cudaFree((void*)c->matrix_angle_real); cudaFree((void*)c->matrix_angle_imag);
+    cudaFree((void*)c->gamma_table_real); cudaFree((void*)c->gamma_table_imag);
+    cudaFree((void*)c->matrix_gamma); cudaFree((void*)c->fl_table);
+    free(c);
+}
+
+void cuda_free_data(void* vdh) {
+    ComputeData* d = (ComputeData*)vdh;
+    cudaFree((void*)d->mass); cudaFree((void*)d->momentum);
+    cudaFree((void*)d->angle); cudaFree((void*)d->frac);
+    cudaFree((void*)d->time); cudaFree((void*)d->weight);
+    cudaFree((void*)d->bkg);
+    cudaFree(d->g_interp_real); cudaFree(d->g_interp_imag);
+    cudaFree(d->g_bw_real); cudaFree(d->g_bw_imag);
+    cudaFree(d->Q_out); cudaFree(d->P_out);
+    cudaFree(d->pap_real); cudaFree(d->pap_imag);
+    cudaFree(d->pam_real); cudaFree(d->pam_imag);
+    cudaFree(d->gp_real); cudaFree(d->gp_imag);
+    cudaFree(d->gm_real); cudaFree(d->gm_imag);
+    cudaFree(d->poq_real); cudaFree(d->poq_imag);
+    cudaFree(d->bw_p_real); cudaFree(d->bw_p_imag);
+    cudaFree(d->common_amp_factor_real); cudaFree(d->common_amp_factor_imag);
+    cudaFree(d->ap_real); cudaFree(d->ap_imag);
+    cudaFree(d->am_real); cudaFree(d->am_imag);
+    cudaFree(d->dQ_dP); cudaFree(d->bw_dom_real); cudaFree(d->bw_dom_imag);
+    cudaFree(d->grad_ck_real_partial); cudaFree(d->grad_ck_imag_partial);
+    cudaFree(d->grad_m0_partial); cudaFree(d->grad_g0_partial);
+    cudaFree(d->grad_Gamma_partial); cudaFree(d->grad_DeltaGamma_partial);
+    cudaFree(d->grad_DeltaM_partial); cudaFree(d->grad_Ap_partial);
+    cudaFree(d->grad_poq_rho_partial); cudaFree(d->grad_pop_phi_partial);
+    free(d);
+}
+
 } // extern "C"
