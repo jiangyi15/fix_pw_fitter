@@ -39,21 +39,25 @@ for batch in [1, 3, 10, 64, 128]:
     for label, mod_name in [('f64', '_cuda'), ('f32', '_cuda_f32'), ('merged', '_cuda_merged')]:
         try:
             mod = __import__(f'ampfit.{mod_name}', fromlist=['object'])
-            cls = mod.CUDAKernel if 'f32' not in mod_name else mod.CUDAKernel32
             if 'merged' in mod_name:
                 cls = mod.CUDAMergedKernel
+            elif 'f32' in mod_name:
+                cls = mod.CUDAKernel32
+            else:
+                cls = mod.CUDAKernel
             
             k = cls(kc)
             dh = k.load_data(data)
             Q, grads, P = k.compute(params, dh, norm=None)
             k.free()
 
-            q_ok = abs(Q - Q_np) < 1e-8 * max(1.0, abs(Q_np))
-            p_ok = np.max(np.abs(P - P_np)) < 1e-6
+            is_f32 = 'f32' in label
+            q_ok = abs(Q - Q_np) < (1e-4 if is_f32 else 1e-10) * max(1.0, abs(Q_np))
+            p_ok = np.max(np.abs(P - P_np)) < (1e-5 if is_f32 else 1e-10)
             g_ok = True
             for key in ['ck', 'm0', 'g0', 'scalar']:
                 rel = np.max(np.abs(grads[key] - grads_np[key])) / (np.max(np.abs(grads_np[key])) + 1e-30)
-                if rel > 1e-5:
+                if rel > (1e-4 if is_f32 else 1e-5):
                     g_ok = False
 
             status = '✓' if (q_ok and p_ok and g_ok) else '✗'
