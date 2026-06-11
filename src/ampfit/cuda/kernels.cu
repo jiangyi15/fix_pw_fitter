@@ -687,6 +687,60 @@ __global__ void reduce_sum_complex_features_kernel(
 //=============================================================================
 extern "C" {
 
+// Structs for unified launch API (mirrors the merged kernel layout)
+typedef struct {
+    const double* mass; const double* momentum; const double* angle;
+    const double* frac; const double* time; const double* weight; const double* bkg;
+    const double* ck_real; const double* ck_imag; const double* m0; const double* g0;
+    double Gamma; double Delta_Gamma; double Delta_m;
+    double A_prod; double poq_rho; double pop_phi;
+    double norm_val; int use_norm;
+} ComputeData;
+
+typedef struct {
+    const int* m0_index; const int* g0_index;
+    const int* g0_mass_index; const int* mass_index;
+    const int* fl_type; const int* fl_q_index;
+    const int* bw_order; const int* fl_order; const int* angle_index;
+} ComputeIndices;
+
+typedef struct {
+    const double* angle_k; const double* angle_b;
+    const double* matrix_angle_real; const double* matrix_angle_imag;
+    const double* gamma_table_real; const double* gamma_table_imag;
+    double gamma_min; double gamma_delta; int gamma_table_bins;
+    const double* matrix_gamma;
+    const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+} ComputeConstants;
+
+typedef struct {
+    int n_events; int n_wave; int n_res; int n_decay;
+    int n_unique_bw; int n_gamma_rows;
+    int n_mass; int n_momentum; int n_angle_k; int n_angle_total;
+} ComputeDims;
+
+typedef struct {
+    double* g_interp_real; double* g_interp_imag;
+    double* g_bw_real; double* g_bw_imag;
+    double* Q_out; double* P_out;
+    double* pap_real; double* pap_imag;
+    double* pam_real; double* pam_imag;
+    double* gp_real; double* gp_imag;
+    double* gm_real; double* gm_imag;
+    double* poq_real; double* poq_imag;
+    double* bw_p_real; double* bw_p_imag;
+    double* common_amp_factor_real; double* common_amp_factor_imag;
+    double* ap_real; double* ap_imag;
+    double* am_real; double* am_imag;
+    double* dQ_dP;
+    double* bw_dom_real; double* bw_dom_imag;
+    double* grad_ck_real_partial; double* grad_ck_imag_partial;
+    double* grad_m0_partial; double* grad_g0_partial;
+    double* grad_Gamma_partial; double* grad_DeltaGamma_partial;
+    double* grad_DeltaM_partial; double* grad_Ap_partial;
+    double* grad_poq_rho_partial; double* grad_pop_phi_partial;
+} ComputeScratch;
+
 cudaError_t cuda_alloc(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
 cudaError_t cuda_free(void* ptr) { return cudaFree(ptr); }
 cudaError_t cuda_memcpy_to_device(void* dst, const void* src, size_t size) {
@@ -862,6 +916,73 @@ void launch_reduce_sum_complex_features(const double* real_in, const double* ima
     reduce_sum_complex_features_kernel<<<n_features, block_size, 2 * block_size * sizeof(double)>>>(
         real_in, imag_in, real_out, imag_out, n_events, n_features);
     CUDA_CHECK(cudaGetLastError());
+}
+
+// Unified launch — calls g_bw + main forward + gradient in sequence
+void launch_compute_all(
+    const ComputeData* d, const ComputeIndices* idx,
+    const ComputeConstants* c, const ComputeDims* dim,
+    ComputeScratch* s
+) {
+    launch_compute_g_bw(
+        d->mass, d->g0, idx->g0_index, idx->g0_mass_index,
+        c->matrix_gamma,
+        c->gamma_table_real, c->gamma_table_imag,
+        c->gamma_min, c->gamma_delta,
+        dim->n_gamma_rows, dim->n_unique_bw, dim->n_mass, c->gamma_table_bins,
+        s->g_interp_real, s->g_interp_imag,
+        s->g_bw_real, s->g_bw_imag,
+        dim->n_events);
+
+    launch_compute_main(
+        d->mass, d->momentum, d->angle,
+        d->frac, d->time, d->weight, d->bkg,
+        idx->m0_index, idx->fl_type,
+        idx->mass_index, idx->fl_q_index,
+        idx->bw_order, idx->fl_order, idx->angle_index,
+        c->angle_k, c->angle_b,
+        c->matrix_angle_real, c->matrix_angle_imag,
+        s->g_bw_real, s->g_bw_imag,
+        c->fl_table, c->fl_min, c->fl_delta,
+        dim->n_wave, dim->n_res, dim->n_decay, dim->n_unique_bw,
+        dim->n_mass, dim->n_momentum, dim->n_angle_k, dim->n_angle_total,
+        c->fl_table_bins,
+        d->ck_real, d->ck_imag, d->m0,
+        d->Gamma, d->Delta_Gamma, d->Delta_m,
+        d->A_prod, d->poq_rho, d->pop_phi,
+        s->Q_out, s->P_out,
+        s->pap_real, s->pap_imag, s->pam_real, s->pam_imag,
+        s->gp_real, s->gp_imag, s->gm_real, s->gm_imag,
+        s->poq_real, s->poq_imag,
+        s->bw_p_real, s->bw_p_imag,
+        s->common_amp_factor_real, s->common_amp_factor_imag,
+        s->ap_real, s->ap_imag, s->am_real, s->am_imag, s->dQ_dP,
+        s->bw_dom_real, s->bw_dom_imag,
+        dim->n_events, d->use_norm, d->norm_val);
+
+    launch_gradient(
+        s->P_out,
+        s->pap_real, s->pap_imag, s->pam_real, s->pam_imag,
+        s->gp_real, s->gp_imag, s->gm_real, s->gm_imag,
+        s->poq_real, s->poq_imag,
+        s->bw_p_real, s->bw_p_imag,
+        s->common_amp_factor_real, s->common_amp_factor_imag,
+        s->ap_real, s->ap_imag, s->am_real, s->am_imag, s->dQ_dP,
+        s->bw_dom_real, s->bw_dom_imag,
+        s->g_interp_real, s->g_interp_imag,
+        s->g_bw_real, s->g_bw_imag,
+        d->frac, d->time,
+        idx->m0_index, idx->g0_index, idx->bw_order, c->matrix_gamma,
+        d->m0, d->g0, d->ck_real, d->ck_imag,
+        d->Gamma, d->Delta_Gamma, d->Delta_m,
+        d->A_prod, d->poq_rho, d->pop_phi,
+        dim->n_wave, dim->n_res, dim->n_unique_bw, dim->n_gamma_rows, dim->n_mass,
+        s->grad_ck_real_partial, s->grad_ck_imag_partial,
+        s->grad_m0_partial, s->grad_g0_partial,
+        s->grad_Gamma_partial, s->grad_DeltaGamma_partial,
+        s->grad_DeltaM_partial, s->grad_Ap_partial,
+        s->grad_poq_rho_partial, s->grad_pop_phi_partial,
+        dim->n_events);
 }
 
 } // extern "C"
