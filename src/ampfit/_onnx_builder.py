@@ -87,14 +87,6 @@ class PWAONNXBuilder:
         self._value_info.append(vi)
         return name
 
-    def _scalar(self, value, dtype=TensorProto.FLOAT):
-        name = self._name(f"c{value}")
-        if dtype == TensorProto.FLOAT:
-            self._embed(name, np.array(value, dtype=np.float32))
-        else:
-            self._embed(name, np.array(value, dtype=np.int64))
-        return name
-
     def _node(self, op_type, inputs, outputs=None, **attrs):
         if outputs is None:
             outputs = [self._name(op_type.lower())]
@@ -121,10 +113,12 @@ class PWAONNXBuilder:
 
     def _scalar(self, value, dtype=TensorProto.FLOAT):
         name = self._name(f"c{value}")
+        # Use 1-D shape [1] instead of 0-D for ATC/CANN compatibility.
+        # ATC internally converts Mul(scalar, tensor) to unsupported Muls op.
         if dtype == TensorProto.FLOAT:
-            self._embed(name, np.array(value, dtype=np.float32))
+            self._embed(name, np.array([value], dtype=np.float32))
         else:
-            self._embed(name, np.array(value, dtype=np.int64))
+            self._embed(name, np.array([value], dtype=np.int64))
         return name
 
     # ── complex arithmetic on (r, i) pairs ──────────────────────
