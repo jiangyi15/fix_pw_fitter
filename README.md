@@ -186,6 +186,13 @@ The ONNX backend uses **two ONNX models** built in-memory:
 
 Both models are built from `kernel_config` at a moderate fixed batch size (default 1024). The `compute()` method handles arbitrarily large datasets by **splitting into fixed-size batches** with weight-0 masking on the final partial batch.
 
+**Data transfer note:** Unlike `CUDABackend.load_data()` which uploads data to GPU
+persistently via `GPUDataHolder`, `ONNXBackend.load_data()` stores data as numpy arrays
+in system memory. ONNX Runtime transfers data CPU→GPU inside every `sess.run()` call,
+so data upload happens on each batch of every `compute()` invocation. This adds overhead
+vs the custom CUDA backend which keeps data resident on GPU. A future optimization could
+use ONNX Runtime's `IOBinding` to pre-allocate GPU buffers.
+
 ## Gradient Validation
 
 All backends validated against a **3-point central-difference numerical reference**:
