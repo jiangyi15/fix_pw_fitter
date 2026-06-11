@@ -270,7 +270,9 @@ class ONNXBackend(ComputeBackend):
             )
 
     def load_data(self, data_np):
-        return data_np
+        """Store data, casting event arrays to float32 for the ONNX model."""
+        return {k: (v.astype(np.float32) if isinstance(v, np.ndarray) else v)
+                for k, v in data_np.items()}
 
     # ── helpers ─────────────────────────────────────────────────
 
@@ -282,7 +284,7 @@ class ONNXBackend(ComputeBackend):
         input_names : list of str
             Expected input names (from the session being used).
         data_slice : dict
-            Sliced event data for this batch.
+            Sliced event data for this batch (already float32 from load_data).
         params : dict
             Fit parameters (ck, m0, g0, scalar).
         norm : float or None
