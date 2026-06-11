@@ -8,9 +8,9 @@ Backends tested:
   4. ONNXBackend  (f32, CPU)     — ONNX Runtime CPU, weight-masked for any batch size
   5. ONNXBackend  (f32, CUDA)    — ONNX Runtime GPU, weight-masked for any batch size
 
-ONNX uses a fixed-shape model (batch_size=8192). Variable batch sizes are
-achieved by zeroing weights for unused events.  This is correct because
-Q = -Σ weight·log(P/norm+bkg), so weight=0 events contribute 0.
+ONNX models are built in-memory from kernel_config at a moderate batch size.
+Variable batch sizes are handled internally by ONNXBackend.compute() which
+splits data into fixed-size chunks with weight=0 masking on partial batches.
 
 Metrics:
   - Execution time (ms)
@@ -39,7 +39,11 @@ from ampfit.backends import CUDABackend, NumpyBackend, ONNXBackend
 # ── Configuration ─────────────────────────────────────────────
 CONFIG_FILE = "config_angle.yml"
 ONNX_MODEL = "pwa_forward.onnx"
-ONNX_MAX_BATCH = 8192  # ONNX model is built with this fixed batch size
+
+# Auto-detect ONNX batch size from the model file
+import onnxruntime as _ort
+_onnx_sess = _ort.InferenceSession(ONNX_MODEL, providers=["CPUExecutionProvider"])
+ONNX_MAX_BATCH = [i.shape[0] for i in _onnx_sess.get_inputs() if i.name == "mass"][0]
 
 BATCH_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
@@ -80,10 +84,15 @@ def init_backend(name, kernel_config):
     elif name == "cuda_f32":
         return CUDABackend(kernel_config, dtype="float32")
     elif name == "onnx_cpu":
-        return ONNXBackend(ONNX_MODEL, providers=["CPUExecutionProvider"])
+        return ONNXBackend(
+            kernel_config=kernel_config,
+            batch_size=ONNX_MAX_BATCH,
+            providers=["CPUExecutionProvider"],
+        )
     elif name == "onnx_cuda":
         return ONNXBackend(
-            ONNX_MODEL,
+            kernel_config=kernel_config,
+            batch_size=ONNX_MAX_BATCH,
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         )
     else:
@@ -113,31 +122,13 @@ def convert_data(data, backend_name):
     return d
 
 
-def pad_to_onnx(data, n_real):
-    """Pad a data dict to ONNX_MAX_BATCH with weight=0 for padding events."""
-    d = {}
-    for k, v in data.items():
-        full_shape = (ONNX_MAX_BATCH,) + v.shape[1:]
-        full = np.zeros(full_shape, dtype=v.dtype)
-        full[:n_real] = v
-        d[k] = full
-    # Set weight of padded events to 0
-    d["weight"][n_real:] = 0.0
-    return d
-
-
 def benchmark_backend(name, kernel_config, n_events, trials=TRIALS, warmup=WARMUP):
     backend = init_backend(name, kernel_config)
 
-    # Generate base data
+    # Generate base data (ONNXBackend's compute handles batching internally)
     raw_params = make_params()
     raw_data = make_data(n_events)
-
-    # For ONNX: pad to fixed batch size with weight=0 masking
-    if name.startswith("onnx"):
-        data = convert_data(pad_to_onnx(raw_data, n_events), name)
-    else:
-        data = convert_data(raw_data, name)
+    data = convert_data(raw_data, name)
     params = convert_params(raw_params, name)
 
     dh = backend.load_data(data)
@@ -186,11 +177,8 @@ def accuracy_check(name, kernel_config, n_events, ref_backend="numpy"):
     Q_ref, grads_ref, P_ref = ref.compute(raw_params, ref_dh, norm=None)
     ref.free()
 
-    # Test backend
-    if name.startswith("onnx"):
-        data = convert_data(pad_to_onnx(raw_data, n_events), name)
-    else:
-        data = convert_data(raw_data, name)
+    # Test backend (ONNXBackend handles batching internally)
+    data = convert_data(raw_data, name)
     params = convert_params(raw_params, name)
     dh = backend.load_data(data)
     Q, grads, P = backend.compute(params, dh, norm=None)
@@ -203,7 +191,6 @@ def accuracy_check(name, kernel_config, n_events, ref_backend="numpy"):
         if key in grads and key in grads_ref:
             g_test = np.asarray(grads[key])
             g_ref_ = np.asarray(grads_ref[key])
-            # For complex ck, compare as complex; for real, compare as float
             if np.iscomplexobj(g_test) or np.iscomplexobj(g_ref_):
                 denom = np.max(np.abs(g_ref_)) + 1e-30
                 results[f"grad_{key}_max_rel"] = float(
@@ -220,9 +207,6 @@ def accuracy_check(name, kernel_config, n_events, ref_backend="numpy"):
     if P is not None and P_ref is not None:
         p_test = np.asarray(P).astype(np.float64)
         p_ref_ = np.asarray(P_ref).astype(np.float64)
-        if name.startswith("onnx"):
-            # Only compare valid (non-masked) events
-            p_test = p_test[:n_events]
         results["P_max_abs_diff"] = float(np.max(np.abs(p_test - p_ref_)))
 
     return results
