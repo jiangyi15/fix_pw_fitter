@@ -9,3 +9,4 @@ data/
 fit_output/
 *.png
 *.onnx
+*.om
