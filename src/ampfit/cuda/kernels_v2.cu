@@ -18,6 +18,12 @@
 
 using complex = thrust::complex<double>;
 
+// ── Named constants ──
+#define BLOCK_SIZE      256     // threads per block (RTX 3070 Ti optimal)
+#define N_ANG_COMP      3       // x, y, z components per angle bin
+#define N_SCALAR        6       // scalar gradient count
+#define DEFAULT_BATCH_SIZE 50000 // default events per GPU batch
+
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -199,7 +205,7 @@ __global__ void compute_main_kernel(
     for (int k_idx = tid; k_idx < n_angle_k; k_idx += block_sz) {
         int angle_pos = angle_index[k_idx];
         double ka_prod = 1.0;
-        for (int comp = 0; comp < 3; comp++) {
+        for (int comp = 0; comp < N_ANG_COMP; comp++) {
             int angle_idx = event_idx * n_angle_total * 3 + angle_pos * 3 + comp;
             double k_val = angle_k[k_idx * 3 + comp];
             double b_val = angle_b[k_idx * 3 + comp];
@@ -772,8 +778,7 @@ void launch_compute_g_bw(
     double* g_bw_real, double* g_bw_imag,
     int n_events) {
 
-    int block_size = 256;
-    compute_g_bw_kernel<<<n_events, block_size>>>(
+    compute_g_bw_kernel<<<n_events, BLOCK_SIZE>>>(
         mass, g0, g0_index, g0_mass_index, matrix_gamma,
         gamma_table_real, gamma_table_imag,
         gamma_min, gamma_delta,
@@ -809,8 +814,8 @@ void launch_compute_main(
     double* bw_dom_real, double* bw_dom_imag,
     int n_events, int use_norm, double norm) {
 
-    int block_size = 256;
-    compute_main_kernel<<<n_events, block_size>>>(
+    
+    compute_main_kernel<<<n_events, BLOCK_SIZE>>>(
         mass, momentum, angle, frac, time, weight, bkg,
         m0_index, fl_type, mass_index, fl_q_index,
         bw_order, fl_order, angle_index,
@@ -862,8 +867,8 @@ void launch_gradient(
     double* grad_poq_rho_partial, double* grad_pop_phi_partial,
     int n_events) {
 
-    int block_size = 256;
-    gradient_kernel<<<n_events, block_size>>>(
+    
+    gradient_kernel<<<n_events, BLOCK_SIZE>>>(
         P, pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag, poq_real, poq_imag,
         bw_p_real, bw_p_imag, common_amp_factor_real, common_amp_factor_imag,
@@ -885,33 +890,33 @@ void launch_gradient(
 
 // Reduction launch wrappers (same as original)
 void launch_reduce_sum(const double* input, double* output, int n) {
-    int block_size = 256;
-    int grid_size = (n + block_size - 1) / block_size;
-    reduce_sum_kernel<<<grid_size, block_size, block_size * sizeof(double)>>>(input, output, n);
+    
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    reduce_sum_kernel<<<grid_size, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(input, output, n);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_reduce_sum_complex(const double* real_in, const double* imag_in,
     double* real_out, double* imag_out, int n) {
-    int block_size = 256;
-    int grid_size = (n + block_size - 1) / block_size;
-    reduce_sum_complex_kernel<<<grid_size, block_size, 2 * block_size * sizeof(double)>>>(
+    
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    reduce_sum_complex_kernel<<<grid_size, BLOCK_SIZE, 2 * BLOCK_SIZE * sizeof(double)>>>(
         real_in, imag_in, real_out, imag_out, n);
     CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_reduce_sum_features(const double* input, double* output,
     int n_events, int n_features) {
-    int block_size = 256;
-    reduce_sum_features_kernel<<<n_features, block_size, block_size * sizeof(double)>>>(
+    
+    reduce_sum_features_kernel<<<n_features, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(
         input, output, n_events, n_features);
 }
 
 void launch_reduce_sum_complex_features(const double* real_in, const double* imag_in,
     double* real_out, double* imag_out,
     int n_events, int n_features) {
-    int block_size = 256;
-    reduce_sum_complex_features_kernel<<<n_features, block_size, 2 * block_size * sizeof(double)>>>(
+    
+    reduce_sum_complex_features_kernel<<<n_features, BLOCK_SIZE, 2 * BLOCK_SIZE * sizeof(double)>>>(
         real_in, imag_in, real_out, imag_out, n_events, n_features);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -1215,7 +1220,7 @@ void* cuda_create_context_v2(
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
     c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
-    c->batch_size = batch_size > 0 ? batch_size : 50000;
+    c->batch_size = batch_size > 0 ? batch_size : DEFAULT_BATCH_SIZE;
 
     // Pre-allocate scratch buffers when batch_size is known
     if (c->batch_size > 0) {
@@ -1351,7 +1356,7 @@ void cuda_compute_v2(void* vctx, void* vdh,
     *oQ = 0; memset(oP, 0, ne * 8);
     memset(ogck_r, 0, nw * 8); memset(ogck_i, 0, nw * 8);
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
-    memset(ogsc, 0, 6 * 8);
+    memset(ogsc, 0, N_SCALAR * sizeof(double));
 
     // Zero reduction output buffers (stale from previous call)
     cudaMemset(s.g_bw_real, 0, bs * nu * 8);
