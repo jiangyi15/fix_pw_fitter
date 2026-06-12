@@ -705,6 +705,7 @@ typedef struct {
     int n_wave; int n_res; int n_decay; int n_unique_bw;
     int n_gamma_rows; int n_mass; int n_momentum;
     int n_angle_k; int n_angle_total;
+    int batch_size;
 } ComputeContext;
 
 typedef struct {
@@ -1194,7 +1195,8 @@ void* cuda_create_context_v2(
     const double* mg,int n16,
     const double* ft,int n17, double flmin,double fldel,int fbins,
     int nw,int nr,int nd,int nub,int ngr,
-    int nm,int nmom,int nak_,int nat
+    int nm,int nmom,int nak_,int nat,
+    int batch_size
 ) {
     ComputeContext* c = (ComputeContext*)calloc(1, sizeof(ComputeContext));
     c->m0_index = (int*)_up_int(m0_i, n1); c->g0_index = (int*)_up_int(g0_i, n2);
@@ -1211,6 +1213,7 @@ void* cuda_create_context_v2(
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
+    c->batch_size = batch_size > 0 ? batch_size : 0;
     return c;
 }
 void cuda_free_context_v2(void* vctx) {
@@ -1247,7 +1250,7 @@ void cuda_free_data_v2(void* vh) {
     free(h);
 }
 
-void cuda_compute_v2(void* vctx, void* vdh, int batch_size,
+void cuda_compute_v2(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* m0,const double* g0,
     double G,double DG,double DM,double Ap,double pr,double pp,
@@ -1259,7 +1262,7 @@ void cuda_compute_v2(void* vctx, void* vdh, int batch_size,
 ) {
     ComputeContext* c = (ComputeContext*)vctx;
     DataHandle2* h = (DataHandle2*)vdh;
-    int ne = h->ne, bs = batch_size > 0 ? batch_size : ne;
+    int ne = h->ne, bs = c->batch_size > 0 ? c->batch_size : ne;
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
 
