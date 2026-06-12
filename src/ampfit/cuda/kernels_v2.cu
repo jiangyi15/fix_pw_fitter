@@ -1310,6 +1310,9 @@ void cuda_compute_v2(void* vctx, void* vdh,
     ComputeContext* c = (ComputeContext*)vctx;
     DataHandle2* h = (DataHandle2*)vdh;
     int ne = h->ne, bs = c->batch_size > 0 ? c->batch_size : ne;
+    // Cap batch size to 50000 to avoid huge per-call scratch allocation
+    int max_bs = 50000;
+    if (bs > max_bs) bs = max_bs;
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
 
