@@ -20,7 +20,6 @@ using complex = thrust::complex<double>;
 
 // ── Named constants ──
 #define BLOCK_SIZE      256     // threads per block (RTX 3070 Ti optimal)
-#define N_ANG_COMP      3       // x, y, z components per angle bin
 #define N_SCALAR        6       // scalar gradient count
 #define DEFAULT_BATCH_SIZE 50000 // default events per GPU batch
 
@@ -170,7 +169,7 @@ __global__ void compute_main_kernel(
     const double* __restrict__ fl_table,
     double fl_min, double fl_delta,
     int n_wave, int n_res, int n_decay, int n_unique_bw,
-    int n_mass, int n_momentum, int n_angle_k, int n_angle_total,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
     int fl_table_bins,
     const double* __restrict__ ck_real,
     const double* __restrict__ ck_imag,
@@ -200,15 +199,15 @@ __global__ void compute_main_kernel(
     //=========================================================================
     // Phase 1: Compute ka_prod for all angle_k values (parallel across threads)
     //=========================================================================
-    __shared__ double s_ka_prod[336];  // n_angle_k = 336
+    extern __shared__ double s_ka_prod[];
 
     for (int k_idx = tid; k_idx < n_angle_k; k_idx += block_sz) {
         int angle_pos = angle_index[k_idx];
         double ka_prod = 1.0;
-        for (int comp = 0; comp < N_ANG_COMP; comp++) {
-            int angle_idx = event_idx * n_angle_total * 3 + angle_pos * 3 + comp;
-            double k_val = angle_k[k_idx * 3 + comp];
-            double b_val = angle_b[k_idx * 3 + comp];
+        for (int comp = 0; comp < n_angle_comp; comp++) {
+            int angle_idx = event_idx * n_angle_total * n_angle_comp + angle_pos * n_angle_comp + comp;
+            double k_val = angle_k[k_idx * n_angle_comp + comp];
+            double b_val = angle_b[k_idx * n_angle_comp + comp];
             ka_prod *= cos(angle[angle_idx] * k_val + b_val);
         }
         s_ka_prod[k_idx] = ka_prod;
@@ -734,7 +733,7 @@ typedef struct {
     // Dimensions
     int n_wave; int n_res; int n_decay; int n_unique_bw;
     int n_gamma_rows; int n_mass; int n_momentum;
-    int n_angle_k; int n_angle_total;
+    int n_angle_k; int n_angle_total; int n_angle_comp;
     int batch_size;
     int n_m0_params;   // actual m0/g0 array sizes (from max(index)+1)
     int n_g0_params;
@@ -799,7 +798,7 @@ void launch_compute_main(
     const double* fl_table,
     double fl_min, double fl_delta,
     int n_wave, int n_res, int n_decay, int n_unique_bw,
-    int n_mass, int n_momentum, int n_angle_k, int n_angle_total,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
     int fl_table_bins,
     const double* ck_real, const double* ck_imag, const double* m0,
     double Gamma, double Delta_Gamma, double Delta_m,
@@ -815,7 +814,7 @@ void launch_compute_main(
     int n_events, int use_norm, double norm) {
 
     
-    compute_main_kernel<<<n_events, BLOCK_SIZE>>>(
+    compute_main_kernel<<<n_events, BLOCK_SIZE, n_angle_k * sizeof(double)>>>(
         mass, momentum, angle, frac, time, weight, bkg,
         m0_index, fl_type, mass_index, fl_q_index,
         bw_order, fl_order, angle_index,
@@ -823,7 +822,7 @@ void launch_compute_main(
         g_bw_real, g_bw_imag, fl_table,
         fl_min, fl_delta,
         n_wave, n_res, n_decay, n_unique_bw,
-        n_mass, n_momentum, n_angle_k, n_angle_total,
+        n_mass, n_momentum, n_angle_k, n_angle_total, n_angle_comp,
         fl_table_bins,
         ck_real, ck_imag, m0,
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
@@ -947,7 +946,7 @@ void launch_compute_all(
         data->g_bw_real, data->g_bw_imag,
         ctx->fl_table, ctx->fl_min, ctx->fl_delta,
         ctx->n_wave, ctx->n_res, ctx->n_decay, ctx->n_unique_bw,
-        ctx->n_mass, ctx->n_momentum, ctx->n_angle_k, ctx->n_angle_total,
+        ctx->n_mass, ctx->n_momentum, ctx->n_angle_k, ctx->n_angle_total, ctx->n_angle_comp,
         ctx->fl_table_bins,
         params->ck_real, params->ck_imag, params->m0,
         params->Gamma, params->Delta_Gamma, params->Delta_m,
@@ -1051,7 +1050,7 @@ void* cuda_load_data(void* vctx, const double* mass, const double* mom,
     ComputeData* d = (ComputeData*)malloc(sizeof(ComputeData));
     d->mass = (double*)_up_dbl(mass, ne * c->n_mass);
     d->momentum = (double*)_up_dbl(mom, ne * c->n_momentum);
-    d->angle = (double*)_up_dbl(ang, ne * c->n_angle_total * 3);
+    d->angle = (double*)_up_dbl(ang, ne * c->n_angle_total * c->n_angle_comp);
     d->frac = (double*)_up_dbl(frac, ne);
     d->time = (double*)_up_dbl(time, ne);
     d->weight = (double*)_up_dbl(wgt, ne);
@@ -1184,7 +1183,7 @@ void cuda_free_data(void* vdh) {
 
 typedef struct { const double* m; const double* mo; const double* a;
     const double* f; const double* t; const double* w; const double* b;
-    int ne; int nm; int nmom; int nat;
+    int ne; int nm; int nmom; int nat; int nac;
 } DataHandle2;
 
 void* cuda_create_context_v2(
@@ -1200,7 +1199,7 @@ void* cuda_create_context_v2(
     const double* mg,int n16,
     const double* ft,int n17, double flmin,double fldel,int fbins,
     int nw,int nr,int nd,int nub,int ngr,
-    int nm,int nmom,int nak_,int nat,
+    int nm,int nmom,int nak_,int nat,int nac,
     int n_m0p, int n_g0p,
     int batch_size
 ) {
@@ -1218,7 +1217,7 @@ void* cuda_create_context_v2(
     c->fl_table = (double*)_up_dbl(ft, n17); c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
-    c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
+    c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat; c->n_angle_comp = nac;
     c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
     c->batch_size = batch_size > 0 ? batch_size : DEFAULT_BATCH_SIZE;
 
@@ -1285,14 +1284,16 @@ void* cuda_load_data_v2(void* vctx,
     const double* wgt,const double* bkg,int ne
 ) {
     DataHandle2* h = (DataHandle2*)calloc(1, sizeof(DataHandle2));
+    ComputeContext* c_ctx = (ComputeContext*)vctx;
+    int nac = c_ctx ? c_ctx->n_angle_comp : 3;
     h->m = (const double*)_up_dbl(mass, ne * nmass);
     h->mo = (const double*)_up_dbl(mom, ne * nmom);
-    h->a = (const double*)_up_dbl(ang, ne * nang * 3);
+    h->a = (const double*)_up_dbl(ang, ne * nang * nac);
     h->f = (const double*)_up_dbl(frac, ne);
     h->t = (const double*)_up_dbl(time, ne);
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
-    h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang;
+    h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang; h->nac = nac;
     return h;
 }
 void cuda_free_data_v2(void* vh) {
@@ -1376,7 +1377,7 @@ void cuda_compute_v2(void* vctx, void* vdh,
         ComputeData d = s;
         d.mass = h->m + st * h->nm;
         d.momentum = h->mo + st * h->nmom;
-        d.angle = h->a + st * h->nat * 3;
+        d.angle = h->a + st * h->nat * h->nac;
         d.frac = h->f + st; d.time = h->t + st;
         d.weight = h->w + st; d.bkg = h->b + st;
         d.n_events = nb;

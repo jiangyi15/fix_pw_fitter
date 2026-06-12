@@ -30,7 +30,7 @@ void* cuda_create_context_v2(
     const double* mg,int n16,
     const double* ft,int n17, double flmin,double fldel,int fbins,
     int nw,int nr,int nd,int nub,int ngr,
-    int nm,int nmom,int nak_,int nat,
+    int nm,int nmom,int nak_,int nat,int nac,
     int n_m0p,int n_g0p,
     int batch_size);
 void cuda_free_context_v2(void*);
@@ -119,6 +119,7 @@ class CUDAKernelV2:
             int(np.max(c["angle_index"])) + 1
             if len(c["angle_index"]) > 0 else 0
         )
+        self.n_angle_comp = c["angle_k"].shape[-1]
         self.n_m0_params = int(np.max(c["m0_index"])) + 1
         self.n_g0_params = int(np.max(c["g0_index"])) + 1
 
@@ -166,7 +167,7 @@ class CUDAKernelV2:
             self.n_wave, self.n_res, self.n_decay,
             self.n_unique_bw, self.n_gamma_rows,
             self.n_mass, self.n_momentum,
-            self.n_angle_k, self.n_angle_total,
+            self.n_angle_k, self.n_angle_total, self.n_angle_comp,
             self.n_m0_params, self.n_g0_params,
             batch_size,
         )
