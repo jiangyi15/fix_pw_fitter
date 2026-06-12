@@ -979,7 +979,7 @@ void launch_compute_all(
         data->grad_DeltaM_partial, data->grad_Ap_partial,
         data->grad_poq_rho_partial, data->grad_pop_phi_partial,
         data->n_events);
-    // Check gradient kernel
+    // Flush any pending kernel errors before returning
     cudaGetLastError();
 }
 
@@ -1296,7 +1296,15 @@ void cuda_compute_v2(void* vctx, void* vdh, int batch_size,
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
     memset(ogsc, 0, 6 * 8);
 
+    // Single-double GPU buffer for Q reduction
+    double* Q_red_gpu;
+    cudaMalloc(&Q_red_gpu, 8);
+    double Q_red_host;
+
     double* Ph = (double*)malloc(bs * 8);
+    double* gck_buf = (double*)malloc(nw * 8);
+    double* gm0_buf = (double*)malloc(nu * 8);
+    double* gg0_buf = (double*)malloc(ng * 8);
 
     for (int b = 0; b < nbat; b++) {
         int st = b * bs;
@@ -1315,30 +1323,32 @@ void cuda_compute_v2(void* vctx, void* vdh, int batch_size,
         // Clear any pending errors from launch_compute_all
         cudaGetLastError();
 
-        double* qp = (double*)malloc(nb * 8);
-        cudaMemcpy(qp, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
-        for (int i = 0; i < nb; i++) *oQ += qp[i];
-        free(qp);
+        // GPU reduction for Q
+        launch_reduce_sum(d.Q_out, Q_red_gpu, nb);
+        cudaMemcpy(&Q_red_host, Q_red_gpu, 8, cudaMemcpyDeviceToHost);
+        *oQ += Q_red_host;
 
         cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
         memcpy(oP + st, Ph, nb * 8);
 
-        #define ACC(f, sz, out) do { \
-            double* bf = (double*)malloc((sz) * (nb) * 8); \
-            cudaMemcpy(bf, d.f, (sz) * (nb) * 8, cudaMemcpyDeviceToHost); \
-            for (int j = 0; j < (sz); j++) { \
-                double s = 0; \
-                for (int i = 0; i < nb; i++) s += bf[j + i * (sz)]; \
-                (out)[j] += s; \
-            } \
-            free(bf); \
-        } while(0)
-        ACC(grad_ck_real_partial, nw, ogck_r);
-        ACC(grad_ck_imag_partial, nw, ogck_i);
-        ACC(grad_m0_partial, nu, ogm0);
-        ACC(grad_g0_partial, ng, ogg0);
-        #undef ACC
+        // GPU reductions: sum per-event gradients across events
+        launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
+        cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
 
+        launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, nw);
+        cudaMemcpy(gck_buf, s.g_bw_imag, nw * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
+
+        launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
+        cudaMemcpy(gm0_buf, s.g_interp_real, nu * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
+
+        launch_reduce_sum_features(d.grad_g0_partial, s.g_interp_imag, nb, ng);
+        cudaMemcpy(gg0_buf, s.g_interp_imag, ng * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
+
+        // Scalar gradients: download per-event and sum on CPU
         #define SA(f, idx) do { \
             double* bf = (double*)malloc(nb * 8); \
             cudaMemcpy(bf, d.f, nb * 8, cudaMemcpyDeviceToHost); \
@@ -1363,7 +1373,8 @@ void cuda_compute_v2(void* vctx, void* vdh, int batch_size,
     F(grad_Gamma_partial); F(grad_DeltaGamma_partial); F(grad_DeltaM_partial);
     F(grad_Ap_partial); F(grad_poq_rho_partial); F(grad_pop_phi_partial);
     #undef F
-    free(Ph);
+    cudaFree(Q_red_gpu);
+    free(Ph); free(gck_buf); free(gm0_buf); free(gg0_buf);
 
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
