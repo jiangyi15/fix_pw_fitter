@@ -207,17 +207,41 @@ class CUDABackendV2(ComputeBackend):
         return self.kernel.compute(params, data_handle, norm=norm)
 
     def prepare_phsp_batched(self, phsp_np, n_events):
-        """Upload full phsp to GPU once."""
+        """Store phsp numpy dict for batched norm computation."""
         self._phsp_np = phsp_np
         self._phsp_n = n_events
-        self._phsp_scratch = self.kernel.load_data(phsp_np)
+        self._phsp_scratch = None  # loaded per-batch in compute_norm_batched
 
     def compute_norm_batched(self, params):
-        """Compute norm over full phsp — v2 context handles internal batching."""
-        if self._phsp_scratch is None:
+        """Compute norm over phsp, batching in Python loops."""
+        if self._phsp_np is None:
             raise RuntimeError("No phsp loaded; call prepare_phsp_batched first")
-        n_b, g_b, _ = self.kernel.compute(params, self._phsp_scratch, norm=None)
-        return n_b, g_b
+        total_norm = 0.0
+        total_grads = None
+        ne = self._phsp_n
+        bs = 50000  # GPU batch size
+        nbat = (ne + bs - 1) // bs
+
+        for b in range(nbat):
+            start = b * bs
+            end = min(start + bs, ne)
+            # Slice numpy arrays
+            batch = {}
+            for k, v in self._phsp_np.items():
+                if isinstance(v, np.ndarray) and v.shape[0] == ne:
+                    batch[k] = v[start:end]
+                else:
+                    batch[k] = v
+            dh = self.kernel.load_data(batch)
+            n_b, g_b, _ = self.kernel.compute(params, dh, norm=None)
+            dh.free()
+            total_norm += float(n_b)
+            if total_grads is None:
+                total_grads = {k: v.copy() for k, v in g_b.items()}
+            else:
+                for k in g_b:
+                    total_grads[k] += g_b[k]
+        return total_norm, total_grads
 
     def free_phsp_batched(self):
         self._phsp_np = None
