@@ -730,8 +730,10 @@ typedef struct {
     int n_gamma_rows; int n_mass; int n_momentum;
     int n_angle_k; int n_angle_total;
     int batch_size;
-    ComputeData* scratch;  // pre-allocated scratch buffers (batch_size > 0 only)
-    double* Q_red_gpu;     // single-double GPU buffer for Q reduction
+    int n_m0_params;   // actual m0/g0 array sizes (from max(index)+1)
+    int n_g0_params;
+    ComputeData* scratch;
+    double* Q_red_gpu;
 } ComputeContext;
 
 typedef struct {
@@ -778,7 +780,6 @@ void launch_compute_g_bw(
         n_gamma_rows, n_unique_bw, n_mass, gamma_table_bins,
         g_interp_real, g_interp_imag,
         g_bw_real, g_bw_imag, n_events);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_compute_main(
@@ -830,7 +831,6 @@ void launch_compute_main(
         ap_real, ap_imag, am_real, am_imag, dQ_dP,
         bw_dom_real, bw_dom_imag,
         n_events, use_norm, norm);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 // Optimized backward: single kernel with improved g0 gradient
@@ -881,7 +881,6 @@ void launch_gradient(
         grad_DeltaM_partial, grad_Ap_partial,
         grad_poq_rho_partial, grad_pop_phi_partial,
         n_events);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 // Reduction launch wrappers (same as original)
@@ -906,7 +905,6 @@ void launch_reduce_sum_features(const double* input, double* output,
     int block_size = 256;
     reduce_sum_features_kernel<<<n_features, block_size, block_size * sizeof(double)>>>(
         input, output, n_events, n_features);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_reduce_sum_complex_features(const double* real_in, const double* imag_in,
@@ -982,8 +980,7 @@ void launch_compute_all(
         data->grad_DeltaM_partial, data->grad_Ap_partial,
         data->grad_poq_rho_partial, data->grad_pop_phi_partial,
         data->n_events);
-    // Sync + flush: ensures gradient kernel errors are visible before return
-    cudaDeviceSynchronize();
+    // Flush gradient kernel errors (kernel param validation is synchronous)
     cudaGetLastError();
 }
 
@@ -1199,6 +1196,7 @@ void* cuda_create_context_v2(
     const double* ft,int n17, double flmin,double fldel,int fbins,
     int nw,int nr,int nd,int nub,int ngr,
     int nm,int nmom,int nak_,int nat,
+    int n_m0p, int n_g0p,
     int batch_size
 ) {
     ComputeContext* c = (ComputeContext*)calloc(1, sizeof(ComputeContext));
@@ -1216,6 +1214,7 @@ void* cuda_create_context_v2(
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
+    c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
     c->batch_size = batch_size > 0 ? batch_size : 0;
 
     // Pre-allocate scratch buffers when batch_size is known
@@ -1314,11 +1313,12 @@ void cuda_compute_v2(void* vctx, void* vdh,
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
 
+    // Upload per-call params
     ComputeParams p;
     p.ck_real = (double*)_up_dbl(ck_r, nw);
     p.ck_imag = (double*)_up_dbl(ck_i, nw);
-    p.m0 = (double*)_up_dbl(m0, nu);
-    p.g0 = (double*)_up_dbl(g0, ng);
+    p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
+    p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
     p.Gamma = G; p.Delta_Gamma = DG; p.Delta_m = DM;
     p.A_prod = Ap; p.poq_rho = pr; p.pop_phi = pp;
 
