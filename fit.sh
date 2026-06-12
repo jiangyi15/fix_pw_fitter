@@ -21,7 +21,7 @@ python run_fit.py \
     --data "$DATA" \
     --phsp "$PHSP" \
     --fit --maxiter 1000 \
-    --backend cuda_v2 \
+    --backend cuda32 \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/" \
     --fix-mass-width

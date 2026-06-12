@@ -90,8 +90,8 @@ class Fitter:
         )
 
         # Data holders (created by set_data / set_phsp)
-        self.data_holder = None
-        self.phsp_holder = None
+        self._data_holder = None
+        self._phsp_holder = None
 
         # Raw numpy data (needed for norm gradient computation)
         self._data_np = None
@@ -99,7 +99,6 @@ class Fitter:
 
         # Phsp batching — always used (backends split into GPU-sized batches)
         self._phsp_scratch = None  # GPUDataHolder with batch-sized intermediates
-        self._phsp_holder = None    # generic phsp DataHandle (any backend)
         self._phsp_batch_size = 50000  # events per batch
         self._phsp_n = 0               # total phsp events
 
@@ -207,6 +206,10 @@ class Fitter:
 
         Also stores -log(purity)*sum(weights) as a constant NLL offset.
 
+        IMPORTANT: Call set_phsp() BEFORE set_data() for correct purity
+        correction. If set_phsp() is not called first, purity correction
+        is skipped (treated as purity=1.0).
+
         Args:
             data: dict with keys 'mass', 'q', 'angle', 'frac', 'time',
                   'weight', 'bkg' (optional).
@@ -231,9 +234,15 @@ class Fitter:
         else:
             self._bkg_scale = None
             self._log_purity_const = 0.0
+            if self._purity is not None and self._N_b is None:
+                import warnings
+                warnings.warn(
+                    "set_data() called before set_phsp(): purity correction skipped. "
+                    "Call set_phsp() first for correct background scaling."
+                )
 
         self._data_np = data
-        self.data_holder = self.backend.load_data(data)
+        self._data_holder = self.backend.load_data(data)
 
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.
@@ -402,7 +411,7 @@ class Fitter:
 
     def _check_data_loaded(self):
         """Raise if data or phsp not set."""
-        if self.data_holder is None:
+        if self._data_holder is None:
             raise RuntimeError("Data not set. Call set_data() first.")
         phsp_ok = self._phsp_n > 0
         if not phsp_ok:
@@ -468,7 +477,7 @@ class Fitter:
 
         # 2. NLL from data (with norm)
         nll, grads, P = self.backend.compute(
-            params, self.data_holder, norm=norm
+            params, self._data_holder, norm=norm
         )
 
         # 3. dNLL/dnorm
@@ -765,7 +774,7 @@ class Fitter:
         # Compute norm and probabilities (handles batched phsp)
         norm, _ = self._compute_norm_batched(params)
         norm = float(norm)
-        _, _, P_data = self.backend.compute(params, self.data_holder, norm=norm)
+        _, _, P_data = self.backend.compute(params, self._data_holder, norm=norm)
 
         # Compute P_phsp (handle batched mode)
         if hasattr(self.backend, '_phsp_buffer') and self.backend._phsp_buffer is not None:
@@ -997,13 +1006,13 @@ class Fitter:
     # ------------------------------------------------------------------
     def free(self):
         """Free all memory held by the backend."""
-        if self.data_holder is not None and hasattr(self.data_holder, 'free'):
-            self.data_holder.free()
-        if self.phsp_holder is not None and hasattr(self.phsp_holder, 'free'):
-            self.phsp_holder.free()
+        if self._data_holder is not None and hasattr(self._data_holder, 'free'):
+            self._data_holder.free()
+        if self._phsp_holder is not None and hasattr(self._phsp_holder, 'free'):
+            self._phsp_holder.free()
         self.backend.free()
-        self.data_holder = None
-        self.phsp_holder = None
+        self._data_holder = None
+        self._phsp_holder = None
 
 
 # ====================================================================
