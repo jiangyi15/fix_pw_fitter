@@ -201,6 +201,9 @@ class CUDAKernelV2:
         # Use n_angle_total for per-event angle stride
         nang = self.n_angle_total
 
+        # Accept 'bkg' or 'bkg_raw' (Fitter uses 'bkg')
+        bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
+
         dh = DataHandle(self._lib.cuda_load_data_v2(
             self._ctx,
             _db(mass), mass.shape[1],
@@ -209,7 +212,7 @@ class CUDAKernelV2:
             _db(data["frac"]),
             _db(data["time"]),
             _db(data["weight"]),
-            _db(data["bkg_raw"]),
+            _db(data[bkg_key]),
             ne,
         ), self._lib, ne)
         dh._keep = ka

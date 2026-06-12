@@ -181,6 +181,85 @@ class CUDABackend(ComputeBackend):
         self.kernel.free()
 
 
+class CUDABackendV2(ComputeBackend):
+    """v2 CUDA backend — C-managed memory, no GPUArray/GPUConfig.
+
+    Uses ``CUDAKernelV2`` which allocates all GPU memory (config + scratch)
+    in C via ``cuda_create_context_v2``.  Scratch is allocated once and
+    reused across ``compute()`` calls — no per-call ``cudaMalloc``/``cudaFree``.
+
+    Supports an optional ``batch_size`` (events per GPU batch, defaults to 0
+    = full dataset).  Phsp is batched in Python for large datasets.
+    """
+
+    def __init__(self, kernel_config, batch_size=0):
+        from ampfit._cuda_v2 import CUDAKernelV2 as _K
+        self._kernel_class = _K
+        self.kernel = _K(kernel_config, batch_size=batch_size)
+        self._phsp_np = None
+        self._phsp_scratch = None
+        self._phsp_n = 0
+
+    def load_data(self, data_np):
+        return self.kernel.load_data(data_np)
+
+    def compute(self, params, data_handle, norm=None):
+        return self.kernel.compute(params, data_handle, norm=norm)
+
+    def prepare_phsp_batched(self, phsp_np, n_events):
+        """Store phsp data + numpy dict for batched norm computation."""
+        self._phsp_np = phsp_np
+        self._phsp_n = n_events
+        # Load full phsp to GPU for single-batch path
+        self._phsp_scratch = self.kernel.load_data(phsp_np)
+
+    def compute_norm_batched(self, params):
+        """Compute norm over phsp, batching in Python for large datasets."""
+        if self._phsp_scratch is None:
+            raise RuntimeError("No phsp loaded; call prepare_phsp_batched first")
+        total_norm = 0.0
+        total_grads = None
+
+        ne = self._phsp_n
+        bs = 50000
+        nbat = (ne + bs - 1) // bs
+
+        for b in range(nbat):
+            start = b * bs
+            end = min(start + bs, ne)
+
+            # Slice numpy arrays to get one batch
+            phsp_slice = {}
+            for k, v in self._phsp_np.items():
+                if isinstance(v, np.ndarray) and v.shape[0] == ne:
+                    phsp_slice[k] = v[start:end]
+                else:
+                    phsp_slice[k] = v
+
+            dh = self.kernel.load_data(phsp_slice)
+            n_b, g_b, _ = self.kernel.compute(params, dh, norm=None)
+            dh.free()
+
+            total_norm += float(n_b)
+            if total_grads is None:
+                total_grads = {k: v.copy() for k, v in g_b.items()}
+            else:
+                for k in g_b:
+                    total_grads[k] += g_b[k]
+
+        return total_norm, total_grads
+
+    def free_phsp_batched(self):
+        self._phsp_np = None
+        if self._phsp_scratch is not None:
+            self._phsp_scratch.free()
+            self._phsp_scratch = None
+
+    def free(self):
+        self.free_phsp_batched()
+        self.kernel.free()
+
+
 # ── ONNX Runtime backend ───────────────────────────────────────
 
 class ONNXBackend(ComputeBackend):
