@@ -268,8 +268,8 @@ class Fitter:
         # Always use batched mode (split into GPU-sized chunks)
         if hasattr(self.backend, 'prepare_phsp_batched'):
             self.backend.prepare_phsp_batched(phsp, n)
-            # Store phsp handle for plot (from backend if available, else local)
-            self._phsp_holder = getattr(self.backend, '_phsp_scratch', None) or self._phsp_scratch
+            self._phsp_scratch = getattr(self.backend, '_phsp_scratch', None)
+            self._phsp_holder = self._phsp_scratch
         else:
             # Backends without batched support fallback to manual batching
             self._phsp_scratch = self.backend.load_data(phsp)
