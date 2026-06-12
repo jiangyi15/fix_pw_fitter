@@ -99,6 +99,7 @@ class Fitter:
 
         # Phsp batching — always used (backends split into GPU-sized batches)
         self._phsp_scratch = None  # GPUDataHolder with batch-sized intermediates
+        self._phsp_holder = None    # generic phsp DataHandle (any backend)
         self._phsp_batch_size = 50000  # events per batch
         self._phsp_n = 0               # total phsp events
 
@@ -267,9 +268,12 @@ class Fitter:
         # Always use batched mode (split into GPU-sized chunks)
         if hasattr(self.backend, 'prepare_phsp_batched'):
             self.backend.prepare_phsp_batched(phsp, n)
+            # Store phsp handle for plot (from backend if available, else local)
+            self._phsp_holder = getattr(self.backend, '_phsp_scratch', None) or self._phsp_scratch
         else:
             # Backends without batched support fallback to manual batching
             self._phsp_scratch = self.backend.load_data(phsp)
+            self._phsp_holder = self._phsp_scratch
             # phsp_buffer is None → _compute_norm_batched uses fallback loop
 
     def _n_flat_vars(self):
@@ -764,8 +768,8 @@ class Fitter:
         _, _, P_data = self.backend.compute(params, self.data_holder, norm=norm)
 
         # Compute P_phsp (handle batched mode)
-        if self._phsp_buffer is not None:
-            # Batched mode: compute P per batch, concatenate
+        if hasattr(self.backend, '_phsp_buffer') and self.backend._phsp_buffer is not None:
+            # Original CUDA batched mode: GPUDataBuffer with slicing
             P_phsp_list = []
             bs = self._phsp_batch_size
             n_batches = (self._phsp_n + bs - 1) // bs
@@ -773,13 +777,16 @@ class Fitter:
                 start = b * bs
                 end = min(start + bs, self._phsp_n)
                 self._phsp_scratch.attach_input_slice(
-                    self._phsp_buffer, start, end,
+                    self.backend._phsp_buffer, start, end,
                     self._phsp_np["mass"].shape[1], self._phsp_np["q"].shape[1])
                 _, _, P_b = self.backend.compute(params, self._phsp_scratch, norm=None)
                 P_phsp_list.append(P_b[:self._phsp_scratch.n_events])
             P_phsp = np.concatenate(P_phsp_list)
         else:
-            _, _, P_phsp = self.backend.compute(params, self.phsp_holder, norm=None)
+            phsp_h = self._phsp_holder
+            if phsp_h is None:
+                raise RuntimeError("No phsp data loaded; call set_phsp() first")
+            _, _, P_phsp = self.backend.compute(params, phsp_h, norm=None)
 
         data_np = self._data_np
         phsp_np = self._phsp_np

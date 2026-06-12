@@ -121,6 +121,9 @@ def load_npz(npz_path, max_events=None):
 def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
+    parser.add_argument("--backend", default="cuda",
+                        choices=["cuda", "cuda32", "cuda_v2", "numpy", "onnx"],
+                        help="Compute backend")
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--data", default="data/data_arrays.npz")
     parser.add_argument("--phsp", default="data/phsp_arrays.npz")
@@ -143,7 +146,7 @@ def main():
     print("SETUP")
     print("=" * 70)
 
-    fitter = Fitter(args.config)
+    fitter = Fitter(args.config, backend=args.backend)
     fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
     # Optionally add mass/width fixes to the fixed slots
     if args.fix_mass_width:
