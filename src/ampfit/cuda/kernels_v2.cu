@@ -734,9 +734,6 @@ typedef struct {
     int n_g0_params;
     ComputeData* scratch;
     double* Q_red_gpu;
-    // Pre-allocated parameter buffers (avoids per-call cudaMalloc)
-    double* param_ck_real; double* param_ck_imag;
-    double* param_m0; double* param_g0;
 } ComputeContext;
 
 typedef struct {
@@ -1242,11 +1239,6 @@ void* cuda_create_context_v2(
         #undef S
         #undef S2
         cudaMalloc(&c->Q_red_gpu, 8);
-        // Pre-allocated parameter buffers (resued across compute calls)
-        cudaMalloc(&c->param_ck_real, nw * 8);
-        cudaMalloc(&c->param_ck_imag, nw * 8);
-        cudaMalloc(&c->param_m0, n_m0p * 8);
-        cudaMalloc(&c->param_g0, n_g0p * 8);
     } else {
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
@@ -1279,10 +1271,6 @@ void cuda_free_context_v2(void* vctx) {
         free(c->scratch);
     }
     if (c->Q_red_gpu) cudaFree(c->Q_red_gpu);
-    // Free pre-allocated parameter buffers
-    if (c->param_ck_real) { cudaFree(c->param_ck_real); cudaFree(c->param_ck_imag); }
-    if (c->param_m0) cudaFree(c->param_m0);
-    if (c->param_g0) cudaFree(c->param_g0);
     free(c);
 }
 
@@ -1325,23 +1313,12 @@ void cuda_compute_v2(void* vctx, void* vdh,
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
 
-    // Upload per-call params via cudaMemcpy (reuse GPU buffers from context)
+    // Upload per-call params via _up_dbl (always fresh)
     ComputeParams p;
-    if (c->param_ck_real) {
-        cudaMemcpy(c->param_ck_real, ck_r, nw * 8, cudaMemcpyHostToDevice);
-        cudaMemcpy(c->param_ck_imag, ck_i, nw * 8, cudaMemcpyHostToDevice);
-        cudaMemcpy(c->param_m0, m0, c->n_m0_params * 8, cudaMemcpyHostToDevice);
-        cudaMemcpy(c->param_g0, g0, c->n_g0_params * 8, cudaMemcpyHostToDevice);
-        p.ck_real = c->param_ck_real;
-        p.ck_imag = c->param_ck_imag;
-        p.m0 = c->param_m0;
-        p.g0 = c->param_g0;
-    } else {
-        p.ck_real = (double*)_up_dbl(ck_r, nw);
-        p.ck_imag = (double*)_up_dbl(ck_i, nw);
-        p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
-        p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
-    }
+    p.ck_real = (double*)_up_dbl(ck_r, nw);
+    p.ck_imag = (double*)_up_dbl(ck_i, nw);
+    p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
+    p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
     p.Gamma = G; p.Delta_Gamma = DG; p.Delta_m = DM;
     p.A_prod = Ap; p.poq_rho = pr; p.pop_phi = pp;
 
@@ -1375,10 +1352,11 @@ void cuda_compute_v2(void* vctx, void* vdh,
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
     memset(ogsc, 0, 6 * 8);
 
-    // Q reduction buffer (from context if available)
-    double* Q_red_gpu = c->Q_red_gpu;
-    double Q_red_host;
-    if (!Q_red_gpu) { cudaMalloc(&Q_red_gpu, 8); }
+    // Zero reduction output buffers (stale from previous call)
+    cudaMemset(s.g_bw_real, 0, bs * nu * 8);
+    cudaMemset(s.g_bw_imag, 0, bs * nu * 8);
+    cudaMemset(s.g_interp_real, 0, bs * ng * 8);
+    cudaMemset(s.g_interp_imag, 0, bs * ng * 8);
 
     double* Ph = (double*)malloc(bs * 8);
     double* gck_buf = (double*)malloc(nw * 8);
@@ -1402,10 +1380,9 @@ void cuda_compute_v2(void* vctx, void* vdh,
         // Clear any pending errors from launch_compute_all
         cudaGetLastError();
 
-        // GPU reduction for Q (download 1 double instead of nb)
-        launch_reduce_sum(d.Q_out, Q_red_gpu, nb);
-        cudaMemcpy(&Q_red_host, Q_red_gpu, 8, cudaMemcpyDeviceToHost);
-        *oQ += Q_red_host;
+        // CPU sum for Q (reliable, no stale-buffer edge case)
+        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oQ += Ph[i];
 
         cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
         memcpy(oP + st, Ph, nb * 8);
@@ -1456,14 +1433,11 @@ void cuda_compute_v2(void* vctx, void* vdh,
         #undef F
     }
     // Free Q_red_gpu if locally allocated (not from context)
-    if (!c->Q_red_gpu) cudaFree(Q_red_gpu);
+    if (c->Q_red_gpu) { /* allocated in context, freed in cuda_free_context_v2 */ }
     free(Ph); free(gck_buf); free(gm0_buf); free(gg0_buf);
 
-    // Free per-call param GPU memory (only if allocated per-call)
-    if (!c->param_ck_real) {
-        cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
-        cudaFree((void*)p.m0); cudaFree((void*)p.g0);
-    }
+    cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
+    cudaFree((void*)p.m0); cudaFree((void*)p.g0);
 }
 
 } // extern "C"
