@@ -1215,7 +1215,7 @@ void* cuda_create_context_v2(
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
     c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
-    c->batch_size = batch_size > 0 ? batch_size : 0;
+    c->batch_size = batch_size > 0 ? batch_size : 50000;
 
     // Pre-allocate scratch buffers when batch_size is known
     if (c->batch_size > 0) {
@@ -1309,10 +1309,8 @@ void cuda_compute_v2(void* vctx, void* vdh,
 ) {
     ComputeContext* c = (ComputeContext*)vctx;
     DataHandle2* h = (DataHandle2*)vdh;
-    int ne = h->ne, bs = c->batch_size > 0 ? c->batch_size : ne;
-    // Cap batch size to 50000 to avoid huge per-call scratch allocation
-    int max_bs = 50000;
-    if (bs > max_bs) bs = max_bs;
+    int ne = h->ne, bs = c->batch_size;
+    if (ne < bs) bs = ne;
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
 

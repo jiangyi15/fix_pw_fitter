@@ -91,7 +91,7 @@ class CUDAKernelV2:
     Compatible return format with original CUDAKernel for drop-in replacement.
     """
 
-    def __init__(self, config, batch_size=0, lib_path=None):
+    def __init__(self, config, batch_size=50000, lib_path=None):
         # ---- load library ----
         self._lib = _load_lib()
 

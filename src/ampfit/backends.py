@@ -192,7 +192,7 @@ class CUDABackendV2(ComputeBackend):
     = full dataset).  Phsp is batched in Python for large datasets.
     """
 
-    def __init__(self, kernel_config, batch_size=0):
+    def __init__(self, kernel_config, batch_size=50000):
         from ampfit._cuda_v2 import CUDAKernelV2 as _K
         self._kernel_class = _K
         self.kernel = _K(kernel_config, batch_size=batch_size)
