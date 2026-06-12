@@ -689,26 +689,6 @@ extern "C" {
 
 // Structs for clean unified API: (Context*, Data*, Params*, norm, use_norm)
 typedef struct {
-    // Index arrays (GPU)
-    const int* m0_index; const int* g0_index;
-    const int* g0_mass_index; const int* mass_index;
-    const int* fl_type; const int* fl_q_index;
-    const int* bw_order; const int* fl_order; const int* angle_index;
-    // Constant arrays (GPU)
-    const double* angle_k; const double* angle_b;
-    const double* matrix_angle_real; const double* matrix_angle_imag;
-    const double* gamma_table_real; const double* gamma_table_imag;
-    double gamma_min; double gamma_delta; int gamma_table_bins;
-    const double* matrix_gamma;
-    const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
-    // Dimensions
-    int n_wave; int n_res; int n_decay; int n_unique_bw;
-    int n_gamma_rows; int n_mass; int n_momentum;
-    int n_angle_k; int n_angle_total;
-    int batch_size;
-} ComputeContext;
-
-typedef struct {
     // Event data (GPU)
     const double* mass; const double* momentum; const double* angle;
     const double* frac; const double* time; const double* weight; const double* bkg;
@@ -731,6 +711,28 @@ typedef struct {
     double* grad_poq_rho_partial; double* grad_pop_phi_partial;
     int n_events;
 } ComputeData;
+
+typedef struct {
+    // Index arrays (GPU)
+    const int* m0_index; const int* g0_index;
+    const int* g0_mass_index; const int* mass_index;
+    const int* fl_type; const int* fl_q_index;
+    const int* bw_order; const int* fl_order; const int* angle_index;
+    // Constant arrays (GPU)
+    const double* angle_k; const double* angle_b;
+    const double* matrix_angle_real; const double* matrix_angle_imag;
+    const double* gamma_table_real; const double* gamma_table_imag;
+    double gamma_min; double gamma_delta; int gamma_table_bins;
+    const double* matrix_gamma;
+    const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+    // Dimensions
+    int n_wave; int n_res; int n_decay; int n_unique_bw;
+    int n_gamma_rows; int n_mass; int n_momentum;
+    int n_angle_k; int n_angle_total;
+    int batch_size;
+    ComputeData* scratch;  // pre-allocated scratch buffers (batch_size > 0 only)
+    double* Q_red_gpu;     // single-double GPU buffer for Q reduction
+} ComputeContext;
 
 typedef struct {
     const double* ck_real; const double* ck_imag;
@@ -980,7 +982,8 @@ void launch_compute_all(
         data->grad_DeltaM_partial, data->grad_Ap_partial,
         data->grad_poq_rho_partial, data->grad_pop_phi_partial,
         data->n_events);
-    // Flush any pending kernel errors before returning
+    // Sync + flush: ensures gradient kernel errors are visible before return
+    cudaDeviceSynchronize();
     cudaGetLastError();
 }
 
@@ -1214,6 +1217,33 @@ void* cuda_create_context_v2(
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat;
     c->batch_size = batch_size > 0 ? batch_size : 0;
+
+    // Pre-allocate scratch buffers when batch_size is known
+    if (c->batch_size > 0) {
+        int bs = c->batch_size;
+        c->scratch = (ComputeData*)calloc(1, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&c->scratch->f, bs * sizeof(double))
+        #define S2(f,n) cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double))
+        S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
+        S2(g_bw_real, nub); S2(g_bw_imag, nub);
+        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
+        S2(bw_p_real, nw); S2(bw_p_imag, nw);
+        S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
+        S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S2(bw_dom_real, nub); S2(bw_dom_imag, nub);
+        S2(grad_ck_real_partial, nw); S2(grad_ck_imag_partial, nw);
+        S2(grad_m0_partial, nub); S2(grad_g0_partial, ngr);
+        S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
+        S(grad_DeltaM_partial); S(grad_Ap_partial);
+        S(grad_poq_rho_partial); S(grad_pop_phi_partial);
+        #undef S
+        #undef S2
+        cudaMalloc(&c->Q_red_gpu, 8);
+    } else {
+        c->scratch = NULL;
+        c->Q_red_gpu = NULL;
+    }
     return c;
 }
 void cuda_free_context_v2(void* vctx) {
@@ -1224,6 +1254,24 @@ void cuda_free_context_v2(void* vctx) {
     F(angle_k); F(angle_b); F(matrix_angle_real); F(matrix_angle_imag);
     F(gamma_table_real); F(gamma_table_imag); F(matrix_gamma); F(fl_table);
     #undef F
+    // Free pre-allocated scratch
+    if (c->scratch) {
+        #define SF(f) cudaFree(c->scratch->f)
+        SF(g_interp_real); SF(g_interp_imag); SF(g_bw_real); SF(g_bw_imag);
+        SF(Q_out); SF(P_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
+        SF(gp_real); SF(gp_imag); SF(gm_real); SF(gm_imag); SF(poq_real); SF(poq_imag);
+        SF(bw_p_real); SF(bw_p_imag); SF(common_amp_factor_real); SF(common_amp_factor_imag);
+        SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag); SF(dQ_dP);
+        SF(bw_dom_real); SF(bw_dom_imag);
+        SF(grad_ck_real_partial); SF(grad_ck_imag_partial);
+        SF(grad_m0_partial); SF(grad_g0_partial);
+        SF(grad_Gamma_partial); SF(grad_DeltaGamma_partial);
+        SF(grad_DeltaM_partial); SF(grad_Ap_partial);
+        SF(grad_poq_rho_partial); SF(grad_pop_phi_partial);
+        #undef SF
+        free(c->scratch);
+    }
+    if (c->Q_red_gpu) cudaFree(c->Q_red_gpu);
     free(c);
 }
 
@@ -1274,35 +1322,41 @@ void cuda_compute_v2(void* vctx, void* vdh,
     p.Gamma = G; p.Delta_Gamma = DG; p.Delta_m = DM;
     p.A_prod = Ap; p.poq_rho = pr; p.pop_phi = pp;
 
+    // Use context-allocated scratch (avoids per-call cudaMalloc/free)
     ComputeData s;
-    memset(&s, 0, sizeof(ComputeData));
-    #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
-    #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
-    S2(g_interp_real,ng); S2(g_interp_imag,ng);
-    S2(g_bw_real,nu); S2(g_bw_imag,nu);
-    S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
-    S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
-    S2(bw_p_real,nw); S2(bw_p_imag,nw);
-    S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
-    S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
-    S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
-    S2(grad_ck_real_partial,nw); S2(grad_ck_imag_partial,nw);
-    S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
-    S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
-    S(grad_DeltaM_partial); S(grad_Ap_partial);
-    S(grad_poq_rho_partial); S(grad_pop_phi_partial);
-    #undef S
-    #undef S2
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
+        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
+        S2(bw_p_real,nw); S2(bw_p_imag,nw);
+        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
+        S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
+        S2(grad_ck_real_partial,nw); S2(grad_ck_imag_partial,nw);
+        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
+        S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
+        S(grad_DeltaM_partial); S(grad_Ap_partial);
+        S(grad_poq_rho_partial); S(grad_pop_phi_partial);
+        #undef S
+        #undef S2
+    }
 
     *oQ = 0; memset(oP, 0, ne * 8);
     memset(ogck_r, 0, nw * 8); memset(ogck_i, 0, nw * 8);
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
     memset(ogsc, 0, 6 * 8);
 
-    // Single-double GPU buffer for Q reduction
-    double* Q_red_gpu;
-    cudaMalloc(&Q_red_gpu, 8);
-    double Q_red_host;
+    // Zero reduction output buffers on GPU (stale from previous calls)
+    cudaMemset(s.g_bw_real, 0, bs * nu * 8);
+    cudaMemset(s.g_bw_imag, 0, bs * nu * 8);
+    cudaMemset(s.g_interp_real, 0, bs * ng * 8);
+    cudaMemset(s.g_interp_imag, 0, bs * ng * 8);
 
     double* Ph = (double*)malloc(bs * 8);
     double* gck_buf = (double*)malloc(nw * 8);
@@ -1326,10 +1380,9 @@ void cuda_compute_v2(void* vctx, void* vdh,
         // Clear any pending errors from launch_compute_all
         cudaGetLastError();
 
-        // GPU reduction for Q
-        launch_reduce_sum(d.Q_out, Q_red_gpu, nb);
-        cudaMemcpy(&Q_red_host, Q_red_gpu, 8, cudaMemcpyDeviceToHost);
-        *oQ += Q_red_host;
+        // CPU sum for Q (avoids GPU reduction edge case with reused scratch)
+        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oQ += Ph[i];
 
         cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
         memcpy(oP + st, Ph, nb * 8);
@@ -1364,19 +1417,23 @@ void cuda_compute_v2(void* vctx, void* vdh,
         #undef SA
     }
 
-    #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
-    F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-    F(Q_out); F(P_out); F(pap_real); F(pap_imag); F(pam_real); F(pam_imag);
-    F(gp_real); F(gp_imag); F(gm_real); F(gm_imag); F(poq_real); F(poq_imag);
-    F(bw_p_real); F(bw_p_imag); F(common_amp_factor_real); F(common_amp_factor_imag);
-    F(ap_real); F(ap_imag); F(am_real); F(am_imag); F(dQ_dP);
-    F(bw_dom_real); F(bw_dom_imag);
-    F(grad_ck_real_partial); F(grad_ck_imag_partial);
-    F(grad_m0_partial); F(grad_g0_partial);
-    F(grad_Gamma_partial); F(grad_DeltaGamma_partial); F(grad_DeltaM_partial);
-    F(grad_Ap_partial); F(grad_poq_rho_partial); F(grad_pop_phi_partial);
-    #undef F
-    cudaFree(Q_red_gpu);
+    // Free scratch (only if allocated per-call, not from context)
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        F(Q_out); F(P_out); F(pap_real); F(pap_imag); F(pam_real); F(pam_imag);
+        F(gp_real); F(gp_imag); F(gm_real); F(gm_imag); F(poq_real); F(poq_imag);
+        F(bw_p_real); F(bw_p_imag); F(common_amp_factor_real); F(common_amp_factor_imag);
+        F(ap_real); F(ap_imag); F(am_real); F(am_imag); F(dQ_dP);
+        F(bw_dom_real); F(bw_dom_imag);
+        F(grad_ck_real_partial); F(grad_ck_imag_partial);
+        F(grad_m0_partial); F(grad_g0_partial);
+        F(grad_Gamma_partial); F(grad_DeltaGamma_partial); F(grad_DeltaM_partial);
+        F(grad_Ap_partial); F(grad_poq_rho_partial); F(grad_pop_phi_partial);
+        #undef F
+    }
+    // Free Q_red_gpu if locally allocated
+    if (c->Q_red_gpu) { /* allocated in context, freed in cuda_free_context_v2 */ }
     free(Ph); free(gck_buf); free(gm0_buf); free(gg0_buf);
 
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
