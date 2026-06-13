@@ -155,73 +155,55 @@ particle:
         P: +1
         mass: 1.322
         width: 0.120
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        model: BW
     a2(1700)p:
         J: 2
         P: +1
         mass: 1.8375
         width: 0.377
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        model: BW
     a2(1700)m:
         J: 2
         P: +1
         mass: 1.8375
         width: 0.377
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        model: BW
     pi2(1670)p:
         J: 2
         P: -1
         mass: 1.665
         width: 0.334
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/pi2(1670)p_gamma.npy
+        model: BW
     pi2(1670)m:
         J: 2
         P: -1
         mass: 1.665
         width: 0.334
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/pi2(1670)p_gamma.npy
+        model: BW
     pi1(1600)p:
         J: 1
         P: -1
         mass: 1.798
         width: 0.533
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/pi1(1600)p_gamma.npy
+        model: BW
     pi1(1600)m:
         J: 1
         P: -1
         mass: 1.798
         width: 0.533
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/pi1(1600)p_gamma.npy
+        model: BW
     a1(1640)p:
         J: 1
         P: +1
         mass: 1.710
         width: 0.599
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/a1(1640)p_gamma.npy
+        model: BW
     a1(1640)m:
         J: 1
         P: +1
         mass: 1.710
         width: 0.599
-        width_scale: True
-        model: width_linear_npy
-        file: /media/jiangy/JZAO/ana/time_dep_amp/test_4pi/fit_ls4/lineshapes4/a1(1640)p_gamma.npy
+        model: BW
     rhoA:
         J: 1
         P: -1
