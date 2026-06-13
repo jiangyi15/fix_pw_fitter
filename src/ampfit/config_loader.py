@@ -83,7 +83,7 @@ class DecayChain:
     def get_gls_combination(self):
         ls_lists = [i.get_ls_names() for i in self.decays]
         # print(ls_lists)
-        total = str(self) + "_total_0"
+        total = str(self).replace("+",".") + "_total_0"
         ret = list(itertools.product([total], *ls_lists))
         return ret
 
@@ -277,21 +277,41 @@ class Config:
         return 0., q_max
 
     def build_fl_table(self, l_list, n_interp=500):
+        """
+        Build Blatt-Weisskopf form factor table with TFPWA normalization.
+        
+        TFPWA normalizes form factors so that F(q0) = q0 at reference momentum q0.
+        This ensures consistency with TFPWA amplitudes.
+        """
         ret = []
-        d = 3.0
+        d = 3.0  # Barrier radius in GeV^-1
+        q0 = 1.0  # Reference momentum in GeV
+        
         q_min, q_max = self.get_max_q_range()
         q = np.linspace(q_min, q_max, n_interp)
+        
         for l in l_list:
             if l == 0:
+                # L=0: F = 1 (no normalization needed)
                 ret.append(np.ones_like(q))
             elif l == 1:
+                # L=1: F = q / sqrt(1 + (q*d)²)
+                # Normalized: F = q * sqrt(1 + (q0*d)²) / sqrt(1 + (q*d)²)
                 z = (q * d)**2
-                ret.append( q / np.sqrt( 1 + z  ))
+                z0 = (q0 * d)**2
+                norm_factor = np.sqrt(1 + z0)  # sqrt(10) ≈ 3.162
+                ret.append(q * norm_factor / np.sqrt(1 + z))
             elif l == 2:
+                # L=2: F = q² / sqrt(9 + 3(q*d)² + (q*d)⁴)
+                # Normalized: F = q² * sqrt(9 + 3(q0*d)² + (q0*d)⁴) / sqrt(9 + 3(q*d)² + (q*d)⁴)
                 z = (q * d)**2
-                ret.append( q**2 / np.sqrt( 9 + 3*z + z**2 ))
-            else: # not implemeted
+                z0 = (q0 * d)**2
+                norm_factor = np.sqrt(9 + 3*z0 + z0**2)  # ≈ 10.817
+                ret.append(q**2 * norm_factor / np.sqrt(9 + 3*z + z**2))
+            else:
+                # Not implemented - use L=0 as fallback
                 ret.append(np.ones_like(q))
+        
         return np.stack(ret, axis=0), q[0], q[1]-q[0]
 
 

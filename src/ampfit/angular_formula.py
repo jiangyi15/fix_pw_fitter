@@ -10,7 +10,7 @@ cache_formula = {
 {"coeffs": -1/math.sqrt(3), "k": [0,1,1], "b":  [_c, _c, _c]},
 ],
 ((('pim1', 'pip1'), ('pim2', 'pip2')), ((1, 1), (1, 0), (1, 0))): [
-{"coeffs": -1/math.sqrt(2)*1j, "k": [0,1,1], "b":  [_c, _s, _s]},
+{"coeffs": -1/math.sqrt(2)*1j, "k": [1,1,1], "b":  [_s, _s, _s]},
 ],
 ((('pim1', 'pip1'), ('pim2', 'pip2')), ((2, 2), (1, 0), (1, 0))): [
 {"coeffs":  1/math.sqrt(6), "k":  [1,1,1],  "b": [_c, _s, _s]},
