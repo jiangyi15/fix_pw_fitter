@@ -552,8 +552,12 @@ class ConstraintManager:
                     return True
             return False
 
+        added = set()
         for name in sorted(all_ck_names):
             canon = self.name_res.map.get(name, name)
+            if canon in added:
+                continue
+            added.add(canon)
             r_fixed = _slot_fixed(canon, 'r')
             i_fixed = _slot_fixed(canon, 'i')
             if not (r_fixed and i_fixed):

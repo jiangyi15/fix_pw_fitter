@@ -43,6 +43,12 @@ def build_constraints(all_comb):
             fixed_slots[p + 'r'] = 1.0
             fixed_slots[p + 'i'] = 0.0
 
+    # Fix B->rhoA.rhoB total (matching reference TFPWA)
+    fix_total = "B->rhoA.rhoBrhoA->pip1.pim1rhoB->pip2.pim2_total_0"
+    if fix_total in all_params:
+        fixed_slots[fix_total + 'r'] = 1.0
+        fixed_slots[fix_total + 'i'] = 0.0
+
     # --- Same params and scales ---
     for r1 in ["a1(1260)", "a1(1640)", "a2(1320)", "pi1300",
                "pi1600", "a2(1700)", "pi2(1670)", "pi1(1600)"]:
@@ -122,7 +128,7 @@ def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
     parser.add_argument("--backend", default="cuda",
-                        choices=["cuda", "cuda32", "cuda_v2", "numpy", "onnx"],
+                        choices=["cuda", "cuda32", "cuda_v2", "numpy", "onnx", "cuda_v3"],
                         help="Compute backend")
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--data", default="data/data_arrays.npz")
@@ -157,7 +163,7 @@ def main():
             val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
             fixed_slots[name] = val
 
-    fixed_slots["gamma"] = 0.0
+    # gamma is free (fitted time parameter) — do NOT fix to 0
     fixed_slots["delta_gamma"] = 0.0
     fixed_slots["delta_m"]= 0.506
     fixed_slots["A_prod"] = 0.0
