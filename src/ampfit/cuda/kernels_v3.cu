@@ -62,14 +62,14 @@ __device__ complex interp_complex_device(
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
     double t = diff - xbin;
     int base = type_idx * n_bins + xbin;
-    // Clamp indices to [0, n_bins-1]
-    int im1 = max(0, base - 1);
+    int type_end = (type_idx + 1) * n_bins - 1;
+    int type_start = type_idx * n_bins;
+    // Clamp indices to [type_start, type_end]
+    int im1 = max(type_start, base - 1);
     int i0  = base;
-    int i1  = min(base + 1, n_bins - 1);
-    int i2  = min(base + 2, n_bins - 1);
-    // Swap endpoints to avoid duplicate indices for Catmull-Rom
-    // If xbin == 0, duplicate p[0] for p[-1]
-    // If xbin == n_bins-2, duplicate p[n_bins-1] for p[2]
+    int i1  = min(base + 1, type_end);
+    int i2  = min(base + 2, type_end);
+    // Edge fix: at xbin==0 duplicate p0 for p[-1]; at xbin==n_bins-2 duplicate p1 for p[2]
     int jm1 = (xbin == 0) ? i0 : im1;
     int j2  = (xbin == n_bins - 2) ? i1 : i2;
     double real_val = catmull_rom_1d(
@@ -89,10 +89,12 @@ __device__ double interp_real_device(
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
     double t = diff - xbin;
     int base = type_idx * n_bins + xbin;
-    int im1 = max(0, base - 1);
+    int type_end = (type_idx + 1) * n_bins - 1;
+    int type_start = type_idx * n_bins;
+    int im1 = max(type_start, base - 1);
     int i0  = base;
-    int i1  = min(base + 1, n_bins - 1);
-    int i2  = min(base + 2, n_bins - 1);
+    int i1  = min(base + 1, type_end);
+    int i2  = min(base + 2, type_end);
     int jm1 = (xbin == 0) ? i0 : im1;
     int j2  = (xbin == n_bins - 2) ? i1 : i2;
     return catmull_rom_1d(

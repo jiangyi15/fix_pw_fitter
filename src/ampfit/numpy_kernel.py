@@ -71,6 +71,45 @@ class NumpyKernelCorrect:
         right = np.take(table.flatten(), idx + 1)
         return (right - left) * delta + left
 
+    def interp_catmull_rom(self, table, types, x, xmin, xdelta):
+        """Vectorized Catmull-Rom interpolation (C¹ continuous)."""
+        diff = (x - xmin) / xdelta
+        xbin = np.floor(diff).astype(np.intp)
+        n_bins = table.shape[-1]
+        n_types = table.shape[0]
+        xbin = np.clip(xbin, 0, n_bins - 2)
+        t = diff - xbin
+        # Flat indices per-type
+        type_start = types * n_bins
+        type_end = (types + 1) * n_bins - 1
+        base = type_start + xbin
+        # Clamp indices to [type_start, type_end]
+        pm1 = np.clip(base - 1, type_start, type_end)
+        p0  = base
+        p1  = np.clip(base + 1, type_start, type_end)
+        p2  = np.clip(base + 2, type_start, type_end)
+        # Edge fix: at xbin==0, duplicate p0 for pm1
+        at_left = (xbin == 0)
+        pm1 = np.where(at_left, p0, pm1)
+        # at xbin==n_bins-2, duplicate p1 for p2
+        at_right = (xbin == n_bins - 2)
+        p2 = np.where(at_right, p1, p2)
+        # Gather table values
+        f = table.flatten()
+        v_pm1 = np.take(f, pm1)
+        v_p0  = np.take(f, p0)
+        v_p1  = np.take(f, p1)
+        v_p2  = np.take(f, p2)
+        # Catmull-Rom
+        t2 = t * t
+        t3 = t2 * t
+        return 0.5 * (
+            (2.0 * v_p0)
+            + (-v_pm1 + v_p1) * t
+            + (2.0 * v_pm1 - 5.0 * v_p0 + 4.0 * v_p1 - v_p2) * t2
+            + (-v_pm1 + 3.0 * v_p0 - 3.0 * v_p1 + v_p2) * t3
+        )
+
     def _compute(self, params, data, norm=None):
         """Compute forward and gradients with correct complex calculus"""
         
