@@ -32,6 +32,13 @@ def find_cuda():
     return None, None
 
 
+VARIANTS = [
+    ("kernels.cu", "libcuda_kernels.so"),
+    ("kernels_v2.cu", "libcuda_kernels_v2.so"),
+    ("kernels_v3.cu", "libcuda_kernels_v3.so"),
+]
+
+
 def build():
     cuda_path, nvcc = find_cuda()
     if not nvcc:
@@ -39,19 +46,24 @@ def build():
         return False
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    src_file = os.path.join(script_dir, "kernels.cu")
-    out_file = os.path.join(script_dir, "libcuda_kernels.so")
+    all_ok = True
 
-    cmd = [nvcc, '-shared', '-Xcompiler', '-fPIC',
-           '-o', out_file, src_file, '-lcudart']
+    for src_name, lib_name in VARIANTS:
+        src_file = os.path.join(script_dir, src_name)
+        out_file = os.path.join(script_dir, lib_name)
 
-    print(f"Building: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}")
-        return False
-    print(f"✓ Built {out_file}")
-    return True
+        cmd = [nvcc, '-shared', '-Xcompiler', '-fPIC',
+               '-o', out_file, src_file, '-lcudart']
+
+        print(f"Building: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  FAILED:\n{result.stderr}")
+            all_ok = False
+        else:
+            print(f"  ✓ Built {out_file}")
+
+    return all_ok
 
 
 if __name__ == "__main__":
