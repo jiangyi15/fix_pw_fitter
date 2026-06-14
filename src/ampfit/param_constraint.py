@@ -361,8 +361,7 @@ class FixedOverride:
     def apply(self, d):
         d = dict(d)
         for name, val in self.values.items():
-            if name in d:
-                d[name] = val
+            d[name] = val  # inject fixed value even if not in raw dict
         return d
 
     def chain_grad(self, grad_out, d_in):
