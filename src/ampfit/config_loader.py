@@ -274,7 +274,7 @@ class Config:
         m_max = m_center - m_finals[0]
         m1, m2 = m_finals[0:2]
         q_max = math.sqrt( (m_max**2 - (m1+m2)**2)*(m_max**2-(m1+m2)**2) )/2/m_max
-        return 0., q_max
+        return 0., q_max * 1.2  # 20% safety margin for sub-decay q values
 
     def build_fl_table(self, l_list, n_interp=500):
         """

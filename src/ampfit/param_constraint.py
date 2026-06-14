@@ -38,12 +38,14 @@ class ParameterConstraint:
         If the dict has ``name + 'r'`` / ``name + 'i'`` slots, treat
         as a complex ck parameter: ``r·exp(j·θ)``.
         Otherwise use ``name`` directly (real/m0/g0/scalar).
+        
+        NOTE: coupling parameters not in slot_dict default to 0+0j.
         """
         if name + 'r' in slot_dict:
             r = slot_dict[name + 'r']
             theta = slot_dict.get(name + 'i', 0.0)
             return r * np.exp(1j * theta)
-        return slot_dict.get(name, 1.0 + 0.0j)
+        return slot_dict.get(name, 0.0 + 0.0j)
 
     def build_ck(self, slot_dict):
         """Compute ck from slot-level real dict.
