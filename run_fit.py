@@ -128,7 +128,10 @@ def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
     parser.add_argument("--backend", default="cuda",
-                        choices=["cuda", "cuda32", "cuda_v2", "numpy", "onnx", "cuda_v3"],
+                        choices=["cuda", "cuda32", "cuda64", 
+                                 "cuda_v2", "cuda64_v2", "cuda32_v2",
+                                 "cuda_v3", "cuda64_v3", "cuda32_v3",
+                                 "numpy", "onnx", "onnx_cpu", "onnx_cuda"],
                         help="Compute backend")
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--data", default="data/data_arrays.npz")

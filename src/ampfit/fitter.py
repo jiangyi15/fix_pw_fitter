@@ -57,9 +57,15 @@ class Fitter:
             elif backend in ("cuda_v2", "cuda64_v2"):
                 from ampfit.backends import CUDABackendV2
                 backend = CUDABackendV2(self.kernel_config, batch_size=0)
+            elif backend == "cuda32_v2":
+                from ampfit.backends import CUDABackendV2F32
+                backend = CUDABackendV2F32(self.kernel_config, batch_size=0)
             elif backend in ("cuda_v3", "cuda64_v3"):
                 from ampfit.backends import CUDABackendV3
                 backend = CUDABackendV3(self.kernel_config)
+            elif backend == "cuda32_v3":
+                from ampfit.backends import CUDABackendV3F32
+                backend = CUDABackendV3F32(self.kernel_config)
             elif backend == "numpy":
                 backend = NumpyBackend(self.kernel_config)
             elif backend in ("onnx", "onnx_cpu"):
