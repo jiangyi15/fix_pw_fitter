@@ -17,12 +17,16 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 │   ├── particle_model.py           # Particle property definitions + get_gamma_defaults()
 │   ├── angular_formula.py          # Angular distribution formulas
 │   ├── numpy_kernel.py             # NumPy reference kernel (Wirtinger gradients)
-│   ├── backends.py                 # ComputeBackend base + 4 backends
-│   ├── _cuda.py                    # CUDA Python bindings (CFFI), float64 kernel
-│   ├── _cuda_f32.py                # CUDA float32 kernel (2-4× faster)
+│   ├── backends.py                 # ComputeBackend base + 6 backends
+│   ├── _cuda.py                    # CUDA Python bindings (CFFI), float64 v2 kernel
+│   ├── _cuda_v2_f32.py             # CUDA float32 v2 kernel (fastest)
+│   ├── _cuda_v3_f32.py             # CUDA float32 v3 kernel (Catmull-Rom)
 │   ├── _onnx_builder.py            # In-memory ONNX graph builder (no PyTorch)
 │   ├── cuda/
-│   │   ├── kernels.cu              # Optimized CUDA C kernels (forward + backward)
+│   │   ├── kernels.cu              # CUDA C kernels v2 (linear interpolation)
+│   │   ├── kernels_v3.cu           # CUDA C kernels v3 (Catmull-Rom interpolation)
+│   │   ├── kernels_v2_f32.cu       # Float32 v2 kernel
+│   │   ├── kernels_v3_f32.cu       # Float32 v3 kernel
 │   │   └── build.py                # Auto-build on first import
 │   ├── fitter.py                   # Fitter: NLL → BFGS fit → save_params → plot
 │   ├── param_constraint.py         # Parameter constraints: fixed, same, scale
@@ -68,11 +72,12 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 from ampfit import Fitter
 
 # Backend selection via string shortcut
-fitter = Fitter("config_angle.yml")              # default: CUDA f64
-fitter = Fitter("config_angle.yml", backend="cuda32")   # CUDA f32
-fitter = Fitter("config_angle.yml", backend="numpy")    # NumPy f64
-fitter = Fitter("config_angle.yml", backend="onnx_cpu") # ONNX CPU
-fitter = Fitter("config_angle.yml", backend="onnx_cuda")# ONNX CUDA
+fitter = Fitter("config_angle.yml")              # default: CUDA f64 v2
+fitter = Fitter("config_angle.yml", backend="cuda32_v2")   # CUDA f32 v2 (fastest)
+fitter = Fitter("config_angle.yml", backend="cuda32_v3")   # CUDA f32 v3 (stable)
+fitter = Fitter("config_angle.yml", backend="numpy")       # NumPy f64
+fitter = Fitter("config_angle.yml", backend="onnx_cpu")    # ONNX CPU
+fitter = Fitter("config_angle.yml", backend="onnx_cuda")   # ONNX CUDA
 
 fitter.set_data(data)
 fitter.set_phsp(phsp)
@@ -105,7 +110,7 @@ fitter.plot(result, prefix="plots/")
 
 ```python
 from ampfit import Config
-from ampfit.backends import NumpyBackend, CUDABackend, ONNXBackend
+from ampfit.backends import NumpyBackend, CUDABackendV2, CUDABackendV2F32, ONNXBackend
 
 config = Config("config_angle.yml")
 kc = config.build_all_index()
@@ -114,8 +119,9 @@ kc = config.build_all_index()
 nk = NumpyBackend(kc)
 Q, grads, P = nk.compute(params, data)
 
-# CUDA accelerated (f64 or f32)
-ck = CUDABackend(kc, dtype="float64")
+# CUDA accelerated (v2 or v3, f64 or f32)
+ck = CUDABackendV2(kc, dtype="float64")      # f64 v2
+ck = CUDABackendV2F32(kc)                     # f32 v2 (fastest)
 dh = ck.load_data(data)
 Q, grads, P = ck.compute(params, dh)
 
@@ -132,10 +138,12 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 | Backend | 64 | 256 | 1024 | 8192 | vs NumPy (max) |
 |---------|:---:|:---:|:----:|:----:|:--------------:|
 | **NumPy f64** CPU | 5.5K | 5.6K | 5.3K | 5.2K | 1× |
-| **CUDA f64** GPU | 66K | 110K | 162K | 183K | **33×** |
-| **CUDA f32** GPU | 119K | 336K | 681K | 798K | **145×** |
+| **CUDA f64 v2** GPU | 72K | 119K | 142K | 188K | **36×** |
+| **CUDA f64 v3** GPU | 84K | 142K | 172K | 187K | **36×** |
+| **CUDA f32 v2** GPU | 142K | 396K | 717K | 831K | **160×** |
+| **CUDA f32 v3** GPU | 138K | 355K | 504K | 609K | **117×** |
 | **ONNX f32** CPU | 3K | 11K | 40K | 32K | 8× |
-| **ONNX f32** CUDA | 21K | 79K | 355K | 338K | **64×** |
+| **ONNX f32** CUDA | 21K | 79K | 355K | 338K | **65×** |
 
 **Latency** (forward + backward pass, 1024 events):
 
@@ -144,13 +152,17 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 | **NumPy f64** CPU | 193 ms | 1× |
 | **ONNX** CPU | 26 ms | 7.4× |
 | **ONNX** CUDA | **2.9 ms** | **67×** |
-| **CUDA f64** GPU | 6.3 ms | 31× |
-| **CUDA f32** GPU | **1.5 ms** | **129×** |
+| **CUDA f64 v2** GPU | 7.2 ms | 27× |
+| **CUDA f64 v3** GPU | 6.0 ms | 32× |
+| **CUDA f32 v2** GPU | **1.4 ms** | **135×** |
+| **CUDA f32 v3** GPU | 2.0 ms | 94× |
 
 ### Key observations
 
-- **CUDA f32** is the fastest overall: **145× vs NumPy**, **4× faster than CUDA f64**
-- **ONNX CUDA** offers 64× speedup without requiring CUDA Toolkit at build time
+- **CUDA f32 v2** is the fastest overall: **160× vs NumPy**, **4.4× faster than CUDA f64**
+- **CUDA f32 v3** has better numerical stability for large datasets but slightly slower than v2
+- **CUDA v3 (f64)** shows better small-batch latency than v2 due to Catmull-Rom interpolation
+- **ONNX CUDA** offers 65× speedup without requiring CUDA Toolkit at build time
 - **ONNX CPU** is 8× vs NumPy — useful on machines without GPU
 - Custom CUDA kernels outperform ONNX because they are purpose-built for this computation
 - ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
@@ -200,8 +212,10 @@ All backends validated against a **3-point central-difference numerical referenc
 | Backend | norm=None | norm=NLL |
 |---------|:---------:|:--------:|
 | NumPy f64 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
-| CUDA f64 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
-| CUDA f32 | 1e-7 to 3e-8 | 1e-7 to 5e-8 |
+| CUDA f64 v2 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
+| CUDA f64 v3 | 1e-9 to 1e-11 | 1e-7 to 1e-8 |
+| CUDA f32 v2 | 1e-7 to 3e-8 | 1e-7 to 5e-8 |
+| CUDA f32 v3 | 1e-7 to 3e-8 | 1e-7 to 5e-8 |
 | ONNX f32 | 1e-4 to 3e-4 | 2e-4 to 5e-4 |
 
 ONNX f32 precision (~1e-4) is limited by float32 vs the float64 numerical reference.
