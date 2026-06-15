@@ -35,54 +35,25 @@ class Fitter:
         Args:
             config_file: path to YAML config.
             backend: a :class:`ComputeBackend` instance, or a string shortcut.
-                     Strings: ``"cuda"`` (default f64), ``"cuda32"`` (f32),
-                     ``"cuda64"``, ``"numpy"``, ``"onnx"``/``"onnx_cpu"``,
-                     ``"onnx_cuda"``.
+                     Strings are resolved via
+                     ``ampfit.backends.create_backend()``.
+                     Registered names: ``"cuda"``/``"cuda64"``, ``"cuda32"``,
+                     ``"cuda_v2"``/``"cuda64_v2"``, ``"cuda32_v2"``,
+                     ``"cuda_v3"``/``"cuda64_v3"``, ``"cuda32_v3"``,
+                     ``"numpy"``, ``"onnx"``/``"onnx_cpu"``, ``"onnx_cuda"``.
         """
         from ampfit.config_loader import Config
         from ampfit.param_constraint import ConstraintManager
-        from ampfit.backends import CUDABackend, NumpyBackend, ONNXBackend
+        from ampfit.backends import create_backend
 
         self.config = Config(config_file)
         self.kernel_config = self.config.build_all_index()
 
         # Resolve backend
         if backend is None or backend == "cuda":
-            backend = CUDABackend(self.kernel_config, dtype="float64")
+            backend = create_backend("cuda64", self.kernel_config)
         elif isinstance(backend, str):
-            if backend == "cuda64":
-                backend = CUDABackend(self.kernel_config, dtype="float64")
-            elif backend == "cuda32":
-                backend = CUDABackend(self.kernel_config, dtype="float32")
-            elif backend in ("cuda_v2", "cuda64_v2"):
-                from ampfit.backends import CUDABackendV2
-                backend = CUDABackendV2(self.kernel_config, batch_size=0)
-            elif backend == "cuda32_v2":
-                from ampfit.backends import CUDABackendV2F32
-                backend = CUDABackendV2F32(self.kernel_config, batch_size=0)
-            elif backend in ("cuda_v3", "cuda64_v3"):
-                from ampfit.backends import CUDABackendV3
-                backend = CUDABackendV3(self.kernel_config)
-            elif backend == "cuda32_v3":
-                from ampfit.backends import CUDABackendV3F32
-                backend = CUDABackendV3F32(self.kernel_config)
-            elif backend == "cuda_mixed":
-                from ampfit.backends import CUDABackendMixed
-                backend = CUDABackendMixed(self.kernel_config, batch_size=0)
-            elif backend == "numpy":
-                backend = NumpyBackend(self.kernel_config)
-            elif backend in ("onnx", "onnx_cpu"):
-                backend = ONNXBackend(
-                    kernel_config=self.kernel_config,
-                    providers=["CPUExecutionProvider"],
-                )
-            elif backend == "onnx_cuda":
-                backend = ONNXBackend(
-                    kernel_config=self.kernel_config,
-                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-                )
-            else:
-                raise ValueError(f"Unknown backend: {backend}")
+            backend = create_backend(backend, self.kernel_config)
         # 'backend' is now a ComputeBackend instance
         self.backend = backend
 
