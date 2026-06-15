@@ -176,8 +176,8 @@ __global__ void compute_main_kernel(
     const float* __restrict__ m0,
     float Gamma, float Delta_Gamma, float Delta_m,
     float A_p, float poq_rho, float pop_phi,
-    float* __restrict__ Q_out,
-    float* __restrict__ P_out,
+    double* __restrict__ Q_out,
+    double* __restrict__ P_out,
     float* __restrict__ pap_real, float* __restrict__ pap_imag,
     float* __restrict__ pam_real, float* __restrict__ pam_imag,
     float* __restrict__ gp_real, float* __restrict__ gp_imag,
@@ -389,7 +389,7 @@ __global__ void compute_main_kernel(
 //      (same shared-memory pattern as forward g_bw kernel)
 //=============================================================================
 __global__ void gradient_kernel(
-    const float* __restrict__ P,
+    const double* __restrict__ P,
     const float* __restrict__ pap_real, const float* __restrict__ pap_imag,
     const float* __restrict__ pam_real, const float* __restrict__ pam_imag,
     const float* __restrict__ gp_real, const float* __restrict__ gp_imag,
@@ -700,7 +700,7 @@ typedef struct {
     // Scratch buffers (GPU)
     float* g_interp_real; float* g_interp_imag;
     float* g_bw_real; float* g_bw_imag;
-    float* Q_out; float* P_out;
+    double* Q_out; double* P_out;
     float* pap_real; float* pap_imag; float* pam_real; float* pam_imag;
     float* gp_real; float* gp_imag; float* gm_real; float* gm_imag;
     float* poq_real; float* poq_imag;
@@ -803,7 +803,7 @@ void launch_compute_main(
     const float* ck_real, const float* ck_imag, const float* m0,
     float Gamma, float Delta_Gamma, float Delta_m,
     float A_p, float poq_rho, float pop_phi,
-    float* Q_out, float* P_out,
+    double* Q_out, double* P_out,
     float* pap_real, float* pap_imag, float* pam_real, float* pam_imag,
     float* gp_real, float* gp_imag, float* gm_real, float* gm_imag,
     float* poq_real, float* poq_imag,
@@ -839,7 +839,7 @@ void launch_compute_main(
 
 // Optimized backward: single kernel with improved g0 gradient
 void launch_gradient(
-    const float* P, const float* pap_real, const float* pap_imag,
+    const double* P, const float* pap_real, const float* pap_imag,
     const float* pam_real, const float* pam_imag,
     const float* gp_real, const float* gp_imag,
     const float* gm_real, const float* gm_imag,
@@ -1062,7 +1062,7 @@ void* cuda_load_data(void* vctx, const float* mass, const float* mom,
 #define S2(f,n) cudaMalloc(&d->f, ne * (n) * sizeof(float))
     S2(g_interp_real, ng); S2(g_interp_imag, ng);
     S2(g_bw_real, nu); S2(g_bw_imag, nu);
-    S(Q_out); S(P_out);
+    cudaMalloc(&d->Q_out, ne * sizeof(double)); cudaMalloc(&d->P_out, ne * sizeof(double));
     S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
     S(gp_real); S(gp_imag); S(gm_real); S(gm_imag);
     S(poq_real); S(poq_imag);
@@ -1087,7 +1087,7 @@ void cuda_compute(void* vctx, void* vdh,
     float Gamma, float DG, float DM,
     float Ap, float pr, float pp,
     float norm_val, int use_norm,
-    float* Q_out, float* P_out,
+    double* Q_out, double* P_out,
     float* gck_r, float* gck_i,
     float* gm0_out, float* gg0_out,
     float* gsc_out,
@@ -1229,7 +1229,7 @@ void* cuda_create_context_v2_f32(
         #define S2(f,n) cudaMalloc(&c->scratch->f, bs * (n) * sizeof(float))
         S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
         S2(g_bw_real, nub); S2(g_bw_imag, nub);
-        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        cudaMalloc(&c->scratch->Q_out, bs * sizeof(double)); cudaMalloc(&c->scratch->P_out, bs * sizeof(double)); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
         S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
         S2(bw_p_real, nw); S2(bw_p_imag, nw);
         S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
@@ -1308,7 +1308,7 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
     const float* m0,const float* g0,
     float G,float DG,float DM,float Ap,float pr,float pp,
     float nv,int use_norm,
-    float* oQ,float* oP,
+    double* oQ,double* oP,
     float* ogck_r,float* ogck_i,
     float* ogm0,float* ogg0,
     float* ogsc
@@ -1339,7 +1339,7 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
         #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(float))
         S2(g_interp_real,ng); S2(g_interp_imag,ng);
         S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        cudaMalloc(&s.Q_out, bs * sizeof(double)); cudaMalloc(&s.P_out, bs * sizeof(double)); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
         S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
         S2(bw_p_real,nw); S2(bw_p_imag,nw);
         S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
@@ -1354,7 +1354,7 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
         #undef S2
     }
 
-    *oQ = 0; memset(oP, 0, ne * 4);
+    *oQ = 0.0; memset(oP, 0, ne * 8);
     memset(ogck_r, 0, nw * 4); memset(ogck_i, 0, nw * 4);
     memset(ogm0, 0, nu * 4); memset(ogg0, 0, ng * 4);
     memset(ogsc, 0, N_SCALAR * sizeof(float));
@@ -1365,7 +1365,7 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
     cudaMemset(s.g_interp_real, 0, bs * ng * 4);
     cudaMemset(s.g_interp_imag, 0, bs * ng * 4);
 
-    float* Ph = (float*)malloc(bs * 4);
+    double* Ph = (double*)malloc(bs * sizeof(double));
     float* gck_buf = (float*)malloc(nw * 4);
     float* gm0_buf = (float*)malloc(nu * 4);
     float* gg0_buf = (float*)malloc(ng * 4);
@@ -1388,11 +1388,11 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
         cudaGetLastError();
 
         // CPU sum for Q (reliable, no stale-buffer edge case)
-        cudaMemcpy(Ph, d.Q_out, nb * 4, cudaMemcpyDeviceToHost);
+        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
         for (int i = 0; i < nb; i++) *oQ += Ph[i];
 
-        cudaMemcpy(Ph, d.P_out, nb * 4, cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * 4);
+        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+        memcpy(oP + st, Ph, nb * 8);
 
         // GPU reductions: sum per-event gradients across events
         launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
@@ -1413,8 +1413,8 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
 
         // Scalar gradients: download per-event and sum on CPU
         #define SA(f, idx) do { \
-            float* bf = (float*)malloc(nb * 4); \
-            cudaMemcpy(bf, d.f, nb * 4, cudaMemcpyDeviceToHost); \
+            float* bf = (float*)malloc(nb * 8); \
+            cudaMemcpy(bf, d.f, nb * 8, cudaMemcpyDeviceToHost); \
             for (int i = 0; i < nb; i++) ogsc[idx] += bf[i]; \
             free(bf); \
         } while(0)
