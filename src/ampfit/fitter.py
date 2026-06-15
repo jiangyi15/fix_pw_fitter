@@ -267,12 +267,14 @@ class Fitter:
         Args:
             phsp: dict with same structure as data.
         """
-        # Normalize phsp weights to sum to 1
+        # Normalize phsp weights to sum to n_events (keeps weights ≈ 1.0,
+        # avoiding float32 underflow in kernel gradient computation)
         phsp = dict(phsp)
-        w = phsp.get("weight", np.ones(phsp["mass"].shape[0]))
+        n = phsp["mass"].shape[0]
+        w = phsp.get("weight", np.ones(n))
         w_sum = np.sum(w)
         if w_sum > 0:
-            phsp["weight"] = w / w_sum
+            phsp["weight"] = w / w_sum * n
 
         # Compute N_b = weighted average of bkg over phsp
         b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
@@ -489,10 +491,26 @@ class Fitter:
     def _compute_norm_batched(self, params):
         """Compute norm over ALL phsp events, batching if needed."""
         if hasattr(self.backend, 'compute_norm_batched'):
-            return self.backend.compute_norm_batched(params)
+            norm, grads = self.backend.compute_norm_batched(params)
+            # For float32 backends: the phsp scalar gradient is unreliable
+            # due to catastrophic cancellation in float32 (large per-event
+            # gradients with near-perfect cancellation).  Recompute it with
+            # the NumPy kernel for accuracy.
+            if self.backend.dtype == np.float32 and grads is not None:
+                from ampfit.numpy_kernel import NumpyKernelCorrect as _NK
+                nk = _NK(self.kernel_config)
+                norm_np, grads_np, _ = nk._compute(params, self._phsp_np, norm=None)
+                grads = grads_np
+                self._last_norm_grads = grads
+            return norm, grads
 
         # Single-batch: backends without batched support load all at once
         norm, grads, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
+        if self.backend.dtype == np.float32 and grads is not None:
+            from ampfit.numpy_kernel import NumpyKernelCorrect as _NK
+            nk = _NK(self.kernel_config)
+            norm_np, grads_np, _ = nk._compute(params, self._phsp_np, norm=None)
+            grads = grads_np
         return float(norm), grads
 
     def get_nll_raw(self, params):
@@ -509,7 +527,13 @@ class Fitter:
 
         # 1. Norm from phase space (batched if needed)
         norm, norm_grads = self._compute_norm_batched(params)
-        norm = float(norm)
+        # Weights sum to n_phsp, so kernel Q = sum(P*w) = n_phsp * mean(P*w).
+        # NLL formula needs norm = mean(P*w): divide by n_phsp.
+        n_phsp = self._phsp_n
+        norm = float(norm) / n_phsp
+        for key in norm_grads:
+            if norm_grads[key] is not None:
+                norm_grads[key] = np.asarray(norm_grads[key]) / n_phsp
 
         # 2. NLL from data (with norm)
         nll, grads, P = self.backend.compute(
@@ -534,12 +558,7 @@ class Fitter:
             if key in ("ck", "scalar", "m0", "g0"):
                 g = np.asarray(grads[key])
                 ng = np.asarray(norm_grads[key])
-                # Guard against NaN in norm gradient (float32 precision issues
-                # in the phsp kernel with small normalized weights)
-                if np.any(np.isnan(ng)):
-                    total_grads[key] = g
-                else:
-                    total_grads[key] = g + dNLL_dnorm * ng
+                total_grads[key] = g + dNLL_dnorm * ng
             else:
                 total_grads[key] = grads[key]
 
