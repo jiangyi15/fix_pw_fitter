@@ -6,7 +6,8 @@ registered via ``@register_model(name)``.  Models are instantiated
 with ``build_particle(name, model="BW", **kwargs)``.
 
 To add a custom model, create a new file in this directory that
-imports from ``.base`` and uses ``@register_model``::
+imports from ``.base`` and uses ``@register_model``, then import it
+in this ``__init__.py``::
 
     # particle_model/my_model.py
     import numpy as np
@@ -17,10 +18,12 @@ imports from ``.base`` and uses ``@register_model``::
         def gamma(self, m):
             return [np.exp(-m**2) + 0j]
 
-Then ensure the file is imported (e.g., in ``__init__.py``).
+    # particle_model/__init__.py
+    from . import my_model   # noqa: F401
 """
 
 from .base import BaseModel, ALL_MODELS, register_model, build_particle
-from . import models_builtin  # noqa: F401 — trigger registration of built-in models
+from . import models_builtin   # noqa: F401 — register built-in models
+from . import bugg_model       # noqa: F401 — register Bugg model
 
 __all__ = ["BaseModel", "ALL_MODELS", "register_model", "build_particle"]

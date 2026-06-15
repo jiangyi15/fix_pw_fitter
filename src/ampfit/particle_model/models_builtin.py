@@ -70,11 +70,13 @@ class GSRhoModel(BaseModel):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
 
 
+# ── Bugg lineshape (sigma/f0(500)) ──────────────────────────────
+
 # ── Bugg lineshape ──────────────────────────────────────────────
 
 @register_model("Bugg")
 class BuggModel(BaseModel):
-    """Bugg parametrisation (placeholder)."""
+    """Bugg parametrisation (placeholder — see ``bugg_model.py`` for real impl)."""
 
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 0.1))]
