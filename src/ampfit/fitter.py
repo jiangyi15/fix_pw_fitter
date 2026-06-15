@@ -693,7 +693,7 @@ class Fitter:
         )
         return result
 
-    def _params_from_fit(self, fit_result, return_bounded=True):
+    def _params_from_fit(self, fit_result, return_bounded=True, hess_inv=None):
         """Build dicts of parameter values and errors from a BFGS fit result.
         
         Args:
@@ -701,6 +701,8 @@ class Fitter:
             return_bounded: if True, transform values back through
                             BoundTransform (physical space).
                             if False, return raw unbounded optimizer values.
+            hess_inv: optional inverse Hessian. If None, uses
+                      ``fit_result.hess_inv``.
         
         Returns:
             (values_dict, errors_dict) where each maps slot_name -> float.
@@ -710,7 +712,8 @@ class Fitter:
         from ampfit.boundary import BoundTransform
 
         x_best = fit_result.x
-        hess_inv = fit_result.hess_inv
+        if hess_inv is None:
+            hess_inv = fit_result.hess_inv
         raw_errors = np.sqrt(np.diag(hess_inv))
         names = self._var_registry.flat_names
 
@@ -758,8 +761,11 @@ class Fitter:
         if not use_cached:
             import numpy as np
             H = self.compute_numerical_hessian(fit_result.x)
-            fit_result.hess_inv = np.linalg.inv(H)
-        values, errors = self._params_from_fit(fit_result, return_bounded)
+            hess_inv = np.linalg.inv(H)
+            values, errors = self._params_from_fit(fit_result, return_bounded,
+                                                    hess_inv=hess_inv)
+        else:
+            values, errors = self._params_from_fit(fit_result, return_bounded)
         return {name: (values[name], errors[name]) for name in values}
 
     def compute_numerical_hessian(self, x, eps=1e-5):
