@@ -963,7 +963,9 @@ class Fitter:
         out = {"value": {}, "error": {}}
         for name in flat_names:
             out["value"][name] = float(values[name])
-            out["error"][name] = float(errors[name])
+            err = float(errors[name])
+            if err != 0.0:
+                out["error"][name] = err
 
         # Add all defaults to value (including fixed params not in flat_names)
         for name, val in self.defaults.items():
