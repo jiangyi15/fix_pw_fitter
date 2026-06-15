@@ -66,6 +66,9 @@ class Fitter:
             elif backend == "cuda32_v3":
                 from ampfit.backends import CUDABackendV3F32
                 backend = CUDABackendV3F32(self.kernel_config)
+            elif backend == "cuda_mixed":
+                from ampfit.backends import CUDABackendMixed
+                backend = CUDABackendMixed(self.kernel_config, batch_size=0)
             elif backend == "numpy":
                 backend = NumpyBackend(self.kernel_config)
             elif backend in ("onnx", "onnx_cpu"):
