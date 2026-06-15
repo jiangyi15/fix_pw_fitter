@@ -571,27 +571,31 @@ class ConstraintManager:
             return False
 
         added = set()
-        for name in sorted(all_ck_names):
+
+        def _add(name, kind):
+            """Deduplicate through same-constraint and add to registry."""
             canon = self.name_res.map.get(name, name)
             if canon in added:
-                continue
+                return
+            if _name_fixed(canon):
+                return
             added.add(canon)
-            r_fixed = _slot_fixed(canon, 'r')
-            i_fixed = _slot_fixed(canon, 'i')
-            if not (r_fixed and i_fixed):
-                self._var_registry.add_complex(canon, ('ck', canon))
+            if kind == 'ck':
+                r_fixed = _slot_fixed(canon, 'r')
+                i_fixed = _slot_fixed(canon, 'i')
+                if not (r_fixed and i_fixed):
+                    self._var_registry.add_complex(canon, ('ck', canon))
+            else:
+                self._var_registry.add_real(canon, (kind, canon))
 
+        for name in sorted(all_ck_names):
+            _add(name, 'ck')
         for name in self.m0_names:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('m0', name))
-
+            _add(name, 'm0')
         for name in self.g0_names:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('g0', name))
-
+            _add(name, 'g0')
         for name in self.SCALAR_NAMES:
-            if not _name_fixed(name):
-                self._var_registry.add_real(name, ('scalar', name))
+            _add(name, 'scalar')
 
 
 # ================================================================

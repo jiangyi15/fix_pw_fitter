@@ -959,19 +959,10 @@ class Fitter:
             out["value"][name] = float(values[name])
             out["error"][name] = float(errors[name])
 
-        # Save fixed mass/width/scalar params that may not be in flat_names
-        for name in self.config.m0_phys_name:
+        # Save fixed params not in flat_names (mass, width, scalar, ...)
+        for name, val in self._fixed_slots.items():
             if name not in out["value"]:
-                idx = list(self.config.m0_phys_name).index(name)
-                out["value"][name] = float(self.default_m0[idx])
-        for name in self.config.g0_phys_name:
-            if name not in out["value"]:
-                idx = list(self.config.g0_phys_name).index(name)
-                out["value"][name] = float(self.default_g0[idx])
-        if self.default_scalar is not None:
-            for name, val in zip(self.cm.SCALAR_NAMES, self.default_scalar):
-                if name not in out["value"]:
-                    out["value"][name] = float(val)
+                out["value"][name] = float(val)
 
         # Build alias→canonical map from same_params (like archive's new_name)
         new_name = {}
