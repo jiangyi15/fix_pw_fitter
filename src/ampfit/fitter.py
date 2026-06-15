@@ -752,6 +752,43 @@ class Fitter:
         values, errors = self._params_from_fit(fit_result, return_bounded)
         return {name: (values[name], errors[name]) for name in values}
 
+    def compute_numerical_hessian(self, x, eps=1e-5):
+        """Numerical Hessian via 2-point gradient difference.
+
+        For each parameter *j*, perturbs ``x[j] ± eps``, evaluates the
+        gradient, and approximates::
+
+            H[i, j] = (grad_i(x+eps·eⱼ) - grad_i(x-eps·eⱼ)) / (2·eps)
+
+        This requires ``2·N`` gradient evaluations (N = free params).
+
+        The result can replace ``fit_result.hess_inv``::
+
+            import numpy as np
+            H = fitter.compute_numerical_hessian(result.x)
+            result.hess_inv = np.linalg.inv(H)
+
+        Args:
+            x: flat parameter vector at the minimum (``result.x``).
+            eps: finite-difference step (default 1e-5).
+
+        Returns:
+            ``(N, N)`` ndarray — the symmetric Hessian matrix d²(NLL)/dx².
+        """
+        import numpy as np
+        n = len(x)
+        H = np.zeros((n, n))
+
+        for j in range(n):
+            xp = x.copy(); xp[j] += eps
+            _, gp = self.get_nll(xp)
+            xm = x.copy(); xm[j] -= eps
+            _, gm = self.get_nll(xm)
+            H[:, j] = (gp - gm) / (2 * eps)
+
+        # Symmetrise
+        return (H + H.T) / 2
+
     # ------------------------------------------------------------------
     # Plotting
     # ------------------------------------------------------------------
@@ -963,9 +1000,7 @@ class Fitter:
         out = {"value": {}, "error": {}}
         for name in flat_names:
             out["value"][name] = float(values[name])
-            err = float(errors[name])
-            if err != 0.0:
-                out["error"][name] = err
+            out["error"][name] = float(errors[name])
 
         # Add all defaults to value (including fixed params not in flat_names)
         for name, val in self.defaults.items():
