@@ -61,10 +61,10 @@ class FlatteCModel(BaseModel):
 
 @register_model("GS_rho")
 class GSRhoModel(BaseModel):
-    """Gounaris-Sakurai lineshape (placeholder)."""
+    """Gounaris-Sakurai lineshape (see ``gs_rho_model.py`` for full impl)."""
 
     def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 0.1))]
+        return [float(self.kwargs.get("width", 0.149))]
 
     def gamma(self, m):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
