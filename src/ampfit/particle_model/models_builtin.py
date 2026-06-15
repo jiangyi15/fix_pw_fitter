@@ -41,7 +41,7 @@ class OneModel(BaseModel):
 
 @register_model("FlatteC")
 class FlatteCModel(BaseModel):
-    """Flatté-like parametrisation with multiple decay channels."""
+    """Flatté-like parametrisation (see ``flatte_model.py`` for full impl)."""
 
     def get_gamma_count(self):
         return len(self.kwargs["mass_list"])
@@ -50,8 +50,7 @@ class FlatteCModel(BaseModel):
         return [f"{self.name}_g{i}" for i in range(self.get_gamma_count())]
 
     def get_gamma_defaults(self):
-        return [float(self.kwargs.get(f"g_{i}", 0.1))
-                for i in range(self.get_gamma_count())]
+        return [float(self.kwargs.get(f"g_{i}", 0.1)) for i in range(self.get_gamma_count())]
 
     def gamma(self, m):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
