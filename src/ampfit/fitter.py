@@ -733,22 +733,32 @@ class Fitter:
 
         return values, errors
 
-    def get_uncertainties(self, fit_result, return_bounded=True):
-        """Compute parameter uncertainties from a BFGS fit result.
-        
-        Uses the inverse Hessian (fit_result.hess_inv) to compute
-        1-sigma uncertainties. Bound transforms are automatically
-        propagated for parameters set via set_range().
-        
+    def get_uncertainties(self, fit_result, return_bounded=True, use_cached=True):
+        """Compute parameter uncertainties from a fit result.
+
+        Uses the inverse Hessian from the fit, or computes a numerical
+        Hessian via finite-difference gradients when *use_cached* is
+        ``False``.
+
+        Bound transforms are automatically propagated for parameters
+        set via ``set_range()``.
+
         Args:
-            fit_result: OptimizeResult from fit() method.
+            fit_result: OptimizeResult from ``fit()`` method.
             return_bounded: if True (default), returns values and errors
                             in the physical (bounded) space.
                             if False, returns raw optimizer space values.
-        
+            use_cached: if True (default), use ``fit_result.hess_inv``.
+                        if False, compute numerical Hessian from
+                        ``fit_result.x`` via :meth:`compute_numerical_hessian`.
+
         Returns:
             dict of {slot_name: (value, error)} for every free parameter.
         """
+        if not use_cached:
+            import numpy as np
+            H = self.compute_numerical_hessian(fit_result.x)
+            fit_result.hess_inv = np.linalg.inv(H)
         values, errors = self._params_from_fit(fit_result, return_bounded)
         return {name: (values[name], errors[name]) for name in values}
 
