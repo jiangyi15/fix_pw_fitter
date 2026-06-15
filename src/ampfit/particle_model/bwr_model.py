@@ -34,7 +34,7 @@ def _two_body_cm_mom(m, m1, m2):
     m12s = (m1 + m2) ** 2
     m12d = (m1 - m2) ** 2
     p2 = (s - m12s) * (s - m12d)
-    return np.where(p2 > 0, np.sqrt(p2) / (2 * m), 0.0)
+    return np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
 
 
 def _bprime_poly(L, z):

@@ -37,7 +37,7 @@ def _two_body_cm_mom(m, m1, m2):
     m12d = (m1 - m2) ** 2
     p2 = (s - m12s) * (s - m12d)
     # Clamp to 0 below threshold, divide by (2m)² then sqrt
-    p = np.where(p2 > 0, np.sqrt(p2) / (2 * m), 0.0)
+    p = np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
     return p
 
 
