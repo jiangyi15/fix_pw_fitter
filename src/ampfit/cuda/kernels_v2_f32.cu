@@ -1413,8 +1413,8 @@ void cuda_compute_v2_f32(void* vctx, void* vdh,
 
         // Scalar gradients: download per-event and sum on CPU
         #define SA(f, idx) do { \
-            float* bf = (float*)malloc(nb * 8); \
-            cudaMemcpy(bf, d.f, nb * 8, cudaMemcpyDeviceToHost); \
+            float* bf = (float*)malloc(nb * sizeof(float)); \
+            cudaMemcpy(bf, d.f, nb * sizeof(float), cudaMemcpyDeviceToHost); \
             for (int i = 0; i < nb; i++) ogsc[idx] += bf[i]; \
             free(bf); \
         } while(0)
