@@ -336,6 +336,27 @@ class Fitter:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
                 x[i] = val
+            elif name in self.config.m0_phys_name:
+                idx = list(self.config.m0_phys_name).index(name)
+                val = float(self.default_m0[idx])
+                if i in self._bound_transforms:
+                    val = self._bound_transforms[i].inverse(val)
+                x[i] = val
+            elif name in self.config.g0_phys_name:
+                idx = list(self.config.g0_phys_name).index(name)
+                val = float(self.default_g0[idx])
+                if i in self._bound_transforms:
+                    val = self._bound_transforms[i].inverse(val)
+                x[i] = val
+            elif name in self.cm.SCALAR_NAMES:
+                idx = self.cm.SCALAR_NAMES.index(name)
+                if self.default_scalar is not None:
+                    val = float(self.default_scalar[idx])
+                else:
+                    val = 0.0
+                if i in self._bound_transforms:
+                    val = self._bound_transforms[i].inverse(val)
+                x[i] = val
             else:
                 x[i] = self._var_registry.build_initial()[i]
 
@@ -946,6 +967,20 @@ class Fitter:
         for name in flat_names:
             out["value"][name] = float(values[name])
             out["error"][name] = float(errors[name])
+
+        # Save fixed mass/width/scalar params that may not be in flat_names
+        for name in self.config.m0_phys_name:
+            if name not in out["value"]:
+                idx = list(self.config.m0_phys_name).index(name)
+                out["value"][name] = float(self.default_m0[idx])
+        for name in self.config.g0_phys_name:
+            if name not in out["value"]:
+                idx = list(self.config.g0_phys_name).index(name)
+                out["value"][name] = float(self.default_g0[idx])
+        if self.default_scalar is not None:
+            for name, val in zip(self.cm.SCALAR_NAMES, self.default_scalar):
+                if name not in out["value"]:
+                    out["value"][name] = float(val)
 
         # Build alias→canonical map from same_params (like archive's new_name)
         new_name = {}
