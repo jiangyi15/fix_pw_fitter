@@ -871,15 +871,15 @@ class Fitter:
             plt.close(fig)
             print(f"  saved {path}")
 
-        # ---- Mass (first 6 columns = 48/8, 2×3 grid, range (0,5), 100 bins) ----
+        # ---- Mass (first 6 columns = 48/8, 3×2 grid, range (0.2,5.2), 100 bins) ----
         n_mass_total = data_np["mass"].shape[1]  # 48
         n_mass_plot = n_mass_total // 8            # 6
-        fig, axes = plt.subplots(2, 3,
-            figsize=(figsize[0] * 0.75, 5), squeeze=False)
+        fig, axes = plt.subplots(3, 2,
+            figsize=(figsize[0] * 0.5, 6.5), squeeze=False)
         for i in range(n_mass_plot):
             _make_hist(axes.flatten()[i], f"mass[{i}]",
                        data_np["mass"][:, i], phsp_np["mass"][:, i],
-                       bins_range=(0, 5), n_bins_override=100)
+                       bins_range=(0.2, 5.2), n_bins_override=100)
         plt.tight_layout()
         _save_figure(fig, "mass.png")
 
