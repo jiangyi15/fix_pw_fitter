@@ -1041,10 +1041,10 @@ class Fitter:
             r_name = p + 'r'
             i_name = p + 'i'
             if r_name in self._fixed_slots and i_name in self._fixed_slots:
-                out["value"][r_name] = float(self._fixed_slots[r_name])
-                out["value"][i_name] = float(self._fixed_slots[i_name])
-                out["error"][r_name] = 0.0
-                out["error"][i_name] = 0.0
+                if r_name not in out["value"]:
+                    out["value"][r_name] = float(self._fixed_slots[r_name])
+                if i_name not in out["value"]:
+                    out["value"][i_name] = float(self._fixed_slots[i_name])
 
         # Same-param aliases: copy value from canonical
         for alias, canon in new_name.items():
