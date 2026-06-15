@@ -5,7 +5,7 @@ Each class is registered with ``@register_backend(name)`` and available
 through ``create_backend(name, kernel_config, **kwargs)``.
 """
 import numpy as np
-from . import ComputeBackend, register_backend, DataHandle
+from .core import ComputeBackend, register_backend, DataHandle
 
 
 # ── NumPy backend ───────────────────────────────────────────────
