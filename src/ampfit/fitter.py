@@ -745,9 +745,12 @@ class Fitter:
           - Data (weighted by data weight)
           - Phsp weighted by P × phsp_weight (the model prediction)
         
+        Only 1/8 of total variables are plotted (first 6 mass + 9 angle).
+        Angle[..., 0] mapped to [-π, π]; angle[..., 1,2] use cos transform.
+        
         Figures are saved as:
-          {prefix}mass.png      — all mass columns (48 subplots)
-          {prefix}angles.png    — all angle positions × components (72 subplots)
+          {prefix}mass.png      — first 6 mass columns
+          {prefix}angles.png    — first 9 angle components (3 pos × 3 comp)
           {prefix}time.png      — time distribution
         
         Args:
@@ -864,31 +867,46 @@ class Fitter:
             plt.close(fig)
             print(f"  saved {path}")
 
-        # ---- Mass ----
-        n_mass = data_np["mass"].shape[1]
-        n_rows = (n_mass + cols - 1) // cols
+        # ---- Mass (first 6 columns = 48/8) ----
+        n_mass_total = data_np["mass"].shape[1]  # 48
+        n_mass_plot = n_mass_total // 8            # 6
+        mass_vars = []
+        for i in range(n_mass_plot):
+            mass_vars.append((
+                f"mass[{i}]",
+                data_np["mass"][:, i],
+                phsp_np["mass"][:, i],
+            ))
+        n_mass_vars = len(mass_vars)
+        n_rows = (n_mass_vars + cols - 1) // cols
         fig, axes = plt.subplots(n_rows, cols,
             figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
-        for i in range(n_mass):
-            _make_hist(axes.flatten()[i], f"mass[{i}]",
-                       data_np["mass"][:, i], phsp_np["mass"][:, i])
-        for i in range(n_mass, len(axes.flatten())):
+        for i, (label, d, p) in enumerate(mass_vars):
+            _make_hist(axes.flatten()[i], label, d, p)
+        for i in range(n_mass_vars, len(axes.flatten())):
             axes.flatten()[i].set_visible(False)
         plt.tight_layout()
         _save_figure(fig, "mass.png")
 
-        # ---- Angles ----
-        n_pos = data_np["angle"].shape[1]  # 24
-        n_comp = 3
+        # ---- Angles (first 9 = 72/8, first 3 positions × 3 components) ----
+        d_angle = data_np["angle"].reshape(ne_d, -1, 3)
+        p_angle = phsp_np["angle"].reshape(ne_p, -1, 3)
+        n_pos_plot = d_angle.shape[1] // 8  # 3 positions
+
         angle_vars = []
-        for pos in range(n_pos):
-            for comp in range(n_comp):
-                angle_vars.append((
-                    f"angle[{pos},{comp}]",
-                    data_np["angle"].reshape(ne_d, -1, 3)[:, pos, comp],
-                    phsp_np["angle"].reshape(ne_p, -1, 3)[:, pos, comp],
-                ))
-        n_ang = len(angle_vars)  # 72
+        for pos in range(n_pos_plot):
+            d0 = (d_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
+            d1 = np.cos(d_angle[:, pos, 1])
+            d2 = np.cos(d_angle[:, pos, 2])
+            p0 = (p_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
+            p1 = np.cos(p_angle[:, pos, 1])
+            p2 = np.cos(p_angle[:, pos, 2])
+            angle_vars += [
+                (f"angle_phi [{pos},0]", d0, p0),
+                (f"cos_theta1[{pos},1]", d1, p1),
+                (f"cos_theta2[{pos},2]", d2, p2),
+            ]
+        n_ang = len(angle_vars)  # 9
         n_rows = (n_ang + cols - 1) // cols
         fig, axes = plt.subplots(n_rows, cols,
             figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
