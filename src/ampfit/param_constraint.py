@@ -500,6 +500,8 @@ class ConstraintManager:
     def set_range(self, name, lo, hi):
         from ampfit.boundary import BoundTransform as _BT
         bt = _BT(lo, hi)
+        # Resolve alias to canon (same-constraint)
+        name = self.name_res.map.get(name, name)
         try:
             si, ei = self.var_registry.flat_index(name)
             for idx in range(si, ei):
@@ -514,6 +516,7 @@ class ConstraintManager:
                 f"Available: {self.var_registry.flat_names[:6]}...")
 
     def unset_range(self, name):
+        name = self.name_res.map.get(name, name)
         try:
             si, ei = self.var_registry.flat_index(name)
             for idx in range(si, ei):

@@ -160,10 +160,10 @@ def main():
     # Optionally add mass/width fixes to the fixed slots
     if args.fix_mass_width:
         for name in fitter.config.m0_phys_name:
-            val = float(fitter.default_m0[fitter.config.m0_phys_name.index(name)])
+            val = float(fitter.defaults[name])
             fixed_slots[name] = val
         for name in fitter.config.g0_phys_name:
-            val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
+            val = float(fitter.defaults[name])
             fixed_slots[name] = val
 
     # gamma is free (fitted time parameter) — do NOT fix to 0
@@ -192,12 +192,12 @@ def main():
 
     # Set boundary ranges for masses and widths
     for name in fitter.config.m0_phys_name:
-        val = float(fitter.default_m0[fitter.config.m0_phys_name.index(name)])
+        val = float(fitter.defaults[name])
         if name not in fitter._fixed_slots:
             fitter.set_range(name, val - 0.1, val + 0.1)
     for name in fitter.config.g0_phys_name:
         if name not in fitter._fixed_slots:
-            val = float(fitter.default_g0[fitter.config.g0_phys_name.index(name)])
+            val = float(fitter.defaults[name])
             lo = max(0.0, val - 0.1)
             hi = min(2.0, val + 0.1)
             fitter.set_range(name, lo, hi)
@@ -230,7 +230,7 @@ def main():
     print(f"  Data → GPU: {data_gpu_time:.2f}s")
 
     # m0 and g0 default values come from config.yml particle definitions
-    # (lazy-loaded by Fitter.default_m0 / Fitter.default_g0)
+    # (lazy-loaded by Fitter.defaults)
     n_free = len(fitter.free_param_names())
     print(f"  Free params: {n_free}")
 
