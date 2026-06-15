@@ -830,12 +830,16 @@ class Fitter:
         # Ensure output directory
         os.makedirs(prefix, exist_ok=True)
 
-        def _make_hist(ax, label, d, p):
-            lo = min(d.min(), p.min())
-            hi = max(d.max(), p.max())
+        def _make_hist(ax, label, d, p, bins_range=None, n_bins_override=None):
+            if bins_range is not None:
+                lo, hi = bins_range
+            else:
+                lo = min(d.min(), p.min())
+                hi = max(d.max(), p.max())
             if hi - lo < 1e-12:
                 hi = lo + 1.0
-            bins = np.linspace(lo, hi, n_bins + 1)
+            nb = n_bins_override if n_bins_override is not None else n_bins
+            bins = np.linspace(lo, hi, nb + 1)
             bin_w = bins[1] - bins[0]
             bin_c = (bins[:-1] + bins[1:]) / 2
 
@@ -867,33 +871,25 @@ class Fitter:
             plt.close(fig)
             print(f"  saved {path}")
 
-        # ---- Mass (first 6 columns = 48/8) ----
+        # ---- Mass (first 6 columns = 48/8, 2×3 grid, range (0,5), 100 bins) ----
         n_mass_total = data_np["mass"].shape[1]  # 48
         n_mass_plot = n_mass_total // 8            # 6
-        mass_vars = []
+        fig, axes = plt.subplots(2, 3,
+            figsize=(figsize[0] * 0.75, 5), squeeze=False)
         for i in range(n_mass_plot):
-            mass_vars.append((
-                f"mass[{i}]",
-                data_np["mass"][:, i],
-                phsp_np["mass"][:, i],
-            ))
-        n_mass_vars = len(mass_vars)
-        n_rows = (n_mass_vars + cols - 1) // cols
-        fig, axes = plt.subplots(n_rows, cols,
-            figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
-        for i, (label, d, p) in enumerate(mass_vars):
-            _make_hist(axes.flatten()[i], label, d, p)
-        for i in range(n_mass_vars, len(axes.flatten())):
-            axes.flatten()[i].set_visible(False)
+            _make_hist(axes.flatten()[i], f"mass[{i}]",
+                       data_np["mass"][:, i], phsp_np["mass"][:, i],
+                       bins_range=(0, 5), n_bins_override=100)
         plt.tight_layout()
         _save_figure(fig, "mass.png")
 
-        # ---- Angles (first 9 = 72/8, first 3 positions × 3 components) ----
+        # ---- Angles (first 9 = 72/8, 3 positions × 3 components, 3×3 grid) ----
         d_angle = data_np["angle"].reshape(ne_d, -1, 3)
         p_angle = phsp_np["angle"].reshape(ne_p, -1, 3)
         n_pos_plot = d_angle.shape[1] // 8  # 3 positions
 
-        angle_vars = []
+        fig, axes = plt.subplots(3, 3,
+            figsize=(figsize[0] * 0.75, 7), squeeze=False)
         for pos in range(n_pos_plot):
             d0 = (d_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
             d1 = np.cos(d_angle[:, pos, 1])
@@ -901,19 +897,13 @@ class Fitter:
             p0 = (p_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
             p1 = np.cos(p_angle[:, pos, 1])
             p2 = np.cos(p_angle[:, pos, 2])
-            angle_vars += [
-                (f"angle_phi [{pos},0]", d0, p0),
-                (f"cos_theta1[{pos},1]", d1, p1),
-                (f"cos_theta2[{pos},2]", d2, p2),
-            ]
-        n_ang = len(angle_vars)  # 9
-        n_rows = (n_ang + cols - 1) // cols
-        fig, axes = plt.subplots(n_rows, cols,
-            figsize=(figsize[0], 2.5 * n_rows), squeeze=False)
-        for i, (label, d, p) in enumerate(angle_vars):
-            _make_hist(axes.flatten()[i], label, d, p)
-        for i in range(n_ang, len(axes.flatten())):
-            axes.flatten()[i].set_visible(False)
+            for cmp, (d, p, lbl) in enumerate([
+                    (d0, p0, f"angle_phi [{pos},0]"),
+                    (d1, p1, f"cos_theta1[{pos},1]"),
+                    (d2, p2, f"cos_theta2[{pos},2]"),
+            ]):
+                ax = axes[pos, cmp]
+                _make_hist(ax, lbl, d, p)
         plt.tight_layout()
         _save_figure(fig, "angles.png")
 
