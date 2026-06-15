@@ -1,13 +1,14 @@
-"""ONNX Runtime backend — float32 CPU/GPU via onnxruntime."""
+"""ONNX Runtime backends — float32 CPU/GPU via onnxruntime.
+
+Separate classes for CPU and CUDA providers so each has its own
+defaults and can be registered independently.
+"""
 import numpy as np
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("onnx")
-@register_backend("onnx_cpu")
-@register_backend("onnx_cuda")
-class ONNXBackend(ComputeBackend):
-    """ONNX Runtime backend (float32, CPU/GPU via onnxruntime)."""
+class _ONNXBackendBase(ComputeBackend):
+    """Shared ONNX Runtime logic (not registered — use subclasses)."""
     dtype = np.float32
     _SCALAR_NAMES = ["Gamma", "Delta_Gamma", "Delta_m", "A_prod", "poq_rho", "pop_phi"]
     _GRAD_MAP = {
@@ -118,3 +119,29 @@ class ONNXBackend(ComputeBackend):
             all_P.append(P_batch[:n_valid])
         P_all = all_P[0] if len(all_P) == 1 else np.concatenate(all_P, axis=0)
         return total_Q, total_grads, P_all
+
+
+# ── CPU backend ────────────────────────────────────────────────
+
+@register_backend("onnx")
+@register_backend("onnx_cpu")
+class ONNXCPUBackend(_ONNXBackendBase):
+    """ONNX Runtime on CPU."""
+    def __init__(self, kernel_config=None, model_path=None,
+                 norm_model_path="pwa_forward_norm.onnx",
+                 batch_size=8192):
+        super().__init__(kernel_config, model_path, norm_model_path,
+                         batch_size, providers=['CPUExecutionProvider'])
+
+
+# ── CUDA backend ───────────────────────────────────────────────
+
+@register_backend("onnx_cuda")
+class ONNXCUDABackend(_ONNXBackendBase):
+    """ONNX Runtime on GPU (falls back to CPU for unsupported ops)."""
+    def __init__(self, kernel_config=None, model_path=None,
+                 norm_model_path="pwa_forward_norm.onnx",
+                 batch_size=8192):
+        super().__init__(kernel_config, model_path, norm_model_path,
+                         batch_size,
+                         providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
