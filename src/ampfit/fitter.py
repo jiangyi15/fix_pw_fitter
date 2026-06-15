@@ -965,7 +965,7 @@ class Fitter:
             out["value"][name] = float(values[name])
             out["error"][name] = float(errors[name])
 
-        # Save default values for params not in flat_names (fixed mass/width/scalar/...)
+        # Add all defaults to value (including fixed params not in flat_names)
         for name, val in self.defaults.items():
             if name not in out["value"]:
                 out["value"][name] = float(val)
