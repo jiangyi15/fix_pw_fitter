@@ -534,7 +534,12 @@ class Fitter:
             if key in ("ck", "scalar", "m0", "g0"):
                 g = np.asarray(grads[key])
                 ng = np.asarray(norm_grads[key])
-                total_grads[key] = g + dNLL_dnorm * ng
+                # Guard against NaN in norm gradient (float32 precision issues
+                # in the phsp kernel with small normalized weights)
+                if np.any(np.isnan(ng)):
+                    total_grads[key] = g
+                else:
+                    total_grads[key] = g + dNLL_dnorm * ng
             else:
                 total_grads[key] = grads[key]
 
