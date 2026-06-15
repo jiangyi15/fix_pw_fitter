@@ -491,26 +491,10 @@ class Fitter:
     def _compute_norm_batched(self, params):
         """Compute norm over ALL phsp events, batching if needed."""
         if hasattr(self.backend, 'compute_norm_batched'):
-            norm, grads = self.backend.compute_norm_batched(params)
-            # For float32 backends: the phsp scalar gradient is unreliable
-            # due to catastrophic cancellation in float32 (large per-event
-            # gradients with near-perfect cancellation).  Recompute it with
-            # the NumPy kernel for accuracy.
-            if self.backend.dtype == np.float32 and grads is not None:
-                from ampfit.numpy_kernel import NumpyKernelCorrect as _NK
-                nk = _NK(self.kernel_config)
-                norm_np, grads_np, _ = nk._compute(params, self._phsp_np, norm=None)
-                grads = grads_np
-                self._last_norm_grads = grads
-            return norm, grads
+            return self.backend.compute_norm_batched(params)
 
         # Single-batch: backends without batched support load all at once
         norm, grads, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
-        if self.backend.dtype == np.float32 and grads is not None:
-            from ampfit.numpy_kernel import NumpyKernelCorrect as _NK
-            nk = _NK(self.kernel_config)
-            norm_np, grads_np, _ = nk._compute(params, self._phsp_np, norm=None)
-            grads = grads_np
         return float(norm), grads
 
     def get_nll_raw(self, params):
