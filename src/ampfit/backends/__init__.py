@@ -7,7 +7,9 @@ instantiated with ``create_backend(name, kernel_config, **kwargs)``.
 """
 from .core import ALL_BACKENDS, register_backend, create_backend, \
     DataHandle, ComputeBackend
-from . import models  # noqa: F401 — trigger registration
+from . import numpy_backend   # noqa: F401 — register NumpyBackend
+from . import cuda_backends   # noqa: F401 — register CUDA backends
+from . import onnx_backend    # noqa: F401 — register ONNXBackend
 
 __all__ = [
     "ALL_BACKENDS", "register_backend", "create_backend",
