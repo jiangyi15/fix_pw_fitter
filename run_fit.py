@@ -173,6 +173,18 @@ def main():
     fixed_slots["poqr"] = 1.0
     fixed_slots["poqi"] = 0.0
 
+    for name in ["a1(1260)", "a1(1640)", "a2(1320)"]:
+        if f"{name}p_mass" in fixed_slots:
+            del fixed_slots[f"{name}p_mass"]
+        if f"{name}m_mass" in fixed_slots:
+            del fixed_slots[f"{name}m_mass"]
+        if f"{name}p_width" in fixed_slots:
+            del fixed_slots[f"{name}p_width"]
+        if f"{name}m_width" in fixed_slots:
+            del fixed_slots[f"{name}m_width"]
+        same_params.append([f"{name}p_mass",f"{name}m_mass"])
+        same_params.append([f"{name}p_width",f"{name}m_width"])
+
     fitter.set_fixed(fixed_slots)
     fitter.set_same(same_params)
     fitter.set_scale(scale_params)
