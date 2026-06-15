@@ -27,5 +27,6 @@ from . import models_builtin   # noqa: F401 — register built-in models
 from . import bugg_model       # noqa: F401 — register Bugg model
 from . import gs_rho_model     # noqa: F401 — register GS_rho model
 from . import flatte_model     # noqa: F401 — register FlatteC model
+from . import bwr_model        # noqa: F401 — register BWR model
 
 __all__ = ["BaseModel", "ALL_MODELS", "register_model", "build_particle"]
