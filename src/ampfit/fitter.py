@@ -307,6 +307,19 @@ class Fitter:
         _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
+    def reinitial(self):
+        """Deterministic default flat vector (no randomness).
+
+        Complex params (ck) start at ``(magnitude=1, phase=0)``.
+        Real params (mass, width, scalar) start at the center of
+        their bound range (config default).
+
+        Returns:
+            array of shape (n_flat,) matching free_param_names() length.
+        """
+        _ = self.pc
+        return self._var_registry.build_initial_deterministic()
+
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
         
@@ -323,7 +336,8 @@ class Fitter:
         _ = self.pc
         names = self._var_registry.flat_names
         values = data.get("value", data) if isinstance(data, dict) else data
-        x = np.empty(len(names))
+        # Start from deterministic defaults, then override with JSON
+        x = self.reinitial()
 
         for i, name in enumerate(names):
             if name in values:
@@ -336,29 +350,6 @@ class Fitter:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
                 x[i] = val
-            elif name in self.config.m0_phys_name:
-                idx = list(self.config.m0_phys_name).index(name)
-                val = float(self.default_m0[idx])
-                if i in self._bound_transforms:
-                    val = self._bound_transforms[i].inverse(val)
-                x[i] = val
-            elif name in self.config.g0_phys_name:
-                idx = list(self.config.g0_phys_name).index(name)
-                val = float(self.default_g0[idx])
-                if i in self._bound_transforms:
-                    val = self._bound_transforms[i].inverse(val)
-                x[i] = val
-            elif name in self.cm.SCALAR_NAMES:
-                idx = self.cm.SCALAR_NAMES.index(name)
-                if self.default_scalar is not None:
-                    val = float(self.default_scalar[idx])
-                else:
-                    val = 0.0
-                if i in self._bound_transforms:
-                    val = self._bound_transforms[i].inverse(val)
-                x[i] = val
-            else:
-                x[i] = self._var_registry.build_initial()[i]
 
         return x
 

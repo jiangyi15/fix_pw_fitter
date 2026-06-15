@@ -169,6 +169,24 @@ class VariableRegistry:
                 idx += 1
         return x
 
+    def build_initial_deterministic(self):
+        """Deterministic default flat vector (no randomness).
+
+        Complex params start at ``(magnitude=1, phase=0)`` (default coupling).
+        Real params start at ``0`` (center of bound = config default).
+        """
+        x = np.empty(self.n_flat)
+        idx = 0
+        for e in self._entries:
+            if e['kind'] == 'complex':
+                x[idx] = 1.0      # default magnitude
+                x[idx + 1] = 0.0  # default phase
+                idx += 2
+            else:
+                x[idx] = 0.0      # center of bound / config default
+                idx += 1
+        return x
+
     # ── forward: flat x → {slot_name: real_value} ──────────────
 
     def to_dict(self, x):
