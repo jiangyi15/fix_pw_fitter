@@ -111,10 +111,8 @@ class Fitter:
         self._phsp_batch_size = 50000  # events per batch
         self._phsp_n = 0               # total phsp events
 
-        # Default physical params from config.yml (lazy-built)
-        self._default_m0_arr = None   # built from config particle masses
-        self._default_g0_arr = None   # built from config particle widths
-        self.default_scalar = None    # user-set scalar defaults
+        # Default physical params (lazy-built unified dict)
+        self._defaults = None         # {name: physical_default, ...}
 
         # Background / purity parameters (computed during set_phsp/set_data)
         self._purity = None           # purity fraction from config
@@ -307,18 +305,42 @@ class Fitter:
         _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
-    def reinitial(self):
-        """Deterministic default flat vector (no randomness).
+    def reinitial(self, seed=42):
+        """Deterministic flat vector using stored physical defaults.
 
-        Complex params (ck) start at ``(magnitude=1, phase=0)``.
-        Real params (mass, width, scalar) start at the center of
-        their bound range (config default).
+        Real params (mass, width, scalar) are set to their config
+        defaults.  Complex (ck) params use ``(magnitude=1, phase=0)``
+        with a small random offset seeded by *seed* to avoid exact
+        symmetry that can cause kernel singularities.
 
         Returns:
             array of shape (n_flat,) matching free_param_names() length.
         """
         _ = self.pc
-        return self._var_registry.build_initial_deterministic()
+        rng = np.random.RandomState(seed)
+        names = self._var_registry.flat_names
+        defaults = self.defaults
+        # Collect all ck base names
+        ck_names = set()
+        for comb in self.all_comb:
+            for p in comb:
+                if isinstance(p, str):
+                    ck_names.add(p)
+        x = np.empty(len(names))
+        for i, name in enumerate(names):
+            if name in defaults:
+                val = float(defaults[name])
+                # Complex entries: add tiny fuzz to avoid exact 1+0j symmetry
+                base = name[:-1] if name.endswith(('r', 'i')) else ''
+                if base in ck_names:
+                    val += rng.uniform(-0.01, 0.01)
+                if i in self._bound_transforms:
+                    bt = self._bound_transforms[i]
+                    val = bt.inverse(val)
+                x[i] = val
+            else:
+                x[i] = 0.0
+        return x
 
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
@@ -369,66 +391,53 @@ class Fitter:
         """
         return self.var_registry.flat_names
 
-    def _extract_config_defaults(self):
-        """Build default m0/g0 arrays from config.yml particle definitions.
-        
-        Mass defaults come from the 'mass' field of each particle.
-        Width/defaults come from 'width' (simple) or 'g_{idx}' (Flatte coupling).
-        """
-        if self._default_m0_arr is None:
-            m0 = []
+    @property
+    def defaults(self):
+        """Unified physical default values for all params (lazy-built)."""
+        if self._defaults is None:
+            d = {}
+            # Mass defaults from config
             for name in self.config.m0_phys_name:
                 particle = name.replace('_mass', '')
-                dic = self.config.dic.get('particle', {})
-                mass = None
-                if particle in dic:
-                    mass = dic[particle].get('mass')
-                if mass is None:
-                    mass = 0.8
-                m0.append(float(mass))
-            self._default_m0_arr = np.array(m0, dtype=np.float64)
-
-        if self._default_g0_arr is None:
-            # Build a map: gamma_name → default value from pre-built models
-            gamma_map = {}
+                mass = self.config.dic.get('particle', {}).get(particle, {}).get('mass', 0.8)
+                d[name] = float(mass)
+            # Width/defaults from particle models
             for chain in self.config.full_decay.chains:
                 for decay in chain.decays:
                     model = decay.core._model
-                    names = model.get_gamma_name()
-                    vals = model.get_gamma_defaults()
-                    for n, v in zip(names, vals):
-                        gamma_map[n] = float(v)
-            g0 = [gamma_map.get(name, 0.1) for name in self.config.g0_phys_name]
-            self._default_g0_arr = np.array(g0, dtype=np.float64)
+                    for n, v in zip(model.get_gamma_name(), model.get_gamma_defaults()):
+                        d[n] = float(v)
+            # Scalar defaults
+            scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+                           "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
+            for name in self.cm.SCALAR_NAMES:
+                d.setdefault(name, scalar_base.get(name, 0.0))
+            # ck defaults (1+0j for each coupling)
+            for comb in self.all_comb:
+                for p in comb:
+                    if isinstance(p, str):
+                        d.setdefault(p + 'r', 1.0)
+                        d.setdefault(p + 'i', 0.0)
+            self._defaults = d
+        return self._defaults
 
-    @property
-    def default_m0(self):
-        """Default m0 values from config (lazy-built)."""
-        self._extract_config_defaults()
-        return self._default_m0_arr
-
-    @default_m0.setter
-    def default_m0(self, val):
-        self._default_m0_arr = np.array(val, dtype=np.float64) if val is not None else None
-
-    @property
-    def default_g0(self):
-        """Default g0 values from config (lazy-built)."""
-        self._extract_config_defaults()
-        return self._default_g0_arr
-
-    @default_g0.setter
-    def default_g0(self, val):
-        self._default_g0_arr = np.array(val, dtype=np.float64) if val is not None else None
+    @defaults.setter
+    def defaults(self, val):
+        self._defaults = dict(val) if val else {}
 
     def set_default_params(self, m0=None, g0=None, scalar=None):
-        """Set default physical parameters (used when not passed to get_nll)."""
+        """Set default physical parameters (overrides config defaults)."""
+        if self._defaults is None:
+            _ = self.defaults  # trigger lazy build
         if m0 is not None:
-            self._default_m0_arr = np.array(m0, dtype=np.float64)
+            for name, val in zip(self.config.m0_phys_name, m0):
+                self._defaults[name] = float(val)
         if g0 is not None:
-            self._default_g0_arr = np.array(g0, dtype=np.float64)
+            for name, val in zip(self.config.g0_phys_name, g0):
+                self._defaults[name] = float(val)
         if scalar is not None:
-            self.default_scalar = np.array(scalar, dtype=np.float64)
+            for name, val in zip(self.cm.SCALAR_NAMES, scalar):
+                self._defaults[name] = float(val)
 
     def _check_data_loaded(self):
         """Raise if data or phsp not set."""
@@ -443,14 +452,13 @@ class Fitter:
     # ------------------------------------------------------------------
     def _build_base_params(self, ck, m0, g0, scalar):
         """Build the params dict from components, using defaults for None."""
+        defaults = self.defaults
         if m0 is None:
-            m0 = self.default_m0  # from config.yml particle masses
+            m0 = np.array([defaults.get(n, 0.0) for n in self.config.m0_phys_name])
         if g0 is None:
-            g0 = self.default_g0  # from config.yml particle widths
+            g0 = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
         if scalar is None:
-            scalar = self.default_scalar
-        if scalar is None:
-            scalar = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
+            scalar = [defaults.get(n, 0.0) for n in self.cm.SCALAR_NAMES]
         return {"ck": ck, "m0": m0, "g0": g0, "scalar": list(scalar)}
 
     def _compute_norm_derivative(self, norm, P, data):
@@ -540,13 +548,11 @@ class Fitter:
         ck = self.cm.pc.build_ck(resolved)
 
         # Build m0, g0, scalar from defaults + resolved values
-        m0_arr = self.default_m0.copy()
-        g0_arr = self.default_g0.copy()
+        defaults = self.defaults
+        m0_arr = np.array([defaults.get(n, 0.0) for n in self.config.m0_phys_name])
+        g0_arr = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
         scalar_names = self.cm.SCALAR_NAMES
-        if self.default_scalar is not None:
-            scalar_arr = list(self.default_scalar)
-        else:
-            scalar_arr = [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]
+        scalar_arr = [defaults.get(n, 0.0) for n in scalar_names]
 
         for name, val in resolved.items():
             if name in self.config.m0_phys_name:
@@ -959,8 +965,8 @@ class Fitter:
             out["value"][name] = float(values[name])
             out["error"][name] = float(errors[name])
 
-        # Save fixed params not in flat_names (mass, width, scalar, ...)
-        for name, val in self._fixed_slots.items():
+        # Save default values for params not in flat_names (fixed mass/width/scalar/...)
+        for name, val in self.defaults.items():
             if name not in out["value"]:
                 out["value"][name] = float(val)
 
