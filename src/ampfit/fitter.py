@@ -267,12 +267,14 @@ class Fitter:
         Args:
             phsp: dict with same structure as data.
         """
-        # Normalize phsp weights to sum to 1
+        # Normalize phsp weights to sum to n_events (keeps weights ≈ 1.0
+        # for any dataset size, avoiding float32 underflow in kernel gradients)
         phsp = dict(phsp)
-        w = phsp.get("weight", np.ones(phsp["mass"].shape[0]))
+        n = phsp["mass"].shape[0]
+        w = phsp.get("weight", np.ones(n))
         w_sum = np.sum(w)
         if w_sum > 0:
-            phsp["weight"] = w / w_sum
+            phsp["weight"] = w / w_sum * n
 
         # Compute N_b = weighted average of bkg over phsp
         b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
@@ -509,7 +511,14 @@ class Fitter:
 
         # 1. Norm from phase space (batched if needed)
         norm, norm_grads = self._compute_norm_batched(params)
-        norm = float(norm)
+        # Kernel computes Q = sum(P * w) where w sums to n_phsp.
+        # NLL formula needs norm = mean(P * w) = Q / n_phsp.
+        n_phsp = self._phsp_n
+        norm = float(norm) / n_phsp
+        if norm_grads is not None:
+            for key in norm_grads:
+                if norm_grads[key] is not None:
+                    norm_grads[key] = np.asarray(norm_grads[key]) / n_phsp
 
         # 2. NLL from data (with norm)
         nll, grads, P = self.backend.compute(
