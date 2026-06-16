@@ -47,13 +47,13 @@ def _h_fun(s, m1, m2):
     TFPWA reference::
 
         k = cal_monentum(m, m1, m2)   # standard q_cm (NO *m factor)
-        return 2/pi * k/sqrt(s) * log((sqrt(s) + 2*k) / (2*sm))
+        return 2/pi * k/sqrt(s) * log((sqrt(s) + 2*k) / sm)
     """
     pi = np.pi
     sm = m1 + m2
     sqrt_s = np.sqrt(s)
     k = _two_body_cm_mom(sqrt_s, m1, m2)  # standard q_cm, NO *m
-    return (2.0 / pi) * (k / sqrt_s) * np.log((sqrt_s + 2.0 * k) / (2.0 * sm))
+    return (2.0 / pi) * (k / sqrt_s) * np.log((sqrt_s + 2.0 * k) / sm)
 
 
 def _dh_ds_fun(s, m1, m2):
@@ -73,14 +73,14 @@ def _d_fun(s, m1, m2):
 
         k = cal_monentum(m, m1, m2)   # standard q_cm (NO *m factor)
         sm24 = (sm*sm)/4
-        ret = 3/pi * sm24/k² * log((m+2k)/(2*sm)) + m/(2*pi*k) - sm24*m/(pi*k³)
+        ret = 3/pi * sm24/k² * log((m+2k)/sm) + m/(2*pi*k) - sm24*m/(pi*k³)
     """
     pi = np.pi
     sm = m1 + m2
     m = np.sqrt(s)
     k = _two_body_cm_mom(m, m1, m2)  # standard q_cm, NO *m
     sm24 = (sm * sm) / 4.0
-    ret = (3.0 / pi) * sm24 / k ** 2 * np.log((m + 2.0 * k) / (2.0 * sm))
+    ret = (3.0 / pi) * sm24 / k ** 2 * np.log((m + 2.0 * k) / sm)
     ret = ret + m / (2.0 * pi * k)
     ret = ret - sm24 * m / (pi * k ** 3)
     return ret
@@ -187,6 +187,10 @@ class GSRhoModel(BaseModel):
         # Mass-shift term (without the g0 factor)
         fs_val = _fs_fun(m ** 2, M ** 2, 1.0, m2, m3)
 
-        # gamma(m) = Gamma(m)/g0 + i * fs(m²) / (m0 * g0)
-        gamma_m = gamma_run + 1j * fs_val / (M * g0)
+        # gamma(m) = Gamma(m)/g0 + i * fs(m²) / m0
+        # _fs_fun(gam=1) returns fs_without_g0 coupling.
+        # TFPWA's bw_dom = M² - m² + g0*fs - i*M*Γ.
+        # The kernel computes: g = g0*gamma, bw_dom = M² - m² - i*M*g.
+        # We need: -i*M*g = g0*fs - i*M*Γ → gamma = Γ/g0 + i*fs/M.
+        gamma_m = gamma_run + 1j * fs_val / M
         return [gamma_m]
