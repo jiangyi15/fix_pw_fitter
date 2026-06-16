@@ -42,12 +42,18 @@ def _two_body_cm_mom(m, m1, m2):
 
 
 def _h_fun(s, m1, m2):
-    """GS h(s) function."""
+    """GS h(s) function.
+
+    TFPWA reference::
+
+        k = cal_monentum(m, m1, m2)   # standard q_cm (NO *m factor)
+        return 2/pi * k/sqrt(s) * log((sqrt(s) + 2*k) / (2*sm))
+    """
     pi = np.pi
     sm = m1 + m2
     sqrt_s = np.sqrt(s)
-    k = _two_body_cm_mom(sqrt_s, m1, m2)
-    return (2.0 / pi) * (k / sqrt_s) * np.log((sqrt_s + 2.0 * k) / sm)
+    k = _two_body_cm_mom(sqrt_s, m1, m2)  # standard q_cm, NO *m
+    return (2.0 / pi) * (k / sqrt_s) * np.log((sqrt_s + 2.0 * k) / (2.0 * sm))
 
 
 def _dh_ds_fun(s, m1, m2):
@@ -61,22 +67,36 @@ def _dh_ds_fun(s, m1, m2):
 
 
 def _d_fun(s, m1, m2):
-    """GS D(s) function (used for normalisation)."""
+    """GS D(s) function (used for normalisation).
+
+    TFPWA reference::
+
+        k = cal_monentum(m, m1, m2)   # standard q_cm (NO *m factor)
+        sm24 = (sm*sm)/4
+        ret = 3/pi * sm24/k² * log((m+2k)/(2*sm)) + m/(2*pi*k) - sm24*m/(pi*k³)
+    """
     pi = np.pi
     sm = m1 + m2
     m = np.sqrt(s)
-    k = _two_body_cm_mom(m, m1, m2)
+    k = _two_body_cm_mom(m, m1, m2)  # standard q_cm, NO *m
     sm24 = (sm * sm) / 4.0
-    ret = (3.0 / pi) * sm24 / k ** 2 * np.log((m + 2 * k) / sm)
+    ret = (3.0 / pi) * sm24 / k ** 2 * np.log((m + 2.0 * k) / (2.0 * sm))
     ret = ret + m / (2.0 * pi * k)
     ret = ret - sm24 * m / (pi * k ** 3)
     return ret
 
 
 def _fs_fun(s, m2, gam, m1, m2m):
-    """GS mass-shift function fs(s)."""
-    k_s = _two_body_cm_mom(np.sqrt(s), m1, m2m)
-    k_m2 = _two_body_cm_mom(np.sqrt(m2), m1, m2m)
+    """GS mass-shift function fs(s).
+
+    TFPWA reference::
+
+        k_s  = cal_monentum(sqrt(s), m1, m2m)    # standard q_cm, NO *m
+        k_m2 = cal_monentum(sqrt(m2), m1, m2m)   # standard q_cm, NO *m
+        f = gam * m2 / k_m2**3 * [k_s**2*(h(s)-h(m2)) + (m2-s)*k_m2**2*dh_ds(m2)]
+    """
+    k_s = _two_body_cm_mom(np.sqrt(s), m1, m2m)   # standard q_cm
+    k_m2 = _two_body_cm_mom(np.sqrt(m2), m1, m2m)  # standard q_cm
     f = gam * m2 / k_m2 ** 3
     f *= k_s ** 2 * (_h_fun(s, m1, m2m) - _h_fun(m2, m1, m2m)) \
          + (m2 - s) * k_m2 ** 2 * _dh_ds_fun(m2, m1, m2m)
