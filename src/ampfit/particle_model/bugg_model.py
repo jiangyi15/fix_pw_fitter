@@ -92,7 +92,9 @@ class BuggModel(BaseModel):
 
     def gamma(self, m):
         s = m ** 2
-        M = float(self.kwargs.get("M", self.kwargs.get("mass", 0.953)))
+        # BUGG model uses a fixed sigma mass (M=0.953) regardless of config
+        self._bugg_M = 0.953
+        M = self._bugg_M
         M2 = M * M
         mPi2 = _mPi ** 2
         mK2  = _mK ** 2
@@ -117,13 +119,16 @@ class BuggModel(BaseModel):
         gamma_4pi  = M * _gamma_4pi(s, M, _g4pi, _lambda_4pi, _s0_4pi)
 
         Gamma_tot = gamma_2pi + gamma_2K + gamma_2eta + gamma_4pi
-
-        # The framework computes: dom = m0² - m² - i·m0·g0·gamma(m)
-        # We need:                dom = M² - s - g1sg·adlerZero·z - i·Γ_tot
-        # ⇒  gamma(m) = (g1sg·adlerZero·z + i·Γ_tot) / (i·M·g0)
-        g0 = float(self.kwargs.get("width", 1.0))
         bw_term = g1sg * adlerZero * z + 1j * Gamma_tot
-        return [bw_term / (1j * M * g0)]
+
+        # Framework: dom = m0² - m² - i·m0·g0·gamma(m)
+        # TFPWA:     dom = M² - m² - g1sg·A·z - i·Γ_tot  (with M=0.953)
+        # We need gamma such that kernel produces M² - m² - bw_term
+        # ⇒  gamma = i·(M² - m0² - bw_term) / (m0·g0)
+        g0 = float(self.kwargs.get("width", 1.0))
+        m0 = float(self.kwargs.get("mass", M))
+        gamma = 1j * (M * M - m0 * m0 - bw_term) / (m0 * g0)
+        return [gamma]
 
 
 # ── Quick self-test ─────────────────────────────────────────────
