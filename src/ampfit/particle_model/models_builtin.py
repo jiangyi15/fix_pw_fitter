@@ -88,20 +88,31 @@ class BuggModel(BaseModel):
 
 @register_model("width_linear_npy")
 class WidthLinearNPYModel(BaseModel):
-    """Energy-dependent width loaded from a ``.npy`` file.
+    """Energy-dependent width from a ``.npy`` file via linear interpolation.
 
-    The file must have columns ``[mass, Re(gamma), Im(gamma)]``.
-    Values are linearly interpolated and normalised to 1 at the
-    resonance pole mass.
+    Based on the TFPWA ``WidthInterpLinearNpy`` model (``amp/interpolation.py``).
+
+    The file must have columns ``[mass, Re(Pi), Im(Pi)]`` where Pi(m) is the
+    complex self-energy.  The ``gamma(m)`` return value encodes::
+
+        gamma(m) = Im(Pi(m)) + i · (Re(Pi(m₀)) − Re(Pi(m)))
+
+    so that the framework computes::
+
+        bw_dom = m₀² − m² − i·m₀·g₀·gamma(m)
+               = m₀² − m² − m₀·g₀·(Re(Pi(m))−Re(Pi(m₀))) − i·m₀·g₀·Im(Pi(m))
+
+    which matches the TFPWA ``convert_to_amp`` formula.
 
     YAML example::
 
         particle:
-          f2(1270):
-            mass: 1.275
-            width: 0.185
+          f0(500):
+            mass: 0.5
+            width: 0.5
             model: width_linear_npy
             file: /path/to/width_table.npy
+            width_scale: True   # optional: normalise Im(Pi(m₀)) to 1
     """
 
     def get_gamma_defaults(self):
@@ -110,7 +121,15 @@ class WidthLinearNPYModel(BaseModel):
     def gamma(self, m):
         data = np.load(self.kwargs["file"])
         mi = data[:, 0]
-        fi = data[:, 1] + 1j * data[:, 2]
-        y = np.interp(m, mi, fi)
-        y0 = np.interp(self.kwargs["mass"], mi, fi)
-        return [y / y0]
+        fi = data[:, 1] + 1j * data[:, 2]          # complex Pi(m)
+
+        fm  = np.interp(m, mi, fi)                 # Pi(m)
+        fm0 = np.interp(self.kwargs["mass"], mi, fi)  # Pi(m₀)
+
+        # gamma = Im(Pi(m)) + i · (Re(Pi(m₀)) − Re(Pi(m)))
+        g = np.imag(fm) + 1j * (np.real(fm0) - np.real(fm))
+
+        if self.kwargs.get("width_scale", False) and np.imag(fm0) != 0:
+            g = g / np.imag(fm0)
+
+        return [g]
