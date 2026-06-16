@@ -360,7 +360,7 @@ __global__ void compute_main_kernel(
         double pb = thrust::norm(pap);
         double pbbar = thrust::norm(pam_val);
         double frac_val = frac[event_idx];
-        double P = frac_val * pb * (1.0 - A_p) + (1.0 - frac_val) * pbbar * (1.0 + A_p);
+        double P = frac_val * pb * (1.0 + A_p) + (1.0 - frac_val) * pbbar * (1.0 - A_p);
         P_out[event_idx] = P;
 
         double weight_val = weight[event_idx];
@@ -444,8 +444,8 @@ __global__ void gradient_kernel(
 
     double pb = thrust::norm(pap);
     double pbbar = thrust::norm(pam);
-    double dP_dpb = frac_val * (1.0 - A_p);
-    double dP_dpbbar = (1.0 - frac_val) * (1.0 + A_p);
+    double dP_dpb = frac_val * (1.0 + A_p);
+    double dP_dpbbar = (1.0 - frac_val) * (1.0 - A_p);
     double dP_dAp = -frac_val * pb + (1.0 - frac_val) * pbbar;
 
     grad_Ap_partial[event_idx] = dQ_dP_val * dP_dAp;

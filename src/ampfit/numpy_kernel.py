@@ -183,7 +183,7 @@ class NumpyKernelCorrect:
         pb = np.abs(pap)**2
         pbbar = np.abs(pam)**2
         
-        P = frac * pb * (1 - A_p) + (1 - frac) * pbbar * (1 + A_p)
+        P = frac * pb * (1 + A_p) + (1 - frac) * pbbar * (1 - A_p)
         
         # Loss
         if norm is None:
@@ -198,8 +198,8 @@ class NumpyKernelCorrect:
         # Use Wirtinger calculus consistently
         
         # Probability gradients (REAL)
-        dP_dpb = frac * (1 - A_p)
-        dP_dpbbar = (1 - frac) * (1 + A_p)
+        dP_dpb = frac * (1 + A_p)
+        dP_dpbbar = (1 - frac) * (1 - A_p)
         dP_dAp = -frac * pb + (1 - frac) * pbbar
         dQ_dAp = np.sum(dQ_dP * dP_dAp)
         
