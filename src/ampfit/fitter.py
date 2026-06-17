@@ -248,10 +248,11 @@ class Fitter:
             phsp["weight"] = w / w_sum * n
 
         # Compute N_b = weighted average of bkg over phsp
+        # (matching reference TFPWA: NB = mean(phsp_bg_value))
         b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
         if np.isscalar(b):
             b = np.full(phsp["mass"].shape[0], b, dtype=np.float64)
-        self._N_b = float(np.sum(phsp["weight"] * b)) if w_sum > 0 else 0.0
+        self._N_b = float(np.sum(phsp["weight"] * b) / n) if w_sum > 0 and n > 0 else 0.0
 
         self._phsp_np = phsp
         n = phsp["mass"].shape[0]
@@ -340,10 +341,6 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
-                # Reverse archive-style scale on r-slots
-                for p, s in self._scale_params.items():
-                    if name == p + 'r' and s != 0:
-                        val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)

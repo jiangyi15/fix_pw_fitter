@@ -529,18 +529,23 @@ class ConstraintManager:
     # ── forward pipeline ───────────────────────────────────────
 
     def resolve(self, raw_dict):
-        """Run the full constraint pipeline: same → scale → fixed."""
+        """Run the full constraint pipeline: same → fixed → scale.
+        
+        Fixed values are the physical param values; scale is a model factor
+        that multiplies ALL params (even fixed ones), matching TFPWA convention
+        where scale is applied at the amplitude product level.
+        """
         d = self.name_res.apply(raw_dict)
-        d = self.scale_tr.apply(d)
         d = self.fixed_tr.apply(d)
+        d = self.scale_tr.apply(d)
         return d
 
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve`."""
-        grad = self.fixed_tr.chain_grad(grad_resolved, resolved)
-        grad = self.scale_tr.chain_grad(grad, resolved)
+        """Reverse of :meth:`resolve` (scale → fixed → same)."""
+        grad = self.scale_tr.chain_grad(grad_resolved, resolved)
+        grad = self.fixed_tr.chain_grad(grad, resolved)
         grad = self.name_res.chain_grad(grad, raw)
         return grad
 

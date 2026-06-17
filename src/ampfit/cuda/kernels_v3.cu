@@ -41,13 +41,8 @@ using complex = thrust::complex<double>;
 __device__ double catmull_rom_1d(
     double pm1, double p0, double p1, double p2, double t
 ) {
-    double t2 = t * t;
-    double t3 = t2 * t;
-    return 0.5 * (
-        (2.0 * p0)
-        + (-pm1 + p1) * t
-        + (2.0 * pm1 - 5.0 * p0 + 4.0 * p1 - p2) * t2
-        + (-pm1 + 3.0 * p0 - 3.0 * p1 + p2) * t3
+    return p0 + 0.5 * t * (
+        -pm1 + p1 + t * (2.0*pm1 - 5.0*p0 + 4.0*p1 - p2 + t * (-pm1 + 3.0*p0 - 3.0*p1 + p2))
     );
 }
 
@@ -60,22 +55,17 @@ __device__ complex interp_complex_device(
 ) {
     double diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    double t = diff - xbin;
+    double t = max(0.0, min(diff - xbin, 1.0));
     int base = type_idx * n_bins + xbin;
-    int type_end = (type_idx + 1) * n_bins - 1;
-    int type_start = type_idx * n_bins;
-    // Clamp indices to [type_start, type_end]
-    int im1 = max(type_start, base - 1);
-    int i0  = base;
-    int i1  = min(base + 1, type_end);
-    int i2  = min(base + 2, type_end);
-    // Edge fix: at xbin==0 duplicate p0 for p[-1]; at xbin==n_bins-2 duplicate p1 for p[2]
-    int jm1 = (xbin == 0) ? i0 : im1;
-    int j2  = (xbin == n_bins - 2) ? i1 : i2;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    // Need 4 control points: pm1 at base-1, p0 at base, p1 at base+1, p2 at base+2
+    // Clamp to [type_start, end_], duplicate edge values
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
     double real_val = catmull_rom_1d(
-        table_real[jm1], table_real[i0], table_real[i1], table_real[j2], t);
+        table_real[im1], table_real[base], table_real[base + 1], table_real[i2], t);
     double imag_val = catmull_rom_1d(
-        table_imag[jm1], table_imag[i0], table_imag[i1], table_imag[j2], t);
+        table_imag[im1], table_imag[base], table_imag[base + 1], table_imag[i2], t);
     return complex(real_val, imag_val);
 }
 
@@ -87,18 +77,13 @@ __device__ double interp_real_device(
 ) {
     double diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    double t = diff - xbin;
+    double t = max(0.0, min(diff - xbin, 1.0));
     int base = type_idx * n_bins + xbin;
-    int type_end = (type_idx + 1) * n_bins - 1;
-    int type_start = type_idx * n_bins;
-    int im1 = max(type_start, base - 1);
-    int i0  = base;
-    int i1  = min(base + 1, type_end);
-    int i2  = min(base + 2, type_end);
-    int jm1 = (xbin == 0) ? i0 : im1;
-    int j2  = (xbin == n_bins - 2) ? i1 : i2;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
     return catmull_rom_1d(
-        table[jm1], table[i0], table[i1], table[j2], t);
+        table[im1], table[base], table[base + 1], table[i2], t);
 }
 
 //=============================================================================

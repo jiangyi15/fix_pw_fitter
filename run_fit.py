@@ -171,9 +171,9 @@ def main():
     fixed_slots["delta_m"]= 0.506
     fixed_slots["A_prod"] = 0.0
     fixed_slots["poqr"] = 1.0
-    fixed_slots["poqi"] = 0.0
+    fixed_slots["poqi"] = np.pi  # TFPWA convention: phi_cp = phi + pi
 
-    for name in ["a1(1260)", "a1(1640)", "a2(1320)"]:
+    for name in []: # "a1(1260)", "a1(1640)", "a2(1320)"]:
         if f"{name}p_mass" in fixed_slots:
             del fixed_slots[f"{name}p_mass"]
         if f"{name}m_mass" in fixed_slots:

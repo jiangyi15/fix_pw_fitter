@@ -254,7 +254,7 @@ class Config:
         m_min = m_finals[0]+ m_finals[1]
         return m_min, m_max
 
-    def build_gamma_table(self, n_interp=500):
+    def build_gamma_table(self, n_interp=2000):
         gamma_table = {}
         m_min, m_max = self.get_max_mass_range()
         m = np.linspace(m_min-0.01, m_max + 0.01, n_interp)
@@ -276,7 +276,7 @@ class Config:
         q_max = math.sqrt( (m_max**2 - (m1+m2)**2)*(m_max**2-(m1+m2)**2) )/2/m_max
         return 0., q_max * 1.2  # 20% safety margin for sub-decay q values
 
-    def build_fl_table(self, l_list, n_interp=500):
+    def build_fl_table(self, l_list, n_interp=2000):
         """
         Build Blatt-Weisskopf form factor table with TFPWA normalization.
         
@@ -320,7 +320,7 @@ class Config:
 
     def build_single_index(self):
         topo_id_map = self.topo_index
-        print(topo_id_map)
+        # print(topo_id_map)
 
         bw_gamma = {}
 

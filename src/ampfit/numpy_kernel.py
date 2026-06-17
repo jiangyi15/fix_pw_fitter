@@ -130,11 +130,11 @@ class NumpyKernelCorrect:
         
         # ==================== FORWARD PASS ====================
         
-        # BW propagators
+        # BW propagators (Catmull-Rom interpolation matching cuda_v3)
         g0_all = np.take(g0, self.g0_index)
         g0_m = np.take(mass, self.g0_mass_index, axis=-1)
-        g_interp = self.interp(self.gamma_table, self.g0_index, g0_m, 
-                               self.gamma_min, self.gamma_delta)
+        g_interp = self.interp_catmull_rom(self.gamma_table, self.g0_index, g0_m,
+                                           self.gamma_min, self.gamma_delta)
         g = g0_all * g_interp
         g_bw = np.dot(g, self.matrix_gamma)
         
@@ -147,10 +147,10 @@ class NumpyKernelCorrect:
         bw_dom_all_reshaped = bw_dom_all.reshape(n_events, self.n_wave, self.n_res)
         bw_p = np.prod(bw_dom_all_reshaped, axis=-1)
         
-        # FL factors
+        # FL factors (Catmull-Rom interpolation matching cuda_v3)
         fl_q = np.take(momentum, self.fl_q_index, axis=-1)
-        fl = self.interp(self.fl_table, self.fl_type, fl_q, 
-                        self.fl_min, self.fl_delta)
+        fl = self.interp_catmull_rom(self.fl_table, self.fl_type, fl_q,
+                                    self.fl_min, self.fl_delta)
         fl_all = np.take(fl, self.fl_order, axis=-1)
         fl_p = np.prod(fl_all.reshape(-1, self.n_wave, self.n_decay), axis=-1)
         
