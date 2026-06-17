@@ -31,3 +31,15 @@ echo ""
 echo "=== done ==="
 echo "results: $PREFIX/results.json"
 echo "plots:   $PREFIX/plots/"
+
+echo "=== fitting ==="
+python3 run_fit.py \
+    --config config_amp.yml \
+    --data data/data_arrays.npz \
+    --phsp data/phsp_arrays.npz \
+    --fit --maxiter 200 \
+    --backend cuda_v3 \
+    --init /home/jiangy/ana/test_4pi/test_amp/pw_cfit5_td6_fix29/final_params_0.json \
+    --fix-mass-width \
+    --save "$PREFIX/results.json" \
+    --plot "$PREFIX/plots/"

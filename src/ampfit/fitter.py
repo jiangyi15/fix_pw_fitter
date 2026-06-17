@@ -340,6 +340,11 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
+                # Reverse archive-style scale on r-slots:
+                # JSON stores SCALED values (save step 6), ScaleTransform applies them during compute
+                for p, s in self._scale_params.items():
+                    if name == p + 'r' and s != 0:
+                        val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
