@@ -238,21 +238,20 @@ class Fitter:
         Args:
             phsp: dict with same structure as data.
         """
-        # Normalize phsp weights to sum to n_events (keeps weights ≈ 1.0,
-        # avoiding float32 underflow in kernel gradient computation)
+        # Normalize phsp weights to sum to 1.0 (matches reference TFPWA convention)
         phsp = dict(phsp)
         n = phsp["mass"].shape[0]
         w = phsp.get("weight", np.ones(n))
         w_sum = np.sum(w)
         if w_sum > 0:
-            phsp["weight"] = w / w_sum * n
+            phsp["weight"] = w / w_sum
 
         # Compute N_b = weighted average of bkg over phsp
-        # (matching reference TFPWA: NB = mean(phsp_bg_value))
+        # (weights sum to 1, so sum(weight*bkg) is the weighted mean)
         b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
         if np.isscalar(b):
             b = np.full(phsp["mass"].shape[0], b, dtype=np.float64)
-        self._N_b = float(np.sum(phsp["weight"] * b) / n) if w_sum > 0 and n > 0 else 0.0
+        self._N_b = float(np.sum(phsp["weight"] * b)) if w_sum > 0 else 0.0
 
         self._phsp_np = phsp
         n = phsp["mass"].shape[0]
@@ -480,9 +479,9 @@ class Fitter:
         # 1. Norm from phase space (batched if needed)
         norm, norm_grads = self._compute_norm_batched(params)
         # Weights sum to n_phsp, so kernel Q = sum(P*w) = n_phsp * mean(P*w).
-        # NLL formula needs norm = mean(P*w): divide by n_phsp.
+        # NLL formula needs norm = mean(P*w) — weights already sum to 1
         n_phsp = self._phsp_n
-        norm = float(norm) / n_phsp
+        norm = float(norm)
         for key in norm_grads:
             if norm_grads[key] is not None:
                 norm_grads[key] = np.asarray(norm_grads[key]) / n_phsp
