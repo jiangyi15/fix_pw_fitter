@@ -483,13 +483,12 @@ class Fitter:
 
         # 1. Norm from phase space (batched if needed)
         norm, norm_grads = self._compute_norm_batched(params)
-        # Weights sum to n_phsp, so kernel Q = sum(P*w) = n_phsp * mean(P*w).
-        # NLL formula needs norm = mean(P*w) — weights already sum to 1
-        n_phsp = self._phsp_n
+        # Weights sum to 1 from set_phsp(), so kernel Q = sum(P*w) = mean(P*w) = norm.
+        # Kernel's norm_grad is already d(norm)/dparam — no scaling needed.
         norm = float(norm)
         for key in norm_grads:
             if norm_grads[key] is not None:
-                norm_grads[key] = np.asarray(norm_grads[key]) / n_phsp
+                norm_grads[key] = np.asarray(norm_grads[key])
 
         # 2. NLL from data (with norm)
         nll, grads, P = self.backend.compute(
