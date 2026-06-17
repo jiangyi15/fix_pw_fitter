@@ -308,6 +308,18 @@ class Config:
                 z0 = (q0 * d)**2
                 norm_factor = np.sqrt(9 + 3*z0 + z0**2)  # ≈ 10.817
                 ret.append(q**2 * norm_factor / np.sqrt(9 + 3*z + z**2))
+            elif l == 3:
+                # L=3: P(z) = 225 + 45z + 6z² + z³
+                z = (q * d)**2
+                z0 = (q0 * d)**2
+                norm_factor = np.sqrt(225 + 45*z0 + 6*z0**2 + z0**3)
+                ret.append(q**3 * norm_factor / np.sqrt(225 + 45*z + 6*z**2 + z**3))
+            elif l == 4:
+                # L=4: P(z) = 11025 + 1575z + 135z² + 10z³ + z⁴
+                z = (q * d)**2
+                z0 = (q0 * d)**2
+                norm_factor = np.sqrt(11025 + 1575*z0 + 135*z0**2 + 10*z0**3 + z0**4)
+                ret.append(q**4 * norm_factor / np.sqrt(11025 + 1575*z + 135*z**2 + 10*z**3 + z**4))
             else:
                 # Not implemented - use L=0 as fallback
                 ret.append(np.ones_like(q))

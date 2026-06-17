@@ -390,6 +390,10 @@ particle:
         P: +1
         mass: 1.255
         width: 0.211
+        model: BWR
+        L: 2
+        daug2Mass: 0.13957039
+        daug3Mass: 0.13957039
 
 constrains:
     fix_var:
