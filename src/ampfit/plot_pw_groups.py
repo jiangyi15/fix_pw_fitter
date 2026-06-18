@@ -172,6 +172,13 @@ class PWGroupPlotter:
         colors = colors or plt.cm.tab20(np.linspace(0, 1, len(self.labels)))
         glabels = group_labels or self.labels
 
+        # Background normalisation (constant across subplots)
+        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
+        bkg_norm = float(np.sum(pw * bkg))
+        purity = f._purity if f._purity is not None else 1.0
+        data_total = float(np.sum(dw))
+        bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
+
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
         n_var = len(var_data)
@@ -188,20 +195,36 @@ class PWGroupPlotter:
             p = var_phsp[i]
             xlo, xhi = (ranges[i] if ranges else (lo, hi))
             bins = np.linspace(xlo, xhi, n_bins + 1)
+            bin_c = (bins[:-1] + bins[1:]) / 2
 
             dy, _ = np.histogram(d, bins=bins, weights=dw)
             dw2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
-            ty, _ = np.histogram(p, bins=bins,
-                                 weights=pw * self._P_total * self._scale)
+
+            # Signal
+            sig, _ = np.histogram(p, bins=bins,
+                                  weights=pw * self._P_total * self._scale)
+
+            # Background (filled area)
+            bkg_y, _ = np.histogram(p, bins=bins, weights=pw * bkg * bkg_scale)
+
+            # Total fit = signal + background
+            tot = sig + bkg_y
+
+            # Partial waves (signal only)
             gys = [np.histogram(p, bins=bins,
                                 weights=pw * Pg * self._scale)[0]
                    for Pg in self._P_groups]
 
-            ax.errorbar((bins[:-1] + bins[1:]) / 2, dy, yerr=np.sqrt(dw2),
+            ax.errorbar(bin_c, dy, yerr=np.sqrt(dw2),
                         fmt='o', color='black', markersize=3, capsize=2,
                         label='data' if legend and i == 0 else None)
-            ax.step(bins[1:], ty, where='post', color='grey', linewidth=2,
+            # Background fill
+            ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
+                            color='C3', label='bkg' if legend and i == 0 else None)
+            # Total fit step (signal + bkg)
+            ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
                     label='total fit' if legend and i == 0 else None)
+            # Partial wave groups (signal only)
             for gy, c, lab in zip(gys, colors, glabels):
                 ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
                         label=lab if legend and i == 0 else None)
@@ -224,19 +247,22 @@ class PWGroupPlotter:
         plt.close(fig)
         print(f"  saved {path}")
 
-    def plot_asymmetry(self, varfun, tag_data, tag_phsp, labels, lo, hi,
-                       n_bins, prefix, output="plots/", ranges=None,
+    def plot_asymmetry(self, varfun, labels, lo, hi,
+                       n_bins, prefix, tag_data=None, tag_phsp=None,
+                       output="plots/", ranges=None,
                        data_weight_extra=None, phsp_weight_extra=None):
         """Plot asymmetry ``(N(tag>0) - N(tag<0)) / (N(tag>0) + N(tag<0))``.
 
-        Only the total model is shown (no group decomposition).
+        When *tag_data* / *tag_phsp* are ``None`` (default), uses
+        ``frac - 0.5`` (so ``frac == 0.5`` events are excluded from
+        both sides — no tagging information).  Only the total model
+        is shown (no group decomposition).
 
         Args:
             varfun: callable(dict) → list of arrays (one per subplot).
-            tag_data: array of tag values for data (sign selects side).
-            tag_phsp: array of tag values for phsp.
-            labels, lo, hi, n_bins, prefix, output, ranges: see :meth:`plot_var`.
-            data_weight_extra, phsp_weight_extra: optional extra weights.
+            labels, lo, hi, n_bins, prefix: see :meth:`plot_var`.
+            tag_data: array of tag values for data (default: frac - 0.5).
+            tag_phsp: array of tag values for phsp (default: frac - 0.5).
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_asymmetry()")
@@ -246,6 +272,12 @@ class PWGroupPlotter:
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
         pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+
+        # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
+        if tag_data is None:
+            tag_data = f._data_np["frac"] - 0.5
+        if tag_phsp is None:
+            tag_phsp = f._phsp_np["frac"] - 0.5
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
