@@ -561,12 +561,15 @@ class PWGroupPlotter:
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
                           prefix, output="plots/",
                           data_weight_extra=None, phsp_weight_extra=None,
-                          smooth_sigma=None, unit="GeV"):
+                          smooth_sigma=None, unit="GeV", scales=None):
         """Plot stacked histogram from permutation-equivalent variables.
 
         All arrays returned by *varfun* are flattened together: weights
         are repeated so each event contributes to every permutation bin.
         Errors propagate via ``√Σ w²`` over the flattened set.
+
+        With *scales*, each permutation is multiplied by its scale factor
+        before summing, e.g. ``scales=[1, -1]`` gives ``mass1 - mass2``.
 
         Args:
             varfun: callable(dict) → list of arrays (same length).
@@ -578,6 +581,7 @@ class PWGroupPlotter:
             data_weight_extra, phsp_weight_extra: optional extra weights.
             smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
             unit: physical unit for bin width in y-label (default "GeV").
+            scales: optional list of scale factors for each permutation.
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_stacked_perm()")
@@ -592,39 +596,45 @@ class PWGroupPlotter:
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
         n_p = len(var_data)
+        if scales is not None:
+            assert len(scales) == n_p, "scales length must match number of permutations"
+        scl = np.ones(n_p) if scales is None else np.array(scales, dtype=np.float64)
 
         n_bins = max(1, int(round((hi - lo) / bin_width)))
-        hi = lo + n_bins * bin_width  # exact bin width
+        hi = lo + n_bins * bin_width
         bins = np.linspace(lo, hi, n_bins + 1)
         bin_c = (bins[:-1] + bins[1:]) / 2
 
         # ── data histogram ────────────────────────────────────────
+        # Flatten perms, apply per-perm scale, tile weights
         d_all = np.concatenate(var_data)
-        dw_all = np.tile(dw, n_p)
+        dw_all = np.concatenate([dw * s for s in scl])
         dy, _ = np.histogram(d_all, bins=bins, weights=dw_all)
 
-        # Variance: per-event, per-bin count of permutations.
+        # Variance: per-event, per-bin with scales
         bin_idx = np.column_stack([np.digitize(arr, bins) - 1 for arr in var_data])
+        bin_idx = np.clip(bin_idx, 0, n_bins - 1)  # protect against out-of-range
         indicator = np.zeros((len(dw), n_bins), dtype=np.float64)
         for p in range(n_p):
-            np.add.at(indicator, (np.arange(len(dw)), bin_idx[:, p]), 1.0)
+            np.add.at(indicator, (np.arange(len(dw)), bin_idx[:, p]), scl[p])
         var_bin = np.sum((dw[:, None] * indicator) ** 2, axis=0)
 
-        # ── model histograms ──────────────────────────────────────
+        # ── model histograms (with per-perm scales) ───────────────
         p_all = np.concatenate(var_phsp)
-        pw_all_sig = np.tile(pw * self._P_total * self._scale, n_p)
+        pw_all_sig = np.concatenate([pw * self._P_total * self._scale * s for s in scl])
 
         bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
         bkg_norm = float(np.sum(pw * bkg))
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
         bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
-        pw_all_bkg = np.tile(pw * bkg * bkg_scale, n_p)
+        pw_all_bkg = np.concatenate([pw * bkg * bkg_scale * s for s in scl])
 
         glabels = self.labels
         gcolors = plt.cm.tab20(np.linspace(0, 1, len(glabels)))
         pw_all_groups = [
-            np.tile(pw * Pg * self._scale, n_p) for Pg in self._P_groups
+            np.concatenate([pw * Pg * self._scale * s for s in scl])
+            for Pg in self._P_groups
         ]
 
         sig, _ = np.histogram(p_all, bins=bins, weights=pw_all_sig)
@@ -661,7 +671,8 @@ class PWGroupPlotter:
                 ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
                         label=lab)
         ax.set_xlim(lo, hi)
-        ax.set_ylim(0, None)
+        y_bottom = None if any(s < 0 for s in scl) else 0
+        ax.set_ylim(y_bottom, None)
         xl = xlabel if not unit else f"{xlabel} ({unit})"
         ax.set_xlabel(xl)
         bw = (hi - lo) / n_bins

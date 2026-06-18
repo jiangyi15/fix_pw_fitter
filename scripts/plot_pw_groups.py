@@ -84,15 +84,15 @@ def main():
 
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [0, 3, 6, 9]),
-        "m(π⁺π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipi", output=args.output,
+        "m(π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipi", output=args.output,
         smooth_sigma=1.0)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [1, 4]),
-        "m(π⁺π⁺π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipipip", output=args.output,
+        "m(π⁺π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipipip", output=args.output,
         smooth_sigma=1.0)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [2, 8]),
-        "m(π⁺π⁻π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipipim", output=args.output,
+        "m(π⁺π⁻π⁻)", 0.2, 5.2, 0.05, "m_pipipim", output=args.output,
         smooth_sigma=1.0)
 
     # Sorted ππ: groups [0,9] and [3,6], each sorted within, then by group min
@@ -144,6 +144,17 @@ def main():
                 [label_j], rj[0], rj[1], 0.05,
                 f"{prefix}_{['min','max'][j]}", output=args.output,
                 smooth_sigma=1.0)
+
+    # Difference (y-axis): pipipip - pipipim at same x values
+    def diff_pipipi(x):
+        m = x["mass"].reshape(-1, 24, 2)
+        return [m[:, 1, 0], m[:, 4, 0], m[:, 2, 0], m[:, 8, 0]]
+
+    plotter.plot_stacked_perm(
+        diff_pipipi,
+        r"$m(3\pi)$",
+        0.2, 5.2, 0.05, "m_pipipi_diff", output=args.output,
+        scales=[1, 1, -1, -1], smooth_sigma=1.0)
 
 
 if __name__ == "__main__":
