@@ -1137,6 +1137,68 @@ class Fitter:
             res.hess_inv = np.load(hessian_path)
         return res
 
+    def save_constraints(self, filepath):
+        """Save all constraints (fixed, same, scale, bounds) to JSON.
+
+        Args:
+            filepath: output JSON path.
+        """
+        import json
+        from collections import defaultdict
+        flat_names = self._var_registry.flat_names
+
+        # Fixed slots
+        fixed = dict(self._fixed_slots)
+
+        # Same-param groups: reconstruct from alias→canon dict
+        alias_map = self._same_params  # {alias: canon}
+        canon_groups = defaultdict(list)
+        for alias, canon in alias_map.items():
+            canon_groups[canon].append(alias)
+        same = [[canon] + sorted(aliases) for canon, aliases in canon_groups.items()]
+
+        # Scale params
+        scale = dict(self._scale_params)
+
+        # Bounds: name → {"low": a, "high": b}  (de-duplicated by value)
+        bt = self._bound_transforms
+        bounds = {}
+        seen = {}
+        for i, name in enumerate(flat_names):
+            if i in bt:
+                t = bt[i]
+                key = (t.a, t.b)
+                if key not in seen:
+                    seen[key] = name
+                    bounds[name] = {"low": t.a, "high": t.b}
+
+        out = {"fixed": fixed, "same": same, "scale": scale, "bounds": bounds}
+        with open(filepath, "w") as f:
+            json.dump(out, f, indent=2)
+        print(f"✓ Saved constraints to {filepath}")
+
+    def load_constraints(self, filepath):
+        """Load constraints from a JSON file saved by :meth:`save_constraints`.
+
+        Resets and re-applies all fixed/same/scale/bound settings.
+
+        Args:
+            filepath: path to JSON file from :meth:`save_constraints`.
+        """
+        import json
+        with open(filepath) as f:
+            data = json.load(f)
+
+        self.set_fixed(data.get("fixed", {}), reset=True)
+        self.set_same(data.get("same", []), reset=True)
+        self.set_scale(data.get("scale", {}), reset=True)
+
+        # Re-apply bounds
+        for name, spec in data.get("bounds", {}).items():
+            self.set_range(name, spec["low"], spec["high"])
+
+        print(f"✓ Loaded constraints from {filepath}")
+
     # ------------------------------------------------------------------
     def _grad_flat(self, fun, param_names, resolved, raw, x_mapped, x0, jac=False):
         """Compute optimizer-space gradient of *fun* w.r.t. *param_names*.
