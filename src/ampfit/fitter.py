@@ -1152,11 +1152,10 @@ class Fitter:
         """Covariance and correlation between multiple observables.
 
         The function ``fun(phys_dict) → list[float]`` returns a vector
-        of observables depending on *param_names*.  Each observable is
-        treated as an independent scalar and its gradient is propagated
-        via :meth:`_grad_flat`.  The Jacobian matrix ``G[i] = ∇ fun_i``
-        is built by stacking these gradients.  The covariance matrix is
-        ``G @ hess_inv @ G.T``.
+        of observables depending on *param_names*.  The Jacobian matrix
+        ``G[i] = ∇ fun_i`` is built by evaluating all observables at
+        each 3‑point shift in a single call, then building per‑observable
+        gradient dicts.  The covariance matrix is ``G @ hess_inv @ G.T``.
 
         Args:
             fun: callable ``fun(phys_dict) → list[float]`` returning
@@ -1170,6 +1169,7 @@ class Fitter:
             ``(n_obs × n_obs)``, and *corr* is the correlation matrix.
         """
         import numpy as np
+        from ampfit.boundary import apply_bound_grads
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
@@ -1183,13 +1183,33 @@ class Fitter:
         if hess_inv is None or not names:
             return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
 
-        # Build gradient matrix one observable at a time
-        G = []
+        # Single 3-point sweep: for each parameter shift evaluate ALL
+        # observables at once, then build per-observable gradient dicts.
+        grad_dicts = [{} for _ in range(n_obs)]
+
+        for name in names:
+            base = float(resolved[name])
+            eps = 1e-5 * max(1.0, abs(base))
+
+            rp = dict(resolved); rp[name] = base + eps
+            vp = fun({n: float(rp[n]) for n in names})
+
+            rm = dict(resolved); rm[name] = base - eps
+            vm = fun({n: float(rm[n]) for n in names})
+
+            for i in range(n_obs):
+                grad = (vp[i] - vm[i]) / (2 * eps)
+                if grad != 0.0:
+                    grad_dicts[i][name] = grad
+
+        # Chain each observable's gradient to optimizer space
+        G = np.zeros((n_obs, len(x0)))
         for i in range(n_obs):
-            obsi = lambda d, idx=i: fun(d)[idx]
-            gf = self._grad_flat(obsi, param_names, resolved, raw, x_mapped, x0)
-            G.append(gf if gf is not None else np.zeros(len(x0)))
-        G = np.array(G)  # (n_obs, n_free)
+            if not grad_dicts[i]:
+                continue
+            grad_raw = self.cm.chain_gradient(grad_dicts[i], resolved, raw)
+            gf = self._var_registry.flat_gradient(x_mapped, grad_raw)
+            G[i] = apply_bound_grads(gf, x0, self._bound_transforms)
 
         cov = G @ hess_inv @ G.T
         d = np.sqrt(np.maximum(np.diag(cov), 0.0))
@@ -1241,16 +1261,16 @@ class Fitter:
         if not param_names:
             raise ValueError(f"No fitted parameters found for '{particle_name}'")
 
-        fit_dict = {n: float(resolved[n]) for n in param_names}
+        # --- 3. BW params and covariance via cal_uncertainties_multi ---
+        def bw_fun(d):
+            bw = model.get_bw_params(d)
+            return [bw["mass_bw"], bw["width_bw"]]
+        vals, cov, _ = self.cal_uncertainties_multi(bw_fun, param_names, fit_result)
 
-        # --- 3. BW params and uncertainties via cal_uncertainties ---
-        mass_bw, mass_bw_err = self.cal_uncertainties(
-            lambda d: model.get_bw_params(d)["mass_bw"], param_names, fit_result)
-        width_bw, width_bw_err = self.cal_uncertainties(
-            lambda d: model.get_bw_params(d)["width_bw"], param_names, fit_result)
-
-        return {"mass_bw": mass_bw, "width_bw": width_bw,
-                "mass_bw_err": mass_bw_err, "width_bw_err": width_bw_err}
+        return {"mass_bw": vals[0], "width_bw": vals[1],
+                "mass_bw_err": float(np.sqrt(max(cov[0, 0], 0.0))),
+                "width_bw_err": float(np.sqrt(max(cov[1, 1], 0.0))),
+                "mass_width_cov": float(cov[0, 1])}
 
     def free(self):
         """Free all memory held by the backend."""
