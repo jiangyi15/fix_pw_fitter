@@ -134,7 +134,7 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
-    def compute_coefficients(self, phsp_np_frac=None):
+    def compute_coefficients(self, phsp_weight_extra=None):
         """Compute time-integral coefficients I, Ī, J.
 
         Uses the kernel with modified data (time, frac) and scalar
@@ -144,8 +144,8 @@ class PWGroupPlotter:
         * **Ī**  = Σ w·|Ā|²   — B0bar partial rate
         * **J**  = Σ w·A*·Ā   — complex interference (Re(J), Im(J))
 
-        If *phsp_np_frac* is given, uses its ``frac`` for phsp events
-        (otherwise uses the already-loaded phsp's ``frac``).
+        If *phsp_weight_extra* is given, it multiplies the phsp weights
+        (e.g. cut or tag weights), correctly renormalising the integrals.
 
         Returns:
             ``(I, Ibar, ReJ, ImJ)`` — all floats.
@@ -167,6 +167,11 @@ class PWGroupPlotter:
             phsp = dict(orig_phsp)
             phsp["time"] = np.asarray(time_array, dtype=np.float64)
             phsp["frac"] = np.asarray(frac_array, dtype=np.float64)
+            if phsp_weight_extra is not None:
+                phsp["weight"] = phsp["weight"] * np.asarray(phsp_weight_extra, dtype=np.float64)
+            # Free old GPU batched data before reloading (prevents corruption)
+            if hasattr(f.backend, 'free_phsp_batched'):
+                f.backend.free_phsp_batched()
             f.set_phsp(phsp)
             Q, _, _ = f.backend.compute(p, f._phsp_holder, norm=None)
             return float(Q)
@@ -337,12 +342,12 @@ class PWGroupPlotter:
         pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
-        # frac convention: frac = P(B0bar) in data → tag = 0.5 - frac
-        # so tag>0 selects B0-like (frac<0.5), tag<0 selects B0bar-like (frac>0.5)
+        # frac = P(B0) in data → tag = frac - 0.5
+        # so tag>0 selects B0-like (frac>0.5), tag<0 selects B0bar-like (frac<0.5)
         if tag_data is None:
-            tag_data = 0.5 - f._data_np["frac"]
+            tag_data = f._data_np["frac"] - 0.5
         if tag_phsp is None:
-            tag_phsp = 0.5 - f._phsp_np["frac"]
+            tag_phsp = f._phsp_np["frac"] - 0.5
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
@@ -414,7 +419,8 @@ class PWGroupPlotter:
         print(f"  saved {path}")
 
     def plot_time_asymmetry(self, t_min=0, t_max=10, n_bins=20,
-                            output="plots/", prefix="time_asym", params=None):
+                            output="plots/", prefix="time_asym", params=None,
+                            data_weight_extra=None, phsp_weight_extra=None):
         """Plot time-dependent asymmetry using exact theoretical formula.
 
         Data: binned time asymmetry ``(N(tag>0) - N(tag<0))/(N(tag>0) + N(tag<0))``.
@@ -428,16 +434,21 @@ class PWGroupPlotter:
             output: output directory.
             prefix: filename stem.
             params: optional params dict (uses from fit_result if None).
+            data_weight_extra: optional per-event weight for data.
+            phsp_weight_extra: optional per-event weight for phsp
+                (also applied in coefficient calculation).
         """
         import numpy as np
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        dw = f._data_np["weight"]
-        tag_data = 0.5 - f._data_np["frac"]
+        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        frac_data = f._data_np["frac"]
+        tag_data = frac_data - 0.5
 
-        # ── Compute coefficients I, Ī, J ──────────────────────────
-        I_val, Ibar_val, ReJ, ImJ = self.compute_coefficients()
+        # ── Compute coefficients I, Ī, J (with optional extra phsp weight) ──
+        I_val, Ibar_val, ReJ, ImJ = self.compute_coefficients(
+            phsp_weight_extra=phsp_weight_extra)
 
         # ── Time parameters from the fit ──────────────────────────
         if params is None:
@@ -451,8 +462,6 @@ class PWGroupPlotter:
         phi = float(sc[5])
 
         # ── Dilution from data (common scale) ────────────────────
-        frac_data = f._data_np["frac"]
-        tag_data = 0.5 - frac_data
         tagged = np.abs(tag_data) > 1e-10
         dilution = float(np.mean(np.abs(1.0 - 2.0 * frac_data[tagged])))
 
