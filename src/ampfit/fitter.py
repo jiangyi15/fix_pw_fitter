@@ -1083,17 +1083,124 @@ class Fitter:
     # ------------------------------------------------------------------
     # Convenience / utility
     # ------------------------------------------------------------------
+    def _grad_flat(self, fun, param_names, resolved, raw, x_mapped, x0):
+        """Compute optimizer-space gradient of *fun* w.r.t. *param_names*."""
+        import numpy as np
+        from ampfit.boundary import apply_bound_grads
+
+        names = [n for n in param_names if n in resolved]
+        if not names:
+            return None
+
+        grad_dict = {}
+        for name in names:
+            base = float(resolved[name])
+            eps = 1e-5 * max(1.0, abs(base))
+            rp = dict(resolved); rp[name] = base + eps
+            vp = fun({n: float(rp[n]) for n in names})
+            rm = dict(resolved); rm[name] = base - eps
+            vm = fun({n: float(rm[n]) for n in names})
+            grad_dict[name] = (vp - vm) / (2 * eps)
+
+        if not grad_dict:
+            return None
+        grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
+        grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
+        return apply_bound_grads(grad_flat, x0, self._bound_transforms)
+
+    def cal_uncertainties(self, fun, param_names, fit_result):
+        """Propagate fit uncertainties to a function of physical parameters.
+
+        Computes the uncertainty of ``fun(phys_dict)`` by 3-point finite
+        difference gradients w.r.t. each parameter in *param_names*,
+        chains through constraints to the optimizer space, and uses the
+        full Hessian inverse for the variance.
+
+        Args:
+            fun: callable ``fun(phys_dict) → float``, where *phys_dict*
+                 maps parameter names to their best-fit values.
+            param_names: list of physical parameter names that *fun*
+                         depends on (e.g. ``["a1(1260)p_mass"]``).
+            fit_result: OptimizeResult from ``fit()`` (has ``.x`` and
+                        ``.hess_inv``).
+
+        Returns:
+            (value, uncertainty) where *value* is ``fun(best_fit_phys)``
+            and *uncertainty* is the 1σ error propagated from the fit.
+        """
+        x0 = fit_result.x
+        hess_inv = getattr(fit_result, 'hess_inv', None)
+        _, resolved, raw, x_mapped = self._build_params(x0)
+
+        names = [n for n in param_names if n in resolved]
+        if not names:
+            raise ValueError(f"None of {param_names} found in resolved parameters")
+
+        fit_dict = {n: float(resolved[n]) for n in names}
+        value = fun(fit_dict)
+
+        if hess_inv is None:
+            return value, 0.0
+
+        gf = self._grad_flat(fun, param_names, resolved, raw, x_mapped, x0)
+        if gf is None:
+            return value, 0.0
+        std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
+        return value, std
+
+    def cal_uncertainties_multi(self, funs, param_names, fit_result):
+        """Covariance and correlation between multiple observables.
+
+        Each function in *funs* is treated as an observable depending on
+        *param_names*.  The Jacobian matrix ``G[i] = ∇_{optimizer} fun_i``
+        is built by stacking optimizer-space gradients.  The covariance
+        matrix is ``G @ hess_inv @ G.T``.
+
+        Args:
+            funs: list of callables, each ``fun(phys_dict) → float``.
+            param_names: list of physical parameter names.
+            fit_result: OptimizeResult from ``fit()``.
+
+        Returns:
+            (values, cov, corr) where *values* is the list of function
+            values at best fit, *cov* is the covariance matrix
+            ``(n_funs × n_funs)``, and *corr* is the correlation matrix.
+        """
+        import numpy as np
+
+        x0 = fit_result.x
+        hess_inv = getattr(fit_result, 'hess_inv', None)
+        _, resolved, raw, x_mapped = self._build_params(x0)
+        names = [n for n in param_names if n in resolved]
+
+        fit_dict = {n: float(resolved[n]) for n in names}
+        values = [f(fit_dict) for f in funs]
+
+        if hess_inv is None or not names:
+            return values, np.zeros((len(funs), len(funs))), \
+                   np.eye(len(funs))
+
+        # Build gradient matrix: rows = observables, cols = optimizer
+        G = []
+        for f in funs:
+            gf = self._grad_flat(f, param_names, resolved, raw, x_mapped, x0)
+            G.append(gf if gf is not None else np.zeros(len(x0)))
+        G = np.array(G)  # (n_funs, n_free)
+
+        cov = G @ hess_inv @ G.T
+        d = np.sqrt(np.maximum(np.diag(cov), 0.0))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            corr = cov / np.outer(d, d)
+            corr[np.isnan(corr)] = 0.0
+            corr = np.clip(corr, -1, 1)
+        return values, cov, corr
+
     def get_bw_params(self, particle_name, fit_result):
         """BW peak mass and width for a single resonance from fit result.
 
         Calls ``model.get_bw_params()`` with the best-fit mass and width
-        values for the given particle.  Also computes 1σ uncertainties
-        via 3-point finite difference gradients propagated through the
-        Hessian inverse.
-
-        The gradient and Hessian are both evaluated in the unbounded
-        (optimizer) parameter space, then the uncertainty is transformed
-        to the physical (bounded) BW parameter space.
+        values for the given particle.  Computes 1σ uncertainties via
+        :meth:`cal_uncertainties`.
 
         Args:
             particle_name: resonance name from config, e.g. ``"a1(1260)p"``.
@@ -1118,12 +1225,8 @@ class Fitter:
         if model is None:
             raise ValueError(f"Particle '{particle_name}' not found in config")
 
-        # --- 2. Get best-fit physical parameters ---
-        x0 = fit_result.x
-        hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved, _, _ = self._build_params(x0)
-
-        # Collect physical parameter names for this particle
+        # --- 2. Collect parameter names and build fit dict ---
+        _, resolved, _, _ = self._build_params(fit_result.x)
         param_names = []
         mass_name = f"{particle_name}_mass"
         if mass_name in resolved:
@@ -1131,52 +1234,19 @@ class Fitter:
         for gname in model.get_gamma_name():
             if gname in resolved:
                 param_names.append(gname)
-
         if not param_names:
             raise ValueError(f"No fitted parameters found for '{particle_name}'")
 
-        # --- 3. Compute BW params at best-fit ---
         fit_dict = {n: float(resolved[n]) for n in param_names}
-        bw = model.get_bw_params(fit_dict)
-        mass_bw = bw["mass_bw"]
-        width_bw = bw["width_bw"]
-        mass_bw_err = 0.0
-        width_bw_err = 0.0
 
-        # --- 4. Uncertainty via physical→optimizer gradient chain ---
-        if hess_inv is not None and param_names:
-            from ampfit.boundary import apply_bound_grads
+        # --- 3. BW params and uncertainties via cal_uncertainties ---
+        mass_bw, mass_bw_err = self.cal_uncertainties(
+            lambda d: model.get_bw_params(d)["mass_bw"], param_names, fit_result)
+        width_bw, width_bw_err = self.cal_uncertainties(
+            lambda d: model.get_bw_params(d)["width_bw"], param_names, fit_result)
 
-            _, _, raw, x_mapped = self._build_params(x0)
-
-            def _propagate(bw_key):
-                grad_dict = {}
-                for name in param_names:
-                    if name not in resolved:
-                        continue
-                    base = float(resolved[name])
-                    eps = 1e-5 * max(1.0, abs(base))
-                    rp = dict(resolved); rp[name] = base + eps
-                    bw_p = model.get_bw_params({n: float(rp[n]) for n in param_names})
-                    rm = dict(resolved); rm[name] = base - eps
-                    bw_m = model.get_bw_params({n: float(rm[n]) for n in param_names})
-                    grad_dict[name] = (bw_p[bw_key] - bw_m[bw_key]) / (2 * eps)
-                if not grad_dict:
-                    return 0.0
-                grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
-                grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-                grad_flat = apply_bound_grads(grad_flat, x0, self._bound_transforms)
-                return float(np.sqrt(max(grad_flat @ hess_inv @ grad_flat, 0.0)))
-
-            mass_bw_err = _propagate("mass_bw")
-            width_bw_err = _propagate("width_bw")
-
-        return {
-            "mass_bw": mass_bw,
-            "width_bw": width_bw,
-            "mass_bw_err": mass_bw_err,
-            "width_bw_err": width_bw_err,
-        }
+        return {"mass_bw": mass_bw, "width_bw": width_bw,
+                "mass_bw_err": mass_bw_err, "width_bw_err": width_bw_err}
 
     def free(self):
         """Free all memory held by the backend."""
