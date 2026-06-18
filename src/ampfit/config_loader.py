@@ -16,8 +16,16 @@ def load_config(filename):
 class Particle:
     def __init__(self, name, **kwargs):
         self.name = name
+        self._decays = []
         for k, v in kwargs.items():
             setattr(self, k, v)
+    def add_decay(self, decay):
+        """Register a Decay in this particle if no identical decay exists."""
+        out_names = tuple(o.name for o in decay.outs)
+        for d in self._decays:
+            if tuple(o.name for o in d.outs) == out_names:
+                return  # already registered
+        self._decays.append(decay)
     def __str__(self):
         return self.name
 
@@ -32,6 +40,7 @@ class Decay:
     def __init__(self, core, outs, **kwargs):
         self.core = core
         self.outs = outs
+        core.add_decay(self)
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -238,6 +247,7 @@ class Config:
         for k in all_particles:
             particles[k] = Particle(k, **dic[k])
             particles[k]._model = build_particle(k, **dic[k])
+            particles[k]._model.register_parent(particles[k])
         ret = []
         for i in  lst:
             tmp = []
@@ -289,6 +299,7 @@ class Config:
         
         q_min, q_max = self.get_max_q_range()
         q = np.linspace(q_min, q_max, n_interp)
+        q = np.clip(q, 0, np.inf)
         
         for l in l_list:
             if l == 0:

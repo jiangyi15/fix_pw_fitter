@@ -39,6 +39,7 @@ class BaseModel:
     def __init__(self, name, **kwargs):
         self.name = name
         self.kwargs = kwargs
+        self._parent = None
 
     def get_gamma_count(self):
         return 1
@@ -52,6 +53,10 @@ class BaseModel:
         Returns list of floats matching get_gamma_name() length.
         """
         return [float(self.kwargs.get("width", 0.1))]
+
+    def register_parent(self, particle):
+        """Store the Particle that owns this model (for decay tree access)."""
+        self._parent = particle
 
     def gamma(self, m):
         """Compute the gamma (width) function at masses *m*.

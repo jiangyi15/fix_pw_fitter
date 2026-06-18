@@ -177,15 +177,21 @@ class GSRhoModel(BaseModel):
         m2 = float(self.kwargs.get("daug2Mass", self._def_m2))
         m3 = float(self.kwargs.get("daug3Mass", self._def_m3))
 
-        # Breakup momenta
-        q  = _two_body_cm_mom(m, m2, m3)
-        q0 = _two_body_cm_mom(M, m2, m3)
+        # Breakup momenta — both q and q0 use decay tree masses (consistent with TFPWA)
+        if self._parent and self._parent._decays:
+            d1 = float(self._parent._decays[0].outs[0].mass)
+            d2 = float(self._parent._decays[0].outs[1].mass)
+            q  = _two_body_cm_mom(m, d1, d2)
+            q0 = _two_body_cm_mom(M, d1, d2)
+        else:
+            q  = _two_body_cm_mom(m, m2, m3)
+            q0 = _two_body_cm_mom(M, m2, m3)
 
         # Running width (without the g0 factor)
         gamma_run = _gamma_run(m, 1.0, q, q0, L, M, d)
 
-        # Mass-shift term (without the g0 factor)
-        fs_val = _fs_fun(m ** 2, M ** 2, 1.0, m2, m3)
+        # Mass-shift term — uses PDG masses (c_daug2Mass/c_daug3Mass in TFPWA)
+        fs_val = _fs_fun(m ** 2, M ** 2, 1.0, self._def_m2, self._def_m3)
 
         # gamma(m) = Gamma(m)/g0 + i * fs(m²) / m0
         # _fs_fun(gam=1) returns fs_without_g0 coupling.

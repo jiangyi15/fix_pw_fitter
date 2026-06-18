@@ -73,8 +73,8 @@ class BWRModel(BaseModel):
         width         — nominal width g₀
         L             — orbital angular momentum (default 0)
         d             — impact parameter in GeV⁻¹ (default 3.0)
-        daug2Mass     — first daughter mass (required)
-        daug3Mass     — second daughter mass (required)
+        daug2Mass     — first daughter mass (required if no decay tree)
+        daug3Mass     — second daughter mass (required if no decay tree)
     """
 
     def get_gamma_defaults(self):
@@ -84,12 +84,15 @@ class BWRModel(BaseModel):
         M  = float(self.kwargs.get("M",  self.kwargs.get("mass",  0.775)))
         L  = int(self.kwargs.get("L", 0))
         d  = float(self.kwargs.get("d", 3.0))
-        m2 = float(self.kwargs.get("daug2Mass"))
-        m3 = float(self.kwargs.get("daug3Mass"))
 
-        # Breakup momenta
-        q  = _two_body_cm_mom(m, m2, m3)
-        q0 = _two_body_cm_mom(M, m2, m3)
+        # Breakup momenta — use decay tree masses (consistent with TFPWA)
+        if self._parent and self._parent._decays:
+            d1 = float(self._parent._decays[0].outs[0].mass)
+            d2 = float(self._parent._decays[0].outs[1].mass)
+            q  = _two_body_cm_mom(m, d1, d2)
+            q0 = _two_body_cm_mom(M, d1, d2)
+        else:
+            raise ValueError(f"BWR model '{self.name}': no decay tree available for q0")
 
         # Running width factor: (q/q₀)^{2L+1} · (m₀/m) · B'_L(q,q₀,d)²
         qq0 = (q / q0) ** (2 * L + 1)
