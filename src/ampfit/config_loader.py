@@ -510,12 +510,30 @@ class Config:
                     ret.append((j[0], j[1].replace("g_ls", "g_lsbar"), *j[2:]))
         return ret
 
+    def _chain_ranges(self):
+        """Build list of (base_start, base_end, chain) for all chains."""
+        idx = 0
+        ranges = []
+        for chain in self.full_decay.chains:
+            n = len(chain.get_gls_combination())
+            ranges.append((idx, idx + n, chain))
+            idx += n
+        return ranges
+
+    def _expand_to_blocks(self, base_indices, n_base):
+        """Repeat base_indices across all 8 topology blocks."""
+        result = []
+        for block in range(8):
+            offset = block * n_base
+            for i in sorted(base_indices):
+                result.append(offset + i)
+        return result
+
     def get_ck_indices(self, resonance_names):
         """Return ck indices for partial waves involving given resonance(s).
 
-        Uses the decay-chain structure directly: any chain where
-        ``decay.core.name`` matches one of the resonance names
-        contributes all its partial-wave ck indices.
+        Any chain where a decay's ``core.name`` matches one of the
+        resonance names contributes all its partial-wave ck indices.
 
         Args:
             resonance_names: str or list of str — particle names from config,
@@ -528,28 +546,62 @@ class Config:
             resonance_names = [resonance_names]
         target = set(resonance_names)
 
-        idx = 0
-        chain_ranges = []  # (base_start, base_end, chain)
-        for chain in self.full_decay.chains:
-            n = len(chain.get_gls_combination())
-            chain_ranges.append((idx, idx + n, chain))
-            idx += n
+        chain_ranges = self._chain_ranges()
+        n_base = chain_ranges[-1][1] if chain_ranges else 0
 
-        n_base = idx
-
-        matching_base = set()
+        matching = set()
         for start, end, chain in chain_ranges:
             for decay in chain.decays:
                 if decay.core.name in target:
-                    matching_base.update(range(start, end))
+                    matching.update(range(start, end))
                     break
 
-        result = []
-        for block in range(8):
-            offset = block * n_base
-            for i in sorted(matching_base):
-                result.append(offset + i)
-        return result
+        return self._expand_to_blocks(matching, n_base)
+
+    def get_decay_ck_indices(self, decay_pairs):
+        """Return ck indices for chains matching specific decay relationships.
+
+        A chain matches when *every* ``(parent, child)`` pair in
+        *decay_pairs* is found in its decay tree.
+
+        Examples::
+
+            # All chains where a1(1260)p → f0(500) + X
+            cfg.get_decay_ck_indices([("a1(1260)p", "f0(500)")])
+
+            # Chains with both a1(1260)p → f0(500) and f0(500) → pip1
+            cfg.get_decay_ck_indices([("a1(1260)p", "f0(500)"),
+                                      ("f0(500)", "pip1")])
+
+        Args:
+            decay_pairs: list of ``(parent_name, child_name)`` tuples.
+                         All pairs must be satisfied by the same chain.
+
+        Returns:
+            list[int] — ck indices covering all 8 topology blocks.
+        """
+        chain_ranges = self._chain_ranges()
+        n_base = chain_ranges[-1][1] if chain_ranges else 0
+
+        matching = set()
+        for start, end, chain in chain_ranges:
+            # Check every pair is satisfied somewhere in this chain
+            ok = True
+            for parent, child in decay_pairs:
+                found = False
+                for decay in chain.decays:
+                    if decay.core.name == parent:
+                        out_names = [o.name for o in decay.outs]
+                        if child in out_names:
+                            found = True
+                            break
+                if not found:
+                    ok = False
+                    break
+            if ok:
+                matching.update(range(start, end))
+
+        return self._expand_to_blocks(matching, n_base)
 
 
 
