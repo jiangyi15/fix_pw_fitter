@@ -1083,6 +1083,101 @@ class Fitter:
     # ------------------------------------------------------------------
     # Convenience / utility
     # ------------------------------------------------------------------
+    def get_bw_params(self, particle_name, fit_result):
+        """BW peak mass and width for a single resonance from fit result.
+
+        Calls ``model.get_bw_params()`` with the best-fit mass and width
+        values for the given particle.  Also computes 1σ uncertainties
+        via 3-point finite difference gradients propagated through the
+        Hessian inverse.
+
+        The gradient and Hessian are both evaluated in the unbounded
+        (optimizer) parameter space, then the uncertainty is transformed
+        to the physical (bounded) BW parameter space.
+
+        Args:
+            particle_name: resonance name from config, e.g. ``"a1(1260)p"``.
+            fit_result: OptimizeResult from ``fit()`` method (has ``.x``
+                        and ``.hess_inv``).
+
+        Returns:
+            dict with keys ``"mass_bw"``, ``"width_bw"``,
+            ``"mass_bw_err"``, ``"width_bw_err"``.
+        """
+        import numpy as np
+
+        # --- 1. Find the particle model ---
+        model = None
+        for chain in self.config.full_decay.chains:
+            for decay in chain.decays[1:]:
+                if decay.core.name == particle_name:
+                    model = decay.core._model
+                    break
+            if model is not None:
+                break
+        if model is None:
+            raise ValueError(f"Particle '{particle_name}' not found in config")
+
+        # --- 2. Get best-fit physical parameters ---
+        x0 = fit_result.x
+        hess_inv = getattr(fit_result, 'hess_inv', None)
+        _, resolved, _, _ = self._build_params(x0)
+
+        # Collect physical parameter names for this particle
+        param_names = []
+        mass_name = f"{particle_name}_mass"
+        if mass_name in resolved:
+            param_names.append(mass_name)
+        for gname in model.get_gamma_name():
+            if gname in resolved:
+                param_names.append(gname)
+
+        if not param_names:
+            raise ValueError(f"No fitted parameters found for '{particle_name}'")
+
+        # --- 3. Compute BW params at best-fit ---
+        fit_dict = {n: float(resolved[n]) for n in param_names}
+        bw = model.get_bw_params(fit_dict)
+        mass_bw = bw["mass_bw"]
+        width_bw = bw["width_bw"]
+        mass_bw_err = 0.0
+        width_bw_err = 0.0
+
+        # --- 4. Uncertainty via physical→optimizer gradient chain ---
+        if hess_inv is not None and param_names:
+            from ampfit.boundary import apply_bound_grads
+
+            _, _, raw, x_mapped = self._build_params(x0)
+
+            def _propagate(bw_key):
+                grad_dict = {}
+                for name in param_names:
+                    if name not in resolved:
+                        continue
+                    base = float(resolved[name])
+                    eps = 1e-5 * max(1.0, abs(base))
+                    rp = dict(resolved); rp[name] = base + eps
+                    bw_p = model.get_bw_params({n: float(rp[n]) for n in param_names})
+                    rm = dict(resolved); rm[name] = base - eps
+                    bw_m = model.get_bw_params({n: float(rm[n]) for n in param_names})
+                    grad_dict[name] = (bw_p[bw_key] - bw_m[bw_key]) / (2 * eps)
+                if not grad_dict:
+                    return 0.0
+                grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
+                grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
+                grad_flat = apply_bound_grads(grad_flat, x0, self._bound_transforms)
+                return float(np.sqrt(max(grad_flat @ hess_inv @ grad_flat, 0.0)))
+
+            mass_bw_err = _propagate("mass_bw")
+            width_bw_err = _propagate("width_bw")
+
+        return {
+            "mass_bw": mass_bw,
+            "width_bw": width_bw,
+            "mass_bw_err": mass_bw_err,
+            "width_bw_err": width_bw_err,
+        }
+
     def free(self):
         """Free all memory held by the backend."""
         if self._data_holder is not None and hasattr(self._data_holder, 'free'):

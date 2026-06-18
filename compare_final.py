@@ -35,6 +35,10 @@ config = Config('config_amp.yml')
 kernel = Kernel(config.build_all_index())
 fitter = ft.Fitter('config_amp.yml', backend='numpy')
 fs, sp, sc = build_constraints(fitter.all_comb)
+# Mass/width aliasing for charge-conjugate pairs
+for name in ["a1(1260)", "a2(1320)"]:
+    sp.append([f"{name}p_mass", f"{name}m_mass"])
+    sp.append([f"{name}p_width", f"{name}m_width"])
 for n in fitter.config.m0_phys_name: fs[n] = float(fitter.defaults[n])
 for n in fitter.config.g0_phys_name: fs[n] = float(fitter.defaults[n])
 for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]: fs[n] = v
