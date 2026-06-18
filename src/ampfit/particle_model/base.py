@@ -64,3 +64,64 @@ class BaseModel:
         Returns a list of complex ndarrays, one per gamma parameter.
         """
         return [np.ones_like(m) + 0j]
+
+    def get_bw_params(self, params=None):
+        """Breit-Wigner peak mass and width from the running gamma(m).
+
+        ``gamma(m)`` is computed with the *original* model parameters
+        (the NPY file's reference mass is unchanged), while the
+        *overridden* m₀, g₀ are used in the denominator formula.
+        This means the peak shifts when the fit mass differs from
+        the NPY reference.
+
+        Solves Re(m₀² - m² - i·m₀·Σ g_i·gamma_i(m)) = 0 for m,
+        then returns the BW mass and width at that point.
+
+        Args:
+            params: optional dict overriding config values.
+                    Accepts either bare names or ``{name}_``-prefixed
+                    keys (as used by the fitter), e.g.::
+
+                        {"mass": 1.3, "width": 0.15}
+                        {"a2(1320)p_mass": 1.3, "a2(1320)p_width": 0.15}
+                        {"g_0": 0.2}
+                        {"f0(980)_g_0": 0.2}
+
+        Returns:
+            dict with keys ``"mass_bw"`` and ``"width_bw"``.
+        """
+        from scipy.optimize import root_scalar
+
+        # Helper: read *key* from params (full name, e.g. ``rhoA_mass``).
+        # Fall back to kwargs using bare key (``mass``) via prefix strip.
+        def _p(key, fallback=None):
+            if params and key in params:
+                return float(params[key])
+            bare = key
+            if bare.startswith(self.name + "_"):
+                bare = bare[len(self.name) + 1:]
+            if bare in self.kwargs:
+                return float(self.kwargs[bare])
+            return fallback
+
+        m0 = _p(f"{self.name}_mass", 0.775)
+        gamma_names = self.get_gamma_name()
+        defaults = self.get_gamma_defaults()
+        g0_vals = [_p(gamma_names[i], defaults[i]) for i in range(self.get_gamma_count())]
+        n_ch = len(g0_vals)
+
+        def sum_gamma_im(m):
+            g_list = self.gamma(np.array([float(m)]))
+            return sum(float(g0_vals[i]) * float(g_list[i][0].imag) for i in range(n_ch))
+
+        def f(m):
+            return m0**2 - m**2 + m0 * sum_gamma_im(m)
+
+        sol = root_scalar(f, x0=m0, x1=m0 * 1.1, method='secant', xtol=1e-8)
+        if not sol.converged:
+            raise RuntimeError(f"get_bw_params: root finding failed for {self.name}")
+
+        mass_bw = float(sol.root)
+        g_list = self.gamma(np.array([mass_bw]))
+        width_bw = sum(float(g0_vals[i]) * float(g_list[i][0].real) for i in range(n_ch))
+        return {"mass_bw": mass_bw, "width_bw": width_bw}
