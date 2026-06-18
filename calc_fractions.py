@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Compute amplitude fractions from a fit result.
+Compute amplitude fractions from a fit result and save to CSV.
 
-Groups:
-  * B → R1 R2 / B → R π  — fraction by B-meson decay children
-  * Rx → intermediate     — fraction by the probe resonance (decays[1].core)
+Two separate categories (no cross-talk):
+
+  * **Rx → 3π**: ``Rx → Ry + π, Ry → π + π``
+  * **B → R1 R2**: ``B → R1 + R2, R1 → ππ, R2 → ππ``
+
+Each entry reports the B0 (g_ls) and B0bar (g_lsbar) fraction side by side.
 
 Usage:
-    python calc_fractions.py fit_results.json --hessian hessian.npy
+    python calc_fractions.py fit_results.json --hessian hessian.npy -o fractions.csv
     python calc_fractions.py fit_results.json --hessian hessian.npy --max-events 5000
 """
 
-import sys, os, argparse
+import sys, os, argparse, csv
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,45 +23,106 @@ from ampfit.amp_frac import AmplitudeFractions
 from run_fit import build_constraints, load_npz
 
 
-def discover_groups(config):
-    """Return (b_groups, res_groups) dicts mapping labels → ck indices.
+def _charge_stem(name):
+    """Strip trailing ``p``/``m`` charge suffix to merge charge-conjugate pairs.
 
-    *b_groups*  — sorted tuple of B-decay children → list of ck indices.
-    *res_groups* — probe resonance name → list of ck indices.
+    ``a1(1260)`` is kept separate (different dynamics for p vs m).
     """
-    chain_ranges = []
+    if name.startswith("a1(1260)"):
+        return name
+    if len(name) > 1 and name[-1] in ("p", "m"):
+        return name[:-1]
+    return name
+
+
+def discover_groups(config):
+    """Return list of ``(label, ls_mask, lsbar_mask)`` for each category.
+
+    Two lists returned: ``groups_3pi`` and ``groups_B_R1R2``.
+    """
     idx = 0
+    chain_ranges = []
     for chain in config.full_decay.chains:
         n = len(chain.get_gls_combination())
         chain_ranges.append((idx, idx + n, chain))
         idx += n
     n_base = idx
 
-    def base_to_ck(base_set):
-        out = []
-        for block in range(8):
-            offset = block * n_base
-            for i in sorted(base_set):
-                out.append(offset + i)
-        return out
+    inner_set = set()
+    for chain in config.full_decay.chains:
+        inner_set.update(chain.inner)
 
-    # --- B → R1 R2 groups ---
-    b_groups = {}   # sorted-tuple of child names → [base indices]
+    raw_3pi = {}
+    raw_B = {}
+
     for start, end, chain in chain_ranges:
-        b_outs = tuple(sorted(o.name for o in chain.decays[0].outs))
-        b_groups.setdefault(b_outs, []).extend(range(start, end))
+        d1 = chain.decays[1]
+        d2 = chain.decays[2]
 
-    # --- probe resonance groups (decays[1].core) ---
-    res_groups = {}  # resonance name → [base indices]
-    for start, end, chain in chain_ranges:
-        res = chain.decays[1].core.name
-        res_groups.setdefault(res, []).extend(range(start, end))
+        d1_child_inner = any(o.name in inner_set for o in d1.outs)
+        d2_child_inner = any(o.name in inner_set for o in d2.outs)
 
-    # Convert base → ck for all
-    b_ck = {k: base_to_ck(v) for k, v in b_groups.items()}
-    res_ck = {k: base_to_ck(v) for k, v in res_groups.items()}
+        if d1_child_inner:
+            res = _charge_stem(d1.core.name)
+            raw_3pi.setdefault(res, []).extend(range(start, end))
+        elif not d1_child_inner and not d2_child_inner:
+            r1 = d1.core.name
+            r2 = d2.core.name
+            key = tuple(sorted([r1, r2]))
+            raw_B.setdefault(key, []).extend(range(start, end))
 
-    return b_ck, res_ck
+    def split_ls(base_idxs):
+        ls, lsbar = [], []
+        for i in base_idxs:
+            for block in range(4):
+                ls.append(block * n_base + i)
+                lsbar.append((block + 4) * n_base + i)
+        return ls, lsbar
+
+    groups_3pi = []
+    for k in sorted(raw_3pi):
+        ls, lsbar = split_ls(raw_3pi[k])
+        groups_3pi.append((k, ls, lsbar))
+
+    groups_B = []
+    for k in sorted(raw_B):
+        ls, lsbar = split_ls(raw_B[k])
+        label = "B→" + "+".join(k)
+        groups_B.append((label, ls, lsbar))
+
+    return groups_3pi, groups_B
+
+
+def compute_section(af, groups, title):
+    """Compute fractions for a list of (label, ls_mask, lsbar_mask) tuples.
+
+    Returns list of ``(label, v_ls, e_ls, v_lsbar, e_lsbar)``.
+    """
+    if not groups:
+        return []
+
+    # Single batch call: interleave ls and lsbar masks
+    all_masks = []
+    for _, ls, lsbar in groups:
+        all_masks.append(ls)
+        all_masks.append(lsbar)
+    vals, errs = af.fractions(all_masks)
+
+    rows = []
+    for i, (label, _, _) in enumerate(groups):
+        v_ls, v_lsbar = vals[2 * i], vals[2 * i + 1]
+        e_ls, e_lsbar = errs[2 * i], errs[2 * i + 1]
+        rows.append((label, v_ls, e_ls, v_lsbar, e_lsbar))
+
+    # Print
+    print("=" * 80)
+    print(f"  {title}")
+    print("=" * 80)
+    print(f"  {'Label':30s}  {'B0':>22s}  {'B0bar':>22s}")
+    print("  " + "-" * 75)
+    for label, v0, e0, v1, e1 in rows:
+        print(f"  {label:30s}  {v0:10.6f} ± {e0:10.6f}  {v1:10.6f} ± {e1:10.6f}")
+    return rows
 
 
 def main():
@@ -70,6 +134,7 @@ def main():
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit phsp events (faster testing)")
     ap.add_argument("--backend", default="numpy", help="Compute backend")
+    ap.add_argument("-o", "--output", help="CSV output path")
     args = ap.parse_args()
 
     # ── Setup fitter ──────────────────────────────────────────────
@@ -87,35 +152,35 @@ def main():
     if fit_result.x is None or len(fit_result.x) == 0:
         print("ERROR: could not reconstruct x from", args.fit_json)
         sys.exit(1)
+
     # ── Build groups ──────────────────────────────────────────────
-    b_groups, res_groups = discover_groups(f.config)
+    groups_3pi, groups_B = discover_groups(f.config)
 
     # ── AmplitudeFractions ────────────────────────────────────────
     fit_ns = SimpleNamespace(x=fit_result.x, hess_inv=fit_result.hess_inv)
     af = AmplitudeFractions(f, fit_ns)
 
-    # ── Compute B-group fractions ─────────────────────────────────
-    print("=" * 60)
-    print("  B → R1 R2  /  B → R  +  π   amplitude fractions")
-    print("=" * 60)
-    b_masks = list(b_groups.values())
-    b_labels = ["B→" + "+".join(k) for k in b_groups.keys()]
-    if b_masks:
-        vals, errs = af.fractions(b_masks)
-        for label, v, e in zip(b_labels, vals, errs):
-            print(f"  {label:35s}  {v:10.6f} ± {e:10.6f}")
+    # ── Compute ───────────────────────────────────────────────────
+    rows_3pi = compute_section(af, groups_3pi,
+                               "Resonance → 3π  (Rx → Ry+π, Ry → ππ)")
+    if groups_B:
+        print()
+    rows_B = compute_section(af, groups_B,
+                             "B → R1 R2  (R1, R2 → ππ)")
 
-    # ── Compute resonance-group fractions ─────────────────────────
-    print()
-    print("=" * 60)
-    print("  Resonance (decays[1].core) amplitude fractions")
-    print("=" * 60)
-    res_masks = list(res_groups.values())
-    res_labels = list(res_groups.keys())
-    if res_masks:
-        vals, errs = af.fractions(res_masks)
-        for label, v, e in zip(res_labels, vals, errs):
-            print(f"  {label:25s}  {v:10.6f} ± {e:10.6f}")
+    # ── CSV output ────────────────────────────────────────────────
+    if args.output:
+        with open(args.output, "w", newline="") as fout:
+            w = csv.writer(fout)
+            w.writerow(["Category", "Label",
+                        "B0_value", "B0_error",
+                        "B0bar_value", "B0bar_error"])
+            for row in rows_3pi:
+                w.writerow(["Rx→3π", *row])
+            for row in rows_B:
+                w.writerow(["B→R1R2", *row])
+        print(f"\nSaved to {args.output}")
+
 
 if __name__ == "__main__":
     main()
