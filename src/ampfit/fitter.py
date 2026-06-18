@@ -1082,9 +1082,56 @@ class Fitter:
 
     # ------------------------------------------------------------------
     # Convenience / utility
+    def save_hessian(self, fit_result, filepath):
+        """Save the inverse Hessian to a ``.npy`` file.
+
+        Args:
+            fit_result: OptimizeResult from ``fit()`` (must have
+                        ``.hess_inv``).
+            filepath: output path (convention: ``*.npy``).
+        """
+        import numpy as np
+        hess_inv = getattr(fit_result, 'hess_inv', None)
+        if hess_inv is None:
+            raise ValueError("fit_result has no hess_inv")
+        np.save(filepath, hess_inv)
+
+    def load_results(self, json_path, hessian_path=None):
+        """Load fit results from a JSON file and optionally the Hessian.
+
+        The JSON file should have been saved by :meth:`save_params`.
+        ``x`` is reconstructed from the ``"value"`` dict via
+        :meth:`values_from_dict`.
+
+        Args:
+            json_path: path to the JSON file from :meth:`save_params`.
+            hessian_path: optional path to a ``.npy`` file from
+                          :meth:`save_hessian`.  If given, the returned
+                          object includes ``.hess_inv``.
+
+        Returns:
+            SimpleNamespace with ``.x`` (and ``.hess_inv`` if
+            *hessian_path* is provided), passable to
+            :meth:`cal_uncertainties` / :meth:`get_bw_params`.
+        """
+        import json, numpy as np
+        from types import SimpleNamespace
+        with open(json_path) as f:
+            data = json.load(f)
+        res = SimpleNamespace()
+        res.x = self.values_from_dict(data.get("value", data))
+        if hessian_path:
+            res.hess_inv = np.load(hessian_path)
+        return res
+
     # ------------------------------------------------------------------
-    def _grad_flat(self, fun, param_names, resolved, raw, x_mapped, x0):
-        """Compute optimizer-space gradient of *fun* w.r.t. *param_names*."""
+    def _grad_flat(self, fun, param_names, resolved, raw, x_mapped, x0, jac=False):
+        """Compute optimizer-space gradient of *fun* w.r.t. *param_names*.
+
+        When *jac* is ``True``, ``fun(phys_dict)`` must return
+        ``(value, {name: gradient, ...})``.
+        Otherwise a 3-point finite difference is computed.
+        """
         import numpy as np
         from ampfit.boundary import apply_bound_grads
 
@@ -1092,15 +1139,18 @@ class Fitter:
         if not names:
             return None
 
-        grad_dict = {}
-        for name in names:
-            base = float(resolved[name])
-            eps = 1e-5 * max(1.0, abs(base))
-            rp = dict(resolved); rp[name] = base + eps
-            vp = fun({n: float(rp[n]) for n in names})
-            rm = dict(resolved); rm[name] = base - eps
-            vm = fun({n: float(rm[n]) for n in names})
-            grad_dict[name] = (vp - vm) / (2 * eps)
+        if jac:
+            _, grad_dict = fun({n: float(resolved[n]) for n in names})
+        else:
+            grad_dict = {}
+            for name in names:
+                base = float(resolved[name])
+                eps = 1e-5 * max(1.0, abs(base))
+                rp = dict(resolved); rp[name] = base + eps
+                vp = fun({n: float(rp[n]) for n in names})
+                rm = dict(resolved); rm[name] = base - eps
+                vm = fun({n: float(rm[n]) for n in names})
+                grad_dict[name] = (vp - vm) / (2 * eps)
 
         if not grad_dict:
             return None
@@ -1108,21 +1158,23 @@ class Fitter:
         grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
         return apply_bound_grads(grad_flat, x0, self._bound_transforms)
 
-    def cal_uncertainties(self, fun, param_names, fit_result):
+    def cal_uncertainties(self, fun, param_names, fit_result, jac=False):
         """Propagate fit uncertainties to a function of physical parameters.
 
-        Computes the uncertainty of ``fun(phys_dict)`` by 3-point finite
-        difference gradients w.r.t. each parameter in *param_names*,
-        chains through constraints to the optimizer space, and uses the
-        full Hessian inverse for the variance.
+        When ``jac=False`` (default), a 3‑point finite difference is
+        used for the gradient.  When ``jac=True``, ``fun`` must return
+        ``(value, {name: gradient, ...})`` — an analytical gradient
+        dict mapping each parameter name to its partial derivative.
 
         Args:
             fun: callable ``fun(phys_dict) → float``, where *phys_dict*
-                 maps parameter names to their best-fit values.
+                 maps parameter names to their best-fit values.  With
+                 ``jac=True`` returns ``(float, dict)`` instead.
             param_names: list of physical parameter names that *fun*
                          depends on (e.g. ``["a1(1260)p_mass"]``).
             fit_result: OptimizeResult from ``fit()`` (has ``.x`` and
                         ``.hess_inv``).
+            jac: if ``True``, *fun* returns an analytical gradient dict.
 
         Returns:
             (value, uncertainty) where *value* is ``fun(best_fit_phys)``
@@ -1137,31 +1189,34 @@ class Fitter:
             raise ValueError(f"None of {param_names} found in resolved parameters")
 
         fit_dict = {n: float(resolved[n]) for n in names}
-        value = fun(fit_dict)
+        if jac:
+            value, _ = fun(fit_dict)
+        else:
+            value = fun(fit_dict)
 
         if hess_inv is None:
             return value, 0.0
 
-        gf = self._grad_flat(fun, param_names, resolved, raw, x_mapped, x0)
+        gf = self._grad_flat(fun, param_names, resolved, raw, x_mapped, x0, jac=jac)
         if gf is None:
             return value, 0.0
         std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
         return value, std
 
-    def cal_uncertainties_multi(self, fun, param_names, fit_result):
+    def cal_uncertainties_multi(self, fun, param_names, fit_result, jac=False):
         """Covariance and correlation between multiple observables.
 
-        The function ``fun(phys_dict) → list[float]`` returns a vector
-        of observables depending on *param_names*.  The Jacobian matrix
-        ``G[i] = ∇ fun_i`` is built by evaluating all observables at
-        each 3‑point shift in a single call, then building per‑observable
-        gradient dicts.  The covariance matrix is ``G @ hess_inv @ G.T``.
+        When ``jac=False`` (default), a 3‑point finite difference is
+        used.  When ``jac=True``, ``fun`` must return
+        ``(list[values], list[dict])`` — a list of observable values
+        and a list of gradient dicts (one per observable).
 
         Args:
-            fun: callable ``fun(phys_dict) → list[float]`` returning
-                 a vector of observables.
+            fun: callable ``fun(phys_dict) → list[float]`` (or
+                 ``(list[float], list[dict])`` when ``jac=True``).
             param_names: list of physical parameter names.
             fit_result: OptimizeResult from ``fit()``.
+            jac: if ``True``, *fun* returns analytical gradients.
 
         Returns:
             (values, cov, corr) where *values* is the list of function
@@ -1177,30 +1232,28 @@ class Fitter:
         names = [n for n in param_names if n in resolved]
 
         fit_dict = {n: float(resolved[n]) for n in names}
-        values = list(fun(fit_dict))
-        n_obs = len(values)
 
+        if jac:
+            values, grad_dicts = fun(fit_dict)
+            values = list(values)
+        else:
+            values = list(fun(fit_dict))
+            grad_dicts = [{} for _ in range(len(values))]
+            for name in names:
+                base = float(resolved[name])
+                eps = 1e-5 * max(1.0, abs(base))
+                rp = dict(resolved); rp[name] = base + eps
+                vp = fun({n: float(rp[n]) for n in names})
+                rm = dict(resolved); rm[name] = base - eps
+                vm = fun({n: float(rm[n]) for n in names})
+                for i in range(len(values)):
+                    grad = (vp[i] - vm[i]) / (2 * eps)
+                    if grad != 0.0:
+                        grad_dicts[i][name] = grad
+
+        n_obs = len(values)
         if hess_inv is None or not names:
             return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
-
-        # Single 3-point sweep: for each parameter shift evaluate ALL
-        # observables at once, then build per-observable gradient dicts.
-        grad_dicts = [{} for _ in range(n_obs)]
-
-        for name in names:
-            base = float(resolved[name])
-            eps = 1e-5 * max(1.0, abs(base))
-
-            rp = dict(resolved); rp[name] = base + eps
-            vp = fun({n: float(rp[n]) for n in names})
-
-            rm = dict(resolved); rm[name] = base - eps
-            vm = fun({n: float(rm[n]) for n in names})
-
-            for i in range(n_obs):
-                grad = (vp[i] - vm[i]) / (2 * eps)
-                if grad != 0.0:
-                    grad_dicts[i][name] = grad
 
         # Chain each observable's gradient to optimizer space
         G = np.zeros((n_obs, len(x0)))
