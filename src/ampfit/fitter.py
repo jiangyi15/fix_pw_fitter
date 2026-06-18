@@ -1148,23 +1148,26 @@ class Fitter:
         std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
         return value, std
 
-    def cal_uncertainties_multi(self, funs, param_names, fit_result):
+    def cal_uncertainties_multi(self, fun, param_names, fit_result):
         """Covariance and correlation between multiple observables.
 
-        Each function in *funs* is treated as an observable depending on
-        *param_names*.  The Jacobian matrix ``G[i] = ∇_{optimizer} fun_i``
-        is built by stacking optimizer-space gradients.  The covariance
-        matrix is ``G @ hess_inv @ G.T``.
+        The function ``fun(phys_dict) → list[float]`` returns a vector
+        of observables depending on *param_names*.  Each observable is
+        treated as an independent scalar and its gradient is propagated
+        via :meth:`_grad_flat`.  The Jacobian matrix ``G[i] = ∇ fun_i``
+        is built by stacking these gradients.  The covariance matrix is
+        ``G @ hess_inv @ G.T``.
 
         Args:
-            funs: list of callables, each ``fun(phys_dict) → float``.
+            fun: callable ``fun(phys_dict) → list[float]`` returning
+                 a vector of observables.
             param_names: list of physical parameter names.
             fit_result: OptimizeResult from ``fit()``.
 
         Returns:
             (values, cov, corr) where *values* is the list of function
             values at best fit, *cov* is the covariance matrix
-            ``(n_funs × n_funs)``, and *corr* is the correlation matrix.
+            ``(n_obs × n_obs)``, and *corr* is the correlation matrix.
         """
         import numpy as np
 
@@ -1174,18 +1177,19 @@ class Fitter:
         names = [n for n in param_names if n in resolved]
 
         fit_dict = {n: float(resolved[n]) for n in names}
-        values = [f(fit_dict) for f in funs]
+        values = list(fun(fit_dict))
+        n_obs = len(values)
 
         if hess_inv is None or not names:
-            return values, np.zeros((len(funs), len(funs))), \
-                   np.eye(len(funs))
+            return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
 
-        # Build gradient matrix: rows = observables, cols = optimizer
+        # Build gradient matrix one observable at a time
         G = []
-        for f in funs:
-            gf = self._grad_flat(f, param_names, resolved, raw, x_mapped, x0)
+        for i in range(n_obs):
+            obsi = lambda d, idx=i: fun(d)[idx]
+            gf = self._grad_flat(obsi, param_names, resolved, raw, x_mapped, x0)
             G.append(gf if gf is not None else np.zeros(len(x0)))
-        G = np.array(G)  # (n_funs, n_free)
+        G = np.array(G)  # (n_obs, n_free)
 
         cov = G @ hess_inv @ G.T
         d = np.sqrt(np.maximum(np.diag(cov), 0.0))
