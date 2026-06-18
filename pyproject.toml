@@ -18,6 +18,14 @@ dynamic = []
 cuda = [
     "cffi",
 ]
+onnx = [
+    "onnx",
+    "onnxruntime",
+]
+onnx-gpu = [
+    "onnx",
+    "onnxruntime-gpu",
+]
 dev = [
     "pytest",
     "pytest-xdist",
@@ -28,4 +36,5 @@ where = ["src"]
 include = ["ampfit*"]
 
 [tool.setuptools.package-data]
-ampfit = ["cuda/kernels.cu"]
+ampfit = ["cuda/kernels_v2.cu", "cuda/kernels_v2_f32.cu", 
+          "cuda/kernels_v3.cu", "cuda/kernels_v3_f32.cu"]
