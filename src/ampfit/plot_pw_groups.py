@@ -167,13 +167,8 @@ class PWGroupPlotter:
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
         pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
-        # Recompute normalisation with extra weights
-        data_total = float(np.sum(dw))
-        purity = f._purity if f._purity is not None else 1.0
-        target = data_total * purity
-        total_sum = float(np.sum(pw * self._P_total))
-        scale = target / total_sum if total_sum > 0 else 0.0
-
+        # Extra weights are multiplicative per-event — they do NOT change the
+        # overall normalisation scale (determined by base weights in compute()).
         colors = colors or plt.cm.tab20(np.linspace(0, 1, len(self.labels)))
         glabels = group_labels or self.labels
 
@@ -197,9 +192,9 @@ class PWGroupPlotter:
             dy, _ = np.histogram(d, bins=bins, weights=dw)
             dw2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
             ty, _ = np.histogram(p, bins=bins,
-                                 weights=pw * self._P_total * scale)
+                                 weights=pw * self._P_total * self._scale)
             gys = [np.histogram(p, bins=bins,
-                                weights=pw * Pg * scale)[0]
+                                weights=pw * Pg * self._scale)[0]
                    for Pg in self._P_groups]
 
             ax.errorbar((bins[:-1] + bins[1:]) / 2, dy, yerr=np.sqrt(dw2),
@@ -222,6 +217,98 @@ class PWGroupPlotter:
 
         if legend:
             axes.flatten()[0].legend(fontsize=7, ncol=2)
+
+        plt.tight_layout()
+        path = os.path.join(output, prefix + ".png")
+        fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  saved {path}")
+
+    def plot_asymmetry(self, varfun, tag_data, tag_phsp, labels, lo, hi,
+                       n_bins, prefix, output="plots/", ranges=None,
+                       data_weight_extra=None, phsp_weight_extra=None):
+        """Plot asymmetry ``(N(tag>0) - N(tag<0)) / (N(tag>0) + N(tag<0))``.
+
+        Only the total model is shown (no group decomposition).
+
+        Args:
+            varfun: callable(dict) → list of arrays (one per subplot).
+            tag_data: array of tag values for data (sign selects side).
+            tag_phsp: array of tag values for phsp.
+            labels, lo, hi, n_bins, prefix, output, ranges: see :meth:`plot_var`.
+            data_weight_extra, phsp_weight_extra: optional extra weights.
+        """
+        if not self._ready:
+            raise RuntimeError("call .compute() before .plot_asymmetry()")
+
+        import matplotlib.pyplot as plt
+
+        f = self.fitter
+        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+
+        var_data = varfun(f._data_np)
+        var_phsp = varfun(f._phsp_np)
+        n_var = len(var_data)
+
+        n_cols = min(3, n_var)
+        n_rows = (n_var + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(5 * n_cols, 4 * n_rows),
+                                 squeeze=False)
+
+        for i in range(n_var):
+            ax = axes.flatten()[i]
+            d = var_data[i]
+            p = var_phsp[i]
+            xlo, xhi = (ranges[i] if ranges else (lo, hi))
+            bins = np.linspace(xlo, xhi, n_bins + 1)
+            bin_c = (bins[:-1] + bins[1:]) / 2
+
+            # Data split by tag
+            m1 = tag_data > 0
+            m2 = tag_data < 0
+
+            N1d, _ = np.histogram(d[m1], bins=bins, weights=dw[m1])
+            N2d, _ = np.histogram(d[m2], bins=bins, weights=dw[m2])
+            W1d, _ = np.histogram(d[m1], bins=bins, weights=dw[m1] ** 2)
+            W2d, _ = np.histogram(d[m2], bins=bins, weights=dw[m2] ** 2)
+
+            denom = N1d + N2d
+            Ad = np.divide(N1d - N2d, denom, where=denom > 0, out=np.zeros_like(denom))
+            # Error propagation: var(A) = 4/(N1+N2)^4 * (N2^2*W1 + N1^2*W2)
+            numer = N2d**2 * W1d + N1d**2 * W2d
+            var = np.divide(4.0 * numer, denom**4, where=denom > 0,
+                            out=np.zeros_like(denom))
+            Ad_err = np.sqrt(var)
+
+            # Model split by tag (total fit only)
+            pm1 = tag_phsp > 0
+            pm2 = tag_phsp < 0
+
+            N1m, _ = np.histogram(p[pm1], bins=bins,
+                                  weights=pw[pm1] * self._P_total[pm1] * self._scale)
+            N2m, _ = np.histogram(p[pm2], bins=bins,
+                                  weights=pw[pm2] * self._P_total[pm2] * self._scale)
+            denom_m = N1m + N2m
+            Am = np.divide(N1m - N2m, denom_m, where=denom_m > 0,
+                           out=np.zeros_like(denom_m))
+
+            ax.errorbar(bin_c, Ad, yerr=Ad_err, fmt='o',
+                        color='black', markersize=3, capsize=2, label='data')
+            ax.step(bins[1:], Am, where='post', color='grey', linewidth=2,
+                    label='total fit')
+            ax.axhline(y=0, color='grey', linestyle=':', linewidth=1)
+
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(xlo, xhi)
+            ax.set_xlabel(labels[i])
+            ax.tick_params(labelsize=9)
+
+        for i in range(n_var, n_rows * n_cols):
+            axes.flatten()[i].set_visible(False)
+
+        axes.flatten()[0].legend(fontsize=7)
 
         plt.tight_layout()
         path = os.path.join(output, prefix + ".png")
