@@ -994,7 +994,7 @@ class Fitter:
             grad_scale: gradient scaling factor (default 1.0).
                         Matches archive's grad_sacle if used.
         """
-        import json, cmath
+        import json, cmath, os
 
         values, errors = self._params_from_fit(fit_result, return_bounded=True)
         flat_names = self._var_registry.flat_names
@@ -1078,6 +1078,13 @@ class Fitter:
         with open(filepath, 'w') as f:
             json.dump(out, f, indent=2)
         print(f"✓ Saved fit results to {filepath}")
+
+        # Save error matrix (inverse Hessian) alongside the JSON
+        if hasattr(fit_result, 'hess_inv') and fit_result.hess_inv is not None:
+            err_path = os.path.splitext(filepath)[0] + "_error_matrix.npy"
+            np.save(err_path, fit_result.hess_inv)
+            print(f"✓ Saved error matrix to {err_path}")
+
         return out
 
     # ------------------------------------------------------------------
