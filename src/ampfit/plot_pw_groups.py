@@ -134,6 +134,69 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
+    def compute_coefficients(self, phsp_np_frac=None):
+        """Compute time-integral coefficients I, Ī, J.
+
+        Uses the kernel with modified data (time, frac) and scalar
+        parameters to extract the fundamental integrals:
+
+        * **I**  = Σ w·|A|²   — B0 partial rate
+        * **Ī**  = Σ w·|Ā|²   — B0bar partial rate
+        * **J**  = Σ w·A*·Ā   — complex interference (Re(J), Im(J))
+
+        If *phsp_np_frac* is given, uses its ``frac`` for phsp events
+        (otherwise uses the already-loaded phsp's ``frac``).
+
+        Returns:
+            ``(I, Ibar, ReJ, ImJ)`` — all floats.
+        """
+        import numpy as np
+
+        f = self.fitter
+        # Save original phsp and reload at the end
+        orig_phsp = dict(f._phsp_np)
+        params, _, _, _ = f._build_params(self.fit_result.x)
+
+        delta_m = float(params["scalar"][2])
+
+        # ── helper: set phsp data and run compute ────────────────
+        def _run(time_array, frac_array, poq_rho=1.0, pop_phi=0.0,
+                 gamma=0.0, delta_gamma=0.0, A_prod=0.0):
+            p = dict(params)
+            p["scalar"] = [gamma, delta_gamma, delta_m, A_prod, poq_rho, pop_phi]
+            phsp = dict(orig_phsp)
+            phsp["time"] = np.asarray(time_array, dtype=np.float64)
+            phsp["frac"] = np.asarray(frac_array, dtype=np.float64)
+            f.set_phsp(phsp)
+            Q, _, _ = f.backend.compute(p, f._phsp_holder, norm=None)
+            return float(Q)
+
+        ne = orig_phsp["mass"].shape[0]
+
+        # 1. I = Σ w·|ap|²   (time=0, frac=1)
+        I = _run(np.zeros(ne), np.ones(ne))
+
+        # 2. Ī = Σ w·|am|²   (time=0, frac=0)
+        Ibar = _run(np.zeros(ne), np.zeros(ne))
+
+        # 3. J integrals: time = π/(2·Δm), need cross terms
+        #    With this time: gp = gm = 1/√2 (for ΔΓ=0, Γ=0)
+        t_cross = np.full(ne, np.pi / (2.0 * delta_m))
+        sum_IIbar = I + Ibar
+
+        # Re(J): use poq = -i → cross term gives Re(ap*·am)
+        Q_Re = _run(t_cross, np.ones(ne), poq_rho=1.0, pop_phi=-np.pi/2)
+        ReJ = Q_Re - (sum_IIbar / 2.0)
+
+        # Im(J): use poq = 1 → cross term gives Im(ap*·am)
+        Q_Im = _run(t_cross, np.ones(ne), poq_rho=1.0, pop_phi=0.0)
+        ImJ = (sum_IIbar / 2.0) - Q_Im
+
+        # Restore original phsp
+        f.set_phsp(orig_phsp)
+
+        return I, Ibar, ReJ, ImJ
+
     # ── plotting ──────────────────────────────────────────────────
 
     def plot_var(self, varfun, labels, lo, hi, n_bins, prefix,
@@ -274,10 +337,12 @@ class PWGroupPlotter:
         pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
+        # frac convention: frac = P(B0bar) in data → tag = 0.5 - frac
+        # so tag>0 selects B0-like (frac<0.5), tag<0 selects B0bar-like (frac>0.5)
         if tag_data is None:
-            tag_data = f._data_np["frac"] - 0.5
+            tag_data = 0.5 - f._data_np["frac"]
         if tag_phsp is None:
-            tag_phsp = f._phsp_np["frac"] - 0.5
+            tag_phsp = 0.5 - f._phsp_np["frac"]
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
@@ -343,6 +408,123 @@ class PWGroupPlotter:
         axes.flatten()[0].legend(fontsize=7)
 
         plt.tight_layout()
+        path = os.path.join(output, prefix + ".png")
+        fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  saved {path}")
+
+    def plot_time_asymmetry(self, t_min=0, t_max=10, n_bins=20,
+                            output="plots/", prefix="time_asym", params=None):
+        """Plot time-dependent asymmetry using exact theoretical formula.
+
+        Data: binned time asymmetry ``(N(tag>0) - N(tag<0))/(N(tag>0) + N(tag<0))``.
+
+        Model: continuous curve from the fitted time parameters and
+        the integrals I, Ī, J, scaled by dilution ``⟨|1-2·frac|⟩``.
+
+        Args:
+            t_min, t_max: time range.
+            n_bins: number of time bins.
+            output: output directory.
+            prefix: filename stem.
+            params: optional params dict (uses from fit_result if None).
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        f = self.fitter
+        dw = f._data_np["weight"]
+        tag_data = 0.5 - f._data_np["frac"]
+
+        # ── Compute coefficients I, Ī, J ──────────────────────────
+        I_val, Ibar_val, ReJ, ImJ = self.compute_coefficients()
+
+        # ── Time parameters from the fit ──────────────────────────
+        if params is None:
+            params, _, _, _ = f._build_params(self.fit_result.x)
+        sc = params["scalar"]
+        gamma = float(sc[0])
+        delta_gamma = float(sc[1])
+        delta_m = float(sc[2])
+        A_prod = float(sc[3])
+        r = float(sc[4])
+        phi = float(sc[5])
+
+        # ── Dilution from data (common scale) ────────────────────
+        frac_data = f._data_np["frac"]
+        tag_data = 0.5 - frac_data
+        tagged = np.abs(tag_data) > 1e-10
+        dilution = float(np.mean(np.abs(1.0 - 2.0 * frac_data[tagged])))
+
+        # ── Data asymmetry in time bins ───────────────────────────
+        time_data = f._data_np["time"]
+        bins = np.linspace(t_min, t_max, n_bins + 1)
+        bin_c = (bins[:-1] + bins[1:]) / 2
+
+        m1 = tag_data > 0
+        m2 = tag_data < 0
+
+        N1d, _ = np.histogram(time_data[m1], bins=bins, weights=dw[m1])
+        N2d, _ = np.histogram(time_data[m2], bins=bins, weights=dw[m2])
+        W1d, _ = np.histogram(time_data[m1], bins=bins, weights=dw[m1] ** 2)
+        W2d, _ = np.histogram(time_data[m2], bins=bins, weights=dw[m2] ** 2)
+
+        denom = N1d + N2d
+        Ad = np.divide(N1d - N2d, denom, where=denom > 0, out=np.zeros_like(denom))
+        numer = N2d**2 * W1d + N1d**2 * W2d
+        var = np.divide(4.0 * numer, denom**4, where=denom > 0,
+                        out=np.zeros_like(denom))
+        Ad_err = np.sqrt(var)
+
+        # ── Theoretical asymmetry curve ───────────────────────────
+        I = I_val
+        Ibar = Ibar_val
+        r2 = r**2
+
+        t_grid = np.linspace(t_min, t_max, 200)
+
+        def P_of_t(t, I, Ibar, ReJ, ImJ):
+            cht = np.cosh(t * delta_gamma / 2)
+            ct = np.cos(t * delta_m)
+            sht = np.sinh(t * delta_gamma / 2)
+            st = np.sin(t * delta_m)
+            expt = np.exp(-t * gamma)
+
+            C_ang = np.cos(phi) * ReJ - np.sin(phi) * ImJ
+            D_ang = np.cos(phi) * ImJ + np.sin(phi) * ReJ
+
+            P1 = (I + r2 * Ibar) * cht
+            P2 = (I - r2 * Ibar) * ct
+            P3 = C_ang * sht
+            P4 = D_ang * st
+            P = expt * (P1 + P2 - 2.0 * r * P3 - 2.0 * r * P4)
+
+            Pbar1 = (I / r2 + Ibar) * cht
+            Pbar2 = (I / r2 - Ibar) * ct
+            Pbar3 = C_ang * sht
+            Pbar4 = D_ang * st
+            Pbar = expt * (Pbar1 - Pbar2 - 2.0 / r * Pbar3 + 2.0 / r * Pbar4)
+
+            return P, Pbar
+
+        P_t, Pbar_t = P_of_t(t_grid, I, Ibar, ReJ, ImJ)
+        A_theory = np.divide(P_t - Pbar_t, P_t + Pbar_t,
+                             where=(P_t + Pbar_t) > 0, out=np.zeros_like(P_t))
+        A_model = A_theory * dilution
+
+        # ── Plot ──────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.errorbar(bin_c, Ad, yerr=Ad_err, fmt='o',
+                    color='black', markersize=4, capsize=2, label='data')
+        ax.plot(t_grid, A_model, '-', color='grey', linewidth=2,
+                label=f'model (dil={dilution:.3f})')
+        ax.axhline(y=0, color='grey', linestyle=':', linewidth=1)
+        ax.set_xlabel('time')
+        ax.set_ylabel('asymmetry')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
         path = os.path.join(output, prefix + ".png")
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
