@@ -311,6 +311,10 @@ def main():
         fitter.save_params(result, save_path)
         print(f"  Results saved to {save_path}")
 
+        # Save constraints alongside results
+        constraints_path = os.path.splitext(save_path)[0] + "_constraints.json"
+        fitter.save_constraints(constraints_path)
+
         # Plot post-fit distributions
         if args.plot:
             fitter.plot(result, prefix=args.plot)

@@ -138,10 +138,17 @@ def main():
 
     # ── Setup fitter ──────────────────────────────────────────────
     f = Fitter(args.config, backend=args.backend)
-    fs, sp, sc = build_constraints(f.all_comb)
-    f.set_fixed(fs)
-    f.set_same(sp)
-    f.set_scale(sc)
+
+    # Auto-detect constraints alongside the fit JSON
+    constraints_path = os.path.splitext(args.fit_json)[0] + "_constraints.json"
+    if os.path.exists(constraints_path):
+        f.load_constraints(constraints_path)
+        print(f"  Loaded constraints from {constraints_path}")
+    else:
+        fs, sp, sc = build_constraints(f.all_comb)
+        f.set_fixed(fs)
+        f.set_same(sp)
+        f.set_scale(sc)
 
     phsp, _ = load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
