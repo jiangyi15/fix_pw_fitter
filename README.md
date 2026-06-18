@@ -53,7 +53,15 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 ## Installation
 
 ```bash
-pip install -e .                  # Install in development mode
+# Install from remote
+pip install git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git
+
+# Or with optional backends
+pip install "ampfit[onnx] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git"
+pip install "ampfit[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git"
+
+# Install in development mode (local)
+pip install -e .
 # CUDA builds automatically on first use (requires nvcc)
 # ONNX Runtime: pip install onnxruntime onnx  (GPU: onnxruntime-gpu)
 ```
