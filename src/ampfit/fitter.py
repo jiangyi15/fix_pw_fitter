@@ -37,9 +37,9 @@ class Fitter:
             backend: a :class:`ComputeBackend` instance, or a string shortcut.
                      Strings are resolved via
                      ``ampfit.backends.create_backend()``.
-                     Registered names: ``"cuda"``/``"cuda64"``, ``"cuda32"``,
-                     ``"cuda_v2"``/``"cuda64_v2"``, ``"cuda32_v2"``,
-                     ``"cuda_v3"``/``"cuda64_v3"``, ``"cuda32_v3"``,
+                     Registered names: ``"cuda"``/``"cuda64"``,
+                      ``"cuda_v2"``/``"cuda64_v2"``/``"cuda32_v2"``,
+                      ``"cuda_v3"``/``"cuda64_v3"``/``"cuda32_v3"``,
                      ``"numpy"``, ``"onnx"``/``"onnx_cpu"``, ``"onnx_cuda"``.
         """
         from ampfit.config_loader import Config
@@ -1104,29 +1104,35 @@ class Fitter:
         np.save(filepath, hess_inv)
 
     def load_results(self, json_path, hessian_path=None):
-        """Load fit results from a JSON file and optionally the Hessian.
+        """Load fit results from a JSON file and optionally the error matrix.
 
         The JSON file should have been saved by :meth:`save_params`.
         ``x`` is reconstructed from the ``"value"`` dict via
         :meth:`values_from_dict`.
 
+        If *hessian_path* is not given, the method looks for
+        ``{json_stem}_error_matrix.npy`` alongside the JSON and loads
+        it automatically if present.
+
         Args:
             json_path: path to the JSON file from :meth:`save_params`.
-            hessian_path: optional path to a ``.npy`` file from
-                          :meth:`save_hessian`.  If given, the returned
-                          object includes ``.hess_inv``.
+            hessian_path: optional path to a ``.npy`` file.  If ``None``
+                          (default), auto-detects ``_error_matrix.npy``.
 
         Returns:
-            SimpleNamespace with ``.x`` (and ``.hess_inv`` if
-            *hessian_path* is provided), passable to
-            :meth:`cal_uncertainties` / :meth:`get_bw_params`.
+            SimpleNamespace with ``.x`` (and ``.hess_inv`` if the error
+            matrix was found).
         """
-        import json, numpy as np
+        import json, numpy as np, os
         from types import SimpleNamespace
         with open(json_path) as f:
             data = json.load(f)
         res = SimpleNamespace()
         res.x = self.values_from_dict(data.get("value", data))
+        if hessian_path is None:
+            auto_path = os.path.splitext(json_path)[0] + "_error_matrix.npy"
+            if os.path.exists(auto_path):
+                hessian_path = auto_path
         if hessian_path:
             res.hess_inv = np.load(hessian_path)
         return res

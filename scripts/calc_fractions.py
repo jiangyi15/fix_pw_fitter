@@ -10,8 +10,8 @@ Two separate categories (no cross-talk):
 Each entry reports the B0 (g_ls) and B0bar (g_lsbar) fraction side by side.
 
 Usage:
-    python scripts/calc_fractions.py fit_results.json --hessian hessian.npy -o fractions.csv
-    python scripts/calc_fractions.py fit_results.json --hessian hessian.npy --max-events 5000
+    python scripts/calc_fractions.py fit_results.json -o fractions.csv
+    python scripts/calc_fractions.py fit_results.json --max-events 5000
 """
 
 import sys, os, argparse, csv
@@ -128,12 +128,11 @@ def compute_section(af, groups, title):
 def main():
     ap = argparse.ArgumentParser(description="Amplitude fractions from fit result")
     ap.add_argument("fit_json", help="JSON from Fitter.save_params()")
-    ap.add_argument("--hessian", help="Hessian .npy from Fitter.save_hessian()")
     ap.add_argument("--config", default="config_amp.yml", help="Config YAML")
     ap.add_argument("--phsp", default="data/phsp_arrays.npz", help="Phase-space NPZ")
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit phsp events (faster testing)")
-    ap.add_argument("--backend", default="numpy", help="Compute backend")
+    ap.add_argument("--backend", default="cuda_v3", help="Compute backend")
     ap.add_argument("-o", "--output", help="CSV output path")
     args = ap.parse_args()
 
@@ -147,8 +146,8 @@ def main():
     phsp, _ = load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
 
-    # ── Load fit result ───────────────────────────────────────────
-    fit_result = f.load_results(args.fit_json, args.hessian)
+    # ── Load fit result (auto-detects _error_matrix.npy) ──────────
+    fit_result = f.load_results(args.fit_json)
     if fit_result.x is None or len(fit_result.x) == 0:
         print("ERROR: could not reconstruct x from", args.fit_json)
         sys.exit(1)
@@ -157,7 +156,8 @@ def main():
     groups_3pi, groups_B = discover_groups(f.config)
 
     # ── AmplitudeFractions ────────────────────────────────────────
-    fit_ns = SimpleNamespace(x=fit_result.x, hess_inv=fit_result.hess_inv)
+    fit_ns = SimpleNamespace(x=fit_result.x,
+                              hess_inv=getattr(fit_result, 'hess_inv', None))
     af = AmplitudeFractions(f, fit_ns)
 
     # ── Compute ───────────────────────────────────────────────────

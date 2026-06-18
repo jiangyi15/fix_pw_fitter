@@ -9,28 +9,38 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 ├── pyproject.toml
 ├── fit.sh                          # One-command fit pipeline
 ├── run_fit.py                      # Full fit script with archive-compatible constraints
-├── config_angle.yml                # Example configuration
-├── build_onnx_model.py             # CLI to export ONNX models to file (optional)
+├── config_amp.yml                  # Example configuration
+├── scripts/
+│   └── calc_fractions.py           # Amplitude fraction calculator
 ├── src/ampfit/
 │   ├── __init__.py                 # Exports: Config, Fitter, backends, ...
 │   ├── config_loader.py            # YAML config → index arrays for kernels
-│   ├── particle_model.py           # Particle property definitions + get_gamma_defaults()
+│   │                               #   + get_ck_indices() / get_decay_ck_indices()
+│   ├── particle_model.py           # Particle property definitions + BW parameter models
+│   ├── particle_model/             # Lineshape models (GS_rho, BWR, Flatte, Bugg, ...)
 │   ├── angular_formula.py          # Angular distribution formulas
 │   ├── numpy_kernel.py             # NumPy reference kernel (Wirtinger gradients)
-│   ├── backends.py                 # ComputeBackend base + 6 backends
-│   ├── _cuda.py                    # CUDA Python bindings (CFFI), float64 v2 kernel
-│   ├── _cuda_v2_f32.py             # CUDA float32 v2 kernel (fastest)
+│   ├── amp_frac.py                 # AmplitudeFractions — ratio + uncertainty propagation
+│   ├── backends/                   # ComputeBackend base + backends
+│   │   ├── core.py                 #   Base class + registry
+│   │   ├── numpy_backend.py        #   NumPy f64 reference
+│   │   ├── cuda_backends.py        #   CUDA v2/v3 (f64/f32)
+│   │   └── onnx_backend.py         #   ONNX Runtime (CPU/CUDA)
+│   ├── _cuda_v2.py                 # CUDA float64 v2 kernel (CFFI)
+│   ├── _cuda_v2_f32.py             # CUDA float32 v2 kernel
+│   ├── _cuda_v3.py                 # CUDA float64 v3 kernel (Catmull-Rom)
 │   ├── _cuda_v3_f32.py             # CUDA float32 v3 kernel (Catmull-Rom)
 │   ├── _onnx_builder.py            # In-memory ONNX graph builder (no PyTorch)
 │   ├── cuda/
-│   │   ├── kernels.cu              # CUDA C kernels v2 (linear interpolation)
-│   │   ├── kernels_v3.cu           # CUDA C kernels v3 (Catmull-Rom interpolation)
+│   │   ├── build.py                # Auto-build on first import
+│   │   ├── kernels_v2.cu           # CUDA C kernels v2 (linear interpolation)
 │   │   ├── kernels_v2_f32.cu       # Float32 v2 kernel
-│   │   ├── kernels_v3_f32.cu       # Float32 v3 kernel
-│   │   └── build.py                # Auto-build on first import
-│   ├── fitter.py                   # Fitter: NLL → BFGS fit → save_params → plot
+│   │   ├── kernels_v3.cu           # CUDA C kernels v3 (Catmull-Rom interpolation)
+│   │   └── kernels_v3_f32.cu       # Float32 v3 kernel
+│   ├── fitter.py                   # Fitter: NLL → BFGS → save_params → cal_uncertainties
 │   ├── param_constraint.py         # Parameter constraints: fixed, same, scale
-│   └── boundary.py                 # BoundTransform (arctan-based, bijective)
+│   ├── boundary.py                 # BoundTransform (arctan-based, bijective)
+│   └── config_loader.py            # YAML → index arrays
 ├── tests/
 │   ├── test_cuda_kernel.py
 │   ├── test_onnx_cuda.py           # ONNX CUDA smoke tests
@@ -54,7 +64,7 @@ pip install -e .                  # Install in development mode
 
 ```bash
 ./fit.sh                                    # Full fit with defaults
-./fit.sh config_angle.yml data.npz phsp.npz results/
+./fit.sh config_amp.yml data.npz phsp.npz results/
 ```
 
 ### High-level: Fitter with constraints
@@ -71,13 +81,11 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ```python
 from ampfit import Fitter
 
-# Backend selection via string shortcut
-fitter = Fitter("config_angle.yml")              # default: CUDA f64 v2
-fitter = Fitter("config_angle.yml", backend="cuda32_v2")   # CUDA f32 v2 (fastest)
-fitter = Fitter("config_angle.yml", backend="cuda32_v3")   # CUDA f32 v3 (stable)
-fitter = Fitter("config_angle.yml", backend="numpy")       # NumPy f64
-fitter = Fitter("config_angle.yml", backend="onnx_cpu")    # ONNX CPU
-fitter = Fitter("config_angle.yml", backend="onnx_cuda")   # ONNX CUDA
+# Backend selection via string shortcut (default: cuda → v3)
+fitter = Fitter("config_amp.yml")                         # CUDA f64 v3
+fitter = Fitter("config_amp.yml", backend="cuda32_v3")    # CUDA f32 v3
+fitter = Fitter("config_amp.yml", backend="numpy")        # NumPy f64
+fitter = Fitter("config_amp.yml", backend="onnx_cuda")    # ONNX CUDA
 
 fitter.set_data(data)
 fitter.set_phsp(phsp)
@@ -98,37 +106,58 @@ nll, grad = fitter.get_nll(x)
 result = fitter.fit(x)
 uncertainties = fitter.get_uncertainties(result)  # {name: (val, err)}
 
-# Save/restart
+# Save / load results (auto-saves error_matrix.npy alongside JSON)
 fitter.save_params(result, "results.json")
-x_restart = fitter.values_from_dict(json.load("results.json"))
+loaded = fitter.load_results("results.json")   # auto-loads error_matrix.npy
+# → loaded.x, loaded.hess_inv
+
+# Uncertainty propagation for derived observables
+def my_observable(phys_dict):
+    return value
+err = fitter.cal_uncertainties(my_observable, param_names, result)
 
 # Plot distributions
 fitter.plot(result, prefix="plots/")
+```
+
+### Amplitude Fractions
+
+```python
+from ampfit.amp_frac import AmplitudeFractions
+
+af = AmplitudeFractions(fitter, fit_result)
+
+# Fractions for two subsets of partial waves (single 3‑point or analytical sweep)
+vals, errs = af.fractions([[0,1,2], [3,4,5]])
+
+# Custom denominator
+vals, errs = af.fractions([range(224)], denominator=range(224, 448))
+
+# Look up ck indices by resonance name
+idx_f0 = fitter.config.get_ck_indices("f0(500)")
+idx = fitter.config.get_decay_ck_indices([("a1(1260)p", "f0(500)")])
+
+# Scripted batch computation
+python scripts/calc_fractions.py fit_results.json -o fractions.csv
 ```
 
 ### Low-level: Direct kernel
 
 ```python
 from ampfit import Config
-from ampfit.backends import NumpyBackend, CUDABackendV2, CUDABackendV2F32, ONNXBackend
+from ampfit.backends import NumpyBackend, create_backend
 
-config = Config("config_angle.yml")
+config = Config("config_amp.yml")
 kc = config.build_all_index()
 
 # NumPy reference
 nk = NumpyBackend(kc)
 Q, grads, P = nk.compute(params, data)
 
-# CUDA accelerated (v2 or v3, f64 or f32)
-ck = CUDABackendV2(kc, dtype="float64")      # f64 v2
-ck = CUDABackendV2F32(kc)                     # f32 v2 (fastest)
+# CUDA v3 (or use string "cuda" / "cuda_v3")
+ck = create_backend("cuda_v3", kc)
 dh = ck.load_data(data)
 Q, grads, P = ck.compute(params, dh)
-
-# ONNX Runtime (CPU or CUDA) — builds model in-memory
-onnx = ONNXBackend(kernel_config=kc, providers=["CUDAExecutionProvider"])
-dh = onnx.load_data(data)
-Q, grads, P = onnx.compute(params, dh)
 ```
 
 ## Performance
@@ -166,6 +195,7 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 - **ONNX CPU** is 8× vs NumPy — useful on machines without GPU
 - Custom CUDA kernels outperform ONNX because they are purpose-built for this computation
 - ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
+- `cuda` / `cuda64` are aliases for `cuda_v3` / `cuda64_v3` (the latest stable v3 backend)
 
 ## Backend Architecture
 
@@ -174,36 +204,30 @@ x (flat vector)
   ↓
 ├─ VariableRegistry: names → indices
 ├─ ParameterConstraint: ck = build_ck(x_ck)  (combination products)
-├─ apply_bounds: arctan transform for bounded params
+├─ apply_bounds (arctan transform for bounded params)
 ├─ backend.compute: forward + backward pass
 │   │
 │   ├─ NumPyBackend   — pure NumPy f64, reference implementation
-│   ├─ CUDABackend    — custom CUDA C kernels (f64 or f32)
-│   └─ ONNXBackend    — ONNX Runtime (CPU/CUDA), dual-model:
-│       ├─ norm model: Q = sum(P·weight), norm gradients
-│       └─ forward model: NLL + NLL gradients
+│   ├─ CUDABackendV3  — CUDA C kernels f64/f32 v3 (Catmull-Rom, default)
+│   ├─ CUDABackendV2  — CUDA C kernels f64/f32 v2 (linear interpolation)
+│   └─ ONNXBackend    — ONNX Runtime (CPU/CUDA)
 │
 ├─ norm from phsp (batched for large datasets)
 ├─ purity-based likelihood: -log(purity·P/norm + (1-purity)·bkg/Nb)
 ├─ gradient combination: direct + norm chain
-└─ BFGS fit → Hessian → uncertainties → JSON export
+└─ BFGS fit → Hessian → uncertainties → JSON + error_matrix.npy
 ```
 
-### ONNXBackend Design
+### Result persistence
 
-The ONNX backend uses **two ONNX models** built in-memory:
+`save_params()` writes two files:
 
-- **Norm model** (`norm_model=True`): computes `Q = sum(P·weight)` with correct norm gradients — used internally for normalisation integral computation
-- **Forward model** (`norm_model=False`): computes full NLL `Q = -Σw·log(P/norm + bkg)` with NLL gradients — used for likelihood evaluation during fitting
+| File | Format | Content |
+|------|--------|---------|
+| `results.json` | JSON | Best-fit parameter values, errors, NLL, status |
+| `results_error_matrix.npy` | NumPy .npy | Inverse Hessian (covariance) matrix |
 
-Both models are built from `kernel_config` at a moderate fixed batch size (default 1024). The `compute()` method handles arbitrarily large datasets by **splitting into fixed-size batches** with weight-0 masking on the final partial batch.
-
-**Data transfer note:** Unlike `CUDABackend.load_data()` which uploads data to GPU
-persistently via `GPUDataHolder`, `ONNXBackend.load_data()` stores data as numpy arrays
-in system memory. ONNX Runtime transfers data CPU→GPU inside every `sess.run()` call,
-so data upload happens on each batch of every `compute()` invocation. This adds overhead
-vs the custom CUDA backend which keeps data resident on GPU. A future optimization could
-use ONNX Runtime's `IOBinding` to pre-allocate GPU buffers.
+`load_results()` auto-detects and loads the `_error_matrix.npy` when present.
 
 ## Gradient Validation
 
