@@ -92,6 +92,45 @@ def main():
         lambda x: _mass_idx(x, [2, 8]),
         "m(π⁺π⁻π⁻) [GeV]", 0.2, 5.2, 100, "m_pipipim", output=args.output)
 
+    # Sorted ππ: groups [0,9] and [3,6], each sorted within, then by group min
+    def _sorted_pipi(x):
+        m = x["mass"].reshape(-1, 24, 2)
+        a = np.column_stack([m[:, 0, 0], m[:, 9, 0]])
+        b = np.column_stack([m[:, 3, 0], m[:, 6, 0]])
+        a_min = a.min(1); a_max = a.max(1)
+        b_min = b.min(1); b_max = b.max(1)
+        mask = a_min < b_min
+        out = np.zeros((len(m), 4))
+        out[mask,0]=a_min[mask]; out[mask,1]=a_max[mask]
+        out[mask,2]=b_min[mask]; out[mask,3]=b_max[mask]
+        out[~mask,0]=b_min[~mask]; out[~mask,1]=b_max[~mask]
+        out[~mask,2]=a_min[~mask]; out[~mask,3]=a_max[~mask]
+        return [out[:, i] for i in range(4)]
+
+    _sorted = _sorted_pipi(f._data_np)
+    _ranges = [(0.2, 1.5), (0.2, 5.0), (0.2, 3.0), (0.2, 5.0)]
+    _labels = ["pp1_min", "pp1_max", "pp2_min", "pp2_max"]
+    for i in range(4):
+        plotter.plot_var(
+            lambda x, idx=i: [_sorted_pipi(x)[idx]],
+            [_labels[i]], _ranges[i][0], _ranges[i][1], 100,
+            f"m_pipi_sorted_{_labels[i]}", output=args.output)
+
+    # Sorted pipipip and pipipim (2 perms each, sorted within)
+    def _sorted_pair(x, idx_a, idx_b):
+        m = x["mass"].reshape(-1, 24, 2)
+        a, b = m[:, idx_a, 0], m[:, idx_b, 0]
+        lo = np.minimum(a, b); hi = np.maximum(a, b)
+        return [lo, hi]
+
+    for prefix, idx_a, idx_b, lo, hi in [
+            ("m_pipipip_sorted", 1, 4, 0.2, 5.0),
+            ("m_pipipim_sorted", 2, 8, 0.2, 5.0)]:
+        for j, label in enumerate(["min", "max"]):
+            plotter.plot_var(
+                lambda x, p=prefix, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
+                [label], lo, hi, 100, f"{prefix}_{label}", output=args.output)
+
 
 if __name__ == "__main__":
     main()
