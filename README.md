@@ -53,12 +53,12 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 ## Installation
 
 ```bash
-# Install from remote
-pip install git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git
+# Install from remote (interp_bw_ftime branch)
+pip install git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_ftime
 
 # Or with optional backends
-pip install "ampfit[onnx] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git"
-pip install "ampfit[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git"
+pip install "ampfit[onnx] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_ftime"
+pip install "ampfit[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_ftime"
 
 # Install in development mode (local)
 pip install -e .
