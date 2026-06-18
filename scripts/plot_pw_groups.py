@@ -75,6 +75,23 @@ def main():
     plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 50, "time",
                      output=args.output)
 
+    # ── Stacked permutation plots (hardcoded unique indices) ────
+    # ch0 start=0: [0,3,6,9] → 4 unique ππ (rhoA/f0)
+    # ch0 start=1: [1,4,7,10] → 2 unique: [1,4]  pipipi+ (a1p/a2p)
+    # ch0 start=2: [2,5,8,11] → 2 unique: [2,8]  pipipi- (a1m/a2m)
+    def _mass_idx(x, cols):
+        return [x["mass"].reshape(-1, 24, 2)[:, i, 0] for i in cols]
+
+    plotter.plot_stacked_perm(
+        lambda x: _mass_idx(x, [0, 3, 6, 9]),
+        "m(π⁺π⁻) [GeV]", 0.2, 5.2, 100, "m_pipi", output=args.output)
+    plotter.plot_stacked_perm(
+        lambda x: _mass_idx(x, [1, 4]),
+        "m(π⁺π⁺π⁻) [GeV]", 0.2, 5.2, 100, "m_pipipip", output=args.output)
+    plotter.plot_stacked_perm(
+        lambda x: _mass_idx(x, [2, 8]),
+        "m(π⁺π⁻π⁻) [GeV]", 0.2, 5.2, 100, "m_pipipim", output=args.output)
+
 
 if __name__ == "__main__":
     main()

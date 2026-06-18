@@ -538,3 +538,97 @@ class PWGroupPlotter:
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  saved {path}")
+
+    def plot_stacked_perm(self, varfun, xlabel, lo, hi, n_bins,
+                          prefix, output="plots/",
+                          data_weight_extra=None, phsp_weight_extra=None):
+        """Plot stacked histogram from permutation-equivalent variables.
+
+        All arrays returned by *varfun* are flattened together: weights
+        are repeated so each event contributes to every permutation bin.
+        Errors propagate via ``√Σ w²`` over the flattened set.
+
+        Args:
+            varfun: callable(dict) → list of arrays (same length).
+            xlabel: x-axis label.
+            lo, hi, n_bins, prefix: standard plot parameters.
+            output: output directory.
+            data_weight_extra, phsp_weight_extra: optional extra weights.
+        """
+        if not self._ready:
+            raise RuntimeError("call .compute() before .plot_stacked_perm()")
+
+        import matplotlib.pyplot as plt
+
+        f = self.fitter
+        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+
+        var_data = varfun(f._data_np)
+        var_phsp = varfun(f._phsp_np)
+        n_p = len(var_data)
+
+        bins = np.linspace(lo, hi, n_bins + 1)
+        bin_c = (bins[:-1] + bins[1:]) / 2
+
+        # ── data histogram ────────────────────────────────────────
+        # Central value: flatten all perms, tile weights (correct for mean)
+        d_all = np.concatenate(var_data)
+        dw_all = np.tile(dw, n_p)
+        dy, _ = np.histogram(d_all, bins=bins, weights=dw_all)
+
+        # Variance: per-event, per-bin count of permutations.
+        # If an event's k permutations fall in the same bin,
+        # the total weight is k·w, variance = (k·w)² (NOT k·w²).
+        bin_idx = np.column_stack([np.digitize(arr, bins) - 1 for arr in var_data])
+        # Build indicator (n_evt, n_bins): count of perms per (event, bin)
+        indicator = np.zeros((len(dw), n_bins), dtype=np.float64)
+        for p in range(n_p):
+            np.add.at(indicator, (np.arange(len(dw)), bin_idx[:, p]), 1.0)
+        var_bin = np.sum((dw[:, None] * indicator) ** 2, axis=0)
+
+        # ── model histograms ──────────────────────────────────────
+        # Signal, background, groups use flattened perms
+        p_all = np.concatenate(var_phsp)
+        pw_all_sig = np.tile(pw * self._P_total * self._scale, n_p)
+
+        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
+        bkg_norm = float(np.sum(pw * bkg))
+        purity = f._purity if f._purity is not None else 1.0
+        data_total = float(np.sum(dw))
+        bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
+        pw_all_bkg = np.tile(pw * bkg * bkg_scale, n_p)
+
+        glabels = self.labels
+        gcolors = plt.cm.tab20(np.linspace(0, 1, len(glabels)))
+        pw_all_groups = [
+            np.tile(pw * Pg * self._scale, n_p) for Pg in self._P_groups
+        ]
+
+        sig, _ = np.histogram(p_all, bins=bins, weights=pw_all_sig)
+        bkg_y, _ = np.histogram(p_all, bins=bins, weights=pw_all_bkg)
+        tot = sig + bkg_y
+        gys = [np.histogram(p_all, bins=bins, weights=gw)[0] for gw in pw_all_groups]
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.errorbar(bin_c, dy, yerr=np.sqrt(var_bin), fmt='o',
+                    color='black', markersize=3, capsize=2, label='data')
+        ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
+                        color='C3', label='bkg')
+        ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
+                label='total fit')
+        for gy, c, lab in zip(gys, gcolors, glabels):
+            ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
+                    label=lab)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(0, None)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Events")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        path = os.path.join(output, prefix + ".png")
+        fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  saved {path}")
