@@ -10,14 +10,14 @@ Two separate categories (no cross-talk):
 Each entry reports the B0 (g_ls) and B0bar (g_lsbar) fraction side by side.
 
 Usage:
-    python calc_fractions.py fit_results.json --hessian hessian.npy -o fractions.csv
-    python calc_fractions.py fit_results.json --hessian hessian.npy --max-events 5000
+    python scripts/calc_fractions.py fit_results.json --hessian hessian.npy -o fractions.csv
+    python scripts/calc_fractions.py fit_results.json --hessian hessian.npy --max-events 5000
 """
 
 import sys, os, argparse, csv
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
 from run_fit import build_constraints, load_npz
@@ -87,7 +87,7 @@ def discover_groups(config):
     groups_B = []
     for k in sorted(raw_B):
         ls, lsbar = split_ls(raw_B[k])
-        label = "B→" + "+".join(k)
+        label = "+".join(k)
         groups_B.append((label, ls, lsbar))
 
     return groups_3pi, groups_B
