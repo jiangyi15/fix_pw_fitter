@@ -55,7 +55,7 @@ def main():
     plotter.plot_var(
         lambda x: [x["mass"][:, i] for i in range(nm)],
         [f"mass[{i}]" for i in range(nm)],
-        0.2, 5.2, 100, "mass", legend=True, output=args.output)
+         0.2, 5.2, 0.05, "mass", legend=True, output=args.output, smooth_sigma=1.0)
 
     # Angles
     def angle_var(x):
@@ -68,12 +68,12 @@ def main():
         return out
     ar = [(-np.pi, np.pi), (-1, 1), (-1, 1)] * 3
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
-    plotter.plot_var(angle_var, al, 0, 1, 50, "angles",
-                     ranges=ar, output=args.output)
+    plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
+                     ranges=ar, output=args.output, unit="")
 
     # Time
-    plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 50, "time",
-                     output=args.output)
+    plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 0.2, "time",
+                     output=args.output, unit="ps")
 
     # ── Stacked permutation plots (hardcoded unique indices) ────
     # ch0 start=0: [0,3,6,9] → 4 unique ππ (rhoA/f0)
@@ -84,13 +84,16 @@ def main():
 
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [0, 3, 6, 9]),
-        "m(π⁺π⁻) [GeV]", 0.2, 5.2, 100, "m_pipi", output=args.output)
+        "m(π⁺π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipi", output=args.output,
+        smooth_sigma=1.0)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [1, 4]),
-        "m(π⁺π⁺π⁻) [GeV]", 0.2, 5.2, 100, "m_pipipip", output=args.output)
+        "m(π⁺π⁺π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipipip", output=args.output,
+        smooth_sigma=1.0)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [2, 8]),
-        "m(π⁺π⁻π⁻) [GeV]", 0.2, 5.2, 100, "m_pipipim", output=args.output)
+        "m(π⁺π⁻π⁻) [GeV]", 0.2, 5.2, 0.05, "m_pipipim", output=args.output,
+        smooth_sigma=1.0)
 
     # Sorted ππ: groups [0,9] and [3,6], each sorted within, then by group min
     def _sorted_pipi(x):
@@ -108,13 +111,20 @@ def main():
         return [out[:, i] for i in range(4)]
 
     _sorted = _sorted_pipi(f._data_np)
-    _ranges = [(0.2, 1.5), (0.2, 5.0), (0.2, 3.0), (0.2, 5.0)]
-    _labels = ["pp1_min", "pp1_max", "pp2_min", "pp2_max"]
+    _ranges = [(0.2, 1.5, 0.015), (0.2, 5.2, 0.05), (0.2, 3.0, 0.03), (0.2, 5.0, 0.05)]
+    _xlabels = [
+        r"$m(\pi\pi)^{\rm min}_{\rm low}$",
+        r"$m(\pi\pi)^{\rm max}_{\rm low}$",
+        r"$m(\pi\pi)^{\rm min}_{\rm high}$",
+        r"$m(\pi\pi)^{\rm max}_{\rm high}$",
+    ]
     for i in range(4):
+        lo, hi, bw = _ranges[i]
         plotter.plot_var(
             lambda x, idx=i: [_sorted_pipi(x)[idx]],
-            [_labels[i]], _ranges[i][0], _ranges[i][1], 100,
-            f"m_pipi_sorted_{_labels[i]}", output=args.output)
+            [_xlabels[i]], lo, hi, bw,
+            f"m_pipi_sorted_{['pp1_min','pp1_max','pp2_min','pp2_max'][i]}",
+            output=args.output, smooth_sigma=1.0)
 
     # Sorted pipipip and pipipim (2 perms each, sorted within)
     def _sorted_pair(x, idx_a, idx_b):
@@ -123,13 +133,17 @@ def main():
         lo = np.minimum(a, b); hi = np.maximum(a, b)
         return [lo, hi]
 
-    for prefix, idx_a, idx_b, lo, hi in [
-            ("m_pipipip_sorted", 1, 4, 0.2, 5.0),
-            ("m_pipipim_sorted", 2, 8, 0.2, 5.0)]:
-        for j, label in enumerate(["min", "max"]):
+    for prefix, idx_a, idx_b, r_min, r_max, xl_min, xl_max in [
+            ("m_pipipip_sorted", 1, 4, (0.2, 5.2), (0.2, 5.2),
+             r"$m(\pi^+\pi^+\pi^-)^{\rm min}$", r"$m(\pi^+\pi^+\pi^-)^{\rm max}$"),
+            ("m_pipipim_sorted", 2, 8, (0.2, 5.2), (0.2, 5.2),
+             r"$m(\pi^+\pi^-\pi^-)^{\rm min}$", r"$m(\pi^+\pi^-\pi^-)^{\rm max}$")]:
+        for j, (rj, label_j) in enumerate([(r_min, xl_min), (r_max, xl_max)]):
             plotter.plot_var(
-                lambda x, p=prefix, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
-                [label], lo, hi, 100, f"{prefix}_{label}", output=args.output)
+                lambda x, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
+                [label_j], rj[0], rj[1], 0.05,
+                f"{prefix}_{['min','max'][j]}", output=args.output,
+                smooth_sigma=1.0)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ on data points.  B0 and B0bar are combined.
 
 import os
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 
 def discover_groups(config):
@@ -204,27 +205,26 @@ class PWGroupPlotter:
 
     # ── plotting ──────────────────────────────────────────────────
 
-    def plot_var(self, varfun, labels, lo, hi, n_bins, prefix,
+    def plot_var(self, varfun, labels, lo, hi, bin_width, prefix,
                  legend=False, output="plots/", ranges=None,
                  group_labels=None, colors=None,
-                 data_weight_extra=None, phsp_weight_extra=None):
+                 data_weight_extra=None, phsp_weight_extra=None,
+                 smooth_sigma=None, unit="GeV"):
         """Plot variable(s) using pre-computed weights.
 
         Args:
             varfun: callable(dict) → list of arrays (one per subplot).
-                    Called with the fitter's ``_data_np`` and ``_phsp_np``.
             labels: subplot titles.
             lo, hi: x range (fallback when *ranges* is None).
-            n_bins: number of bins.
+            bin_width: width of each histogram bin in x‑axis units.
             prefix: filename stem (saved as ``{prefix}.png``).
             legend: if True, draw legend on first subplot.
             output: output directory.
             ranges: optional list of ``(lo, hi)`` per subplot.
             group_labels, colors: override defaults.
-            data_weight_extra: optional per-event weight multiplying
-                ``data["weight"]`` (e.g. tag weights, cuts).
-            phsp_weight_extra: optional per-event weight multiplying
-                ``phsp["weight"]`` (e.g. tag weights, cuts).
+            data_weight_extra, phsp_weight_extra: optional extra weights.
+            smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
+            unit: physical unit for bin width in y-label (default "GeV").
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_var()")
@@ -262,6 +262,8 @@ class PWGroupPlotter:
             d = var_data[i]
             p = var_phsp[i]
             xlo, xhi = (ranges[i] if ranges else (lo, hi))
+            n_bins = max(1, int(round((xhi - xlo) / bin_width)))
+            xhi = xlo + n_bins * bin_width  # exact bin width
             bins = np.linspace(xlo, xhi, n_bins + 1)
             bin_c = (bins[:-1] + bins[1:]) / 2
 
@@ -288,19 +290,36 @@ class PWGroupPlotter:
                         label='data' if legend and i == 0 else None)
             # Background fill
             ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
-                            color='C3', label='bkg' if legend and i == 0 else None)
+                            color='C3', edgecolor='none', linewidth=0,
+                            label='bkg' if legend and i == 0 else None)
             # Total fit step (signal + bkg)
             ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
                     label='total fit' if legend and i == 0 else None)
-            # Partial wave groups (signal only)
+            # Partial wave groups (signal only) — smoothed if requested
             for gy, c, lab in zip(gys, colors, glabels):
-                ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
-                        label=lab if legend and i == 0 else None)
+                if smooth_sigma is not None and smooth_sigma > 0:
+                    gy_s = gaussian_filter1d(gy.astype(np.float64), smooth_sigma)
+                    # Cubic interpolation onto finer grid for smooth curve
+                    from scipy.interpolate import CubicSpline
+                    cs = CubicSpline(bin_c, gy_s, bc_type='natural')
+                    x_fine = np.linspace(xlo, xhi, n_bins * 10)
+                    ax.plot(x_fine, cs(x_fine), '-', color=c, linewidth=1.5,
+                            label=lab if legend and i == 0 else None)
+                else:
+                    ax.plot(bin_c, gy, '-', color=c, linewidth=1.5,
+                            label=lab if legend and i == 0 else None)
 
             ax.grid(True, alpha=0.3)
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(0, None)
-            ax.set_xlabel(labels[i])
+            xl = labels[i]
+            if unit:
+                xl = f"{xl} ({unit})"
+            ax.set_xlabel(xl)
+            if i == 0:
+                bw = (xhi - xlo) / n_bins
+                yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
+                ax.set_ylabel(yl)
             ax.tick_params(labelsize=9)
 
         for i in range(n_var, n_rows * n_cols):
@@ -539,9 +558,10 @@ class PWGroupPlotter:
         plt.close(fig)
         print(f"  saved {path}")
 
-    def plot_stacked_perm(self, varfun, xlabel, lo, hi, n_bins,
+    def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
                           prefix, output="plots/",
-                          data_weight_extra=None, phsp_weight_extra=None):
+                          data_weight_extra=None, phsp_weight_extra=None,
+                          smooth_sigma=None, unit="GeV"):
         """Plot stacked histogram from permutation-equivalent variables.
 
         All arrays returned by *varfun* are flattened together: weights
@@ -551,14 +571,19 @@ class PWGroupPlotter:
         Args:
             varfun: callable(dict) → list of arrays (same length).
             xlabel: x-axis label.
-            lo, hi, n_bins, prefix: standard plot parameters.
+            lo, hi: x range.
+            bin_width: width of each histogram bin in x‑axis units.
+            prefix: filename stem.
             output: output directory.
             data_weight_extra, phsp_weight_extra: optional extra weights.
+            smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
+            unit: physical unit for bin width in y-label (default "GeV").
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_stacked_perm()")
 
         import matplotlib.pyplot as plt
+        from scipy.interpolate import CubicSpline
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
@@ -568,27 +593,24 @@ class PWGroupPlotter:
         var_phsp = varfun(f._phsp_np)
         n_p = len(var_data)
 
+        n_bins = max(1, int(round((hi - lo) / bin_width)))
+        hi = lo + n_bins * bin_width  # exact bin width
         bins = np.linspace(lo, hi, n_bins + 1)
         bin_c = (bins[:-1] + bins[1:]) / 2
 
         # ── data histogram ────────────────────────────────────────
-        # Central value: flatten all perms, tile weights (correct for mean)
         d_all = np.concatenate(var_data)
         dw_all = np.tile(dw, n_p)
         dy, _ = np.histogram(d_all, bins=bins, weights=dw_all)
 
         # Variance: per-event, per-bin count of permutations.
-        # If an event's k permutations fall in the same bin,
-        # the total weight is k·w, variance = (k·w)² (NOT k·w²).
         bin_idx = np.column_stack([np.digitize(arr, bins) - 1 for arr in var_data])
-        # Build indicator (n_evt, n_bins): count of perms per (event, bin)
         indicator = np.zeros((len(dw), n_bins), dtype=np.float64)
         for p in range(n_p):
             np.add.at(indicator, (np.arange(len(dw)), bin_idx[:, p]), 1.0)
         var_bin = np.sum((dw[:, None] * indicator) ** 2, axis=0)
 
         # ── model histograms ──────────────────────────────────────
-        # Signal, background, groups use flattened perms
         p_all = np.concatenate(var_phsp)
         pw_all_sig = np.tile(pw * self._P_total * self._scale, n_p)
 
@@ -610,20 +632,41 @@ class PWGroupPlotter:
         tot = sig + bkg_y
         gys = [np.histogram(p_all, bins=bins, weights=gw)[0] for gw in pw_all_groups]
 
+        # ── smoothing helper for PW groups only ───────────────────
+        def _smooth_group(arr):
+            if smooth_sigma is None or smooth_sigma <= 0:
+                return arr, bin_c, False
+            sigma_bins = smooth_sigma
+            sm = gaussian_filter1d(arr.astype(np.float64), sigma_bins)
+            cs = CubicSpline(bin_c, sm, bc_type='natural')
+            x_fine = np.linspace(lo, hi, n_bins * 10)
+            return cs(x_fine), x_fine, True
+
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.errorbar(bin_c, dy, yerr=np.sqrt(var_bin), fmt='o',
                     color='black', markersize=3, capsize=2, label='data')
+        # Background fill — no edge lines
         ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
-                        color='C3', label='bkg')
+                        color='C3', edgecolor='none', linewidth=0, label='bkg')
+        # Total fit — step
         ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
                 label='total fit')
+        # PW groups — smooth if requested, else step
         for gy, c, lab in zip(gys, gcolors, glabels):
-            ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
-                    label=lab)
+            y_plot, x_plot, is_smooth = _smooth_group(gy)
+            if is_smooth:
+                ax.plot(x_plot, np.maximum(y_plot, 0), '-', color=c, linewidth=1.5,
+                        label=lab)
+            else:
+                ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
+                        label=lab)
         ax.set_xlim(lo, hi)
         ax.set_ylim(0, None)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Events")
+        xl = xlabel if not unit else f"{xlabel} ({unit})"
+        ax.set_xlabel(xl)
+        bw = (hi - lo) / n_bins
+        yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
+        ax.set_ylabel(yl)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
