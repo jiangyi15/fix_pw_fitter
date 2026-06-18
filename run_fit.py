@@ -97,33 +97,6 @@ def build_constraints(all_comb):
     return fixed_slots, same_params, scale_params
 
 
-def load_npz(npz_path, max_events=None):
-    """Load .npz data and format for the kernel."""
-    data = np.load(npz_path)
-    if "angles" in data and "angle" not in data:
-        data = dict(data)
-        data["angle"] = data.pop("angles")
-
-    n_events = data["mass"].shape[0]
-    if max_events is not None and max_events < n_events:
-        n_events = max_events
-        idx = np.random.RandomState(0).choice(data["mass"].shape[0], n_events, replace=False)
-    else:
-        idx = slice(None)
-
-    out = {
-        "mass": data["mass"][idx].reshape(n_events, -1),
-        "q": data["q"][idx].reshape(n_events, -1),
-        "angle": data["angle"][idx].reshape(n_events, -1, 3),
-        "time": data["time"][idx].astype(np.float64),
-        "frac": data["frac"][idx].astype(np.float64),
-        "bkg": data["bkg_raw"][idx].astype(np.float64),
-        "weight": data["weight"][idx].astype(np.float64),
-    }
-    assert not np.any(np.isnan(out["mass"])), "NaN in mass"
-    return out, n_events
-
-
 def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
@@ -212,8 +185,8 @@ def main():
     max_phsp = 10000 if args.debug else None
 
     t0 = time.time()
-    data_np, n_data = load_npz(args.data, max_events=max_data)
-    phsp_np, n_phsp = load_npz(args.phsp, max_events=max_phsp)
+    data_np, n_data = Fitter.load_npz(args.data, max_events=max_data)
+    phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp)
     load_time = time.time() - t0
     print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
 

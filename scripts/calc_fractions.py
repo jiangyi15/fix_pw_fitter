@@ -20,7 +20,7 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
-from run_fit import build_constraints, load_npz
+from run_fit import build_constraints
 
 
 def _charge_stem(name):
@@ -150,7 +150,7 @@ def main():
         f.set_same(sp)
         f.set_scale(sc)
 
-    phsp, _ = load_npz(args.phsp, max_events=args.max_events)
+    phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
 
     # ── Load fit result (auto-detects _error_matrix.npy) ──────────

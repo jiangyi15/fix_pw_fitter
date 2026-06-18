@@ -176,8 +176,49 @@ class Fitter:
         return self.cm.var_registry
 
     # ------------------------------------------------------------------
-    # Data setup
+    # Data loading and setup
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def load_npz(npz_path, max_events=None):
+        """Load ``.npz`` data and format for the kernel.
+
+        Args:
+            npz_path: path to ``.npz`` file with ``mass``, ``q``,
+                      ``angle``/``angles``, ``time``, ``frac``,
+                      ``bkg_raw``, ``weight`` arrays.
+            max_events: if given, subsample to this many events
+                        (deterministic seed 0).
+
+        Returns:
+            ``(data_dict, n_events)``.
+        """
+        import numpy as np
+        data = np.load(npz_path)
+        if "angles" in data and "angle" not in data:
+            data = dict(data)
+            data["angle"] = data.pop("angles")
+
+        n_events = data["mass"].shape[0]
+        if max_events is not None and max_events < n_events:
+            n_events = max_events
+            idx = np.random.RandomState(0).choice(
+                data["mass"].shape[0], n_events, replace=False)
+        else:
+            idx = slice(None)
+
+        out = {
+            "mass": data["mass"][idx].reshape(n_events, -1),
+            "q": data["q"][idx].reshape(n_events, -1),
+            "angle": data["angle"][idx].reshape(n_events, -1, 3),
+            "time": data["time"][idx].astype(np.float64),
+            "frac": data["frac"][idx].astype(np.float64),
+            "bkg": data["bkg_raw"][idx].astype(np.float64),
+            "weight": data["weight"][idx].astype(np.float64),
+        }
+        assert not np.any(np.isnan(out["mass"])), "NaN in mass"
+        return out, n_events
+
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
 
