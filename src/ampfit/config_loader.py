@@ -510,6 +510,47 @@ class Config:
                     ret.append((j[0], j[1].replace("g_ls", "g_lsbar"), *j[2:]))
         return ret
 
+    def get_ck_indices(self, resonance_names):
+        """Return ck indices for partial waves involving given resonance(s).
+
+        Uses the decay-chain structure directly: any chain where
+        ``decay.core.name`` matches one of the resonance names
+        contributes all its partial-wave ck indices.
+
+        Args:
+            resonance_names: str or list of str — particle names from config,
+                             e.g. ``"f0(500)"`` or ``["a1(1260)p", "a1(1260)m"]``.
+
+        Returns:
+            list[int] — ck indices covering all 8 topology blocks.
+        """
+        if isinstance(resonance_names, str):
+            resonance_names = [resonance_names]
+        target = set(resonance_names)
+
+        idx = 0
+        chain_ranges = []  # (base_start, base_end, chain)
+        for chain in self.full_decay.chains:
+            n = len(chain.get_gls_combination())
+            chain_ranges.append((idx, idx + n, chain))
+            idx += n
+
+        n_base = idx
+
+        matching_base = set()
+        for start, end, chain in chain_ranges:
+            for decay in chain.decays:
+                if decay.core.name in target:
+                    matching_base.update(range(start, end))
+                    break
+
+        result = []
+        for block in range(8):
+            offset = block * n_base
+            for i in sorted(matching_base):
+                result.append(offset + i)
+        return result
+
 
 
 
