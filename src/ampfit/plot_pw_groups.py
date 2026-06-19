@@ -209,7 +209,7 @@ class PWGroupPlotter:
                  legend=False, output="plots/", ranges=None,
                  group_labels=None, colors=None,
                  data_weight_extra=None, phsp_weight_extra=None,
-                 smooth_sigma=None, unit="GeV"):
+                 smooth_sigma=None, unit="GeV", show_pull=False):
         """Plot variable(s) using pre-computed weights.
 
         Args:
@@ -225,6 +225,7 @@ class PWGroupPlotter:
             data_weight_extra, phsp_weight_extra: optional extra weights.
             smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
             unit: physical unit for bin width in y-label (default "GeV").
+            show_pull: if True, show pull (data−model)/σ below each panel.
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_var()")
@@ -253,17 +254,32 @@ class PWGroupPlotter:
 
         n_cols = min(3, n_var)
         n_rows = (n_var + n_cols - 1) // n_cols
-        fig, axes = plt.subplots(n_rows, n_cols,
-                                 figsize=(5 * n_cols, 4 * n_rows),
-                                 squeeze=False)
+        if show_pull:
+            import matplotlib.gridspec as mgs
+            fig = plt.figure(figsize=(6 * n_cols, 6 * n_rows))
+            gs = mgs.GridSpec(2 * n_rows, n_cols, figure=fig,
+                              height_ratios=[3, 1] * n_rows, hspace=0)
+            axes = np.empty((2 * n_rows, n_cols), dtype=object)
+            for r in range(2 * n_rows):
+                for c in range(n_cols):
+                    axes[r, c] = fig.add_subplot(gs[r, c])
+            # Share x within each column
+            for r in range(1, 2 * n_rows):
+                for c in range(n_cols):
+                    axes[r, c].sharex(axes[0, c])
+        else:
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows),
+                                     squeeze=False)
 
         for i in range(n_var):
-            ax = axes.flatten()[i]
+            row, col = divmod(i, n_cols)
+            ax = axes[2 * row, col] if show_pull else axes[row, col]
+            ax_pull = axes[2 * row + 1, col] if show_pull else None
             d = var_data[i]
             p = var_phsp[i]
             xlo, xhi = (ranges[i] if ranges else (lo, hi))
             n_bins = max(1, int(round((xhi - xlo) / bin_width)))
-            xhi = xlo + n_bins * bin_width  # exact bin width
+            xhi = xlo + n_bins * bin_width
             bins = np.linspace(xlo, xhi, n_bins + 1)
             bin_c = (bins[:-1] + bins[1:]) / 2
 
@@ -285,6 +301,9 @@ class PWGroupPlotter:
                                 weights=pw * Pg * self._scale)[0]
                    for Pg in self._P_groups]
 
+            # Pull = (data - model) / sqrt(var(data))
+            pull = np.divide(dy - tot, np.sqrt(dw2), where=dw2 > 0, out=np.zeros_like(dy))
+
             ax.errorbar(bin_c, dy, yerr=np.sqrt(dw2),
                         fmt='o', color='black', markersize=3, capsize=2,
                         label='data' if legend and i == 0 else None)
@@ -293,13 +312,12 @@ class PWGroupPlotter:
                             color='C3', edgecolor='none', linewidth=0,
                             label='bkg' if legend and i == 0 else None)
             # Total fit step (signal + bkg)
-            ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
+            ax.step(bin_c, tot, where='mid', color='grey', linewidth=2,
                     label='total fit' if legend and i == 0 else None)
             # Partial wave groups (signal only) — smoothed if requested
             for gy, c, lab in zip(gys, colors, glabels):
                 if smooth_sigma is not None and smooth_sigma > 0:
                     gy_s = gaussian_filter1d(gy.astype(np.float64), smooth_sigma)
-                    # Cubic interpolation onto finer grid for smooth curve
                     from scipy.interpolate import CubicSpline
                     cs = CubicSpline(bin_c, gy_s, bc_type='natural')
                     x_fine = np.linspace(xlo, xhi, n_bins * 10)
@@ -312,23 +330,67 @@ class PWGroupPlotter:
             ax.grid(True, alpha=0.3)
             ax.set_xlim(xlo, xhi)
             ax.set_ylim(0, None)
-            xl = labels[i]
-            if unit:
-                xl = f"{xl} ({unit})"
-            ax.set_xlabel(xl)
+            if show_pull:
+                ax.tick_params(labelbottom=False)
             if i == 0:
                 bw = (xhi - xlo) / n_bins
                 yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
                 ax.set_ylabel(yl)
-            ax.tick_params(labelsize=9)
+            ax.tick_params(labelsize=8)
 
-        for i in range(n_var, n_rows * n_cols):
-            axes.flatten()[i].set_visible(False)
+            # Pull (data - model) / σ  — only when show_pull=True
+            if show_pull:
+                pull_den = np.clip(np.sqrt(dw2), 1.0, None)
+                pull = (dy - tot) / pull_den
+                pmax = max(np.nanmax(np.abs(pull)), 5)
+                ax.set_title(rf"$\chi^2$/ndf = {np.sum(pull**2):.1f}/{np.sum(dw2 > 0)}",
+                             fontsize=8)
+                ax.tick_params(direction="in")
+                ax_pull.bar(bin_c, pull, width=np.diff(bins), alpha=0.5,
+                            color='grey', edgecolor='none')
+                ax_pull.axhline(y=0, color='black', linewidth=0.5)
+                ax_pull.axhline(y=3, color='red', linestyle=':', linewidth=0.8)
+                ax_pull.axhline(y=-3, color='red', linestyle=':', linewidth=0.8)
+                ax_pull.axhline(y=5, color='red', linestyle=':', linewidth=0.5)
+                ax_pull.axhline(y=-5, color='red', linestyle=':', linewidth=0.5)
+                ax_pull.set_ylim(-pmax, pmax)
+                ax_pull.set_xlim(xlo, xhi)
+                ax_pull.minorticks_on()
+                ax_pull.tick_params(direction="in")
+                ax_pull.set_ylabel("pull", fontsize=8)
+                ax_pull.tick_params(labelsize=7)
+                # X-label on bottom row
+                if row == n_rows - 1 or i + n_cols >= n_var:
+                    xl = labels[i]
+                    if unit:
+                        xl = f"{xl} ({unit})"
+                    ax_pull.set_xlabel(xl, fontsize=8)
+                else:
+                    ax_pull.tick_params(labelbottom=False)
+            else:
+                xl = labels[i]
+                if unit:
+                    xl = f"{xl} ({unit})"
+                ax.set_xlabel(xl)
+
+        # Hide unused subplots
+        n_total = n_rows * n_cols
+        # Hide unused subplots
+        n_grid_rows = 2 * n_rows if show_pull else n_rows
+        for j in range(i + 1, n_rows * n_cols):
+            r, c = divmod(j, n_cols)
+            if show_pull:
+                axes[2 * r, c].set_visible(False)
+                axes[2 * r + 1, c].set_visible(False)
+            else:
+                axes[r, c].set_visible(False)
+
+        if show_pull:
+            fig.subplots_adjust(hspace=0)
 
         if legend:
-            axes.flatten()[0].legend(fontsize=7, ncol=2)
+            fig.axes[0].legend(fontsize=7, ncol=2)
 
-        plt.tight_layout()
         path = os.path.join(output, prefix + ".png")
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -375,7 +437,7 @@ class PWGroupPlotter:
         n_cols = min(3, n_var)
         n_rows = (n_var + n_cols - 1) // n_cols
         fig, axes = plt.subplots(n_rows, n_cols,
-                                 figsize=(5 * n_cols, 4 * n_rows),
+                                 figsize=(6 * n_cols, 4.5 * n_rows),
                                  squeeze=False)
 
         for i in range(n_var):
@@ -417,7 +479,7 @@ class PWGroupPlotter:
 
             ax.errorbar(bin_c, Ad, yerr=Ad_err, fmt='o',
                         color='black', markersize=3, capsize=2, label='data')
-            ax.step(bins[1:], Am, where='post', color='grey', linewidth=2,
+            ax.step(bin_c, Am, where='mid', color='grey', linewidth=2,
                     label='total fit')
             ax.axhline(y=0, color='grey', linestyle=':', linewidth=1)
 
@@ -541,7 +603,7 @@ class PWGroupPlotter:
         A_model = A_theory * dilution
 
         # ── Plot ──────────────────────────────────────────────────
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=(6, 4.5))
         ax.errorbar(bin_c, Ad, yerr=Ad_err, fmt='o',
                     color='black', markersize=4, capsize=2, label='data')
         ax.plot(t_grid, A_model, '-', color='grey', linewidth=2,
@@ -561,7 +623,8 @@ class PWGroupPlotter:
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
                           prefix, output="plots/",
                           data_weight_extra=None, phsp_weight_extra=None,
-                          smooth_sigma=None, unit="GeV", scales=None):
+                          smooth_sigma=None, unit="GeV", scales=None,
+                          show_pull=False, legend=False):
         """Plot stacked histogram from permutation-equivalent variables.
 
         All arrays returned by *varfun* are flattened together: weights
@@ -582,6 +645,7 @@ class PWGroupPlotter:
             smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
             unit: physical unit for bin width in y-label (default "GeV").
             scales: optional list of scale factors for each permutation.
+            show_pull: if True, show pull (data−model)/σ below the panel.
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_stacked_perm()")
@@ -652,14 +716,20 @@ class PWGroupPlotter:
             x_fine = np.linspace(lo, hi, n_bins * 10)
             return cs(x_fine), x_fine, True
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        n_ax = 2 if show_pull else 1
+        if show_pull:
+            fig = plt.figure(figsize=(6, 5))
+            ax = plt.subplot2grid((4, 1), (0, 0), rowspan=3)
+            ax_pull = plt.subplot2grid((4, 1), (3, 0), rowspan=1, sharex=ax)
+        else:
+            fig, ax = plt.subplots(figsize=(6, 4.5))
         ax.errorbar(bin_c, dy, yerr=np.sqrt(var_bin), fmt='o',
                     color='black', markersize=3, capsize=2, label='data')
         # Background fill — no edge lines
         ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
                         color='C3', edgecolor='none', linewidth=0, label='bkg')
         # Total fit — step
-        ax.step(bins[1:], tot, where='post', color='grey', linewidth=2,
+        ax.step(bin_c, tot, where='mid', color='grey', linewidth=2,
                 label='total fit')
         # PW groups — smooth if requested, else step
         for gy, c, lab in zip(gys, gcolors, glabels):
@@ -668,20 +738,47 @@ class PWGroupPlotter:
                 ax.plot(x_plot, np.maximum(y_plot, 0), '-', color=c, linewidth=1.5,
                         label=lab)
             else:
-                ax.step(bins[1:], gy, where='post', color=c, linewidth=1.5,
+                ax.step(bin_c, gy, where='mid', color=c, linewidth=1.5,
                         label=lab)
         ax.set_xlim(lo, hi)
         y_bottom = None if any(s < 0 for s in scl) else 0
         ax.set_ylim(y_bottom, None)
-        xl = xlabel if not unit else f"{xlabel} ({unit})"
-        ax.set_xlabel(xl)
+
+        if show_pull:
+            # Pull below
+            ax.tick_params(labelbottom=False, direction="in")
+            pull_den = np.clip(np.sqrt(var_bin), 1.0, None)
+            pull = (dy - tot) / pull_den
+            pmax = max(np.nanmax(np.abs(pull)), 5)
+            ax.set_title(rf"$\chi^2$/ndf = {np.nansum(pull**2):.1f}/{np.sum(var_bin > 0)}",
+                         fontsize=9)
+            ax_pull.bar(bin_c, pull, width=np.diff(bins), alpha=0.5,
+                        color='grey', edgecolor='none')
+            ax_pull.axhline(y=0, color='black', linewidth=0.5)
+            ax_pull.axhline(y=3, color='red', linestyle=':', linewidth=0.8)
+            ax_pull.axhline(y=-3, color='red', linestyle=':', linewidth=0.8)
+            ax_pull.axhline(y=5, color='red', linestyle=':', linewidth=0.5)
+            ax_pull.axhline(y=-5, color='red', linestyle=':', linewidth=0.5)
+            ax_pull.set_ylim(-pmax, pmax)
+            ax_pull.set_xlim(lo, hi)
+            ax_pull.minorticks_on()
+            ax_pull.tick_params(direction="in")
+            ax_pull.set_ylabel("pull", fontsize=9)
+            ax_pull.tick_params(labelsize=8)
+            xl = xlabel if not unit else f"{xlabel} ({unit})"
+            ax_pull.set_xlabel(xl)
+            fig.subplots_adjust(hspace=0)
+        else:
+            xl = xlabel if not unit else f"{xlabel} ({unit})"
+            ax.set_xlabel(xl)
         bw = (hi - lo) / n_bins
         yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
         ax.set_ylabel(yl)
-        ax.legend(fontsize=9)
+        if legend:
+            ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
-        plt.tight_layout()
 
+        # Save
         path = os.path.join(output, prefix + ".png")
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
