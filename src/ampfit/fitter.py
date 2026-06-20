@@ -325,18 +325,27 @@ class Fitter:
     def reinitial(self, seed=42):
         """Deterministic flat vector using stored physical defaults.
 
-        Every parameter is set to its default value with a small
-        random offset (no complex/real distinction).
+        Mass, width and scalar params use their config defaults.
+        CK coupling slots get a small random offset to avoid exact
+        1+0j symmetry that can cause kernel singularities.
         """
         _ = self.pc
         rng = np.random.RandomState(seed)
         names = self._var_registry.flat_names
         defaults = self.defaults
+        # Identify ck slots: base name appears in all_comb
+        ck_bases = set()
+        for comb in self.all_comb:
+            for p in comb:
+                if isinstance(p, str):
+                    ck_bases.add(p)
         x = np.empty(len(names))
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                val += rng.uniform(-0.01, 0.01)
+                base = name[:-1] if name.endswith(('r', 'i')) else ''
+                if base in ck_bases:
+                    val += rng.uniform(-0.01, 0.01)
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
@@ -367,6 +376,10 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
+                # Reverse scale from saved physical value to optimizer space
+                for p, s in self._scale_params.items():
+                    if name == p and s != 0:
+                        val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
@@ -415,12 +428,6 @@ class Fitter:
                            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
             for name in self.cm.SCALAR_NAMES:
                 d.setdefault(name, scalar_base.get(name, 0.0))
-            # ck defaults (1+0j for each coupling)
-            for comb in self.all_comb:
-                for p in comb:
-                    if isinstance(p, str):
-                        d.setdefault(p + 'r', 1.0)
-                        d.setdefault(p + 'i', 0.0)
             self._defaults = d
         return self._defaults
 
@@ -1018,22 +1025,22 @@ class Fitter:
         """
         import json, cmath, os
 
-        values, errors = self._params_from_fit(fit_result, return_bounded=True)
         flat_names = self._var_registry.flat_names
+        # Resolved physical values (post-constraints)
+        _, resolved, _, _ = self._build_params(fit_result.x)
+
+        # Errors from Hessian (transformed to physical space)
+        _, errors = self._params_from_fit(fit_result, return_bounded=True)
 
         out = {"value": {}, "error": {}}
         for name in flat_names:
-            out["value"][name] = float(values[name])
-            out["error"][name] = float(errors[name])
+            out["value"][name] = float(resolved[name])
+            out["error"][name] = float(errors.get(name, 0.0))
 
         # Add all defaults to value (including fixed params not in flat_names)
         for name, val in self.defaults.items():
             if name not in out["value"]:
                 out["value"][name] = float(val)
-
-        # Build alias→canonical map from same_params.
-        # _same_params is {alias: canon} (dict), not list-of-lists.
-        new_name = dict(self._same_params)
 
         # Add fixed ck parameters (from _fixed_slots or old _fixed_params)
         all_param_names = set()
