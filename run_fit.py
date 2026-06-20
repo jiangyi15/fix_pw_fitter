@@ -73,11 +73,14 @@ def build_constraints(all_comb):
                         if key_p + 'r' in fixed_slots:
                             del fixed_slots[key_p + 'r']
                             del fixed_slots[key_p + 'i']
-                        same_params.append([key_m, key_p])
+                        same_params.append([key_m + 'r', key_p + 'r'])
+                        same_params.append([key_m + 'i', key_p + 'i'])
                     if r2 == "rhoA":
-                        scale_params[key_m] = -1
-        same_params.append(name_ps)
-        same_params.append(name_ms)
+                        scale_params[key_m + 'r'] = -1
+        if name_ps and name_ms:
+            for np_, nm_ in zip(name_ps, name_ms):
+                same_params.append([np_ + 'r', nm_ + 'r'])
+                same_params.append([np_ + 'i', nm_ + 'i'])
 
     # KMA/KMB symmetry
     for i in range(3):
@@ -145,7 +148,8 @@ def main():
     fixed_slots["poqr"] = 1.0
     fixed_slots["poqi"] = 0.0
 
-    for name in []: # "a1(1260)", "a1(1640)", "a2(1320)"]:
+    for name in ["a1(1260)", "a1(1640)", "a2(1320)", "pi1300",
+               "pi1600", "a2(1700)", "pi2(1670)", "pi1(1600)"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
         if f"{name}p_mass" in fixed_slots:
             del fixed_slots[f"{name}p_mass"]
         if f"{name}m_mass" in fixed_slots:
@@ -166,7 +170,7 @@ def main():
     for name in fitter.config.m0_phys_name:
         val = float(fitter.defaults[name])
         if name not in fitter._fixed_slots:
-            fitter.set_range(name, val - 0.1, val + 0.1)
+            fitter.set_range(name, val - 0.3, val + 0.3)
     for name in fitter.config.g0_phys_name:
         if name not in fitter._fixed_slots:
             val = float(fitter.defaults[name])

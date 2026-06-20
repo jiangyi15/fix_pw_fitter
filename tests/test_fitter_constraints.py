@@ -88,15 +88,15 @@ def test_set_fixed_then_free():
     assert len(all_free) >= 2, "need at least 1 complex param"
     slot_r = all_free[0]   # e.g. '...total_0r'
     slot_i = all_free[1]   # e.g. '...total_0i'
-    base = slot_r.rstrip('ri')  # e.g. '...total_0'
 
     # Fix both r and i parts → param disappears from registry
     fitter.set_fixed({slot_r: 1.0, slot_i: 0.0})
     assert slot_r not in fitter.free_param_names()
     assert slot_i not in fitter.free_param_names()
 
-    # Free → both slots reappear
-    fitter.set_free(base)
+    # Free each slot individually with exact name
+    fitter.set_free(slot_r)
+    fitter.set_free(slot_i)
     assert slot_r in fitter.free_param_names()
     assert slot_i in fitter.free_param_names()
 
@@ -138,17 +138,18 @@ def test_set_same_then_free():
     if len(names) < 2:
         return  # skip if not enough params
 
-    base = names[0].rstrip('ri')
-    other = names[1].rstrip('ri')
-    fitter.set_same([[base, other]])
+    slot0 = names[0]
+    slot1 = names[1]
+    fitter.set_same([[slot0, slot1]])
 
-    assert any(base in g for g in fitter._same_params)
-    assert any(other in g for g in fitter._same_params)
+    sp = fitter._same_params
+    assert slot0 in sp.values() or slot0 in sp
+    assert slot1 in sp or slot1 in sp.values()
 
-    fitter.set_free(base)
-    assert not any(base in g for g in fitter._same_params)
-    # The other may still be in its own group or the group may be empty
-    assert not any(other in g for g in fitter._same_params)
+    fitter.set_free(slot0)
+    sp = fitter._same_params
+    assert slot0 not in sp.values() and slot0 not in sp
+    assert slot1 not in sp and slot1 not in sp.values()
 
 
 # ── set_scale — additive ──────────────────────────────────────────
@@ -159,16 +160,16 @@ def test_set_scale_is_additive():
     fitter.set_scale({"foo": -1})
     assert fitter._scale_params == {"foo": -1}
 
-    fitter.set_scale({"bar": 2.0})
-    assert fitter._scale_params == {"foo": -1, "bar": 2.0}
+    fitter.set_scale({"baz": 2.0})
+    assert fitter._scale_params == {"foo": -1, "baz": 2.0}
 
 
 def test_set_scale_reset():
     """set_scale(reset=True) clears before adding."""
     fitter = setup_fitter()
     fitter.set_scale({"foo": -1})
-    fitter.set_scale({"bar": 2.0}, reset=True)
-    assert fitter._scale_params == {"bar": 2.0}
+    fitter.set_scale({"baz": 2.0}, reset=True)
+    assert fitter._scale_params == {"baz": 2.0}
 
 
 def test_set_scale_then_free():
@@ -247,15 +248,14 @@ def test_full_interactive_workflow():
             fitter.set_fixed({s: 0.0})
             break
 
-    # Step 3: same-group some params
+    # Step 3: same-group some params (exact slot names)
     cn = [n for n in fitter.free_param_names() if n.endswith('r')][:2]
     if len(cn) == 2:
-        bases = [c.rstrip('ri') for c in cn]
-        fitter.set_same([bases])
+        fitter.set_same([cn])
 
-    # Step 4: scale a param
+    # Step 4: scale a param (exact slot name)
     if fitter.free_param_names():
-        pn = fitter.free_param_names()[0].rstrip('ri')
+        pn = fitter.free_param_names()[0]
         fitter.set_scale({pn: -1})
 
     # Step 5: bound ranges

@@ -111,121 +111,66 @@ class ParameterConstraint:
 class VariableRegistry:
     """Maps named variables to the flat real vector ``x``.
 
-    Complex parameters → 2 slots ``[r, θ]``.
-    Real parameters     → 1 slot.
+    Every entry represents one slot (no complex/real distinction).
+    Complex coupling parameters occupy two slots (``name_r``, ``name_i``)
+    registered as separate entries.
     """
 
     def __init__(self):
         self._entries = []
         self._name_to_entry = {}
 
-    def add_complex(self, name, target=None):
-        self._entries.append({'name': name, 'kind': 'complex', 'target': target})
-        self._name_to_entry[name] = self._entries[-1]
+    def add(self, name):
+        self._entries.append(name)
+        self._name_to_entry[name] = name
 
-    def add_real(self, name, target=None):
-        self._entries.append({'name': name, 'kind': 'real', 'target': target})
-        self._name_to_entry[name] = self._entries[-1]
+    def add_real(self, name):
+        self.add(name)
+
+    def add_complex(self, base):
+        self.add(base + 'r')
+        self.add(base + 'i')
 
     @property
     def names(self):
-        return [e['name'] for e in self._entries]
+        return list(self._name_to_entry.keys())
 
     @property
     def flat_names(self):
-        result = []
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                result.append(e['name'] + 'r')
-                result.append(e['name'] + 'i')
-            else:
-                result.append(e['name'])
-        return result
+        return list(self._entries)
 
     @property
     def n_flat(self):
-        return sum(2 if e['kind'] == 'complex' else 1 for e in self._entries)
+        return len(self._entries)
 
     def flat_index(self, name):
-        idx = 0
-        for e in self._entries:
-            if e['name'] == name:
-                return (idx, idx + (2 if e['kind'] == 'complex' else 1))
-            idx += 2 if e['kind'] == 'complex' else 1
+        for i, n in enumerate(self._entries):
+            if n == name:
+                return (i, i + 1)
         raise KeyError(f"Unknown variable: {name}")
 
     def build_initial(self, seed=None):
         if seed is not None:
             np.random.seed(seed)
         x = np.empty(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                x[idx] = np.random.uniform(0.5, 2.0)
-                x[idx + 1] = np.random.uniform(-np.pi, np.pi)
-                idx += 2
-            else:
-                x[idx] = np.random.uniform(-0.5, 0.5)
-                idx += 1
+        for i in range(self.n_flat):
+            x[i] = np.random.uniform(-0.5, 0.5)
         return x
 
     def build_initial_deterministic(self):
-        """Deterministic default flat vector (no randomness).
-
-        Complex params start at ``(magnitude=1, phase=0)`` (default coupling).
-        Real params start at ``0`` (center of bound = config default).
-        """
-        x = np.empty(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                x[idx] = 1.0      # default magnitude
-                x[idx + 1] = 0.0  # default phase
-                idx += 2
-            else:
-                x[idx] = 0.0      # center of bound / config default
-                idx += 1
-        return x
+        return np.zeros(self.n_flat)
 
     # ── forward: flat x → {slot_name: real_value} ──────────────
 
     def to_dict(self, x):
-        """Flat vector → slot-level real dict.
-
-        Complex ck params: ``{name_r: mag, name_i: phase}``.
-        Real params: ``{name: value}``.
-        """
-        result = {}
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                result[e['name'] + 'r'] = x[idx]
-                result[e['name'] + 'i'] = x[idx + 1]
-                idx += 2
-            else:
-                result[e['name']] = x[idx]
-                idx += 1
-        return result
+        return dict(zip(self._entries, x))
 
     # ── backward: {slot_name: grad} → flat gradient ────────────
 
     def flat_gradient(self, x, grad_dict):
-        """Copies slot-level gradients into the flat vector.
-
-        Complex params: ``flat[i] = grad[name_r]``,
-        ``flat[i+1] = grad[name_i]``.
-        Real params: ``flat[i] = grad[name]``.
-        """
         flat = np.zeros(self.n_flat)
-        idx = 0
-        for e in self._entries:
-            if e['kind'] == 'complex':
-                flat[idx] = grad_dict.get(e['name'] + 'r', 0.0)
-                flat[idx + 1] = grad_dict.get(e['name'] + 'i', 0.0)
-                idx += 2
-            else:
-                flat[idx] = grad_dict.get(e['name'], 0.0)
-                idx += 1
+        for i, n in enumerate(self._entries):
+            flat[i] = grad_dict.get(n, 0.0)
         return flat
 
     # ── compat shims ────────────────────────────────────────────
@@ -234,20 +179,7 @@ class VariableRegistry:
         return self.to_dict(x)
 
     def extract_by_target(self, x, target_type):
-        result = []
-        idx = 0
-        for e in self._entries:
-            take = (e['target'] is not None and e['target'][0] == target_type)
-            if take:
-                if e['kind'] == 'complex':
-                    result.extend([x[idx], x[idx + 1]])
-                    idx += 2
-                else:
-                    result.append(x[idx])
-                    idx += 1
-            else:
-                idx += 2 if e['kind'] == 'complex' else 1
-        return np.array(result)
+        return np.array([])
 
     def backprop_grad(self, x, grad_dict):
         return self.flat_gradient(x, grad_dict)
@@ -262,6 +194,8 @@ class NameResolution:
 
     Forward: ``d[canon] = raw[alias]`` (last alias wins for each canon).
     Backward: ``grad[alias] = grad_out[canon]``.
+
+    Keys are exact slot names — no suffix manipulation.
     """
 
     def __init__(self):
@@ -276,29 +210,15 @@ class NameResolution:
                     self.map[alias] = canon
 
     def _resolve_slot(self, key):
-        """Resolve a slot-level key through the alias map.
-        
-        ``'nr'`` → ``(canon + 'r')`` if *name* is an alias.
-        ``'ni'`` → ``(canon + 'i')`` if *name* is an alias.
-        Otherwise returns the key unchanged.
-        """
-        if key.endswith('r') and key[:-1] in self.map:
-            return self.map[key[:-1]] + 'r'
-        if key.endswith('i') and key[:-1] in self.map:
-            return self.map[key[:-1]] + 'i'
-        if key in self.map:
-            return self.map[key]
-        return key
+        return self.map.get(key, key)
 
     def apply(self, d):
         result = {}
         for k, v in d.items():
-            result[self._resolve_slot(k)] = v
-        # Inject alias slot names too — all_comb may reference them
+            resolved = self._resolve_slot(k)
+            result[resolved] = v
+        # Inject alias slot names too
         for alias, canon in self.map.items():
-            for suffix in ('r', 'i'):
-                if canon + suffix in result:
-                    result[alias + suffix] = result[canon + suffix]
             if canon in result:
                 result[alias] = result[canon]
         return result
@@ -311,9 +231,6 @@ class NameResolution:
             g = grad_out.get(resolved, 0.0)
             # Also accumulate contributions from aliases that map here
             for alias, canon in self.map.items():
-                for suffix in ('r', 'i'):
-                    if canon + suffix == resolved and alias + suffix in grad_out:
-                        g += grad_out[alias + suffix]
                 if canon == resolved and alias in grad_out:
                     g += grad_out[alias]
             result[key] = g
@@ -325,34 +242,33 @@ class NameResolution:
 # ================================================================
 
 class ScaleTransform:
-    """Applies scale factors (on *original* name before alias resolution).
+    """Applies scale factors to parameter values.
 
-    Forward: ``d[name] = d[name] * scale[name]`` (if scale[name] exists).
+    Keys are always full slot names (``name_r`` for ck parameters,
+    ``name`` for real parameters).  ``set_scale`` normalises bare
+    names by appending ``_r`` to match ck slot convention.
+
+    Forward: ``d[name] = d[name] * scale[name]``.
     Backward: ``grad[name] = grad_out[name] * scale[name]``.
     """
 
     def __init__(self):
-        self.factors = {}      # {original_name: float}
+        self.factors = {}      # {slot_name: float}
 
     def set_scale(self, scale):
-        self.factors = dict(scale)
+        self.factors = {k: float(v) for k, v in scale.items()}
 
     def apply(self, d):
         d = dict(d)
         for name, sf in self.factors.items():
-            # Scale only applies to magnitude (name_r), not phase (name_i)
-            if name + 'r' in d:
-                d[name + 'r'] = d[name + 'r'] * sf
-            elif name in d:
+            if name in d:
                 d[name] = d[name] * sf
         return d
 
     def chain_grad(self, grad_out, d_in):
         grad = dict(grad_out)
         for name, sf in self.factors.items():
-            if name + 'r' in grad:
-                grad[name + 'r'] = grad[name + 'r'] * sf
-            elif name in grad:
+            if name in grad:
                 grad[name] = grad[name] * sf
         return grad
 
@@ -457,7 +373,8 @@ class ConstraintManager:
         return self.scale_tr.factors
 
     def free_param_names(self):
-        return self.var_registry.flat_names
+        return [n for n in self.var_registry.flat_names
+                if n not in self.fixed_tr.values]
 
     def initial_values(self, seed=None):
         return self.var_registry.build_initial(seed=seed)
@@ -483,14 +400,12 @@ class ConstraintManager:
     def set_scale(self, scale_params, reset=False):
         if reset:
             self.scale_tr.factors = {}
-        self.scale_tr.factors.update(dict(scale_params))
+        self.scale_tr.factors.update({k: float(v) for k, v in scale_params.items()})
+        self._rebuild()
         self._rebuild()
 
     def set_free(self, name):
-        name_r = name + 'r'
-        name_i = name + 'i'
-        for key in (name, name_r, name_i):
-            self.fixed_tr.values.pop(key, None)
+        self.fixed_tr.values.pop(name, None)
         # Remove from same groups
         self.name_res.map = {k: v for k, v in self.name_res.map.items()
                              if k != name and v != name}
@@ -562,39 +477,18 @@ class ConstraintManager:
         # 2. Build VariableRegistry
         self._var_registry = VariableRegistry()
 
-        def _slot_fixed(name, suffix=''):
-            if (name + suffix) in self.fixed_tr.values:
-                return True
-            for a in self.name_res.map.get(name, []):
-                if (a + suffix) in self.fixed_tr.values:
-                    return True
-            return False
-
-        def _name_fixed(name):
-            if name in self.fixed_tr.values:
-                return True
-            for a in self.name_res.map.get(name, []):
-                if a in self.fixed_tr.values:
-                    return True
-            return False
-
         added = set()
 
         def _add(name, kind):
-            """Deduplicate through same-constraint and add to registry."""
+            """Add parameter to registry, deduplicating through same-constraint."""
             canon = self.name_res.map.get(name, name)
             if canon in added:
                 return
-            if _name_fixed(canon):
-                return
             added.add(canon)
             if kind == 'ck':
-                r_fixed = _slot_fixed(canon, 'r')
-                i_fixed = _slot_fixed(canon, 'i')
-                if not (r_fixed and i_fixed):
-                    self._var_registry.add_complex(canon, ('ck', canon))
+                self._var_registry.add_complex(canon)
             else:
-                self._var_registry.add_real(canon, (kind, canon))
+                self._var_registry.add_real(canon)
 
         for name in sorted(all_ck_names):
             _add(name, 'ck')

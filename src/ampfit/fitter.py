@@ -325,32 +325,18 @@ class Fitter:
     def reinitial(self, seed=42):
         """Deterministic flat vector using stored physical defaults.
 
-        Real params (mass, width, scalar) are set to their config
-        defaults.  Complex (ck) params use ``(magnitude=1, phase=0)``
-        with a small random offset seeded by *seed* to avoid exact
-        symmetry that can cause kernel singularities.
-
-        Returns:
-            array of shape (n_flat,) matching free_param_names() length.
+        Every parameter is set to its default value with a small
+        random offset (no complex/real distinction).
         """
         _ = self.pc
         rng = np.random.RandomState(seed)
         names = self._var_registry.flat_names
         defaults = self.defaults
-        # Collect all ck base names
-        ck_names = set()
-        for comb in self.all_comb:
-            for p in comb:
-                if isinstance(p, str):
-                    ck_names.add(p)
         x = np.empty(len(names))
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                # Complex entries: add tiny fuzz to avoid exact 1+0j symmetry
-                base = name[:-1] if name.endswith(('r', 'i')) else ''
-                if base in ck_names:
-                    val += rng.uniform(-0.01, 0.01)
+                val += rng.uniform(-0.01, 0.01)
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
@@ -381,10 +367,10 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
-                # Reverse archive-style scale on r-slots:
+                # Reverse archive-style scale:
                 # JSON stores SCALED values (save step 6), ScaleTransform applies them during compute
                 for p, s in self._scale_params.items():
-                    if name == p + 'r' and s != 0:
+                    if name == p and s != 0:
                         val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
@@ -407,7 +393,7 @@ class Fitter:
         
         Example: ['B->...total_0r', 'B->...total_0i', 'gamma', ...]
         """
-        return self.var_registry.flat_names
+        return self.cm.free_param_names()
 
     @property
     def defaults(self):
@@ -1050,13 +1036,9 @@ class Fitter:
             if name not in out["value"]:
                 out["value"][name] = float(val)
 
-        # Build alias→canonical map from same_params (like archive's new_name)
-        new_name = {}
-        for group in self._same_params:
-            if group:
-                canon = group[0]
-                for a in group[1:]:
-                    new_name[a] = canon
+        # Build alias→canonical map from same_params.
+        # _same_params is {alias: canon} (dict), not list-of-lists.
+        new_name = dict(self._same_params)
 
         # Add fixed ck parameters (from _fixed_slots or old _fixed_params)
         all_param_names = set()
@@ -1075,16 +1057,14 @@ class Fitter:
 
         # Same-param aliases: copy value from canonical
         for alias, canon in new_name.items():
-            for suf in ['r', 'i']:
-                ak = alias + suf
-                ck = canon + suf
-                if ck in out["value"]:
-                    out["value"][ak] = out["value"][ck]
-                    out["error"][ak] = out["error"][ck]
+            if canon in out["value"]:
+                out["value"][alias] = out["value"][canon]
+                if canon in out["error"]:
+                    out["error"][alias] = out["error"][canon]
 
         # Scale params: multiply value by scale factor
         for p, scale in self._scale_params.items():
-            out["value"][p + 'r'] = scale * out["value"].get(p + 'r', 0.0)
+            out["value"][p] = scale * out["value"].get(p, 0.0)
 
         # Fixed time parameter defaults
         scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
