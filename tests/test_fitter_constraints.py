@@ -270,6 +270,18 @@ def test_full_interactive_workflow():
     print(f"Interactive workflow: NLL = {nll:.6f}, |grad| = {np.linalg.norm(grad):.4e}")
 
 
+def test_gradients_nonzero():
+    """All gradient components should be non-zero for random initial params."""
+    fitter = setup_fitter()
+    for seed in range(5):
+        x0 = fitter.initial_values(seed=seed)
+        nll, grad = fitter.get_nll(x0)
+        assert np.isfinite(nll), f"NLL not finite at seed={seed}"
+        zero_grads = np.where(np.abs(grad) < 1e-15)[0]
+        assert len(zero_grads) == 0, \
+            f"seed={seed}: {len(zero_grads)}/{len(grad)} zero gradient components"
+
+
 # ── run if called directly ────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -297,6 +309,8 @@ if __name__ == "__main__":
     print("✓ test_unset_range")
     test_fixed_and_range_together()
     print("✓ test_fixed_and_range_together")
+    test_gradients_nonzero()
+    print("✓ test_gradients_nonzero")
     test_full_interactive_workflow()
     print("✓ test_full_interactive_workflow")
     print("\nAll constraint API tests passed!")
