@@ -367,11 +367,6 @@ class Fitter:
         for i, name in enumerate(names):
             if name in values:
                 val = float(values[name])
-                # Reverse archive-style scale:
-                # JSON stores SCALED values (save step 6), ScaleTransform applies them during compute
-                for p, s in self._scale_params.items():
-                    if name == p and s != 0:
-                        val /= s
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
@@ -1055,17 +1050,6 @@ class Fitter:
                 if i_name not in out["value"]:
                     out["value"][i_name] = float(self._fixed_slots[i_name])
 
-        # Same-param aliases: copy value from canonical
-        for alias, canon in new_name.items():
-            if canon in out["value"]:
-                out["value"][alias] = out["value"][canon]
-                if canon in out["error"]:
-                    out["error"][alias] = out["error"][canon]
-
-        # Scale params: multiply value by scale factor
-        for p, scale in self._scale_params.items():
-            out["value"][p] = scale * out["value"].get(p, 0.0)
-
         # Fixed time parameter defaults
         scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
         time_defaults = {
@@ -1202,9 +1186,8 @@ class Fitter:
         """Load constraints from a JSON file saved by :meth:`save_constraints`.
 
         Resets and re-applies all fixed/same/scale/bound settings.
-
-        Args:
-            filepath: path to JSON file from :meth:`save_constraints`.
+        Also normalises old-format bare keys (without ``r``/``i`` suffix)
+        to full slot names for backward compatibility.
         """
         import json
         with open(filepath) as f:
@@ -1213,6 +1196,13 @@ class Fitter:
         self.set_fixed(data.get("fixed", {}), reset=True)
         self.set_same(data.get("same", []), reset=True)
         self.set_scale(data.get("scale", {}), reset=True)
+
+        # Backward compat: normalise old bare scale keys (without ``r`` suffix)
+        names = set(self.var_registry.flat_names)
+        for key in list(self._scale_params):
+            if key not in names and key + 'r' in names:
+                val = self._scale_params.pop(key)
+                self._scale_params[key + 'r'] = val
 
         # Re-apply bounds
         for name, spec in data.get("bounds", {}).items():
