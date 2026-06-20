@@ -125,9 +125,11 @@ class VariableRegistry:
         self._name_to_entry[name] = name
 
     def add_real(self, name):
+        """Convenience: real-valued parameter (single slot)."""
         self.add(name)
 
     def add_complex(self, base):
+        """Convenience: complex parameter → two slots ``base + 'r'``, ``base + 'i'``."""
         self.add(base + 'r')
         self.add(base + 'i')
 
@@ -208,20 +210,6 @@ class NameResolution:
                 canon = group[0]
                 for alias in group[1:]:
                     self.map[alias] = canon
-        # Also inject bare-name entries for _add dedup
-        # (slot-name keys like ``name_r`` → also store ``name`` → ``canon_base``)
-        for alias, canon in list(self.map.items()):
-            for suffix in ('r', 'i'):
-                if alias.endswith(suffix) and canon.endswith(suffix):
-                    alias_base = alias[:-1]
-                    canon_base = canon[:-1]
-                    if alias_base not in self.map:
-                        self.map[alias_base] = canon_base
-                    # Also store bare-name entry for _add dedup
-                    if alias.endswith('r') and alias[:-1] not in self.map:
-                        self.map[alias[:-1]] = canon[:-1] if canon.endswith('r') else canon
-                    elif alias.endswith('i') and alias[:-1] not in self.map:
-                        self.map[alias[:-1]] = canon[:-1] if canon.endswith('i') else canon
 
     def _resolve_slot(self, key):
         return self.map.get(key, key)
@@ -510,37 +498,28 @@ class ConstraintManager:
     # ── rebuild ─────────────────────────────────────────────────
 
     def _rebuild(self):
-        # 1. Collect all ck param names from comb structure
-        all_ck_names = set()
-        for comb in self.all_comb:
-            for p in comb:
-                if isinstance(p, str):
-                    all_ck_names.add(p)
-
-        # 2. Build VariableRegistry
         self._var_registry = VariableRegistry()
-
         added = set()
 
-        def _add(name, kind):
+        def _add(name):
             """Add parameter to registry, deduplicating through same-constraint."""
             canon = self.name_res.map.get(name, name)
             if canon in added:
                 return
             added.add(canon)
-            if kind == 'ck':
-                self._var_registry.add_complex(canon)
-            else:
-                self._var_registry.add_real(canon)
+            self._var_registry.add(canon)
 
+        # Register ck slot names (_r and _i separately)
+        all_ck_names = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
         for name in sorted(all_ck_names):
-            _add(name, 'ck')
+            _add(name + 'r')
+            _add(name + 'i')
         for name in self.m0_names:
-            _add(name, 'm0')
+            _add(name)
         for name in self.g0_names:
-            _add(name, 'g0')
+            _add(name)
         for name in self.SCALAR_NAMES:
-            _add(name, 'scalar')
+            _add(name)
 
 
 # ================================================================

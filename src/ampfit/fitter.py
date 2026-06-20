@@ -1027,6 +1027,9 @@ class Fitter:
         # Store physical values for all resolved keys (canon + alias)
         for name, val in resolved.items():
             out["value"][name] = float(val)
+        # Errors only for free params (matches reference JSON convention)
+        free_names = set(self.free_param_names())
+        for name in free_names:
             if name in errors:
                 out["error"][name] = float(errors[name])
 

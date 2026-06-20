@@ -171,12 +171,12 @@ def main():
     for name in fitter.config.m0_phys_name:
         val = float(fitter.defaults[name])
         if name not in fitter._fixed_slots:
-            fitter.set_range(name, val - 0.3, val + 0.3)
+            fitter.set_range(name, val - 2, val + 2)
     for name in fitter.config.g0_phys_name:
         if name not in fitter._fixed_slots:
             val = float(fitter.defaults[name])
-            lo = max(0.0, val - 0.1)
-            hi = min(2.0, val + 0.1)
+            lo = max(0.0, val - 0.2)
+            hi = min(3.0, val + 1.)
             fitter.set_range(name, lo, hi)
 
     # ==================================================================
