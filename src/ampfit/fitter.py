@@ -349,7 +349,7 @@ class Fitter:
         """Build the flat x vector from a save_params JSON dict.
         
         Reads physical (bounded) values from the 'value' section,
-        reverses archive-style scale factors, and inverts bound
+        reverses constraints via ``cm.inverse()``, and inverts bound
         transforms to get optimizer-space x.
         
         Args:
@@ -364,17 +364,17 @@ class Fitter:
         # Start from deterministic defaults, then override with JSON
         x = self.reinitial()
 
-        for i, name in enumerate(names):
-            if name in values:
-                val = float(values[name])
-                # Reverse scale from saved physical value to optimizer space
-                for p, s in self._scale_params.items():
-                    if name == p and s != 0:
-                        val /= s
-                if i in self._bound_transforms:
-                    bt = self._bound_transforms[i]
-                    val = bt.inverse(val)
-                x[i] = val
+        # Build physical dict from JSON and invert constraints
+        phys = {name: float(values[name]) for name in names if name in values}
+        if phys:
+            raw = self.cm.inverse(phys)
+            for i, name in enumerate(names):
+                if name in raw:
+                    val = float(raw[name])
+                    if i in self._bound_transforms:
+                        bt = self._bound_transforms[i]
+                        val = bt.inverse(val)
+                    x[i] = val
 
         return x
 

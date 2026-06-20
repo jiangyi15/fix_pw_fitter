@@ -237,6 +237,10 @@ class NameResolution:
                 result[alias] = result[canon]
         return result
 
+    def inverse(self, d):
+        """Reverse of :meth:`apply`: no-op (all keys already present)."""
+        return dict(d)
+
     def chain_grad(self, grad_out, d_in):
         """Reverse of :meth:`apply` — maps resolved grads back to raw keys."""
         result = {}
@@ -273,7 +277,19 @@ class ScaleTransform:
         self.factors = {k: float(v) for k, v in scale.items()}
 
     def apply(self, d):
-        return dict(d)
+        d = dict(d)
+        for name, sf in self.factors.items():
+            if name in d:
+                d[name] = d[name] * sf
+        return d
+
+    def inverse(self, d):
+        """Reverse of :meth:`apply`: ``d[name] = d[name] / scale[name]``."""
+        d = dict(d)
+        for name, sf in self.factors.items():
+            if name in d and sf != 0:
+                d[name] = d[name] / sf
+        return d
 
     def chain_grad(self, grad_out, d_in):
         grad = dict(grad_out)
@@ -307,6 +323,10 @@ class FixedOverride:
         for name, val in self.values.items():
             d[name] = val  # inject fixed value even if not in raw dict
         return d
+
+    def inverse(self, d):
+        """Reverse of :meth:`apply`: no-op (forward re-injects fixed values)."""
+        return dict(d)
 
     def chain_grad(self, grad_out, d_in):
         grad = dict(grad_out)
@@ -455,14 +475,27 @@ class ConstraintManager:
 
     def resolve(self, raw_dict):
         """Run the full constraint pipeline: same → fixed → scale.
-        
+
         Fixed values are the physical param values; scale is a model factor
         that multiplies ALL params (even fixed ones), matching TFPWA convention
         where scale is applied at the amplitude product level.
+
+        Returns a dict with post-constraint physical parameter values.
         """
         d = self.name_res.apply(raw_dict)
         d = self.fixed_tr.apply(d)
         d = self.scale_tr.apply(d)
+        return d
+
+    def inverse(self, resolved):
+        """Reverse of :meth:`resolve`: scale⁻¹ → fixed⁻¹ → same⁻¹.
+
+        Converts physical (post-constraint) values back to raw
+        (pre-constraint) values.  Used by ``values_from_dict``.
+        """
+        d = self.scale_tr.inverse(resolved)
+        d = self.fixed_tr.inverse(d)
+        d = self.name_res.inverse(d)
         return d
 
     # ── backward pipeline ──────────────────────────────────────

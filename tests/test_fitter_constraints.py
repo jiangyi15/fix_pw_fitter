@@ -30,8 +30,8 @@ def make_data(n_events):
 
 def setup_fitter():
     fitter = Fitter(CONFIG_FILE)
-    fitter.set_data(make_data(N_DATA))
     fitter.set_phsp(make_data(N_PHSP))
+    fitter.set_data(make_data(N_DATA))
     fitter.set_default_params(
         m0=np.random.random(fitter.n_m0) + 2,
         g0=np.random.random(fitter.n_g0) + 0.1,
