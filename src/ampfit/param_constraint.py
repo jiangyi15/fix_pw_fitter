@@ -504,7 +504,7 @@ class ConstraintManager:
         def _add(name):
             """Add parameter to registry, deduplicating through same-constraint."""
             canon = self.name_res.map.get(name, name)
-            if canon in added:
+            if canon in added or canon in self.fixed_tr.values:
                 return
             added.add(canon)
             self._var_registry.add(canon)
