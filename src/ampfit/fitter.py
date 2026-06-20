@@ -1024,9 +1024,11 @@ class Fitter:
         _, errors = self._params_from_fit(fit_result, return_bounded=True)
 
         out = {"value": {}, "error": {}}
-        for name in flat_names:
-            out["value"][name] = float(resolved[name])
-            out["error"][name] = float(errors.get(name, 0.0))
+        # Store physical values for all resolved keys (canon + alias)
+        for name, val in resolved.items():
+            out["value"][name] = float(val)
+            if name in errors:
+                out["error"][name] = float(errors[name])
 
         # Add all defaults to value (including fixed params not in flat_names)
         for name, val in self.defaults.items():
