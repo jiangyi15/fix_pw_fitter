@@ -325,33 +325,24 @@ class Fitter:
     def reinitial(self, seed=42):
         """Deterministic flat vector using stored physical defaults.
 
-        Mass, width and scalar params use their config defaults.
-        CK coupling slots get a small random offset to avoid exact
-        1+0j symmetry that can cause kernel singularities.
+        Parameters with a config default (mass, width, scalar) use that
+        value exactly.  Parameters without defaults (ck coupling slots)
+        get a small random offset to break symmetry.
         """
         _ = self.pc
         rng = np.random.RandomState(seed)
         names = self._var_registry.flat_names
         defaults = self.defaults
-        # Identify ck slots: base name appears in all_comb
-        ck_bases = set()
-        for comb in self.all_comb:
-            for p in comb:
-                if isinstance(p, str):
-                    ck_bases.add(p)
         x = np.empty(len(names))
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                base = name[:-1] if name.endswith(('r', 'i')) else ''
-                if base in ck_bases:
-                    val += rng.uniform(-0.01, 0.01)
                 if i in self._bound_transforms:
                     bt = self._bound_transforms[i]
                     val = bt.inverse(val)
                 x[i] = val
             else:
-                x[i] = 0.0
+                x[i] = rng.uniform(-0.01, 0.01)
         return x
 
     def values_from_dict(self, data):
