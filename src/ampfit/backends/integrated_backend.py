@@ -57,10 +57,12 @@ class IntegratedBackend(ComputeBackend):
         self.M_mm = None   # (n, n) B0bar × B0bar
         self.M_pm = None   # (n, n) B0 × B0bar
         self.phsp_n = 0
+        self._gram_m0 = None   # m0 snapshot used for current Gram matrices
+        self._gram_g0 = None
 
-        # m0/g0 snapshot
-        self._m0_used = None
-        self._g0_used = None
+        # Raw phsp arrays stored by prepare_phsp_batched — used for
+        # deferred Gram matrix computation in _ensure_gram().
+        self._phsp_data = None   # dict with mass, q, angle arrays
 
         # Time/frac/weight arrays (for per‑NLL time averages)
         self._phsp_weights = None
@@ -95,6 +97,29 @@ class IntegratedBackend(ComputeBackend):
                 float(np.sum(w * gm2) / ws),
                 complex(np.sum(w * gpgm) / ws))
 
+    def _ensure_gram(self, params):
+        """Build Gram matrices from stored phsp data if needed.
+
+        Uses *m0*, *g0* from *params* — called on first
+        ``compute_norm_batched`` or when m0/g0 change.
+        """
+        if self._phsp_data is None:
+            raise RuntimeError("IntegratedBackend: phsp not loaded. "
+                               "Call prepare_phsp_batched() first.")
+        m0 = np.asarray(params["m0"])
+        g0 = np.asarray(params["g0"])
+        # Check if already computed with matching m0/g0
+        if (self.M_pp is not None
+                and np.array_equal(m0, self._gram_m0)
+                and np.array_equal(g0, self._gram_g0)):
+            return
+        # Build (or rebuild) from stored phsp data
+        phsp = {**self._phsp_data, "weight": self._phsp_weights,
+                "frac": self._phsp_frac, "time": self._phsp_time}
+        self._load_phsp_matrices(phsp, m0, g0)
+        self._gram_m0 = m0.copy()
+        self._gram_g0 = g0.copy()
+
     def _load_phsp_matrices(self, phsp, m0, g0):
         """Compute Gram matrices from phsp (batched, ~350 MB peak)."""
         n_events = phsp["mass"].shape[0]
@@ -105,21 +130,31 @@ class IntegratedBackend(ComputeBackend):
         sw = np.sqrt(w)
 
         bs = 50000
+        n_batches = (n_events + bs - 1) // bs
+        import sys, time as _time
+        _t0 = _time.time()
         M = np.zeros((n_wave, n_wave), dtype=complex)
         for b_start in range(0, n_events, bs):
+            b_idx = b_start // bs
             b_end = min(b_start + bs, n_events)
             batch = {k: v[b_start:b_end] for k, v in phsp.items()
                      if isinstance(v, np.ndarray)}
             ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
             Ab = ba * sw[b_start:b_end, np.newaxis]
             M += Ab.T.conj() @ Ab
+            _elapsed = _time.time() - _t0
+            _eta = _elapsed / (b_idx + 1) * (n_batches - b_idx - 1)
+            sys.stdout.write(
+                f"\r  Gram matrix: batch {b_idx + 1}/{n_batches}  "
+                f"[{_elapsed:.1f}s"
+                f"{f', {_eta:.1f}s ETA' if _eta > 1 else ''}]   ")
+            sys.stdout.flush()
+        sys.stdout.write("\n")
         M = (M + M.conj().T) / 2
 
         self.M_pp = M[:n, :n].copy()
         self.M_mm = M[n:, n:].copy()
         self.M_pm = M[:n, n:].copy()
-        self._m0_used = np.asarray(m0).copy()
-        self._g0_used = np.asarray(g0).copy()
         self.phsp_n = n_events
         self._phsp_weights = w
         self._phsp_frac = np.asarray(
@@ -157,8 +192,11 @@ class IntegratedBackend(ComputeBackend):
 
         # ── norm mode: use Gram matrices if no data_handle ────────
         if data_handle is not None:
-            # Called from plot() or similar — delegate for per‑event P
+            # Called from plot() — delegate to base backend for per‑event P
             return self.base.compute(params, data_handle, norm=None)
+
+        # Build Gram matrices on first call using m0/g0 from params
+        self._ensure_gram(params)
 
         # ── Fast norm from pre‑computed Gram matrices ─────────────
         if self.M_pp is None:
@@ -217,9 +255,13 @@ class IntegratedBackend(ComputeBackend):
         # ∂norm/∂{gp2,gm2,gpgm}
         d_gp2 = A_co * I_pp.real + B_co * I_mm.real
         d_gm2 = A_co * poq2 * I_mm.real + B_co / poq2 * I_pp.real
-        re_term = A_co * (poq * I_pm) + B_co * (I_pm / poq.conjugate())
-        d_Re = 2.0 * re_term.real
-        d_Im = -2.0 * re_term.imag
+        # ∂norm/∂Re(gpgm_avg) = 2·A_co·Re(poq·I_pm) + 2·B_co·Re(I_pm/poq*)
+        # ∂norm/∂Im(gpgm_avg) = -2·A_co·Im(poq·I_pm) + 2·B_co·Im(I_pm/poq*)
+        # Note: the B term sign differs from the Re case because
+        # the B0bar cross term involves conj(gpgm)/poq* · I_pm.
+        d_Re = (2.0 * (A_co * (poq * I_pm) + B_co * (I_pm / poq.conjugate())).real)
+        d_Im = (-2.0 * (A_co * (poq * I_pm)).imag
+                + 2.0 * (B_co * I_pm / poq.conjugate()).imag)
 
         t = self._phsp_time
         w = self._phsp_weights
@@ -274,10 +316,8 @@ class IntegratedBackend(ComputeBackend):
         scalar_grads = (dG, dDG, dDM, dAp, dpoqr, dpoqi)
 
         # m0/g0 gradients are zero (fixed at pre‑computation)
-        _z_m0 = (np.zeros(len(self._m0_used))
-                 if self._m0_used is not None else np.array([]))
-        _z_g0 = (np.zeros(len(self._g0_used))
-                 if self._g0_used is not None else np.array([]))
+        _z_m0 = np.zeros(self._n_m0())
+        _z_g0 = np.zeros(self._n_g0())
 
         grads = {"ck": grad_ck, "m0": _z_m0, "g0": _z_g0,
                  "scalar": scalar_grads, "norm": None}
@@ -291,16 +331,36 @@ class IntegratedBackend(ComputeBackend):
     # ═══════════════════════════════════════════════════════════════
 
     def prepare_phsp_batched(self, phsp_np, n_events):
-        """Pre‑compute Gram matrices; store phsp numpy dict for fallback."""
-        m0 = phsp_np.get("m0", None)
-        g0 = phsp_np.get("g0", None)
-        if m0 is None:
-            m0 = np.ones(self._n_m0())
-        if g0 is None:
-            g0 = np.ones(self._n_g0())
-        self._load_phsp_matrices(phsp_np, m0, g0)
-        # Store phsp dict for downstream use (plot, etc.)
-        self._phsp_scratch = phsp_np
+        """Store phsp data for deferred Gram matrix computation.
+
+        The actual Gram matrix build happens on the first
+        :meth:`compute_norm_batched` call when m0/g0 from *params*
+        are available.
+
+        Also loads the phsp data to the base backend (e.g. CUDA) so
+        that :meth:`compute` with ``norm=None`` and a ``DataHandle``
+        (called from :meth:`~ampfit.fitter.Fitter.plot`) can use the
+        accelerated backend for per‑event P computation.
+        """
+        import numpy as np
+        w = np.asarray(phsp_np.get("weight", np.ones(n_events)), dtype=np.float64)
+        self._phsp_weights = w
+        self._phsp_frac = np.asarray(
+            phsp_np.get("frac", np.ones(n_events)), dtype=np.float64)
+        self._phsp_time = np.asarray(
+            phsp_np.get("time", np.zeros(n_events)), dtype=np.float64)
+        # Store raw spatial arrays for Gram matrix build
+        self._phsp_data = {k: np.asarray(v)
+                           for k, v in phsp_np.items()
+                           if isinstance(v, np.ndarray)
+                           and k in ("mass", "q", "angle")}
+        self.phsp_n = n_events
+
+        # Load phsp into the base backend for downstream use (plot, etc.)
+        # Ensure 'bkg' key exists (required by CUDA backend)
+        if "bkg" not in phsp_np:
+            phsp_np["bkg"] = np.zeros(n_events, dtype=np.float64)
+        self._phsp_scratch = self.base.load_data(phsp_np)
 
     def compute_norm_batched(self, params):
         """Fast norm + gradients from Gram matrices.
@@ -313,7 +373,8 @@ class IntegratedBackend(ComputeBackend):
     def free(self):
         """Release all resources (matrices + base backend)."""
         self.M_pp = self.M_mm = self.M_pm = None
-        self._m0_used = self._g0_used = None
+        self._gram_m0 = self._gram_g0 = None
+        self._phsp_data = None
         self._phsp_weights = self._phsp_frac = self._phsp_time = None
         self.phsp_n = 0
         try:

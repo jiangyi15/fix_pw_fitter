@@ -79,6 +79,7 @@ class NumpyKernelCorrect:
         n_types = table.shape[0]
         xbin = np.clip(xbin, 0, n_bins - 2)
         t = diff - xbin
+        t = np.clip(t, 0.0, 1.0)  # prevent extrapolation outside table range
         # Flat indices per-type
         type_start = types * n_bins
         type_end = (types + 1) * n_bins - 1
