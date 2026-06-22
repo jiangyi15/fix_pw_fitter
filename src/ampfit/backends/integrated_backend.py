@@ -86,16 +86,44 @@ class IntegratedBackend(ComputeBackend):
         return (eL + eH) / 2, (eL - eH) / 2
 
     def _time_averages(self, scalar):
-        """⟨|gp|²⟩, ⟨|gm|²⟩, ⟨gp*·gm⟩ from stored phsp time/weights."""
+        """Time integrals using cosh/cos/sinh/sin decomposition.
+
+        Returns gp2_avg, gm2_avg, gpgm_avg + derivative integrals
+        for efficient scalar gradient computation.
+        """
+        Gam, DG, Dm, Ap, r, phi = scalar
+        t = self._phsp_time
         w = self._phsp_weights
-        gp, gm = self._gp_gm(self._phsp_time, scalar)
-        gp2 = (gp * gp.conj()).real
-        gm2 = (gm * gm.conj()).real
-        gpgm = gp.conj() * gm
         ws = np.sum(w)
-        return (float(np.sum(w * gp2) / ws),
-                float(np.sum(w * gm2) / ws),
-                complex(np.sum(w * gpgm) / ws))
+
+        expt = np.exp(-Gam * t)
+        cht = np.cosh(DG * t / 2)
+        sht = np.sinh(DG * t / 2)
+        ct = np.cos(Dm * t)
+        st = np.sin(Dm * t)
+
+        def avg(f): return float(np.sum(w * f) / ws)
+        def avg_c(f): return complex(np.sum(w * f) / ws)
+
+        icht = avg(cht * expt)
+        ict = avg(ct * expt)
+        isht = avg(sht * expt)
+        ist = avg(st * expt)
+
+        gp2_avg = (icht + ict) / 2
+        gm2_avg = (icht - ict) / 2
+        gpgm_avg = (-isht + 1j * ist) / 2
+
+        # Derivative time integrals (for scalar gradient chain)
+        idcht = avg(t * expt * sht) / 2       # d(icht)/dDG
+        idct = -avg(t * expt * st)            # d(ict)/dDm
+        idsht = avg(t * expt * cht) / 2       # d(isht)/dDG
+        idst = avg(t * expt * ct)             # d(ist)/dDm
+
+        return (gp2_avg, gm2_avg, gpgm_avg,
+                icht, ict, isht, ist,
+                idcht, idct, idsht, idst,
+                expt, cht, sht, ct, st, t, w, ws)
 
     def _ensure_gram(self, params):
         """Build Gram matrices from stored phsp data if needed.
@@ -220,8 +248,10 @@ class IntegratedBackend(ComputeBackend):
         self.int_Am2 = float(I_mm.real)
         self.int_ApAm = complex(I_pm)
 
-        # Time averages
-        gp2_avg, gm2_avg, gpgm_avg = self._time_averages(params["scalar"])
+        # Time averages with cosh/cos/sinh/sin decomposition
+        (gp2_avg, gm2_avg, gpgm_avg,
+         icht, ict, isht, ist,
+         idcht, idct, idsht, idst) = self._time_averages(params["scalar"])[:11]
 
         # Combine
         frac_avg = float(np.sum(self._phsp_weights * self._phsp_frac))
@@ -251,61 +281,27 @@ class IntegratedBackend(ComputeBackend):
         grad_ck[:n] = (C_pp * Mp + z_total * Mpm).conj()
         grad_ck[n:] = (C_mm * Mm).conj() + z_total * MpmT_ckbar
 
-        # ── scalar gradients ──────────────────────────────────────
-        # ∂norm/∂{gp2,gm2,gpgm}
-        d_gp2 = A_co * I_pp.real + B_co * I_mm.real
-        d_gm2 = A_co * poq2 * I_mm.real + B_co / poq2 * I_pp.real
-        # ∂norm/∂Re(gpgm_avg) = 2·A_co·Re(poq·I_pm) + 2·B_co·Re(I_pm/poq*)
-        # ∂norm/∂Im(gpgm_avg) = -2·A_co·Im(poq·I_pm) + 2·B_co·Im(I_pm/poq*)
-        # Note: the B term sign differs from the Re case because
-        # the B0bar cross term involves conj(gpgm)/poq* · I_pm.
-        d_Re = (2.0 * (A_co * (poq * I_pm) + B_co * (I_pm / poq.conjugate())).real)
-        d_Im = (-2.0 * (A_co * (poq * I_pm)).imag
-                + 2.0 * (B_co * I_pm / poq.conjugate()).imag)
+        # ── scalar gradients (using derivative time integrals) ──────
+        # Spatial combination coefficients (matching reference's int1..4)
+        poq_c = poq.conjugate()
+        int1_x = 0.5*(A_co + B_co/poq2)*I_pp.real + 0.5*(B_co + A_co*poq2)*I_mm.real
+        int2_x = 0.5*(A_co - B_co/poq2)*I_pp.real + 0.5*(B_co - A_co*poq2)*I_mm.real
+        int3_x = -(A_co*(poq*I_pm) + B_co*I_pm/poq_c).real
+        int4_x = -(A_co*(poq*I_pm)).imag + (B_co*I_pm/poq_c).imag
 
-        t = self._phsp_time
-        w = self._phsp_weights
-        ws = np.sum(w)
-        gp, gm = self._gp_gm(t, params["scalar"])
-
-        def avg(f): return float(np.sum(w * f) / ws)
-        def avg_c(f): return complex(np.sum(w * f) / ws)
-
-        def chain(dgp2, dgm2, dgpgm):
-            return (d_gp2 * dgp2 + d_gm2 * dgm2
-                    + d_Re * dgpgm.real + d_Im * dgpgm.imag)
-
-        # Γ
-        dg = -0.5 * t * gp; dgm = -0.5 * t * gm
-        dgp2_G = avg(2.0 * (gp.conj() * dg).real)
-        dgm2_G = avg(2.0 * (gm.conj() * dgm).real)
-        dgpgm_G = avg_c(dg.conj() * gm + gp.conj() * dgm)
-        dG = float(chain(dgp2_G, dgm2_G, dgpgm_G).real)
-
-        # ΔΓ
-        dg = -0.25 * t * gm; dgm = -0.25 * t * gp
-        dgp2_DG = avg(2.0 * (gp.conj() * dg).real)
-        dgm2_DG = avg(2.0 * (gm.conj() * dgm).real)
-        dgpgm_DG = avg_c(dg.conj() * gm + gp.conj() * dgm)
-        dDG = float(chain(dgp2_DG, dgm2_DG, dgpgm_DG).real)
-
-        # Δm
-        dg = 0.5j * t * gm; dgm = 0.5j * t * gp
-        dgp2_DM = avg(2.0 * (gp.conj() * dg).real)
-        dgm2_DM = avg(2.0 * (gm.conj() * dgm).real)
-        dgpgm_DM = avg_c(dg.conj() * gm + gp.conj() * dgm)
-        dDM = float(chain(dgp2_DM, dgm2_DM, dgpgm_DM).real)
+        # Gradient via reference's derivative-time-integral formula
+        dG = float(-(int1_x*2*idsht + int2_x*idst + int3_x*2*idcht - int4_x*idct).real)
+        dDG = float((int1_x*idcht + int3_x*idsht).real)
+        dDM = float((int2_x*idct + int4_x*idst).real)
 
         # A_prod
         d_B0_dens = (gp2_avg * I_pp.real + poq2 * gm2_avg * I_mm.real
                      + 2.0 * (poq * gpgm_avg * I_pm).real)
         d_B0bar_dens = (gm2_avg / poq2 * I_pp.real + gp2_avg * I_mm.real
-                        + 2.0 * (gpgm_avg.conjugate()
-                                 / poq.conjugate() * I_pm).real)
+                        + 2.0 * (gpgm_avg.conjugate() / poq_c * I_pm).real)
         dAp = float((-frac_avg * d_B0_dens + omf * d_B0bar_dens).real)
 
         # poqr, poqi (Wirtinger)
-        poq_c = poq.conjugate()
         dn_dpoq = (A_co * poq_c * gm2_avg * I_mm.real
                    - B_co * gm2_avg * poq_c / poq2**2 * I_pp.real
                    + A_co * gpgm_avg * I_pm
