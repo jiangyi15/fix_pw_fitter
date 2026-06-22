@@ -12,12 +12,70 @@ def register_backend(name):
     return _f
 
 
-def create_backend(name, kernel_config, **kwargs):
-    """Factory: instantiate a backend by name."""
+def eval_backend_spec(spec, kernel_config):
+    """Recursively resolve a backend spec to an instance.
+
+    Supported forms:
+
+    * ``"numpy"`` — simple name.
+    * ``{"name": "cuda_v3", "batch_size": 50000}`` — name + kwargs.
+    * ``{"name": "integrated", "base": "cuda_v3"}`` — nested spec;
+      *base* is itself a backend spec, resolved recursively.
+
+    Any kwarg whose value is a ``str`` or ``dict`` is treated as a
+    nested backend spec and resolved before being passed to the
+    parent backend's constructor.
+
+    Returns:
+        A :class:`ComputeBackend` instance.
+    """
+    if isinstance(spec, str):
+        if spec not in ALL_BACKENDS:
+            raise ValueError(f"Unknown backend '{spec}'. "
+                             f"Available: {list(ALL_BACKENDS.keys())}")
+        return ALL_BACKENDS[spec](kernel_config)
+
+    if not isinstance(spec, dict):
+        raise TypeError(f"Expected str or dict, got {type(spec).__name__}")
+
+    spec = dict(spec)
+    name = spec.pop("name", None)
+    if name is None:
+        raise ValueError("Dict spec must have a 'name' key; "
+                         f"got keys: {list(spec.keys())}")
     if name not in ALL_BACKENDS:
         raise ValueError(f"Unknown backend '{name}'. "
                          f"Available: {list(ALL_BACKENDS.keys())}")
-    return ALL_BACKENDS[name](kernel_config, **kwargs)
+
+    cls = ALL_BACKENDS[name]
+
+    # Recursively resolve any kwargs that are themselves backend specs
+    resolved = {}
+    for k, v in spec.items():
+        if isinstance(v, (str, dict)):
+            resolved[k] = eval_backend_spec(v, kernel_config)
+        else:
+            resolved[k] = v
+
+    return cls(kernel_config, **resolved)
+
+
+def create_backend(spec, kernel_config, **kwargs):
+    """Factory: instantiate a backend.
+
+    Args:
+        spec: string name, or dict with ``"name"`` + kwargs.
+              Kwarg values that are strings or dicts are recursively
+              resolved as backend specs.
+        kernel_config: config dict from ``Config.build_all_index()``.
+        **kwargs: extra arguments (convenience, merged into dict spec).
+
+    Returns:
+        A :class:`ComputeBackend` instance.
+    """
+    if isinstance(spec, dict) and kwargs:
+        spec = {**spec, **kwargs}
+    return eval_backend_spec(spec, kernel_config)
 
 
 class DataHandle:

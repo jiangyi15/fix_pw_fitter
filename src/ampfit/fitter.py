@@ -34,13 +34,13 @@ class Fitter:
 
         Args:
             config_file: path to YAML config.
-            backend: a :class:`ComputeBackend` instance, or a string shortcut.
-                     Strings are resolved via
-                     ``ampfit.backends.create_backend()``.
-                     Registered names: ``"cuda"``/``"cuda64"``,
-                      ``"cuda_v2"``/``"cuda64_v2"``/``"cuda32_v2"``,
-                      ``"cuda_v3"``/``"cuda64_v3"``/``"cuda32_v3"``,
-                     ``"numpy"``, ``"onnx"``/``"onnx_cpu"``, ``"onnx_cuda"``.
+            backend: a :class:`ComputeBackend` instance, a ``str``, or
+                     a ``dict``.  Strings are resolved via
+                     :func:`create_backend`.  Dicts use::
+
+                         {"name": "integrated", "base": "cuda_v3"}
+
+                     where ``"base"`` is itself a recursive backend spec.
         """
         from ampfit.config_loader import Config
         from ampfit.param_constraint import ConstraintManager
@@ -52,7 +52,7 @@ class Fitter:
         # Resolve backend
         if backend is None or backend == "cuda":
             backend = create_backend("cuda64", self.kernel_config)
-        elif isinstance(backend, str):
+        elif isinstance(backend, (str, dict)):
             backend = create_backend(backend, self.kernel_config)
         # 'backend' is now a ComputeBackend instance
         self.backend = backend

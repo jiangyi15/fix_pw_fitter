@@ -106,10 +106,10 @@ def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
     parser.add_argument("--backend", default="cuda_v3",
-                        choices=["cuda_v2", "cuda64_v2", "cuda32_v2",
-                                 "cuda_v3", "cuda64_v3", "cuda32_v3",
-                                 "numpy", "onnx", "onnx_cpu", "onnx_cuda"],
-                        help="Compute backend")
+                        help='Compute backend: a name like "cuda_v3", '
+                             'or a YAML dict like '
+                             '\'{name: integrated, base: cuda_v3}\' '
+                             "(note: spaces required after colons)")
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--data", default="data/data_arrays.npz")
     parser.add_argument("--phsp", default="data/phsp_arrays.npz")
@@ -132,7 +132,13 @@ def main():
     print("SETUP")
     print("=" * 70)
 
-    fitter = Fitter(args.config, backend=args.backend)
+    # Parse backend: YAML dict or plain name
+    backend_spec = args.backend
+    if isinstance(backend_spec, str) and backend_spec.strip().startswith("{"):
+        import yaml
+        backend_spec = yaml.safe_load(backend_spec)
+
+    fitter = Fitter(args.config, backend=backend_spec)
     fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
     # Optionally add mass/width fixes to the fixed slots
     if args.fix_mass_width:
@@ -150,7 +156,7 @@ def main():
     fixed_slots["poqr"] = 1.0
     fixed_slots["poqi"] = 0.0
 
-    for name in ["a1(1260)", "a2(1320)", "a2(1700)", "pi2(1670)", "pi1(1600)"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
+    for name in ["a1(1260)", "a2(1320)", "a2(1700)", "pi2(1670)", "pi1(1600)","a1(1640)", "pi1300", "pi1600"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
         if f"{name}p_mass" in fixed_slots:
             del fixed_slots[f"{name}p_mass"]
         if f"{name}m_mass" in fixed_slots:
@@ -168,17 +174,20 @@ def main():
     print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
 
     # Set boundary ranges for masses and widths
+    mass_width_range = {}
     for name in fitter.config.m0_phys_name:
         val = float(fitter.defaults[name])
-        if name not in fitter._fixed_slots:
-            fitter.set_range(name, val - 2, val + 2)
+        mass_width_range[name] = [val - 2, val + 2]
     for name in fitter.config.g0_phys_name:
-        if name not in fitter._fixed_slots:
-            val = float(fitter.defaults[name])
-            lo = max(0.0, val - 0.2)
-            hi = min(3.0, val + 1.)
-            fitter.set_range(name, lo, hi)
-
+        val = float(fitter.defaults[name])
+        lo = max(0.01, val - 20)
+        hi = min(5.0, val + 4.)
+        mass_width_range[name] = [lo, hi]
+    mass_width_range["a1(1260)p_mass"] = [1.1, 1.32]
+    mass_width_range["a1(1260)m_mass"] = [1.1, 1.32]
+    for k, v in mass_width_range.items():
+        if k not in fitter._fixed_slots:
+            fitter.set_range(k, *v)
     # ==================================================================
     # 2. Load data
     # ==================================================================

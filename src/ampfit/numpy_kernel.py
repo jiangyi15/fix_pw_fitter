@@ -394,3 +394,71 @@ class NumpyKernelCorrect:
         }
         
         return Q, grads, P
+
+    # ------------------------------------------------------------------
+    # Basis computation for pre-integrated backend
+    # ------------------------------------------------------------------
+    def _compute_common_amp_factor(self, data, m0=None, g0=None):
+        """Compute spatial basis functions for each event.
+
+        Returns ``common_amp_factor`` of shape ``(n_events, n_wave)`` —
+        the spatial factor that multiplies ``ck`` to get the full amplitude
+        ``a[k] = ck[k] * common_amp_factor[k]``.  Depends on *m0* and *g0*
+        (Breit-Wigner denominators) but NOT on ``ck`` or time-evolution
+        parameters.
+
+        Args:
+            data: dict with keys ``mass``, ``q``, ``angle``, ``weight``.
+            m0: mass array (uses self params if None).
+            g0: width array (uses self params if None).
+
+        Returns:
+            complex ndarray of shape ``(n_events, n_wave)``.
+        """
+        import numpy as np
+
+        mass = data["mass"]
+        momentum = data["q"]
+        angle = data["angle"]
+        weight = data.get("weight", np.ones(mass.shape[0]))
+
+        # BW propagators (Catmull-Rom)
+        if m0 is None:
+            m0 = np.ones(len(self.m0_index))
+        if g0 is None:
+            g0 = np.ones(len(self.g0_index))
+
+        g0_all = np.take(g0, self.g0_index)
+        g0_m = np.take(mass, self.g0_mass_index, axis=-1)
+        g_interp = self.interp_catmull_rom(self.gamma_table, self.g0_index, g0_m,
+                                           self.gamma_min, self.gamma_delta)
+        g = g0_all * g_interp
+        g_bw = np.dot(g, self.matrix_gamma)
+
+        m0_all = np.take(m0, self.m0_index)
+        m0_m = np.take(mass, self.mass_index, axis=-1)
+        bw_dom = m0_all**2 - m0_m**2 - 1j * m0_all * g_bw
+
+        bw_dom_all = np.take(bw_dom, self.bw_order, axis=-1)
+        n_events = bw_dom_all.shape[0]
+        bw_dom_all_reshaped = bw_dom_all.reshape(n_events, self.n_wave, self.n_res)
+        bw_p = np.prod(bw_dom_all_reshaped, axis=-1)
+
+        # FL factors
+        fl_q = np.take(momentum, self.fl_q_index, axis=-1)
+        fl = self.interp_catmull_rom(self.fl_table, self.fl_type, fl_q,
+                                     self.fl_min, self.fl_delta)
+        fl_all = np.take(fl, self.fl_order, axis=-1)
+        fl_p = np.prod(fl_all.reshape(-1, self.n_wave, self.n_decay), axis=-1)
+
+        # Angular factors
+        ang = np.take(angle, self.angle_index, axis=-2)
+        ka = np.prod(np.cos(ang * self.angle_k + self.angle_b), axis=-1)
+        fa = np.dot(ka, self.matrix_angle)
+
+        # Common amplitude factor (spatial, no ck scaling)
+        one_over_bw = 1.0 / bw_p
+        fa_times_fl = fa * fl_p
+        common_amp_factor = one_over_bw * fa_times_fl
+
+        return common_amp_factor
