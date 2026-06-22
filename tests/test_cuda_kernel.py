@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 from ampfit._cuda import CUDAKernel
 
 CONFIG_FILE = "config_angle.yml"
@@ -36,7 +36,7 @@ def test_cuda_kernel_correctness():
     data = make_data(100)
     
     # NumPy reference
-    nk = NumpyKernelCorrect(kernel_config)
+    nk = NumpyKernel(kernel_config)
     Q_np, grads_np, P_np = nk._compute(params, data)
     
     # CUDA

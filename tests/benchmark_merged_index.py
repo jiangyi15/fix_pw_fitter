@@ -4,7 +4,7 @@ import sys, os, time, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 from ampfit.merged_index_kernel import MergedIndexKernel
 
 CONFIG_FILE = "config_angle.yml"
@@ -24,7 +24,7 @@ base_params = {
     'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
 }
 
-ref_kernel = NumpyKernelCorrect(kernel_config)
+ref_kernel = NumpyKernel(kernel_config)
 test_kernel = MergedIndexKernel(kernel_config)
 
 print("=" * 65)

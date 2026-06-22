@@ -82,7 +82,7 @@ class _ONNXBackendBase(ComputeBackend):
     def _is_event_array(key, array, n_total):
         return isinstance(array, np.ndarray) and array.ndim >= 1 and array.shape[0] == n_total
 
-    def compute(self, params, data_handle, norm=None):
+    def compute(self, params, data_handle, norm=None, return_p=True):
         n_total = data_handle["mass"].shape[0]
         bs = self._onnx_batch; n_batches = (n_total + bs - 1) // bs
         sess = self.sess_norm if norm is None else self.sess

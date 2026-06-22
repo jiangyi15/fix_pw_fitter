@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 from ampfit._cuda_merged import CUDAMergedKernel
 
 CONFIG_FILE = "config_angle.yml"
@@ -34,7 +34,7 @@ for n in [N_EVENTS, 128, 256]:
         'weight': np.ones((n,)),
     }
 
-    ref = NumpyKernelCorrect(kernel_config)
+    ref = NumpyKernel(kernel_config)
     Q_r, grads_r, P_r = ref._compute(params, data)
 
     test = CUDAMergedKernel(kernel_config)

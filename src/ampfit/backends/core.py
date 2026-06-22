@@ -88,7 +88,7 @@ class ComputeBackend:
 
     Subclasses must implement:
       load_data(self, data_np) -> DataHandle
-      compute(self, params, data_handle, norm) -> (Q, grads_dict, P)
+      compute(self, params, data_handle, norm, return_p) -> (Q, grads_dict, P)
       free(self)
     """
     dtype = np.float64
@@ -96,7 +96,18 @@ class ComputeBackend:
     def load_data(self, data_np):
         raise NotImplementedError
 
-    def compute(self, params, data_handle, norm=None):
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        """Compute forward + backward pass.
+
+        Args:
+            params: dict with 'ck', 'm0', 'g0', 'scalar'.
+            data_handle: DataHandle from load_data().
+            norm: optional float normalization factor.
+            return_p: if True, return per-event P; otherwise None.
+
+        Returns:
+            (Q, grads_dict, P_or_None).
+        """
         raise NotImplementedError
 
     def free(self):

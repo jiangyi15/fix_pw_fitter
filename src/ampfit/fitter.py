@@ -481,12 +481,9 @@ class Fitter:
         return np.sum(weight * P / denom)
 
     def _compute_norm_batched(self, params):
-        """Compute norm over ALL phsp events, batching if needed."""
-        if hasattr(self.backend, 'compute_norm_batched'):
-            return self.backend.compute_norm_batched(params)
-
-        # Single-batch: backends without batched support load all at once
-        norm, grads, _ = self.backend.compute(params, self._phsp_scratch, norm=None)
+        """Compute norm over ALL phsp events."""
+        norm, grads, _ = self.backend.compute(params, self._phsp_scratch,
+                                              norm=None, return_p=False)
         return float(norm), grads
 
     def get_nll_raw(self, params):

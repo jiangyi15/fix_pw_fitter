@@ -9,7 +9,7 @@ Provides a complete pipeline for partial wave amplitude analysis:
 """
 
 from .config_loader import Config
-from .numpy_kernel import NumpyKernelCorrect as NumpyKernel
+from .numpy_kernel import NumpyKernel
 from .param_constraint import (
     ParameterConstraint, BoundTransform,
     VariableRegistry, ConstraintManager,

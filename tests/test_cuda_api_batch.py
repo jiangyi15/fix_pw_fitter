@@ -4,7 +4,7 @@ import sys, os, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 
 # Test all three backends at various batch sizes
 config = Config('config_angle.yml')
@@ -32,7 +32,7 @@ for batch in [1, 3, 10, 64, 128]:
     }
 
     # NumPy reference
-    nk = NumpyKernelCorrect(kc)
+    nk = NumpyKernel(kc)
     Q_np, grads_np, P_np = nk._compute(params, data)
 
     # Test each CUDA backend

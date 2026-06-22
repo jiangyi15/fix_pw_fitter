@@ -42,8 +42,8 @@ class IntegratedBackend(ComputeBackend):
     """
 
     def __init__(self, kernel_config, base="numpy"):
-        from ampfit.numpy_kernel import NumpyKernelCorrect
-        self.kernel = NumpyKernelCorrect(kernel_config)
+        from ampfit.numpy_kernel import NumpyKernel
+        self.kernel = NumpyKernel(kernel_config)
 
         # ── Base backend for data NLL ─────────────────────────────
         if isinstance(base, ComputeBackend):
@@ -212,27 +212,33 @@ class IntegratedBackend(ComputeBackend):
     # ═══════════════════════════════════════════════════════════════
 
     def load_data(self, data_np):
-        """Delegate data loading to the base backend."""
-        return self.base.load_data(data_np)
+        """Load data; on first call (phsp) also store arrays for Gram matrices."""
+        h = self.base.load_data(data_np)
+        if self._phsp_data is None:
+            n = data_np["mass"].shape[0]
+            self.phsp_n = n
+            self._phsp_weights = np.asarray(
+                data_np.get("weight", np.ones(n)), dtype=np.float64)
+            self._phsp_frac = np.asarray(
+                data_np.get("frac", np.ones(n)), dtype=np.float64)
+            self._phsp_time = np.asarray(
+                data_np.get("time", np.zeros(n)), dtype=np.float64)
+            self._phsp_data = {k: np.asarray(data_np[k])
+                               for k in ("mass", "q", "angle") if k in data_np}
+        return h
 
-    def compute(self, params, data_handle, norm=None):
+    def compute(self, params, data_handle, norm=None, return_p=True):
         """Forward / backward pass.
 
-        *norm=None* + *data_handle=None* — norm from Gram matrices
-                     (used by :meth:`compute_norm_batched`).
-        *norm=None* + *data_handle provided* — delegate to base backend
-                     (fallback for plotting, etc.).
-        *norm=float* — data NLL → delegate to base backend.
+        * *norm=float* — data NLL → delegate to base backend.
+        * *norm=None, return_p=True*  — per-event P → delegate to base (plot).
+        * *norm=None, return_p=False* — fast norm from Gram matrices.
         """
-        if norm is not None:
-            return self.base.compute(params, data_handle, norm=norm)
+        if norm is not None or return_p:
+            return self.base.compute(params, data_handle, norm=norm,
+                                    return_p=return_p)
 
-        # ── norm mode: use Gram matrices if no data_handle ────────
-        if data_handle is not None:
-            # Called from plot() — delegate to base backend for per‑event P
-            return self.base.compute(params, data_handle, norm=None)
-
-        # Build Gram matrices on first call using m0/g0 from params
+        # ── Fast norm from pre‑integrated Gram matrices ──────────
         self._ensure_gram(params)
 
         if self._Mpp_r is None:
@@ -335,54 +341,10 @@ class IntegratedBackend(ComputeBackend):
 
         grads = {"ck": grad_ck, "m0": _z_m0, "g0": _z_g0,
                  "scalar": scalar_grads, "norm": None}
-        P = np.zeros(self.phsp_n)
+        P = None if not return_p else np.zeros(self.phsp_n)
 
         return float(norm_val.real if hasattr(norm_val, 'real')
                      else norm_val), grads, P
-
-    # ═══════════════════════════════════════════════════════════════
-    #  Batched phsp interface (for fitter compatibility)
-    # ═══════════════════════════════════════════════════════════════
-
-    def prepare_phsp_batched(self, phsp_np, n_events):
-        """Store phsp data for deferred Gram matrix computation.
-
-        The actual Gram matrix build happens on the first
-        :meth:`compute_norm_batched` call when m0/g0 from *params*
-        are available.
-
-        Also loads the phsp data to the base backend (e.g. CUDA) so
-        that :meth:`compute` with ``norm=None`` and a ``DataHandle``
-        (called from :meth:`~ampfit.fitter.Fitter.plot`) can use the
-        accelerated backend for per‑event P computation.
-        """
-        import numpy as np
-        w = np.asarray(phsp_np.get("weight", np.ones(n_events)), dtype=np.float64)
-        self._phsp_weights = w
-        self._phsp_frac = np.asarray(
-            phsp_np.get("frac", np.ones(n_events)), dtype=np.float64)
-        self._phsp_time = np.asarray(
-            phsp_np.get("time", np.zeros(n_events)), dtype=np.float64)
-        # Store raw spatial arrays for Gram matrix build
-        self._phsp_data = {k: np.asarray(v)
-                           for k, v in phsp_np.items()
-                           if isinstance(v, np.ndarray)
-                           and k in ("mass", "q", "angle")}
-        self.phsp_n = n_events
-
-        # Load phsp into the base backend for downstream use (plot, etc.)
-        # Ensure 'bkg' key exists (required by CUDA backend)
-        if "bkg" not in phsp_np:
-            phsp_np["bkg"] = np.zeros(n_events, dtype=np.float64)
-        self._phsp_scratch = self.base.load_data(phsp_np)
-
-    def compute_norm_batched(self, params):
-        """Fast norm + gradients from Gram matrices.
-
-        Returns ``(norm_scalar, grads_dict)``.
-        """
-        n, g, _ = self.compute(params, None, norm=None)
-        return n, g
 
     def free(self):
         """Release all resources (matrices + base backend)."""

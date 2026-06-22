@@ -11,7 +11,7 @@ And for COMPLEX parameters like ck: gradient descent uses ∂Q/∂z*
 import numpy as np
 
 
-class NumpyKernelCorrect:
+class NumpyKernel:
     """Gradient computation with correct Wirtinger calculus throughout"""
     
     def __init__(self, config):
@@ -111,8 +111,18 @@ class NumpyKernelCorrect:
             + (-v_pm1 + 3.0 * v_p0 - 3.0 * v_p1 + v_p2) * t3
         )
 
-    def _compute(self, params, data, norm=None):
-        """Compute forward and gradients with correct complex calculus"""
+    def _compute(self, params, data, norm=None, return_p=True):
+        """Compute forward and gradients with correct complex calculus
+
+        Args:
+            params: dict with ck, m0, g0, scalar.
+            data: dict with mass, q, angle, frac, time, weight, bkg.
+            norm: optional float normalization factor.
+            return_p: if True, return per-event P array; otherwise None.
+
+        Returns:
+            (Q, grads_dict, P_or_None).
+        """
         
         # Extract parameters
         ck = params["ck"]
@@ -394,7 +404,7 @@ class NumpyKernelCorrect:
             "norm": None if norm is None else np.sum(weight / (P / norm + bkg) * (P / norm**2)),
         }
         
-        return Q, grads, P
+        return Q, grads, (P if return_p else None)
 
     # ------------------------------------------------------------------
     # Basis computation for pre-integrated backend

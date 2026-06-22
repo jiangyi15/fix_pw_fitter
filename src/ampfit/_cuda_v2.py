@@ -221,7 +221,7 @@ class CUDAKernelV2:
 
     # -- compute -------------------------------------------------------
 
-    def compute(self, params, data_handle, norm=None):
+    def compute(self, params, data_handle, norm=None, return_p=True):
         """Compute forward + backward pass.
 
         Args:

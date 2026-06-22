@@ -4,7 +4,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 from ampfit.merged_index_kernel import MergedIndexKernel
 
 CONFIG_FILE = "config_angle.yml"
@@ -36,7 +36,7 @@ for n in [N_EVENTS, 128, 256]:
     }
     
     # Reference
-    ref = NumpyKernelCorrect(kernel_config)
+    ref = NumpyKernel(kernel_config)
     Q_r, grads_r, P_r = ref._compute(params, data)
     
     # Merged index

@@ -159,7 +159,7 @@ print(f"grad_scalar: {gsc_out}")
 print("✓ Compute succeeded")
 
 # Compare with numpy reference
-from ampfit.numpy_kernel import NumpyKernelCorrect
+from ampfit.numpy_kernel import NumpyKernel
 params = {
     'ck': ck_real.astype(np.complex128) + 1j * ck_imag.astype(np.complex128),
     'm0': m0_arr, 'g0': g0_arr,
@@ -167,7 +167,7 @@ params = {
 }
 data = {'mass': mass, 'q': momentum, 'angle': angle, 'frac': frac,
         'time': time, 'weight': weight, 'bkg': bkg}
-nk = NumpyKernelCorrect(kc)
+nk = NumpyKernel(kc)
 Q_np, grads_np, P_np = nk._compute(params, data)
 
 print(f"\nQ diff: {abs(Q - Q_np):.2e}")
