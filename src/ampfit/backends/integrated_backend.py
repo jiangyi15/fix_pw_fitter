@@ -162,7 +162,7 @@ class IntegratedBackend(ComputeBackend):
         sw = np.sqrt(w)
         ng = self._ng  # number of groups
 
-        bs = 50000
+        bs = 500
         n_batches = (n_events + bs - 1) // bs
         import sys, time as _time
         _t0 = _time.time()
