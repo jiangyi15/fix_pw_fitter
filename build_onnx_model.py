@@ -42,12 +42,20 @@ def main():
     # ── Forward model (NLL + gradients) ──
     print(f"Building forward ONNX graph (batch_size={args.batch_size})...")
     model = builder.build(batch_size=args.batch_size, norm_model=False)
+    # Strip unused initializers to silence onnxruntime warnings
+    used = set()
+    for n in model.graph.node:
+        used.update(n.input)
+        used.update(n.output)
+    kept = [i for i in model.graph.initializer if i.name in used]
+    del model.graph.initializer[:]
+    model.graph.initializer.extend(kept)
     onnx.save(model, args.output)
     print(f"✓ Saved to {args.output}")
     print(f"  Inputs: {len(model.graph.input)}")
     print(f"  Outputs: {len(model.graph.output)}")
     print(f"  Nodes: {len(model.graph.node)}")
-    print(f"  Constants: {len(model.graph.initializer)}")
+    print(f"  Constants: {len(model.graph.initializer)} (was {len(kept)+len(model.graph.initializer)})")
 
     if args.validate:
         print("\nValidating forward model...")
@@ -63,6 +71,12 @@ def main():
     if not args.no_norm:
         print(f"\nBuilding norm ONNX graph (batch_size={args.batch_size})...")
         norm_model = builder.build(batch_size=args.batch_size, norm_model=True)
+        used = set()
+        for n in norm_model.graph.node:
+            used.update(n.input); used.update(n.output)
+        kept = [i for i in norm_model.graph.initializer if i.name in used]
+        del norm_model.graph.initializer[:]
+        norm_model.graph.initializer.extend(kept)
         onnx.save(norm_model, args.output_norm)
         print(f"✓ Saved to {args.output_norm}")
         print(f"  Inputs: {len(norm_model.graph.input)}")
