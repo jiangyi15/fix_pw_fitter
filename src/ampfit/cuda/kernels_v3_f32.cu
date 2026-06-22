@@ -174,7 +174,157 @@ __global__ void compute_g_bw_kernel(
 }
 
 //=============================================================================
-// KERNEL 2: Main forward computation (bw_p, angular factors, amplitudes, prob)
+// KERNEL 2a: Gram‑matrix common factor — per‑event common_amp → group reduce → A0/A1 (v3 f32)
+//=============================================================================
+__global__ void gram_common_kernel_v3_f32(
+    const float* __restrict__ mass,
+    const float* __restrict__ momentum,
+    const float* __restrict__ angle,
+    const float* __restrict__ weight,
+    const int* __restrict__ m0_index,
+    const int* __restrict__ fl_type,
+    const int* __restrict__ mass_index,
+    const int* __restrict__ fl_q_index,
+    const int* __restrict__ bw_order,
+    const int* __restrict__ fl_order,
+    const int* __restrict__ angle_index,
+    const float* __restrict__ angle_k,
+    const float* __restrict__ angle_b,
+    const float* __restrict__ matrix_angle_real,
+    const float* __restrict__ matrix_angle_imag,
+    const float* __restrict__ g_bw_real,
+    const float* __restrict__ g_bw_imag,
+    const float* __restrict__ fl_table,
+    float fl_min, float fl_delta,
+    int n_wave, int n_res, int n_decay, int n_unique_bw,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
+    int fl_table_bins,
+    const float* __restrict__ m0,
+    float* __restrict__ A0_real, float* __restrict__ A0_imag,
+    float* __restrict__ A1_real, float* __restrict__ A1_imag,
+    int n_events
+) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+    int n = n_wave / 2;
+    int ng = n_wave / 8;
+
+    extern __shared__ float s_sh[];
+    float* s_ka = s_sh;
+    float* s_grp = s_sh + n_angle_k;
+
+    for (int k_idx = tid; k_idx < n_angle_k; k_idx += block_sz) {
+        int angle_pos = angle_index[k_idx];
+        float ka = 1.0f;
+        for (int comp = 0; comp < n_angle_comp; comp++) {
+            int idx = event_idx * n_angle_total * n_angle_comp
+                      + angle_pos * n_angle_comp + comp;
+            ka *= cosf(angle[idx] * angle_k[k_idx * n_angle_comp + comp]
+                       + angle_b[k_idx * n_angle_comp + comp]);
+        }
+        s_ka[k_idx] = ka;
+    }
+    __syncthreads();
+
+    if (tid < 4 * ng) s_grp[tid] = 0.0f;
+    __syncthreads();
+
+    int waves_per_thread = (n_wave + block_sz - 1) / block_sz;
+    int wave_start = tid * waves_per_thread;
+    int wave_end = min(wave_start + waves_per_thread, n_wave);
+
+    for (int w = wave_start; w < wave_end; w++) {
+        complex bw_p(1.0f, 0.0f);
+        for (int r = 0; r < n_res; r++) {
+            int bw_idx = bw_order[w * n_res + r];
+            float m0v = m0[m0_index[bw_idx]];
+            float mv = mass[event_idx * n_mass + mass_index[bw_idx]];
+            complex gbw(g_bw_real[event_idx * n_unique_bw + bw_idx],
+                        g_bw_imag[event_idx * n_unique_bw + bw_idx]);
+            complex dom(m0v * m0v - mv * mv + m0v * gbw.imag(),
+                        -m0v * gbw.real());
+            bw_p *= dom;
+        }
+
+        complex fa_val(0.0f, 0.0f);
+        for (int k = 0; k < n_angle_k; k++) {
+            int idx = k * n_wave + w;
+            fa_val += s_ka[k] * complex(matrix_angle_real[idx], matrix_angle_imag[idx]);
+        }
+        complex common_amp = complex(1.0f, 0.0f) / bw_p * fa_val;
+
+        float fl = 1.0f;
+        for (int d = 0; d < n_decay; d++) {
+            int fl_idx = fl_order[w * n_decay + d];
+            float q = momentum[event_idx * n_momentum + fl_q_index[fl_idx]];
+            fl *= interp_real_device(fl_table, fl_type[fl_idx],
+                                     q, fl_min, fl_delta, fl_table_bins);
+        }
+        common_amp *= fl;
+
+        bool is_B0 = w < n;
+        int g = is_B0 ? w % ng : (w - n) % ng;
+        int slab_offset = is_B0 ? 0 : (2 * ng);
+        atomicAdd(&s_grp[slab_offset + g], common_amp.real());
+        atomicAdd(&s_grp[slab_offset + ng + g], common_amp.imag());
+    }
+    __syncthreads();
+
+    if (tid < ng) {
+        float sw = sqrtf(weight[event_idx]);
+        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid] * sw;
+        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid] * sw;
+        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid] * sw;
+        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid] * sw;
+    }
+}
+
+//=============================================================================
+// KERNEL 2b: Gram‑matrix reduction — batch A0/A1 → Mpp/Mmm/Mpm (v3 f32)
+//=============================================================================
+__global__ void gram_reduce_kernel_v3_f32(
+    const float* __restrict__ A0_real, const float* __restrict__ A0_imag,
+    const float* __restrict__ A1_real, const float* __restrict__ A1_imag,
+    int n_events, int ng,
+    float* __restrict__ Mpp_r, float* __restrict__ Mpp_i,
+    float* __restrict__ Mmm_r, float* __restrict__ Mmm_i,
+    float* __restrict__ Mpm_r, float* __restrict__ Mpm_i
+) {
+    int gi = blockIdx.x;
+    int gj = blockIdx.y;
+    if (gi >= ng || gj >= ng) return;
+
+    float sum_pp_r = 0.0f, sum_pp_i = 0.0f;
+    float sum_mm_r = 0.0f, sum_mm_i = 0.0f;
+    float sum_pm_r = 0.0f, sum_pm_i = 0.0f;
+
+    for (int e = 0; e < n_events; e++) {
+        int base = e * ng;
+        float a0ri = A0_real[base + gi], a0ii = A0_imag[base + gi];
+        float a0rj = A0_real[base + gj], a0ij = A0_imag[base + gj];
+        sum_pp_r += a0ri * a0rj + a0ii * a0ij;
+        sum_pp_i += a0ri * a0ij - a0ii * a0rj;
+
+        float a1ri = A1_real[base + gi], a1ii = A1_imag[base + gi];
+        float a1rj = A1_real[base + gj], a1ij = A1_imag[base + gj];
+        sum_mm_r += a1ri * a1rj + a1ii * a1ij;
+        sum_mm_i += a1ri * a1ij - a1ii * a1rj;
+
+        sum_pm_r += a0ri * a1rj + a0ii * a1ij;
+        sum_pm_i += a0ri * a1ij - a0ii * a1rj;
+    }
+
+    Mpp_r[gi * ng + gj] = sum_pp_r;
+    Mpp_i[gi * ng + gj] = sum_pp_i;
+    Mmm_r[gi * ng + gj] = sum_mm_r;
+    Mmm_i[gi * ng + gj] = sum_mm_i;
+    Mpm_r[gi * ng + gj] = sum_pm_r;
+    Mpm_i[gi * ng + gj] = sum_pm_i;
+}
+
+//=============================================================================
+// KERNEL 2c: Main forward computation (bw_p, angular factors, amplitudes, prob)
 //=============================================================================
 // Each block handles one event.
 // Shared memory: ka_prod for all angle_k values (336 doubles)
@@ -727,6 +877,9 @@ __global__ void reduce_sum_complex_features_kernel(
 //=============================================================================
 extern "C" {
 
+void cuda_gram_matrix_v3_f32(void*,void*,const float*,const float*,
+    double*,double*,double*,double*,double*,double*);
+
 // Structs for clean unified API: (Context*, Data*, Params*, norm, use_norm)
 typedef struct {
     // Event data (GPU)
@@ -955,6 +1108,46 @@ void launch_reduce_sum_complex_features(const float* real_in, const float* imag_
     CUDA_CHECK(cudaGetLastError());
 }
 
+// ── Gram matrix kernel launches (v3 f32) ──────────────────────
+void launch_gram_common_v3_f32(
+    const ComputeContext* ctx, ComputeData* data,
+    const float* m0,
+    float* A0_real, float* A0_imag,
+    float* A1_real, float* A1_imag) {
+
+    int ng = ctx->n_wave / 8;
+    int n_events = data->n_events;
+    int shmem = (ctx->n_angle_k + 4 * ng) * sizeof(float);
+    gram_common_kernel_v3_f32<<<n_events, BLOCK_SIZE, shmem>>>(
+        data->mass, data->momentum, data->angle, data->weight,
+        ctx->m0_index, ctx->fl_type,
+        ctx->mass_index, ctx->fl_q_index,
+        ctx->bw_order, ctx->fl_order, ctx->angle_index,
+        ctx->angle_k, ctx->angle_b,
+        ctx->matrix_angle_real, ctx->matrix_angle_imag,
+        data->g_bw_real, data->g_bw_imag,
+        ctx->fl_table, ctx->fl_min, ctx->fl_delta,
+        ctx->n_wave, ctx->n_res, ctx->n_decay, ctx->n_unique_bw,
+        ctx->n_mass, ctx->n_momentum, ctx->n_angle_k, ctx->n_angle_total, ctx->n_angle_comp,
+        ctx->fl_table_bins, m0,
+        A0_real, A0_imag, A1_real, A1_imag, n_events);
+}
+
+void launch_gram_reduce_v3_f32(
+    const float* A0_real, const float* A0_imag,
+    const float* A1_real, const float* A1_imag,
+    int n_events, int ng,
+    float* Mpp_r, float* Mpp_i,
+    float* Mmm_r, float* Mmm_i,
+    float* Mpm_r, float* Mpm_i) {
+
+    dim3 grid(ng, ng);
+    gram_reduce_kernel_v3_f32<<<grid, 1>>>(
+        A0_real, A0_imag, A1_real, A1_imag,
+        n_events, ng,
+        Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
+}
+
 // Unified launch: (Context*, Data*, Params*, norm, use_norm)
 void launch_compute_all(
     const ComputeContext* ctx, ComputeData* data,
@@ -1029,6 +1222,10 @@ static void* _up_int(const int* src, int n) {
     cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
 }
 static void* _up_dbl(const float* src, int n) {
+    float* d; cudaMalloc(&d, n * sizeof(float));
+    cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
+}
+static void* _up_flt(const float* src, int n) {
     float* d; cudaMalloc(&d, n * sizeof(float));
     cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
 }
@@ -1336,6 +1533,113 @@ void cuda_free_data_v3_f32(void* vh) {
     cudaFree((void*)h->m); cudaFree((void*)h->mo); cudaFree((void*)h->a);
     cudaFree((void*)h->f); cudaFree((void*)h->t); cudaFree((void*)h->w); cudaFree((void*)h->b);
     free(h);
+}
+
+void cuda_gram_matrix_v3_f32(void* vctx, void* vdh,
+    const float* m0, const float* g0,
+    double* oMpp_r, double* oMpp_i,
+    double* oMmm_r, double* oMmm_i,
+    double* oMpm_r, double* oMpm_i) {
+
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne, bs = c->batch_size;
+    if (ne < bs) bs = ne;
+    int nbat = (ne + bs - 1) / bs;
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+    int ng2 = nw / 8;
+
+    const float* gpu_m0 = (const float*)_up_flt(m0, c->n_m0_params);
+    const float* gpu_g0 = (const float*)_up_flt(g0, c->n_g0_params);
+
+    ComputeData s;
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&s.f, bs * sizeof(float))
+        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(float))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        #undef S
+        #undef S2
+    }
+
+    float *A0r, *A0i, *A1r, *A1i;
+    size_t a_sz = (size_t)bs * ng2 * sizeof(float);
+    cudaMalloc(&A0r, a_sz); cudaMalloc(&A0i, a_sz);
+    cudaMalloc(&A1r, a_sz); cudaMalloc(&A1i, a_sz);
+
+    size_t g_sz = (size_t)ng2 * ng2 * sizeof(float);
+    float *Mpp_r, *Mpp_i, *Mmm_r, *Mmm_i, *Mpm_r, *Mpm_i;
+    cudaMalloc(&Mpp_r, g_sz); cudaMalloc(&Mpp_i, g_sz);
+    cudaMalloc(&Mmm_r, g_sz); cudaMalloc(&Mmm_i, g_sz);
+    cudaMalloc(&Mpm_r, g_sz); cudaMalloc(&Mpm_i, g_sz);
+
+    memset(oMpp_r, 0, g_sz * 2); memset(oMpp_i, 0, g_sz * 2);
+    memset(oMmm_r, 0, g_sz * 2); memset(oMmm_i, 0, g_sz * 2);
+    memset(oMpm_r, 0, g_sz * 2); memset(oMpm_i, 0, g_sz * 2);
+
+    float* hbuf = (float*)malloc(g_sz);
+
+    for (int b = 0; b < nbat; b++) {
+        int st = b * bs;
+        int nb = (ne - st > bs) ? bs : (ne - st);
+
+        ComputeData d = s;
+        d.mass = h->m + st * h->nm;
+        d.momentum = h->mo + st * h->nmom;
+        d.angle = h->a + st * h->nat * h->nac;
+        d.weight = h->w + st;
+        d.n_events = nb;
+
+        cudaMemset(d.g_interp_real, 0, bs * ng * 4);
+        cudaMemset(d.g_interp_imag, 0, bs * ng * 4);
+        cudaMemset(d.g_bw_real, 0, bs * nu * 4);
+        cudaMemset(d.g_bw_imag, 0, bs * nu * 4);
+
+        launch_compute_g_bw(
+            d.mass, gpu_g0, c->g0_index, c->g0_mass_index,
+            c->matrix_gamma,
+            c->gamma_table_real, c->gamma_table_imag,
+            c->gamma_min, c->gamma_delta,
+            c->n_gamma_rows, c->n_unique_bw, c->n_mass, c->gamma_table_bins,
+            d.g_interp_real, d.g_interp_imag,
+            d.g_bw_real, d.g_bw_imag, nb);
+        CUDA_CHECK(cudaGetLastError());
+
+        launch_gram_common_v3_f32(c, &d, gpu_m0, A0r, A0i, A1r, A1i);
+        CUDA_CHECK(cudaGetLastError());
+
+        launch_gram_reduce_v3_f32(
+            A0r, A0i, A1r, A1i, nb, ng2,
+            Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
+        CUDA_CHECK(cudaGetLastError());
+
+        cudaMemcpy(hbuf, Mpp_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpp_r[i] += (double)hbuf[i];
+        cudaMemcpy(hbuf, Mpp_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpp_i[i] += (double)hbuf[i];
+        cudaMemcpy(hbuf, Mmm_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMmm_r[i] += (double)hbuf[i];
+        cudaMemcpy(hbuf, Mmm_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMmm_i[i] += (double)hbuf[i];
+        cudaMemcpy(hbuf, Mpm_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpm_r[i] += (double)hbuf[i];
+        cudaMemcpy(hbuf, Mpm_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpm_i[i] += (double)hbuf[i];
+    }
+
+    free(hbuf);
+    cudaFree((void*)gpu_m0); cudaFree((void*)gpu_g0);
+    cudaFree(A0r); cudaFree(A0i); cudaFree(A1r); cudaFree(A1i);
+    cudaFree(Mpp_r); cudaFree(Mpp_i); cudaFree(Mmm_r); cudaFree(Mmm_i);
+    cudaFree(Mpm_r); cudaFree(Mpm_i);
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        #undef F
+    }
 }
 
 void cuda_compute_v3_f32(void* vctx, void* vdh,

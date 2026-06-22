@@ -46,6 +46,9 @@ void cuda_compute_v3(void*,void*,
     const double*,const double*,const double*,const double*,
     double,double,double,double,double,double,double,int,
     double*,double*,double*,double*,double*,double*,double*);
+void cuda_gram_matrix_v3(void*,void*,
+    const double*,const double*,
+    double*,double*,double*,double*,double*,double*);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -307,6 +310,50 @@ class CUDAKernelV3:
         }
 
         return oQ[0], grads, oP
+
+    # -- gram matrix (phsp pre-integration) -----------------------------------
+
+    def compute_gram(self, phsp_handle, m0, g0):
+        """Compute reduced Gram matrices from phsp data on GPU (v3).
+
+        Same interface as :meth:`CUDAKernelV2.compute_gram`.
+        Uses Catmull-Rom interpolation for exact numpy match.
+        """
+        ng2 = self.n_wave // 8
+        sz = ng2 * ng2
+
+        oMpp_r = np.zeros(sz, np.float64)
+        oMpp_i = np.zeros(sz, np.float64)
+        oMmm_r = np.zeros(sz, np.float64)
+        oMmm_i = np.zeros(sz, np.float64)
+        oMpm_r = np.zeros(sz, np.float64)
+        oMpm_i = np.zeros(sz, np.float64)
+
+        m0_arr = np.zeros(self.n_unique_bw, np.float64)
+        m0_arr[:len(m0)] = np.asarray(m0)
+        g0_arr = np.zeros(self.n_gamma_rows, np.float64)
+        g0_arr[:len(g0)] = np.asarray(g0)
+
+        ka = []
+        def _db(a):
+            arr = np.ascontiguousarray(a, np.float64)
+            buf = _ffi.from_buffer(arr)
+            ka.append(buf)
+            return _ffi.cast("double*", buf)
+
+        self._lib.cuda_gram_matrix_v3(
+            self._ctx, phsp_handle.ptr,
+            _db(m0_arr), _db(g0_arr),
+            _db(oMpp_r), _db(oMpp_i),
+            _db(oMmm_r), _db(oMmm_i),
+            _db(oMpm_r), _db(oMpm_i),
+        )
+
+        Mpp = oMpp_r.reshape(ng2, ng2) + 1j * oMpp_i.reshape(ng2, ng2)
+        Mmm = oMmm_r.reshape(ng2, ng2) + 1j * oMmm_i.reshape(ng2, ng2)
+        Mpm = oMpm_r.reshape(ng2, ng2) + 1j * oMpm_i.reshape(ng2, ng2)
+
+        return Mpp, Mmm, Mpm
 
     # -- cleanup -------------------------------------------------------
 

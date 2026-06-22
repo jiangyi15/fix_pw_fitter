@@ -46,6 +46,9 @@ void cuda_compute_v3_f32(void*,void*,
     const float*,const float*,const float*,const float*,
     float,float,float,float,float,float,float,int,
     double*,double*,float*,float*,float*,float*,float*);
+void cuda_gram_matrix_v3_f32(void*,void*,
+    const float*,const float*,
+    double*,double*,double*,double*,double*,double*);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -312,6 +315,53 @@ class CUDAKernelV3F32:
         }
 
         return oQ[0], grads, oP
+
+    # -- gram matrix (phsp pre-integration) -----------------------------------
+
+    def compute_gram(self, phsp_handle, m0, g0):
+        """Compute reduced Gram matrices from phsp data on GPU (v3 f32).
+
+        Same interface as :meth:`CUDAKernelV2F32.compute_gram`.
+        Uses Catmull-Rom interpolation for exact numpy match.
+        """
+        ng2 = self.n_wave // 8
+        sz = ng2 * ng2
+
+        oMpp_r = np.zeros(sz, np.float64)
+        oMpp_i = np.zeros(sz, np.float64)
+        oMmm_r = np.zeros(sz, np.float64)
+        oMmm_i = np.zeros(sz, np.float64)
+        oMpm_r = np.zeros(sz, np.float64)
+        oMpm_i = np.zeros(sz, np.float64)
+
+        m0_arr = np.zeros(self.n_unique_bw, np.float32)
+        m0_arr[:len(m0)] = np.asarray(m0, np.float32)
+        g0_arr = np.zeros(self.n_gamma_rows, np.float32)
+        g0_arr[:len(g0)] = np.asarray(g0, np.float32)
+
+        ka = []
+        def _fb(a):
+            arr = np.ascontiguousarray(a, np.float32)
+            buf = _ffi.from_buffer(arr)
+            ka.append(buf)
+            return _ffi.cast("float*", buf)
+
+        self._lib.cuda_gram_matrix_v3_f32(
+            self._ctx, phsp_handle.ptr,
+            _fb(m0_arr), _fb(g0_arr),
+            _ffi.cast("double*", _ffi.from_buffer(oMpp_r)),
+            _ffi.cast("double*", _ffi.from_buffer(oMpp_i)),
+            _ffi.cast("double*", _ffi.from_buffer(oMmm_r)),
+            _ffi.cast("double*", _ffi.from_buffer(oMmm_i)),
+            _ffi.cast("double*", _ffi.from_buffer(oMpm_r)),
+            _ffi.cast("double*", _ffi.from_buffer(oMpm_i)),
+        )
+
+        Mpp = oMpp_r.reshape(ng2, ng2) + 1j * oMpp_i.reshape(ng2, ng2)
+        Mmm = oMmm_r.reshape(ng2, ng2) + 1j * oMmm_i.reshape(ng2, ng2)
+        Mpm = oMpm_r.reshape(ng2, ng2) + 1j * oMpm_i.reshape(ng2, ng2)
+
+        return Mpp, Mmm, Mpm
 
     # -- cleanup -------------------------------------------------------
 
