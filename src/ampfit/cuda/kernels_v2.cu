@@ -41,15 +41,15 @@ __device__ complex interp_complex_device(
 ) {
     double diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    double delta = diff - xbin;
+    double t = max(0.0, min(diff - xbin, 1.0));
     int left_idx = type_idx * n_bins + xbin;
     int right_idx = left_idx + 1;
     double left_real = table_real[left_idx];
     double right_real = table_real[right_idx];
     double left_imag = table_imag[left_idx];
     double right_imag = table_imag[right_idx];
-    double real_val = (right_real - left_real) * delta + left_real;
-    double imag_val = (right_imag - left_imag) * delta + left_imag;
+    double real_val = (right_real - left_real) * t + left_real;
+    double imag_val = (right_imag - left_imag) * t + left_imag;
     return complex(real_val, imag_val);
 }
 
@@ -61,9 +61,9 @@ __device__ double interp_real_device(
 ) {
     double diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    double delta = diff - xbin;
+    double t = max(0.0, min(diff - xbin, 1.0));
     int left_idx = type_idx * n_bins + xbin;
-    return (table[left_idx + 1] - table[left_idx]) * delta + table[left_idx];
+    return (table[left_idx + 1] - table[left_idx]) * t + table[left_idx];
 }
 
 //=============================================================================

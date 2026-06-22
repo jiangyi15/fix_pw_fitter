@@ -244,8 +244,12 @@ class CUDAKernelV2F32:
 
         ck_r = np.real(ck).astype(np.float32)
         ck_i = np.imag(ck).astype(np.float32)
-        m0 = np.ascontiguousarray(params["m0"], np.float32)
-        g0 = np.ascontiguousarray(params["g0"], np.float32)
+
+        # Pad m0/g0 to the sizes expected by the C kernel
+        m0 = np.zeros(nu_, np.float32)
+        m0[:len(params["m0"])] = np.asarray(params["m0"])
+        g0 = np.zeros(ng_, np.float32)
+        g0[:len(params["g0"])] = np.asarray(params["g0"])
         G, DG, DM, Ap_, pr_, pp_ = params["scalar"]
 
         # CPU output buffers (double precision)

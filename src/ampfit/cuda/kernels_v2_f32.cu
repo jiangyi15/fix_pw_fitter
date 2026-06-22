@@ -41,15 +41,15 @@ __device__ complex interp_complex_device(
 ) {
     float diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    float delta = diff - xbin;
+    float t = max(0.0f, min(diff - xbin, 1.0f));
     int left_idx = type_idx * n_bins + xbin;
     int right_idx = left_idx + 1;
     float left_real = table_real[left_idx];
     float right_real = table_real[right_idx];
     float left_imag = table_imag[left_idx];
     float right_imag = table_imag[right_idx];
-    float real_val = (right_real - left_real) * delta + left_real;
-    float imag_val = (right_imag - left_imag) * delta + left_imag;
+    float real_val = (right_real - left_real) * t + left_real;
+    float imag_val = (right_imag - left_imag) * t + left_imag;
     return complex(real_val, imag_val);
 }
 
@@ -61,9 +61,9 @@ __device__ float interp_real_device(
 ) {
     float diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    float delta = diff - xbin;
+    float t = max(0.0f, min(diff - xbin, 1.0f));
     int left_idx = type_idx * n_bins + xbin;
-    return (table[left_idx + 1] - table[left_idx]) * delta + table[left_idx];
+    return (table[left_idx + 1] - table[left_idx]) * t + table[left_idx];
 }
 
 //=============================================================================

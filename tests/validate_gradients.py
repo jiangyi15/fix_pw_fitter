@@ -89,6 +89,9 @@ def numerical_grad_Q(fn, params, eps=1e-6):
 
 def report(name, grads, ref, tol=1e-3):
     ok = True
+    # ONNX uses linear interpolation (vs Catmull-Rom for others) → larger tolerance
+    if "ONNX" in name:
+        tol = 5e-3
     for key in ["ck", "m0", "g0", "scalar"]:
         g = np.asarray(grads[key])
         r = np.asarray(ref[key])
@@ -118,10 +121,12 @@ def main():
 
     # ── Build backends ──
     backends = [
-        ("NumPy",   create_backend("numpy", kernel_config)),
-        ("CUDAv3",  create_backend("cuda_v3", kernel_config)),
+        ("NumPy",    create_backend("numpy", kernel_config)),
+        ("CUDAv2",   create_backend("cuda_v2", kernel_config)),
+        ("CUDA32v2", create_backend("cuda32_v2", kernel_config)),
+        ("CUDAv3",   create_backend("cuda_v3", kernel_config)),
         ("CUDA32v3", create_backend("cuda32_v3", kernel_config)),
-        ("ONNXcpu", create_backend("onnx_cpu", kernel_config)),
+        ("ONNXcpu",  create_backend("onnx_cpu", kernel_config)),
     ]
 
     # ════════════════════════════════════════════════════════════
@@ -169,6 +174,8 @@ def main():
     results_nll = {}
     for label, be in backends:
         be2 = create_backend("numpy", kernel_config) if label == "NumPy" else \
+              create_backend("cuda_v2", kernel_config) if label == "CUDAv2" else \
+              create_backend("cuda32_v2", kernel_config) if label == "CUDA32v2" else \
               create_backend("cuda_v3", kernel_config) if label == "CUDAv3" else \
               create_backend("cuda32_v3", kernel_config) if label == "CUDA32v3" else \
               create_backend("onnx_cpu", kernel_config)

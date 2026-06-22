@@ -60,7 +60,7 @@ __device__ complex interp_complex_device(
 ) {
     float diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    float t = diff - xbin;
+    float t = max(0.0f, min(diff - xbin, 1.0f));
     int base = type_idx * n_bins + xbin;
     int type_end = (type_idx + 1) * n_bins - 1;
     int type_start = type_idx * n_bins;
@@ -87,7 +87,7 @@ __device__ float interp_real_device(
 ) {
     float diff = (x - xmin) / xdelta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
-    float t = diff - xbin;
+    float t = max(0.0f, min(diff - xbin, 1.0f));
     int base = type_idx * n_bins + xbin;
     int type_end = (type_idx + 1) * n_bins - 1;
     int type_start = type_idx * n_bins;
