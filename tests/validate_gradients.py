@@ -13,7 +13,7 @@ if _cuda_lib_path not in os.environ.get("LD_LIBRARY_PATH", ""):
     os.environ["LD_LIBRARY_PATH"] = f"{_cuda_lib_path}:{os.environ.get('LD_LIBRARY_PATH', '')}"
 
 from ampfit.config_loader import Config
-from ampfit.backends import NumpyBackend, ONNXBackend, CUDABackend
+from ampfit.backends import create_backend
 
 np.random.seed(42)
 CONFIG_FILE = "config_angle.yml"
@@ -118,12 +118,10 @@ def main():
 
     # ── Build backends ──
     backends = [
-        ("NumPy",   NumpyBackend(kernel_config)),
-        ("CUDAb64", CUDABackend(kernel_config, dtype="float64")),
-        ("CUDAb32", CUDABackend(kernel_config, dtype="float32")),
-        ("ONNX",    ONNXBackend("pwa_forward.onnx",
-                                norm_model_path="pwa_forward_norm.onnx",
-                                providers=["CUDAExecutionProvider", "CPUExecutionProvider"])),
+        ("NumPy",   create_backend("numpy", kernel_config)),
+        ("CUDAv3",  create_backend("cuda_v3", kernel_config)),
+        ("CUDA32v3", create_backend("cuda32_v3", kernel_config)),
+        ("ONNXcpu", create_backend("onnx_cpu", kernel_config)),
     ]
 
     # ════════════════════════════════════════════════════════════
@@ -132,7 +130,7 @@ def main():
     print("\n── norm=None (Q = sum(P·weight)) ──")
 
     def Q_norm_fn(p):
-        nk = NumpyBackend(kernel_config)
+        nk = create_backend("numpy", kernel_config)
         Q, _, _ = nk.compute(p, nk.load_data(data), norm=None)
         nk.free()
         return float(Q)
@@ -159,7 +157,7 @@ def main():
     print(f"\n── norm={NORM_VAL} (NLL) ──")
 
     def Q_nll_fn(p):
-        nk = NumpyBackend(kernel_config)
+        nk = create_backend("numpy", kernel_config)
         Q, _, _ = nk.compute(p, nk.load_data(data), norm=NORM_VAL)
         nk.free()
         return float(Q)
@@ -170,12 +168,10 @@ def main():
 
     results_nll = {}
     for label, be in backends:
-        be2 = NumpyBackend(kernel_config) if label == "NumPy" else \
-              CUDABackend(kernel_config, dtype="float64") if label == "CUDAb64" else \
-              CUDABackend(kernel_config, dtype="float32") if label == "CUDAb32" else \
-              ONNXBackend("pwa_forward.onnx",
-                          norm_model_path="pwa_forward_norm.onnx",
-                          providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        be2 = create_backend("numpy", kernel_config) if label == "NumPy" else \
+              create_backend("cuda_v3", kernel_config) if label == "CUDAv3" else \
+              create_backend("cuda32_v3", kernel_config) if label == "CUDA32v3" else \
+              create_backend("onnx_cpu", kernel_config)
         Q, grads, _ = be2.compute(params, be2.load_data(data), norm=NORM_VAL)
         results_nll[label] = grads
         be2.free()
