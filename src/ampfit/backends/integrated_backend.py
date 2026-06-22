@@ -53,16 +53,22 @@ class IntegratedBackend(ComputeBackend):
             self.base = create_backend(base, kernel_config)
 
         # ── Gram matrices (pre‑computed from phsp) ────────────────
-        self.M_pp = None   # (n, n) B0 × B0
-        self.M_mm = None   # (n, n) B0bar × B0bar
-        self.M_pm = None   # (n, n) B0 × B0bar
         self.phsp_n = 0
-        self._gram_m0 = None   # m0 snapshot used for current Gram matrices
+        self._gram_m0 = None
         self._gram_g0 = None
 
-        # Raw phsp arrays stored by prepare_phsp_batched — used for
-        # deferred Gram matrix computation in _ensure_gram().
-        self._phsp_data = None   # dict with mass, q, angle arrays
+        # Reduced Gram matrices (from 4-group structure: n_wave//8 groups)
+        self._ng = self.kernel.n_wave // 8
+        self._Mpp_r = None
+        self._Mmm_r = None
+        self._Mpm_r = None
+        self._groups_B0 = [list(range(k, self.kernel.n_wave // 2, self._ng))
+                           for k in range(self._ng)]
+        self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
+                              for k in range(self._ng)]
+
+        # Raw phsp arrays stored by prepare_phsp_batched
+        self._phsp_data = None
 
         # Time/frac/weight arrays (for per‑NLL time averages)
         self._phsp_weights = None
@@ -126,22 +132,16 @@ class IntegratedBackend(ComputeBackend):
                 expt, cht, sht, ct, st, t, w, ws)
 
     def _ensure_gram(self, params):
-        """Build Gram matrices from stored phsp data if needed.
-
-        Uses *m0*, *g0* from *params* — called on first
-        ``compute_norm_batched`` or when m0/g0 change.
-        """
+        """Build reduced Gram matrices from stored phsp data if needed."""
         if self._phsp_data is None:
             raise RuntimeError("IntegratedBackend: phsp not loaded. "
                                "Call prepare_phsp_batched() first.")
         m0 = np.asarray(params["m0"])
         g0 = np.asarray(params["g0"])
-        # Check if already computed with matching m0/g0
-        if (self.M_pp is not None
+        if (self._Mpp_r is not None
                 and np.array_equal(m0, self._gram_m0)
                 and np.array_equal(g0, self._gram_g0)):
             return
-        # Build (or rebuild) from stored phsp data
         phsp = {**self._phsp_data, "weight": self._phsp_weights,
                 "frac": self._phsp_frac, "time": self._phsp_time}
         self._load_phsp_matrices(phsp, m0, g0)
@@ -149,27 +149,38 @@ class IntegratedBackend(ComputeBackend):
         self._gram_g0 = g0.copy()
 
     def _load_phsp_matrices(self, phsp, m0, g0):
-        """Compute Gram matrices from phsp (batched, ~350 MB peak)."""
+        """Compute 56×56 reduced Gram matrices directly (no full matrix).
+
+        Groups of 4 basis functions (spaced 56 apart) are summed
+        before the outer product, reducing 224×224 → 56×56.
+        """
         n_events = phsp["mass"].shape[0]
         n_wave = self.kernel.n_wave
         n = n_wave // 2
 
         w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
         sw = np.sqrt(w)
+        ng = self._ng  # number of groups
 
         bs = 50000
         n_batches = (n_events + bs - 1) // bs
         import sys, time as _time
         _t0 = _time.time()
-        M = np.zeros((n_wave, n_wave), dtype=complex)
+        Mpp = np.zeros((ng, ng), dtype=complex)
+        Mmm = np.zeros((ng, ng), dtype=complex)
+        Mpm = np.zeros((ng, ng), dtype=complex)
         for b_start in range(0, n_events, bs):
             b_idx = b_start // bs
             b_end = min(b_start + bs, n_events)
             batch = {k: v[b_start:b_end] for k, v in phsp.items()
                      if isinstance(v, np.ndarray)}
             ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
-            Ab = ba * sw[b_start:b_end, np.newaxis]
-            M += Ab.T.conj() @ Ab
+            # Project onto groups: sum 4 blocks of 56 → (batch, 56)
+            A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
+            A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
+            Mpp += A0.T.conj() @ A0
+            Mmm += A1.T.conj() @ A1
+            Mpm += A0.T.conj() @ A1
             _elapsed = _time.time() - _t0
             _eta = _elapsed / (b_idx + 1) * (n_batches - b_idx - 1)
             sys.stdout.write(
@@ -178,11 +189,9 @@ class IntegratedBackend(ComputeBackend):
                 f"{f', {_eta:.1f}s ETA' if _eta > 1 else ''}]   ")
             sys.stdout.flush()
         sys.stdout.write("\n")
-        M = (M + M.conj().T) / 2
-
-        self.M_pp = M[:n, :n].copy()
-        self.M_mm = M[n:, n:].copy()
-        self.M_pm = M[:n, n:].copy()
+        self._Mpp_r = (Mpp + Mpp.conj().T) / 2
+        self._Mmm_r = (Mmm + Mmm.conj().T) / 2
+        self._Mpm_r = Mpm  # not necessarily symmetric
         self.phsp_n = n_events
         self._phsp_weights = w
         self._phsp_frac = np.asarray(
@@ -226,8 +235,7 @@ class IntegratedBackend(ComputeBackend):
         # Build Gram matrices on first call using m0/g0 from params
         self._ensure_gram(params)
 
-        # ── Fast norm from pre‑computed Gram matrices ─────────────
-        if self.M_pp is None:
+        if self._Mpp_r is None:
             raise RuntimeError("IntegratedBackend: phsp not loaded. "
                                "Call prepare_phsp_batched() first.")
 
@@ -239,10 +247,12 @@ class IntegratedBackend(ComputeBackend):
         poq = complex(poqr, poqi)
         poq2 = poq * poq.conjugate()
 
-        # Spatial integrals
-        I_pp = ck_B0.conj() @ self.M_pp @ ck_B0
-        I_mm = ck_B0bar.conj() @ self.M_mm @ ck_B0bar
-        I_pm = ck_B0.conj() @ self.M_pm @ ck_B0bar
+        # ── Spatial integrals (reduced 56×56) ─────────────────────
+        g_B0 = np.array([ck_B0[grp[0]] for grp in self._groups_B0])
+        g_B1 = np.array([ck_B0bar[grp[0]] for grp in self._groups_B0bar])
+        I_pp = g_B0.conj() @ self._Mpp_r @ g_B0
+        I_mm = g_B1.conj() @ self._Mmm_r @ g_B1
+        I_pm = g_B0.conj() @ self._Mpm_r @ g_B1
 
         self.int_Ap2 = float(I_pp.real)
         self.int_Am2 = float(I_mm.real)
@@ -267,19 +277,27 @@ class IntegratedBackend(ComputeBackend):
                     + B_co * 2.0 * (gpgm_avg.conjugate()
                                     / poq.conjugate() * I_pm).real)
 
-        # ── ck gradient ───────────────────────────────────────────
+        # ── ck gradient (reduced: each member gets 1/n of the group gradient) ──
         C_pp = A_co * gp2_avg + B_co * gm2_avg / poq2
         C_mm = A_co * poq2 * gm2_avg + B_co * gp2_avg
         z_total = complex(A_co * poq * gpgm_avg
                           + B_co * gpgm_avg.conjugate() / poq.conjugate())
 
         grad_ck = np.empty_like(ck, dtype=complex)
-        Mp = self.M_pp @ ck_B0
-        Mm = self.M_mm @ ck_B0bar
-        Mpm = self.M_pm @ ck_B0bar
-        MpmT_ckbar = self.M_pm.T @ ck_B0.conj()
-        grad_ck[:n] = (C_pp * Mp + z_total * Mpm).conj()
-        grad_ck[n:] = (C_mm * Mm).conj() + z_total * MpmT_ckbar
+        g_B0 = np.array([ck_B0[grp[0]] for grp in self._groups_B0])
+        g_B1 = np.array([ck_B0bar[grp[0]] for grp in self._groups_B0bar])
+        grad_B0_red = (C_pp * (self._Mpp_r @ g_B0)
+                       + z_total * (self._Mpm_r @ g_B1)).conj()
+        grad_B1_red = (C_mm * (self._Mmm_r @ g_B1)).conj() \
+                      + z_total * (self._Mpm_r.T @ g_B0.conj())
+        for gi, grp in enumerate(self._groups_B0):
+            w = 1.0 / len(grp)
+            for idx in grp:
+                grad_ck[idx] = grad_B0_red[gi] * w
+        for gi, grp in enumerate(self._groups_B0bar):
+            w = 1.0 / len(grp)
+            for idx in grp:
+                grad_ck[n + idx] = grad_B1_red[gi] * w
 
         # ── scalar gradients (using derivative time integrals) ──────
         # Spatial combination coefficients (matching reference's int1..4)
@@ -368,7 +386,7 @@ class IntegratedBackend(ComputeBackend):
 
     def free(self):
         """Release all resources (matrices + base backend)."""
-        self.M_pp = self.M_mm = self.M_pm = None
+        self._Mpp_r = self._Mmm_r = self._Mpm_r = None
         self._gram_m0 = self._gram_g0 = None
         self._phsp_data = None
         self._phsp_weights = self._phsp_frac = self._phsp_time = None
