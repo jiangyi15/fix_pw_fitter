@@ -407,6 +407,71 @@ class NumpyKernel:
         return Q, grads, (P if return_p else None)
 
     # ------------------------------------------------------------------
+    # Reduced Gram matrices for pre-integrated backend
+    # ------------------------------------------------------------------
+    def compute_Mpp(self, phsp_data, m0, g0, weight=None, batch_size=500):
+        """Compute reduced Gram matrices from phsp data on CPU.
+
+        Computes the spatial basis functions (``common_amp_factor``),
+        groups them into 4 identical-particle permutation blocks (each
+        of size ``ng = n_wave // 8``), and forms the reduced Gram
+        matrices:
+
+        * ``Mpp[g1,g2] = Σ_events w · (Σ4 common_amp[B0,g1])* · (Σ4 common_amp[B0,g2])``
+        * ``Mmm[g1,g2] = Σ_events w · (Σ4 common_amp[B0bar,g1])* · (Σ4 common_amp[B0bar,g2])``
+        * ``Mpm[g1,g2] = Σ_events w · (Σ4 common_amp[B0,g1])* · (Σ4 common_amp[B0bar,g2])``
+
+        All work is done on CPU (NumPy).  Returns pre‑symmetrised
+        matrices ready for use by :class:`IntegratedBackend`.
+
+        Args:
+            phsp_data: dict with keys ``mass``, ``q``, ``angle``, ``weight``.
+            m0: 1-D mass parameters.
+            g0: 1-D width parameters.
+            weight: per-event weights (default None → uniform).
+            batch_size: events per batch (default 500).
+
+        Returns:
+            ``(Mpp, Mmm, Mpm)`` — each ``(ng, ng)`` complex128.
+        """
+        import numpy as np
+        n_events = phsp_data["mass"].shape[0]
+        n_wave = self.n_wave
+        n = n_wave // 2
+        ng = n_wave // 8  # 56 for n_wave = 448
+
+        w = np.asarray(weight if weight is not None
+                       else np.ones(n_events), dtype=np.float64)
+        sw = np.sqrt(w)
+
+        Mpp = np.zeros((ng, ng), dtype=complex)
+        Mmm = np.zeros((ng, ng), dtype=complex)
+        Mpm = np.zeros((ng, ng), dtype=complex)
+
+        for b_start in range(0, n_events, batch_size):
+            b_end = min(b_start + batch_size, n_events)
+            batch = {k: v[b_start:b_end] for k, v in phsp_data.items()
+                     if isinstance(v, np.ndarray)}
+            ba = self._compute_common_amp_factor(batch, m0=m0, g0=g0)
+
+            # ba[:, :n]  → B0  waves, ba[:, n:] → B0bar waves
+            # Each: reshape (batch, 4, ng), sum over the 4 permutations
+            A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
+            A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+            A0 *= sw[b_start:b_end, np.newaxis]
+            A1 *= sw[b_start:b_end, np.newaxis]
+
+            Mpp += A0.T.conj() @ A0
+            Mmm += A1.T.conj() @ A1
+            Mpm += A0.T.conj() @ A1
+
+        # Symmetrize Hermitian matrices
+        Mpp = (Mpp + Mpp.conj().T) / 2
+        Mmm = (Mmm + Mmm.conj().T) / 2
+        # Mpm is not necessarily symmetric
+        return Mpp, Mmm, Mpm
+
+    # ------------------------------------------------------------------
     # Basis computation for pre-integrated backend
     # ------------------------------------------------------------------
     def _compute_common_amp_factor(self, data, m0=None, g0=None):
