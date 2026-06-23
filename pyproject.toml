@@ -11,6 +11,9 @@ dependencies = [
     "numpy",
     "pyyaml",
     "cffi",
+    "sympy",
+    "scipy",
+    "matplotlib",
 ]
 dynamic = []
 
