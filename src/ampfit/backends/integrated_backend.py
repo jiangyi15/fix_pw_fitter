@@ -52,12 +52,7 @@ class IntegratedBackend(ComputeBackend):
             from . import create_backend
             self.base = create_backend(base, kernel_config)
 
-        # ── Gram matrices (pre‑computed from phsp) ────────────────
-        self.phsp_n = 0
-        self._gram_m0 = None
-        self._gram_g0 = None
-
-        # Reduced Gram matrices (from 4-group structure: n_wave//8 groups)
+        # ── Reduced Gram matrices (from 4-group structure: n_wave//8 groups)
         self._ng = self.kernel.n_wave // 8
         self._Mpp_r = None
         self._Mmm_r = None
@@ -66,6 +61,13 @@ class IntegratedBackend(ComputeBackend):
                            for k in range(self._ng)]
         self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
                               for k in range(self._ng)]
+
+        # ── Auto‑detect gram backend from base's kernel ──────────
+        # If the base backend's kernel has a compute_gram() method,
+        # use it for GPU‑accelerated Gram matrix pre‑computation.
+        # Otherwise fall back to the numpy batched path.
+        base_kernel = getattr(self.base, "kernel", None)
+        self._gram_compute = getattr(base_kernel, "compute_gram", None)
 
         # Raw phsp arrays stored by prepare_phsp_batched
         self._phsp_data = None
@@ -157,11 +159,33 @@ class IntegratedBackend(ComputeBackend):
         n_events = phsp["mass"].shape[0]
         n_wave = self.kernel.n_wave
         n = n_wave // 2
-
-        w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
-        sw = np.sqrt(w)
         ng = self._ng  # number of groups
 
+        # ── CUDA accelerated path (via base backend's kernel) ─────
+        if self._gram_compute is not None:
+            w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
+            cuda_phsp = {k: v for k, v in phsp.items() if isinstance(v, np.ndarray)}
+            cuda_phsp.setdefault("frac", np.ones(n_events) * 0.5)
+            cuda_phsp.setdefault("time", np.zeros(n_events))
+            cuda_phsp.setdefault("bkg_raw", np.zeros(n_events))
+            # Use the base backend's own data handle for phsp data
+            dh = self.base.load_data(cuda_phsp)
+            Mpp, Mmm, Mpm = self._gram_compute(dh, m0, g0)
+            dh.free()
+            self._Mpp_r = (Mpp + Mpp.conj().T) / 2
+            self._Mmm_r = (Mmm + Mmm.conj().T) / 2
+            self._Mpm_r = Mpm
+            self.phsp_n = n_events
+            self._phsp_weights = w
+            self._phsp_frac = np.asarray(
+                phsp.get("frac", np.ones(n_events)), dtype=np.float64)
+            self._phsp_time = np.asarray(
+                phsp.get("time", np.zeros(n_events)), dtype=np.float64)
+            return
+
+        # ── NumPy fallback (batched) ───────────────────────────────
+        w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
+        sw = np.sqrt(w)
         bs = 500
         n_batches = (n_events + bs - 1) // bs
         import sys, time as _time
