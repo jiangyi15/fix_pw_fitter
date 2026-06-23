@@ -209,9 +209,9 @@ def _latex_label(stem):
 
 
 def _fmt(v, e):
-    if e is None or e < 1e-10:
+    if e is None:
         return f"{v:.4f}"
-    return f"{v:.4f}\\pm{e:.4f}"
+    return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
 
 
 def _output_latex(groups, vals, errs, af, split_ls, output_path, compile_pdf):

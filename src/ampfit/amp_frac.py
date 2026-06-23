@@ -58,15 +58,21 @@ class AmplitudeFractions:
         Includes CK, m0, and g0 gradients.
         """
         p = dict(p)
-        p["ck"] = self._ck_masked(mask)
+        ck_masked = self._ck_masked(mask)
+        p["ck"] = ck_masked
         Q, grads, _ = self.fitter.backend.compute(p, self._data, norm=None)
         total = float(Q)
 
         cfg = self.fitter.config
         grad = {}
-        # CK gradients → internal variable names (real/imag parts)
+        # CK gradients: zero out entries disconnected by mask
+        grad_ck = grads["ck"].copy()
+        if mask is not None:
+            for i in range(self._n_ck):
+                if i not in mask:
+                    grad_ck[i] = 0.0j
         slot_dict = {n: float(v) for n, v in self._resolved.items()}
-        ck_grads = self.fitter.cm.pc.backprop_grad(slot_dict, grads["ck"])
+        ck_grads = self.fitter.cm.pc.backprop_grad(slot_dict, grad_ck)
         grad.update(ck_grads)
         # m0 gradients
         for i, name in enumerate(cfg.m0_phys_name):
@@ -157,7 +163,8 @@ class AmplitudeFractions:
                 values.append(R_i)
 
                 d = {}
-                for pname in param_names:
+                all_keys = set(grad_num) | set(grad_den)
+                for pname in all_keys:
                     if pname in grad_num and pname in grad_den:
                         d[pname] = (grad_num[pname] / total_den
                                     - total_num / total_den**2 * grad_den[pname])
