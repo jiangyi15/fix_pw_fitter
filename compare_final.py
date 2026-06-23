@@ -27,7 +27,7 @@ print(f"  data: {data_all.shape} ({data_all.shape[1]//2} entries × 2 orientatio
 # 1b. Build reference ck from ampfit (same values, correct split)
 sys.path.insert(0, 'src')
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernelCorrect as Kernel
+from ampfit.numpy_kernel import NumpyKernel as Kernel
 import ampfit.fitter as ft
 from run_fit import build_constraints
 

@@ -156,7 +156,7 @@ def main():
     fixed_slots["poqr"] = 1.0
     fixed_slots["poqi"] = 0.0
 
-    for name in ["a1(1260)", "a2(1320)", "a2(1700)", "pi2(1670)", "pi1(1600)","a1(1640)", "pi1300", "pi1600"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
+    for name in []: # "a1(1260)", "a2(1320)", "a2(1700)", "pi2(1670)", "pi1(1600)","a1(1640)", "pi1300", "pi1600"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
         if f"{name}p_mass" in fixed_slots:
             del fixed_slots[f"{name}p_mass"]
         if f"{name}m_mass" in fixed_slots:
