@@ -55,6 +55,7 @@ class AmplitudeFractions:
 
         ``total = Σ weight·P``  (the ``norm=None`` forward sum).
         ``grad_dict`` maps physical parameter name → d(total)/d(param).
+        Includes CK, m0, and g0 gradients.
         """
         p = dict(p)
         p["ck"] = self._ck_masked(mask)
@@ -63,8 +64,14 @@ class AmplitudeFractions:
 
         cfg = self.fitter.config
         grad = {}
+        # CK gradients → internal variable names (real/imag parts)
+        slot_dict = {n: float(v) for n, v in self._resolved.items()}
+        ck_grads = self.fitter.cm.pc.backprop_grad(slot_dict, grads["ck"])
+        grad.update(ck_grads)
+        # m0 gradients
         for i, name in enumerate(cfg.m0_phys_name):
             grad[name] = float(grads["m0"][i])
+        # g0 gradients
         for i, name in enumerate(cfg.g0_phys_name):
             grad[name] = float(grads["g0"][i])
         return total, grad
@@ -81,10 +88,16 @@ class AmplitudeFractions:
         return p
 
     def _default_param_names(self):
-        """Return all mass/width physical parameter names in the resolved dict."""
+        """Return all varying physical parameter names in the resolved dict.
+
+        Includes CK internal names (from VariableRegistry), m0, and g0.
+        """
         resolved = self._resolved
         cfg = self.fitter.config
         names = []
+        # CK internal variable names (real/imag parts)
+        for n in self.fitter._var_registry._entries:
+            names.append(n)
         for n in cfg.m0_phys_name:
             if n in resolved:
                 names.append(n)
