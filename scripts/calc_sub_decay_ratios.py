@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Compute sub-decay branching ratios for 3π resonances.
+Compute fit fractions grouped by first-decay topology.
 
-For each resonance Rx that decays to 3π (e.g. a₁, a₂, π₁, π₂),
-compute the ratio of each sub-channel (e.g. Rx → ρπ, Rx → f₀π)
-to the total Rx → 3π amplitude.
-
-These are the sub-decay branching fractions within the model:
-  R = Σ w·|A(Rx → Xπ)|² / Σ w·|A(Rx → all 3π)|²
+Uses the ck parameter names (which encode the full decay chain) to
+group ck indices by first decay.  Each entry reports B0 (g_ls) and
+B0bar (g_lsbar) fractions separately.
 
 Usage:
-    python scripts/calc_sub_decay_ratios.py fit_results.json
-    python scripts/calc_sub_decay_ratios.py fit_results.json -o ratios.csv
+    python scripts/calc_first_decay_fractions.py fit_results.json
+    python scripts/calc_first_decay_fractions.py fit_results.json -o table.csv
+    python scripts/calc_first_decay_fractions.py fit_results.json --latex
+    python scripts/calc_first_decay_fractions.py fit_results.json --latex --latex-output table.tex
 """
 
 import sys, os, argparse, csv, re, subprocess
@@ -31,54 +30,70 @@ def _cl_name(stem):
         "rhoA": "ρπ", "rhoB": "ρπ",
         "f0(980)": "f₀(980)π", "f0(500)": "f₀(500)π",
         "f2(1270)": "f₂(1270)π",
+        "pi1600": "π(1800)π",
     }
     return nice.get(stem, stem)
 
 
 def _latex_name(name):
-    """Convert Unicode label to LaTeX math mode."""
-    map_ = {
-        "ρπ": r"\rho\pi",
-        "f₀(980)π": r"f_{0}(980)\pi",
-        "f₀(500)π": r"f_{0}(500)\pi",
-        "f₂(1270)π": r"f_{2}(1270)\pi",
-    }
-    return map_.get(name, name)
+    """Convert Unicode label to LaTeX math mode, handling LS suffix and multi-particle labels."""
+    # Strip LS suffix (e.g. "f₂(1270)π L=1" → "f₂(1270)π")
+    ls_part = ""
+    if " L=" in name:
+        base, ls = name.split(" L=", 1)
+        ls_part = f" L={ls}"
+    else:
+        base = name
+
+    return _to_latex_name(base) + ls_part
 
 
-def _latex_rx(name):
-    """Convert resonance name to LaTeX math mode (no charge suffix)."""
-    map_ = {
-        "NR0": r"{\rm NR}",
-        "a1(1260)": r"a_{1}(1260)",
-        "a1(1640)": r"a_{1}(1640)",
-        "a2(1320)": r"a_{2}(1320)",
-        "π1(1600)": r"\pi_{1}(1600)",
-        "π2(1670)": r"\pi_{2}(1670)",
-        "π(1300)": r"\pi(1300)",
-        "π(1600)": r"\pi(1600)",
-        "pi1(1600)": r"\pi_{1}(1600)",
-        "pi2(1670)": r"\pi_{2}(1670)",
-        "pi1300": r"\pi(1300)",
-        "pi1600": r"\pi(1600)",
-    }
-    return map_.get(name, name)
+def _to_latex_name(name):
+    r"""Convert a particle/resonance name to LaTeX math content (without outer $)."""
+    cmds = {"pi": r"\pi", "rho": r"\rho", "sigma": r"\sigma",
+            "NR": r"{\rm NR}", "K": r"K",
+            "ρ": r"\rho", "π": r"\pi", "σ": r"\sigma"}
+
+    # Normalize Unicode subscript digits → ASCII
+    _sub = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+    name = name.translate(_sub)
+
+    def _convert_atom(s):
+        charge = ""
+        if s.endswith("\u207a"): charge = "^{+}"; s = s[:-1]
+        elif s.endswith("\u207b"): charge = "^{-}"; s = s[:-1]
+        elif s not in cmds and s[-1:] in ("p", "m") and len(s) > 1:
+            charge = "^{+}" if s[-1] == "p" else "^{-}"
+            s = s[:-1]
+        m = re.match(r'^([a-zA-Z]+)(\d+)\((.+)\)$', s)
+        if m:
+            base, digit, paren = m.group(1), m.group(2), m.group(3)
+            cmd = cmds.get(base, base)
+            return f"{cmd}_{{{digit}}}({paren}){charge}"
+        m = re.match(r'^([a-zA-Z]+)(\d+)$', s)
+        if m:
+            cmd = cmds.get(m.group(1), m.group(1))
+            return f"{cmd}({m.group(2)}){charge}"
+        if s in cmds:
+            return f"{cmds[s]}{charge}"
+        return f"{s}{charge}"
+
+    parts = re.split(r'(π)', name)
+    converted = [_convert_atom(p) for p in parts if p]
+    return "".join(converted)
 
 
 def discover_sub_decays(config, merge_cp=False):
-    """Group base ck indices by resonance → sub-decay channel.
-
-    Only includes resonances that decay through a cascade
-    (Rx → Ry + π, Ry → ππ), i.e. true 3π decays.
-
-    Args:
-        config: Config object.
-        merge_cp: if True, merge charge-conjugate pairs (a1⁺/a1⁻ → a1).
-
-    Returns list of ``(res_label, [(sub_label, [base_idxs]), ...])``.
-    """
-    from ampfit import Fitter
+    """Group base ck indices by resonance → sub-decay channel."""
     pws = config.full_decay.get_partial_waves_params()
+
+    idx_to_ls = {}
+    for start, end, chain in config._chain_ranges():
+        if len(chain.decays) > 1:
+            ls_list = chain.decays[1].get_ls_list()
+            for j, base_idx in enumerate(range(start, end)):
+                if j < len(ls_list):
+                    idx_to_ls[base_idx] = ls_list[j]
 
     chains = OrderedDict()
     for i, pw in enumerate(pws):
@@ -99,31 +114,33 @@ def discover_sub_decays(config, merge_cp=False):
         if not sub_channel or sub_channel in ("pim1", "pim2", "pip1", "pip2"):
             continue
 
-        chains.setdefault(rx_name, OrderedDict())
-        chains[rx_name].setdefault(sub_channel, []).append(i)
+        ls_info = idx_to_ls.get(i, (0, 0))
+        ls_key = (sub_channel, ls_info)
 
-    # Optionally merge charge-conjugate pairs
+        chains.setdefault(rx_name, OrderedDict())
+        chains[rx_name].setdefault(ls_key, []).append(i)
+
     if merge_cp:
         merged = OrderedDict()
         for rx_name, subs in chains.items():
             base = rx_name[:-1] if len(rx_name) > 1 and rx_name[-1] in "pm" else rx_name
-            for sub_name, idxs in subs.items():
+            for ls_key, idxs in subs.items():
                 merged.setdefault(base, OrderedDict())
-                merged[base].setdefault(sub_name, []).extend(idxs)
+                merged[base].setdefault(ls_key, []).extend(idxs)
         chains = merged
 
-    # Convert to results, sorted by name
     result = []
     for rx_name in sorted(chains, key=lambda x: _cl_name(x)):
         subs = []
-        for sub_name, idxs in chains[rx_name].items():
-            subs.append((_cl_name(sub_name), sorted(set(idxs))))
+        for (sub_name, (L, S)), idxs in sorted(chains[rx_name].items()):
+            ls_counts = sum(1 for k in chains[rx_name] if k[0] == sub_name)
+            wave_label = f" L={L}" if ls_counts > 1 else ""
+            subs.append((_cl_name(sub_name) + wave_label, sorted(set(idxs))))
         result.append((_cl_name(rx_name), subs))
     return result
 
 
 def _setup(args):
-    """Create Fitter, load data and fit result."""
     from ampfit import Fitter
     from run_fit import build_constraints
 
@@ -139,8 +156,9 @@ def _setup(args):
     return f
 
 
-def _output_terminal(groups, csv_rows, f, af, n_base):
-    """Terminal output (existing behavior)."""
+def _output_terminal(groups, csv_rows, af, n_base, merge_cp):
+    """Terminal output."""
+
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
@@ -154,31 +172,46 @@ def _output_terminal(groups, csv_rows, f, af, n_base):
     print("=" * 80)
 
     for rx_label, subs in groups:
-        rx_all_idxs = sum([idxs for _, idxs in subs], [])
-        ls_all, lsbar_all = split_ls(rx_all_idxs)
-        v_tot, e_tot = af.fractions([ls_all, lsbar_all])
-        f0_tot, f1_tot = v_tot[0], v_tot[1]
-        e0_tot, e1_tot = e_tot[0], e_tot[1]
-
         print(f"\n  ── {rx_label} ──")
         print(f"  {'Sub-channel':30s}  {'B0 ratio':>22s}  {'B0bar ratio':>22s}")
         print("  " + "-" * 75)
 
-        # Ratio = sub / total within B0 and B0bar separately
-        # Use af.fractions with denominator for proper gradient-based uncertainty
-        sub_masks_b0 = [split_ls(idxs)[0] for _, idxs in subs]
-        sub_masks_b1 = [split_ls(idxs)[1] for _, idxs in subs]
-        sub_names = [sub_label for sub_label, _ in subs]
-        v_b0, e_b0 = af.fractions(sub_masks_b0, denominator=ls_all)
-        v_b1, e_b1 = af.fractions(sub_masks_b1, denominator=lsbar_all)
+        if merge_cp:
+            pi_p_all = [idxs[0] for _, idxs in subs]
+            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+        else:
+            pi_p_all = [idx for _, idxs in subs for idx in idxs]
+            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
 
-        n_subs = len(sub_names)
-        for j, sub_label in enumerate(sub_names):
-            r0, s0 = v_b0[j], e_b0[j]
-            r1, s1 = v_b1[j], e_b1[j]
-            print(f"  {sub_label:30s}  {r0:8.5f} ± {s0:8.5f}  "
-                  f"{r1:8.5f} ± {s1:8.5f}")
-            csv_rows.append((rx_label, sub_label, r0, s0, r1, s1))
+        sub_groups = []
+        for sub_label, idxs in subs:
+            base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
+            if sub_groups and sub_groups[-1][0] == base:
+                sub_groups[-1][1].append((sub_label, idxs[0] if merge_cp else idxs))
+            else:
+                sub_groups.append((base, [(sub_label, idxs[0] if merge_cp else idxs)]))
+
+        for base_label, entries in sub_groups:
+            for sub_label, pi_p_idx in entries:
+                ls_p, lsbar_p = split_ls([pi_p_idx])
+                v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
+                v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
+                r0, s0 = v_b0[0], e_b0[0]
+                r1, s1 = v_b1[0], e_b1[0]
+                print(f"  {sub_label:30s}  {r0:8.5f} ± {s0:8.5f}  "
+                      f"{r1:8.5f} ± {s1:8.5f}")
+                csv_rows.append((rx_label, sub_label, r0, s0, r1, s1))
+
+            if len(entries) > 1:
+                all_pi_p = [e[1] for e in entries]
+                ls_all, lsbar_all = split_ls(all_pi_p)
+                v_tot, e_tot = af.fractions([ls_all], denominator=ls_p_total)
+                v_tot1, e_tot1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
+                r0, s0 = v_tot[0], e_tot[0]
+                r1, s1 = v_tot1[0], e_tot1[0]
+                print(f"  {'  Total':28s}  {r0:8.5f} ± {s0:8.5f}  "
+                      f"{r1:8.5f} ± {s1:8.5f}")
+                csv_rows.append((rx_label, f"  Total {base_label}", r0, s0, r1, s1))
 
 
 def _fmt(v, e):
@@ -209,61 +242,62 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
     L.append(r"Resonance & Sub-channel & B$^{0}$ & $\overline{\rm B}{}^{0}$ \\")
     L.append(r"\midrule")
 
-    # Base name without charge suffix (to group charge-conjugate pairs)
-    def _base(name):
-        for s in ("⁺", "⁻", "p", "m"):
-            if name.endswith(s):
-                return name[:-1]
-        return name
-
     prev_base = None
     for rx_label, subs in groups:
-        cur_base = _base(rx_label)
+        cur_base = rx_label
         if prev_base is not None and cur_base != prev_base:
             L.append(r"  \midrule")
         prev_base = cur_base
 
-        rx_all_idxs = sum([idxs for _, idxs in subs], [])
-        ls_all, lsbar_all = split_ls(rx_all_idxs)
-        v_tot, e_tot = af.fractions([ls_all, lsbar_all])
-        f0_tot, f1_tot = v_tot[0], v_tot[1]
-        e0_tot, e1_tot = e_tot[0], e_tot[1]
+        pi_p_all = [idxs[0] for _, idxs in subs]
+        ls_p_total, lsbar_p_total = split_ls(pi_p_all)
 
-        # Ratio = sub / total within B0 and B0bar separately (gradient-based)
-        sub_masks_b0 = [split_ls(idxs)[0] for _, idxs in subs]
-        sub_masks_b1 = [split_ls(idxs)[1] for _, idxs in subs]
-        sub_names = [sub_label for sub_label, _ in subs]
-        v_b0, e_b0 = af.fractions(sub_masks_b0, denominator=ls_all)
-        v_b1, e_b1 = af.fractions(sub_masks_b1, denominator=lsbar_all)
+        sub_groups = []
+        for sub_label, idxs in subs:
+            base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
+            if sub_groups and sub_groups[-1][0] == base:
+                sub_groups[-1][1].append((sub_label, idxs[0]))
+            else:
+                sub_groups.append((base, [(sub_label, idxs[0])]))
 
-        n_subs = len(sub_names)
-        rx_ltx = _latex_rx(rx_label)
+        n_subs = sum(len(e) + (1 if len(e) > 1 else 0) for _, e in sub_groups)  # rows + totals
+        rx_ltx = _to_latex_name(rx_label)
 
-        # First sub-channel on the resonance line (multirow span)
-        r0, s0 = v_b0[0], e_b0[0]
-        r1, s1 = v_b1[0], e_b1[0]
-        sub_ltx = _latex_name(sub_names[0])
-        span = f"\\multirow{{{n_subs}}}{{*}}{{$\\ {rx_ltx}$}}"
-        L.append(f"  {span} & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+        for j, (base_label, entries) in enumerate(sub_groups):
+            # Show each individual L value
+            for k, (sub_label, pi_p_idx) in enumerate(entries):
+                ls_p, lsbar_p = split_ls([pi_p_idx])
+                v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
+                v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
+                r0, s0 = v_b0[0], e_b0[0]
+                r1, s1 = v_b1[0], e_b1[0]
 
-        # Remaining sub-channels (no resonance name)
-        for j in range(1, n_subs):
-            r0, s0 = v_b0[j], e_b0[j]
-            r1, s1 = v_b1[j], e_b1[j]
-            sub_ltx = _latex_name(sub_names[j])
-            L.append(f"   & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+                if j == 0 and k == 0:
+                    span = f"\\multirow{{{n_subs}}}{{*}}{{$\\ {rx_ltx}$}}"
+                    sub_ltx = _latex_name(sub_label)
+                    L.append(f"  {span} & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+                else:
+                    sub_ltx = _latex_name(sub_label)
+                    L.append(f"   & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+
+            # Total for multi-L sub-channels
+            if len(entries) > 1:
+                all_pi_p = [e[1] for e in entries]
+                ls_all, lsbar_all = split_ls(all_pi_p)
+                v_tot, e_tot = af.fractions([ls_all], denominator=ls_p_total)
+                v_tot1, e_tot1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
+                r0, s0 = v_tot[0], e_tot[0]
+                r1, s1 = v_tot1[0], e_tot1[0]
+                L.append(f"   & ${_latex_name(base_label)}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
     L.append(r"\bottomrule")
     L.append(r"\end{tabular}")
     L.append(r"\end{document}")
-
     tex = "\n".join(L)
     if output_path:
         with open(output_path, "w") as f:
             f.write(tex)
         print(f"  Saved {output_path}")
-    else:
-        print(tex)
 
     if compile_pdf:
         outdir = os.path.dirname(output_path) if output_path else "/tmp"
@@ -277,10 +311,6 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
         pdfpath = os.path.splitext(texpath)[0] + ".pdf"
         if os.path.exists(pdfpath):
             print(f"  PDF: {pdfpath}")
-        else:
-            for ln in (r.stderr or "").split("\n"):
-                if "Error" in ln:
-                    print(f"  pdflatex: {ln}")
 
 
 def main():
@@ -288,21 +318,17 @@ def main():
         description="Sub-decay branching ratios for 3π resonances")
     ap.add_argument("fit_json")
     ap.add_argument("--config", default=_default_path("config_angle.yml"))
-    ap.add_argument("--phsp", default=_default_path("data/phsp_arrays.npz"))
+    ap.add_argument("--phsp", default=_default_path("data/phsp_noeff_sym_arrays.npz"))
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default="cuda32_v3")
     ap.add_argument("-o", "--output", help="CSV output path")
-    ap.add_argument("--latex", action="store_true",
-                    help="Output LaTeX table instead of terminal")
-    ap.add_argument("--latex-output", default=None,
-                    help="LaTeX .tex path (default: stdout)")
-    ap.add_argument("--pdf", action="store_true",
-                    help="Compile LaTeX to PDF (requires --latex-output)")
+    ap.add_argument("--latex", action="store_true")
+    ap.add_argument("--latex-output", default=None)
+    ap.add_argument("--pdf", action="store_true")
     ap.add_argument("--no-merge-cp", action="store_true",
-                    help="Show charge-conjugate pairs separately (default: merged)")
+                    help="Show charge-conjugate pairs separately")
     args = ap.parse_args()
 
-    # ── Setup ──────────────────────────────────────────────────────
     from ampfit import Fitter
     from ampfit.amp_frac import AmplitudeFractions
 
@@ -314,18 +340,15 @@ def main():
 
     af = AmplitudeFractions(f, fit_result)
 
-    # ── Discover sub-decay groups ──────────────────────────────────
-    groups = discover_sub_decays(f.config, merge_cp=not args.no_merge_cp)
+    stems = discover_sub_decays(f.config, merge_cp=not args.no_merge_cp)
     n_base = len(f.config.full_decay.get_partial_waves_params())
 
-    # ── Output ─────────────────────────────────────────────────────
     if args.latex:
-        _output_latex(groups, af, n_base,
-                      args.latex_output, args.pdf)
+        _output_latex(stems, af, n_base, args.latex_output, args.pdf)
     else:
         csv_rows = []
-        _output_terminal(groups, csv_rows, f, af, n_base)
-
+        _output_terminal(stems, csv_rows, af, n_base,
+                         merge_cp=not args.no_merge_cp)
         if args.output:
             with open(args.output, "w", newline="") as fout:
                 w = csv.writer(fout)
@@ -334,7 +357,7 @@ def main():
                             "B0bar_ratio", "B0bar_ratio_err"])
                 for row in csv_rows:
                     w.writerow(row)
-            print(f"\n  Saved to {args.output}")
+            print(f"\n  Saved CSV to {args.output}")
 
 
 if __name__ == "__main__":
