@@ -421,6 +421,7 @@ class ConstraintManager:
         self.name_res = NameResolution()
         self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.mass_width_transforms = []  # list of Transform from particle models
+        self._extra_names = []        # names registered by transforms (no type distinction)
         self.fixed_tr = FixedOverride()
 
         # Bound transforms (flat-index → BoundTransform)
@@ -493,12 +494,17 @@ class ConstraintManager:
     def set_mass_width_transforms(self, transforms, reset=True):
         if reset:
             self.mass_width_transforms.clear()
+            self._extra_names.clear()
         for tr in transforms:
             if tr is not None:
                 self.mass_width_transforms.append(tr)
-                # Auto-fix output names that are NOT also inputs
-                # (pass-through params like re_00 stay free).
                 input_set = set(tr.input_names)
+                # Register input names — no type distinction (ck/m0/g0
+                # separation only exists in _build_params).
+                for name in tr.input_names:
+                    if name not in self._extra_names:
+                        self._extra_names.append(name)
+                # Auto-fix output names that are NOT also inputs.
                 for name in tr.output_names:
                     if name not in input_set:
                         self.fixed_tr.values[name] = 0.0
@@ -615,6 +621,8 @@ class ConstraintManager:
         for name in self.g0_names:
             _add(name)
         for name in self.SCALAR_NAMES:
+            _add(name)
+        for name in self._extra_names:
             _add(name)
 
 

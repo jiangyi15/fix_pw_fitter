@@ -450,27 +450,6 @@ class Fitter:
                            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
             for name in self.cm.SCALAR_NAMES:
                 d.setdefault(name, scalar_base.get(name, 0.0))
-            # ck defaults from models with mass/width transforms.
-            # Store both p and m variations since build_constraints may
-            # alias p↔m via same-constraints.
-            for chain in self.config.full_decay.chains:
-                for decay in chain.decays[1:]:
-                    model = decay.core._model
-                    if hasattr(model, 'order_names') and hasattr(model, '_ck0_r'):
-                        for a, name in enumerate(model.order_names):
-                            d[name] = float(model._ck0_r[a])
-                            d[name.rstrip('r') + 'i'] = float(model._ck0_i[a])
-                            # Also store the charge-conjugate variation
-                            m_name = name.replace('p->', 'm->').replace('.pip2', '.pim2')
-                            d[m_name] = float(model._ck0_r[a])
-                            d[m_name.rstrip('r') + 'i'] = float(model._ck0_i[a])
-                    # Standalone width param (ck_matrix_v2, separate from gamma names)
-                    if hasattr(model, 'width0'):
-                        p_name = f"{decay.core.name}_width"
-                        d[p_name] = float(model.width0)
-                        m_name = p_name.replace('p_', 'm_')
-                        if m_name != p_name:
-                            d[m_name] = float(model.width0)
             self._defaults = d
         return self._defaults
 
