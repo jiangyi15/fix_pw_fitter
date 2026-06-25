@@ -129,6 +129,23 @@ class _CKWidthTransform(Transform):
                 idx += 2
         return d
 
+    def backward(self, grad_out, d_in=None):
+        eps = 1e-6
+        d = dict(d_in) if d_in else {}
+        grad = dict(grad_out)
+        for name in self.input_names:
+            d_p = dict(d); d_p[name] = d.get(name, 0.0) + eps
+            out_p = self.forward(d_p)
+            d_m = dict(d); d_m[name] = d.get(name, 0.0) - eps
+            out_m = self.forward(d_m)
+            g = 0.0
+            for on in self.output_names:
+                g += grad_out.get(on, 0.0) * (
+                    out_p.get(on, 0.0) - out_m.get(on, 0.0)) / (2 * eps)
+            grad[name] = g
+        return grad
+
+
 @register_model("ck_matrix_v2")
 class CKMatrixModelV2(BaseModel):
     """Running width from CK outer product, normalised to ``{res}_width``.
