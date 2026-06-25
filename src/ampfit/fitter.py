@@ -118,6 +118,21 @@ class Fitter:
         """
         self.cm.set_scale(scale_params, reset=reset)
 
+    def setup_mass_width_transforms(self):
+        """Collect mass/width transforms from all particle models and register them.
+
+        Iterates over all decay chains, calls ``make_mass_width_transform()``
+        on each model, and adds non-``None`` results to the constraint pipeline.
+        """
+        transforms = []
+        for chain in self.config.full_decay.chains:
+            for decay in chain.decays[1:]:
+                model = decay.core._model
+                tfm = model.make_mass_width_transform()
+                if tfm is not None:
+                    transforms.append(tfm)
+        self.cm.set_mass_width_transforms(transforms)
+
     def set_free(self, name):
         """Unfix a previously fixed parameter so it becomes free again.
 

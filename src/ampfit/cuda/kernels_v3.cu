@@ -114,9 +114,10 @@ __global__ void compute_g_bw_kernel(
     int tid = threadIdx.x;
     int block_sz = blockDim.x;
 
-    // Shared memory for g values (all gamma rows)
-    __shared__ double s_g_real[288];  // n_gamma_rows = 288
-    __shared__ double s_g_imag[288];
+    // Shared memory for g values (all gamma rows, dynamic size)
+    extern __shared__ double s_g_dyn[];
+    double* s_g_real = s_g_dyn;
+    double* s_g_imag = s_g_dyn + n_gamma_rows;
 
     // Phase 1: Each thread computes g for its assigned gamma rows
     for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
@@ -674,10 +675,12 @@ __global__ void gradient_kernel(
     // Phase 2: Pre-compute dQ_dbw_dom for all unique_bw
     // and accumulate m0 gradients simultaneously
     //=========================================================================
-    __shared__ double s_dQ_dbw_dom_real[216];  // n_unique_bw = 216
-    __shared__ double s_dQ_dbw_dom_imag[216];
-    __shared__ double s_dQ_dg_bw_real[216];
-    __shared__ double s_dQ_dg_bw_imag[216];
+    // Shared memory for g_bw gradients (dynamic size)
+    extern __shared__ double s_grad_dyn[];
+    double* s_dQ_dbw_dom_real = s_grad_dyn;
+    double* s_dQ_dbw_dom_imag = s_grad_dyn + n_unique_bw;
+    double* s_dQ_dg_bw_real    = s_grad_dyn + 2 * n_unique_bw;
+    double* s_dQ_dg_bw_imag    = s_grad_dyn + 3 * n_unique_bw;
 
     // Initialize m0 partials to zero
     for (int bw_idx = tid; bw_idx < n_unique_bw; bw_idx += block_sz) {
@@ -965,7 +968,8 @@ void launch_compute_g_bw(
     double* g_bw_real, double* g_bw_imag,
     int n_events) {
 
-    compute_g_bw_kernel<<<n_events, BLOCK_SIZE>>>(
+    size_t shmem = 2 * n_gamma_rows * sizeof(double);
+    compute_g_bw_kernel<<<n_events, BLOCK_SIZE, shmem>>>(
         mass, g0, g0_index, g0_mass_index, matrix_gamma,
         gamma_table_real, gamma_table_imag,
         gamma_min, gamma_delta,
@@ -1055,7 +1059,8 @@ void launch_gradient(
     int n_events) {
 
     
-    gradient_kernel<<<n_events, BLOCK_SIZE>>>(
+    size_t shmem_grad = 4 * n_unique_bw * sizeof(double);
+    gradient_kernel<<<n_events, BLOCK_SIZE, shmem_grad>>>(
         P, pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag, poq_real, poq_imag,
         bw_p_real, bw_p_imag, common_amp_factor_real, common_amp_factor_imag,
