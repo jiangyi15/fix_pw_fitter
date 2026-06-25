@@ -140,6 +140,13 @@ class Fitter:
                 tfm = model.make_mass_width_transform()
                 if tfm is not None:
                     transforms.append(tfm)
+                    # Register standalone width param (not in gamma names)
+                    if hasattr(tfm, 'width_name'):
+                        wn = tfm.width_name
+                        if wn not in self.config.g0_phys_name:
+                            self.config.g0_phys_name.append(wn)
+                            self.cm.g0_names.append(wn)
+                            self.cm._rebuild()
         self.cm.set_mass_width_transforms(transforms)
 
     def set_free(self, name):
@@ -453,21 +460,17 @@ class Fitter:
                         for a, name in enumerate(model.order_names):
                             d[name] = float(model._ck0_r[a])
                             d[name.rstrip('r') + 'i'] = float(model._ck0_i[a])
+                            # Also store the charge-conjugate variation
                             m_name = name.replace('p->', 'm->').replace('.pip2', '.pim2')
                             d[m_name] = float(model._ck0_r[a])
                             d[m_name.rstrip('r') + 'i'] = float(model._ck0_i[a])
-            # Defaults for params registered from transform input_names
-            # (e.g. {res}_width — not in get_gamma_name()).
-            for tr in self.cm.mass_width_transforms:
-                for name in tr.input_names:
-                    if name not in d and name not in self.config.m0_phys_name:
-                        # Fallback to decay chain particle config
-                        particle_key = name.replace('_width', '')
-                        config_val = (self.config.dic.get('particle', {})
-                                      .get(particle_key, {}).get('width', None))
-                        if config_val is not None:
-                            d[name] = float(config_val)
-
+                    # Standalone width param (ck_matrix_v2, separate from gamma names)
+                    if hasattr(model, 'width0'):
+                        p_name = f"{decay.core.name}_width"
+                        d[p_name] = float(model.width0)
+                        m_name = p_name.replace('p_', 'm_')
+                        if m_name != p_name:
+                            d[m_name] = float(model.width0)
             self._defaults = d
         return self._defaults
 
@@ -627,6 +630,8 @@ class Fitter:
         grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
 
         # Merge m0, g0, scalar gradients
+        # (extra names like standalone width params beyond the backend's
+        # array size are handled via the transform's backward gradient)
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
                                     ('scalar', scalar_names)]:
