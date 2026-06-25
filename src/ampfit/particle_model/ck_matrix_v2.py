@@ -56,7 +56,7 @@ def _reduced_spec(n_ck, name):
 
     Names::
 
-        {name}_re_00, {name}_re_01, {name}_im_01, …
+        {name}_width, {name}_re_00, {name}_re_01, {name}_im_01, …
     """
     names = []
     for a in range(n_ck):
@@ -90,7 +90,7 @@ class _CKWidthTransform(Transform):
     _has_inverse = False
 
     def __init__(self, name, order_names, gamma_names,
-                 ck_r0, ck_i0, gamma_at_m0, width_name, default_width):
+                 ck_r0, ck_i0, gamma_at_m0, width_name):
         self.width_name = width_name
         in_names = [width_name] + list(order_names) + \
                    [n.rstrip('r') + 'i' for n in order_names]
@@ -102,12 +102,12 @@ class _CKWidthTransform(Transform):
         self.ck_r0 = np.array(ck_r0, dtype=float)
         self.ck_i0 = np.array(ck_i0, dtype=float)
         self.gamma_at_m0 = np.array(gamma_at_m0, dtype=float)
-        self._default_width = float(default_width)
 
     def forward(self, d):
         d = dict(d)
 
-        width = d.get(self.width_name, self._default_width)
+        # {res}_width pass-through
+        width = d[self.width_name]
 
         ck = np.zeros(self.n_ck, dtype=complex)
         for a in range(self.n_ck):
@@ -119,9 +119,11 @@ class _CKWidthTransform(Transform):
         N = np.dot(raw, self.gamma_at_m0)
         scale = width / N if N != 0 else 0.0
 
+        # {res}_width pass-through (separate key, not in gamma_names)
+        d[self.width_name] = width
         idx = 0
         for a in range(self.n_ck):
-            d[self.gamma_names[idx]] = raw[idx] * scale     # re_aa
+            d[self.gamma_names[idx]] = raw[idx] * scale          # re_aa
             idx += 1
             for b in range(a + 1, self.n_ck):
                 d[self.gamma_names[idx]]     = raw[idx] * scale      # re_ab
@@ -242,7 +244,7 @@ class CKMatrixModelV2(BaseModel):
         return _CKWidthTransform(
             self.name, self.order_names, self._g_names,
             self._ck0_r, self._ck0_i,
-            self._gamma_m0, width_name, float(self.kwargs.get("width", 0.1)),
+            self._gamma_m0, width_name,
         )
 
     # ── get_bw_params ────────────────────────────────────────────

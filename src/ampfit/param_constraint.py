@@ -496,9 +496,14 @@ class ConstraintManager:
         for tr in transforms:
             if tr is not None:
                 self.mass_width_transforms.append(tr)
-                # Auto-fix output names that are NOT also inputs
-                # (pass-through params like re_00 stay free).
                 input_set = set(tr.input_names)
+                # Register any input names not already in the registry.
+                # The transform knows what parameters it needs — just add them.
+                for name in tr.input_names:
+                    if name not in self.g0_names:
+                        self.g0_names.append(name)
+                # Auto-fix output names that are NOT also inputs.
+                # (Pass-through params stay free.)
                 for name in tr.output_names:
                     if name not in input_set:
                         self.fixed_tr.values[name] = 0.0
@@ -584,7 +589,7 @@ class ConstraintManager:
         """Reverse of :meth:`resolve` (mass/width → scale → fixed → same)."""
         grad = grad_resolved
         for tr in reversed(self.mass_width_transforms):
-            grad = tr.backward(grad)
+            grad = tr.backward(grad, d_in=resolved)
         for tr in reversed(self.scale_transforms):
             grad = tr.backward(grad)
         grad = self.fixed_tr.chain_grad(grad, resolved)
