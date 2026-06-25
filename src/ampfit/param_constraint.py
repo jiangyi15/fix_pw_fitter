@@ -331,21 +331,18 @@ class Transform:
     def apply_backward(self, grad_out, d_in=None):
         """Apply backward and merge into *grad_out*.
 
-        Calls :meth:`backward`, then:
-
-        1. Updates *grad_out* for keys in ``input_names``
-           (the transform's actual inputs).
-        2. Removes gradients for keys in ``output_names`` but **not** in
-           ``input_names`` — these are derived quantities that the
-           transform computes; the optimizer should not optimise them
-           directly, only through the transform's inputs.
-
-        Use this in pipeline code instead of calling ``backward()`` directly.
+        Each backward call computes the gradient contribution through
+        the transform's path: ``∂loss/∂gamma · ∂gamma/∂input``.
+        This **accumulates** with any existing gradients (e.g. from the
+        kernel's direct path through ``backprop_grad``).
+        Output-only names (in ``output_names`` but not ``input_names``)
+        are removed since they are derived quantities — the optimizer
+        should only access them through the transform's inputs.
         """
         back = self.backward(grad_out, d_in=d_in)
         for name in self.input_names:
             if name in back:
-                grad_out[name] = back[name]
+                grad_out[name] = grad_out.get(name, 0.0) + back[name]
         for name in self.output_names:
             if name not in self.input_names:
                 grad_out.pop(name, None)
