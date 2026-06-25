@@ -597,11 +597,9 @@ class ConstraintManager:
         """Reverse of :meth:`resolve` (mass/width → scale → fixed → same)."""
         grad = grad_resolved
         for tr in reversed(self.mass_width_transforms):
-            back = tr.backward(grad, d_in=resolved)
-            grad.update(back)
+            grad = tr.backward(grad)
         for tr in reversed(self.scale_transforms):
-            back = tr.backward(grad)
-            grad.update(back)
+            grad = tr.backward(grad)
         grad = self.fixed_tr.chain_grad(grad, resolved)
         grad = self.name_res.chain_grad(grad, raw)
         return grad
