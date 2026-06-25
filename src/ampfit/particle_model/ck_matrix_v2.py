@@ -90,7 +90,7 @@ class _CKWidthTransform(Transform):
     _has_inverse = False
 
     def __init__(self, name, order_names, gamma_names,
-                 ck_r0, ck_i0, gamma_at_m0, width_name, width0):
+                 ck_r0, ck_i0, gamma_at_m0, width_name, default_width):
         self.width_name = width_name
         in_names = [width_name] + list(order_names) + \
                    [n.rstrip('r') + 'i' for n in order_names]
@@ -102,12 +102,12 @@ class _CKWidthTransform(Transform):
         self.ck_r0 = np.array(ck_r0, dtype=float)
         self.ck_i0 = np.array(ck_i0, dtype=float)
         self.gamma_at_m0 = np.array(gamma_at_m0, dtype=float)
-        self.width0 = float(width0)
+        self._default_width = float(default_width)
 
     def forward(self, d):
         d = dict(d)
 
-        width = d.get(self.width_name, self.width0)
+        width = d.get(self.width_name, self._default_width)
 
         ck = np.zeros(self.n_ck, dtype=complex)
         for a in range(self.n_ck):
@@ -181,7 +181,6 @@ class CKMatrixModelV2(BaseModel):
 
         # ── config values ─────────────────────────────────────────
         self.m0 = float(kwargs.get("mass", 0.775))
-        self.width0 = float(kwargs.get("width", 0.1))
 
         # ── gamma scale so re_00(m₀) = 1 in unscaled form ────────
         self._gamma_scale = float(np.interp(self.m0, self.x_table,
@@ -216,7 +215,7 @@ class CKMatrixModelV2(BaseModel):
         ck0 = self._ck0_r + 1j * self._ck0_i
         raw0 = _raw_expanded(ck0)
         N0 = np.dot(raw0, self._gamma_m0)
-        self._g_defaults = [self.width0 * r / N0 if N0 != 0 else 0.0
+        self._g_defaults = [float(self.kwargs.get("width", 0.1)) * r / N0 if N0 != 0 else 0.0
                             for r in raw0]
 
     # ── gamma interface ──────────────────────────────────────────
@@ -243,7 +242,7 @@ class CKMatrixModelV2(BaseModel):
         return _CKWidthTransform(
             self.name, self.order_names, self._g_names,
             self._ck0_r, self._ck0_i,
-            self._gamma_m0, width_name, self.width0,
+            self._gamma_m0, width_name, float(self.kwargs.get("width", 0.1)),
         )
 
     # ── get_bw_params ────────────────────────────────────────────
@@ -269,7 +268,7 @@ class CKMatrixModelV2(BaseModel):
                    for i in range(self.get_gamma_count())]
 
         # Read total width from params or kwargs
-        total_width = _p(f"{self.name}_width", self.width0)
+        total_width = _p(f"{self.name}_width", float(self.kwargs.get("width", 0.1)))
 
         def g_bw_re(m):
             g_list = self.gamma(np.array([float(m)]))
