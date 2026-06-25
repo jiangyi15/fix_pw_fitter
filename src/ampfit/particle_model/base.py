@@ -65,6 +65,19 @@ class BaseModel:
         """
         return [np.ones_like(m) + 0j]
 
+    def make_mass_width_transform(self):
+        """Create a Transform from physical parameters to real mass/width.
+
+        Returns a :class:`~ampfit.param_constraint.Transform` that reads
+        physical mass and gamma values from the full parameter dict and
+        replaces them with the model's real (derived) mass and width.
+
+        The default returns ``None`` (physical = real, no transform).
+        Override in subclasses with running widths (GS_rho, Bugg, etc.)
+        to return a ``Transform`` with the appropriate computation.
+        """
+        return None
+
     def get_bw_params(self, params=None):
         """Breit-Wigner peak mass and width from the running gamma(m).
 

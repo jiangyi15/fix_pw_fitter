@@ -1428,6 +1428,10 @@ class Fitter:
         for gname in model.get_gamma_name():
             if gname in resolved:
                 param_names.append(gname)
+        # Also collect standalone width param (ck_matrix_v2 — not in gamma names)
+        width_name = f"{particle_name}_width"
+        if width_name in resolved and width_name not in param_names:
+            param_names.append(width_name)
         if not param_names:
             raise ValueError(f"No fitted parameters found for '{particle_name}'")
 

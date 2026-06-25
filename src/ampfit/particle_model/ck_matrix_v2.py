@@ -130,19 +130,107 @@ class _CKWidthTransform(Transform):
         return d
 
     def backward(self, grad_out, d_in=None):
-        eps = 1e-6
         d = dict(d_in) if d_in else {}
-        grad = dict(grad_out)
-        for name in self.input_names:
-            d_p = dict(d); d_p[name] = d.get(name, 0.0) + eps
-            out_p = self.forward(d_p)
-            d_m = dict(d); d_m[name] = d.get(name, 0.0) - eps
-            out_m = self.forward(d_m)
-            g = 0.0
-            for on in self.output_names:
-                g += grad_out.get(on, 0.0) * (
-                    out_p.get(on, 0.0) - out_m.get(on, 0.0)) / (2 * eps)
-            grad[name] = g
+
+        # 1. Read inputs
+        width = d.get(self.width_name, self._default_width)
+        ck = np.zeros(self.n_ck, dtype=complex)
+        for a in range(self.n_ck):
+            r = d.get(self.order_names[a], self.ck_r0[a])
+            i = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+            ck[a] = r + 1j * i
+
+        # 2. Raw, N, scale
+        raw = _raw_expanded(ck)
+        N = np.dot(raw, self.gamma_at_m0)
+        if N == 0:
+            return {}
+        scale = width / N
+
+        # 3. B = Σ grad_out[name] · raw[i]
+        B = 0.0
+        for i, name in enumerate(self.gamma_names):
+            B += grad_out.get(name, 0.0) * raw[i]
+
+        grad = {}
+
+        # 4. Gradient w.r.t. width
+        grad[self.width_name] = B / N
+
+        # 5. Gradients w.r.t. each ck component
+        n = self.n_ck
+        gammas = self.gamma_at_m0
+
+        # Pre-compute: for each ck component a, collect all raw indices
+        # that depend on it, with their derivatives.
+        # Build index-to-(a,b) mapping once if not cached
+        if not hasattr(self, '_raw_idx_map'):
+            self._raw_idx_map = []  # (a, b, type) for each raw index
+            ri = 0
+            for aa in range(n):
+                self._raw_idx_map.append((aa, aa, 're'))  # diagonal
+                ri += 1
+                for bb in range(aa + 1, n):
+                    self._raw_idx_map.append((aa, bb, 're'))
+                    self._raw_idx_map.append((aa, bb, 'im'))
+                    ri += 2
+
+        for a in range(n):
+            dN_dr = 0.0; dN_di = 0.0  # dN/d(ck_r[a]), dN/d(ck_i[a])
+            A_re  = 0.0; A_im  = 0.0   # Σ grad · ∂raw/∂ck
+
+            for ri, (aa, bb, rtype) in enumerate(self._raw_idx_map):
+                g_out = grad_out.get(self.gamma_names[ri], 0.0)
+                gamma_val = gammas[ri]
+
+                if aa == bb and aa == a:
+                    # Diagonal: |c_a|²
+                    # ∂/∂r: 2·r_a, ∂/∂i: 2·i_a
+                    dr_dr = 2.0 * ck[a].real
+                    dr_di = 2.0 * ck[a].imag
+                    dN_dr += dr_dr * gamma_val
+                    dN_di += dr_di * gamma_val
+                    A_re  += g_out * dr_dr
+                    A_im  += g_out * dr_di
+
+                elif aa == a and bb > a:
+                    if rtype == 're':
+                        # 2·Re(c_a c_b*) = 2(r_a·r_b + i_a·i_b)
+                        # ∂/∂r_a: 2·r_b, ∂/∂i_a: 2·i_b
+                        dr_dr = 2.0 * ck[bb].real
+                        dr_di = 2.0 * ck[bb].imag
+                    else:
+                        # 2·Im(c_a c_b*) = 2(i_a·r_b - r_a·i_b)
+                        # ∂/∂r_a: -2·i_b, ∂/∂i_a: 2·r_b
+                        dr_dr = -2.0 * ck[bb].imag
+                        dr_di =  2.0 * ck[bb].real
+                    dN_dr += dr_dr * gamma_val
+                    dN_di += dr_di * gamma_val
+                    A_re  += g_out * dr_dr
+                    A_im  += g_out * dr_di
+
+                elif bb == a and aa < a:
+                    # re_ba or im_ba where b<a (stored as pair (b,a))
+                    if rtype == 're':
+                        # 2·Re(c_b c_a*) = 2(r_b·r_a + i_b·i_a)
+                        # ∂/∂r_a: 2·r_b, ∂/∂i_a: 2·i_b
+                        dr_dr = 2.0 * ck[aa].real
+                        dr_di = 2.0 * ck[aa].imag
+                    else:
+                        # 2·Im(c_b c_a*) = 2(i_b·r_a - r_b·i_a)
+                        # ∂/∂r_a: 2·i_b, ∂/∂i_a: -2·r_b
+                        dr_dr = 2.0 * ck[aa].imag
+                        dr_di = -2.0 * ck[aa].real
+                    dN_dr += dr_dr * gamma_val
+                    dN_di += dr_di * gamma_val
+                    A_re  += g_out * dr_dr
+                    A_im  += g_out * dr_di
+
+            # ∂loss/∂ck[a]_r = scale · A_re − (scale/N) · dN_dr · B
+            grad[self.order_names[a]] = scale * A_re - (scale / N) * dN_dr * B
+            iname_i = self.order_names[a].rstrip('r') + 'i'
+            grad[iname_i] = scale * A_im - (scale / N) * dN_di * B
+
         return grad
 
 

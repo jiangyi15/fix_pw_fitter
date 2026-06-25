@@ -331,18 +331,23 @@ class Transform:
     def apply_backward(self, grad_out, d_in=None):
         """Apply backward and merge into *grad_out*.
 
-        Each backward call computes the gradient contribution through
-        the transform's path: ``∂loss/∂gamma · ∂gamma/∂input``.
-        This **accumulates** with any existing gradients (e.g. from the
-        kernel's direct path through ``backprop_grad``).
-        Output-only names (in ``output_names`` but not ``input_names``)
-        are removed since they are derived quantities — the optimizer
-        should only access them through the transform's inputs.
+        Rules
+        -----
+        * Input **and** output: **replace** — the transform's backward
+          gives the complete derivative for parameters it both reads
+          and writes (e.g. pass-through like ``re_00``).
+        * Input **only**: **accumulate** — adds the gradient through the
+          transform's gamma path to any existing kernel gradient.
+        * Output **only**: **remove** — derived quantities that should
+          not be in the optimizer space.
         """
         back = self.backward(grad_out, d_in=d_in)
         for name in self.input_names:
             if name in back:
-                grad_out[name] = grad_out.get(name, 0.0) + back[name]
+                if name in self.output_names:
+                    grad_out[name] = back[name]          # replace
+                else:
+                    grad_out[name] = grad_out.get(name, 0.0) + back[name]  # accumulate
         for name in self.output_names:
             if name not in self.input_names:
                 grad_out.pop(name, None)
