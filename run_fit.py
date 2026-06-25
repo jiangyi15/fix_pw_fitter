@@ -171,6 +171,12 @@ def main():
     fitter.set_fixed(fixed_slots)
     fitter.set_same(same_params)
     fitter.set_scale(scale_params)
+    # Share re_00 between charge-conjugate pairs (ck_matrix models)
+    for particle in ["pi2(1670)"]:
+        p_re00 = f"{particle}p_re_00"
+        m_re00 = f"{particle}m_re_00"
+        if p_re00 in fitter.free_param_names() and m_re00 in fitter.free_param_names():
+            fitter.set_same([[p_re00, m_re00]])
     print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
 
     # Set boundary ranges for masses and widths
