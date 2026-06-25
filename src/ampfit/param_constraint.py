@@ -294,19 +294,40 @@ class Transform:
     def backward(self, grad_out, d_in=None):
         """Backpropagate gradient from output space to input space.
 
+        Default: 3-point central-difference through :meth:`forward`.
+        Returns a dict mapping **only** ``input_names`` to their gradients.
+        Parameters in ``output_names`` that are not also in ``input_names``
+        keep their existing gradients (the pipeline caller handles merging).
+
         Args
         ----
         grad_out : dict
-            Gradients w.r.t. output parameters ``{name: value}``.
+            Gradients w.r.t. output parameters.
         d_in : dict or None
-            Input dict passed to forward (may be needed for chain rule).
+            Input dict passed to forward (may be needed for finite diff).
 
         Returns
         -------
         dict
-            Gradients w.r.t. input parameters ``{name: value}``.
+            Gradients w.r.t. input parameters (may be partial —
+            only keys that are in ``input_names``).
         """
-        raise NotImplementedError
+        if not self.input_names:
+            return {}
+        eps = 1e-6
+        d = dict(d_in) if d_in else {}
+        grad = {}
+        for name in self.input_names:
+            d_p = dict(d); d_p[name] = d.get(name, 0.0) + eps
+            out_p = self.forward(d_p)
+            d_m = dict(d); d_m[name] = d.get(name, 0.0) - eps
+            out_m = self.forward(d_m)
+            g = 0.0
+            for oname in self.output_names:
+                g += grad_out.get(oname, 0.0) * (
+                    out_p.get(oname, 0.0) - out_m.get(oname, 0.0)) / (2 * eps)
+            grad[name] = g
+        return grad
 
     def inverse(self, d):
         """Reverse of :meth:`forward`: output dict → input dict.
@@ -594,12 +615,23 @@ class ConstraintManager:
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve` (mass/width → scale → fixed → same)."""
+        """Reverse of :meth:`resolve` (mass/width → scale → fixed → same).
+
+        Each transform's ``backward()`` returns gradients **only** for its
+        ``input_names``.  The pipeline merges them: input-name gradients are
+        replaced (or accumulated), output-only gradients are left unchanged.
+        """
         grad = grad_resolved
         for tr in reversed(self.mass_width_transforms):
-            grad = tr.backward(grad)
+            back = tr.backward(grad, d_in=resolved)
+            for name in tr.input_names:
+                if name in back:
+                    grad[name] = back[name]
         for tr in reversed(self.scale_transforms):
-            grad = tr.backward(grad)
+            back = tr.backward(grad)
+            for name in tr.input_names:
+                if name in back:
+                    grad[name] = back[name]
         grad = self.fixed_tr.chain_grad(grad, resolved)
         grad = self.name_res.chain_grad(grad, raw)
         return grad
