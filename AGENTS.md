@@ -107,9 +107,13 @@ Parameter names from `get_partial_waves_params()` encode the full chain:
    `fun_jac` iterates over ALL keys in `grad_num`/`grad_den`, not just `param_names` — alias
    gradients from `backprop_grad` are propagated through `chain_gradient` to optimizer space.
 
-3. **Constraint pipeline**: `resolve()` = `scale_tr → fixed_tr → name_res`.  `inverse()` = reverse order.
-   `FixedOverride.chain_grad` REMOVES gradient entries for fixed params (so they contribute zero
-   uncertainty).  `ScaleTransform` multiplies by scale factor.
+3. **Constraint pipeline**: `resolve()` = `name_res → fixed_tr → scale_transforms[]`.  `inverse()` = reverse order.
+   Each scale is an independent :class:`ScaleTransform` (name + factor) in a list applied in-order.
+   Scale is the outermost layer: it multiplies ALL params including fixed ones, matching TFPWA convention
+   where scale is at the amplitude product level.  `FixedOverride.chain_grad` REMOVES gradient entries
+   for fixed params (so they contribute zero uncertainty).  `ScaleTransform.backward` multiplies
+   gradient by the same factor.  The base :class:`Transform` class provides ``forward()``, ``backward()``,
+   and optional ``inverse()`` interface for custom parameter-space transforms.
 
 4. **Amplitude fractions with denominator**: `fractions(masks, denominator=)` computes
    `R_i = Σ w·|A_mask_i|² / Σ w·|A_denom|²` with gradient chain accounting for covariance

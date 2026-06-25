@@ -1,19 +1,21 @@
 """
 Independent pipeline stages for parameter constraints.
 
-Each stage is a small object with ``apply(dict)`` (forward) and
-``chain_grad(grad_dict, original_dict)`` (backward):
+Each stage is a small object with ``forward(input_dict)`` (transform)
+and ``backward(grad_dict)`` (gradient backpropagation):
 
     raw = registry.to_dict(x)
-    d   = name_res.apply(raw)       # alias → canonical (same)
-    d   = scale_tr.apply(d)         # multiply by scale factors
-    d   = fixed_tr.apply(d)         # inject constant values
-    ck  = pc.build_ck(d)            # partial-wave amplitudes
+    d   = name_res.forward(raw)       # alias → canonical (same)
+    d   = fixed_tr.forward(d)         # inject constant values
+    for scale in scale_transforms:    # multiply by scale factors
+        d = scale.forward(d)
+    ck  = pc.build_ck(d)              # partial-wave amplitudes
     ...
     grad = pc.backprop_grad(d, grad_ck)
-    grad = fixed_tr.chain_grad(grad, d)
-    grad = scale_tr.chain_grad(grad, d)
-    grad = name_res.chain_grad(grad, raw)
+    for scale in reversed(scale_transforms):
+        grad = scale.backward(grad)
+    grad = fixed_tr.backward(grad, d)
+    grad = name_res.backward(grad, raw)
     flat = registry.flat_gradient(x, grad)
 """
 
@@ -244,47 +246,112 @@ class NameResolution:
 
 
 # ================================================================
-# ScaleTransform — multiply values by scale factors
+# Transform — general parameter transform base class
 # ================================================================
 
-class ScaleTransform:
-    """Applies scale factors to parameter values.
+class Transform:
+    """General base class for parameter-space transforms.
 
-    Keys are always full slot names (``name_r`` for ck parameters,
-    ``name`` for real parameters).  ``set_scale`` normalises bare
-    names by appending ``_r`` to match ck slot convention.
+    A ``Transform`` maps from a set of input parameters to a set of
+    output parameters, with differentiable forward/backward passes.
 
-    Forward: ``d[name] = d[name] * scale[name]``.
-    Backward: ``grad[name] = grad_out[name] * scale[name]``.
+    ── ``forward(input_dict) → output_dict``
+    ── ``backward(grad_output, d_input=None) → grad_input``
+    ── ``inverse(output_dict) → input_dict``  (optional — set
+        ``has_inverse = False`` on subclasses that don't support it)
+
+    Parameters
+    ----------
+    input_names : list of str, optional
+        Names of input parameters (used for registry introspection).
+    output_names : list of str, optional
+        Names of output parameters.
     """
 
-    def __init__(self):
-        self.factors = {}      # {slot_name: float}
+    _has_inverse = True
 
-    def set_scale(self, scale):
-        self.factors = {k: float(v) for k, v in scale.items()}
+    def __init__(self, input_names=None, output_names=None):
+        self._input_names = list(input_names) if input_names is not None else None
+        self._output_names = list(output_names) if output_names is not None else None
 
-    def apply(self, d):
-        d = dict(d)
-        for name, sf in self.factors.items():
-            if name in d:
-                d[name] = d[name] * sf
-        return d
+    @property
+    def input_names(self):
+        return list(self._input_names) if self._input_names is not None else []
+
+    @property
+    def output_names(self):
+        return list(self._output_names) if self._output_names is not None else []
+
+    @property
+    def has_inverse(self):
+        """Whether this transform supports ``inverse()``."""
+        return self._has_inverse
+
+    def forward(self, d):
+        """Transform input dict → output dict."""
+        raise NotImplementedError
+
+    def backward(self, grad_out, d_in=None):
+        """Backpropagate gradient from output space to input space.
+
+        Args
+        ----
+        grad_out : dict
+            Gradients w.r.t. output parameters ``{name: value}``.
+        d_in : dict or None
+            Input dict passed to forward (may be needed for chain rule).
+
+        Returns
+        -------
+        dict
+            Gradients w.r.t. input parameters ``{name: value}``.
+        """
+        raise NotImplementedError
 
     def inverse(self, d):
-        """Reverse of :meth:`apply`: ``d[name] = d[name] / scale[name]``."""
+        """Reverse of :meth:`forward`: output dict → input dict.
+
+        Raise :class:`NotImplementedError` if unsupported.
+        """
+        raise NotImplementedError
+
+
+# ScaleTransform — scale a single parameter by a constant factor
+# ================================================================
+
+class ScaleTransform(Transform):
+    """Scales a single named parameter by a constant factor.
+
+    ``forward``:  ``d[name] *= factor``
+    ``backward``: ``grad[name] *= factor``
+
+    Input and output share the same parameter name; only the value
+    is multiplied.  Multiple independent ``ScaleTransform`` instances
+    are composed as a list in :class:`ConstraintManager`.
+    """
+
+    def __init__(self, name, factor):
+        super().__init__(input_names=[name], output_names=[name])
+        self.name = name
+        self.factor = float(factor)
+
+    def forward(self, d):
         d = dict(d)
-        for name, sf in self.factors.items():
-            if name in d and sf != 0:
-                d[name] = d[name] / sf
+        if self.name in d:
+            d[self.name] = d[self.name] * self.factor
         return d
 
-    def chain_grad(self, grad_out, d_in):
+    def backward(self, grad_out, d_in=None):
         grad = dict(grad_out)
-        for name, sf in self.factors.items():
-            if name in grad:
-                grad[name] = grad[name] * sf
+        if self.name in grad:
+            grad[self.name] = grad[self.name] * self.factor
         return grad
+
+    def inverse(self, d):
+        d = dict(d)
+        if self.name in d and self.factor != 0:
+            d[self.name] = d[self.name] / self.factor
+        return d
 
 
 # ================================================================
@@ -352,7 +419,7 @@ class ConstraintManager:
         # Pipeline stages (independent objects)
         self.pc = ParameterConstraint(all_comb)
         self.name_res = NameResolution()
-        self.scale_tr = ScaleTransform()
+        self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.fixed_tr = FixedOverride()
 
         # Bound transforms (flat-index → BoundTransform)
@@ -388,7 +455,7 @@ class ConstraintManager:
 
     @property
     def scale_params(self):
-        return self.scale_tr.factors
+        return {tr.name: tr.factor for tr in self.scale_transforms}
 
     def free_param_names(self):
         return [n for n in self.var_registry.flat_names
@@ -417,9 +484,9 @@ class ConstraintManager:
 
     def set_scale(self, scale_params, reset=False):
         if reset:
-            self.scale_tr.factors = {}
-        self.scale_tr.factors.update({k: float(v) for k, v in scale_params.items()})
-        self._rebuild()
+            self.scale_transforms.clear()
+        for name, factor in scale_params.items():
+            self.scale_transforms.append(ScaleTransform(name, factor))
         self._rebuild()
 
     def set_free(self, name):
@@ -427,7 +494,7 @@ class ConstraintManager:
         # Remove from same groups
         self.name_res.map = {k: v for k, v in self.name_res.map.items()
                              if k != name and v != name}
-        self.scale_tr.factors.pop(name, None)
+        self.scale_transforms = [tr for tr in self.scale_transforms if tr.name != name]
         self._rebuild()
 
     def set_range(self, name, lo, hi):
@@ -472,7 +539,8 @@ class ConstraintManager:
         """
         d = self.name_res.apply(raw_dict)
         d = self.fixed_tr.apply(d)
-        d = self.scale_tr.apply(d)
+        for tr in self.scale_transforms:
+            d = tr.forward(d)
         return d
 
     def inverse(self, resolved):
@@ -481,7 +549,10 @@ class ConstraintManager:
         Converts physical (post-constraint) values back to raw
         (pre-constraint) values.  Used by ``values_from_dict``.
         """
-        d = self.scale_tr.inverse(resolved)
+        d = resolved
+        for tr in reversed(self.scale_transforms):
+            if tr.has_inverse:
+                d = tr.inverse(d)
         d = self.fixed_tr.inverse(d)
         d = self.name_res.inverse(d)
         return d
@@ -490,7 +561,9 @@ class ConstraintManager:
 
     def chain_gradient(self, grad_resolved, resolved, raw):
         """Reverse of :meth:`resolve` (scale → fixed → same)."""
-        grad = self.scale_tr.chain_grad(grad_resolved, resolved)
+        grad = grad_resolved
+        for tr in reversed(self.scale_transforms):
+            grad = tr.backward(grad)
         grad = self.fixed_tr.chain_grad(grad, resolved)
         grad = self.name_res.chain_grad(grad, raw)
         return grad
@@ -569,7 +642,6 @@ if __name__ == "__main__":
 
     pc = ParameterConstraint(all_comb)
     name_res = NameResolution()
-    scale_tr = ScaleTransform()
     fixed_tr = FixedOverride()
 
     # Build a slot-level dict (as produced by VariableRegistry.to_dict)
@@ -582,7 +654,6 @@ if __name__ == "__main__":
 
     # Test resolve pipeline on slot-level dict
     d = name_res.apply(raw)
-    d = scale_tr.apply(d)
     d = fixed_tr.apply(d)
     ck = pc.build_ck(d)
     print(f"ck shape: {ck.shape}, ck[:3]: {ck[:3]}")
@@ -597,9 +668,8 @@ if __name__ == "__main__":
 
     # Analytical gradient w.r.t. the resolved slot dict
     grad_resolved = pc.backprop_grad(d, grad_ck_exact)
-    # Chain back through fixed → scale → same → raw
+    # Chain back through fixed → same → raw
     grad = fixed_tr.chain_grad(grad_resolved, d)
-    grad = scale_tr.chain_grad(grad, d)
     grad = name_res.chain_grad(grad, raw)
 
     eps = 1e-6
@@ -607,9 +677,9 @@ if __name__ == "__main__":
     for key in list(raw.keys())[:10]:   # test first 10 slots
         sd = raw.copy()
         sd[key] += eps
-        Qp = Q(fixed_tr.apply(scale_tr.apply(name_res.apply(sd))))
+        Qp = Q(fixed_tr.apply(name_res.apply(sd)))
         sd[key] -= 2 * eps
-        Qm = Q(fixed_tr.apply(scale_tr.apply(name_res.apply(sd))))
+        Qm = Q(fixed_tr.apply(name_res.apply(sd)))
         num = (Qp - Qm) / (2 * eps)
         ana = grad.get(key, 0.0)
         err = abs(ana - num)

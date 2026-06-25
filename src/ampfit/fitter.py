@@ -1195,14 +1195,15 @@ class Fitter:
 
         self.set_fixed(data.get("fixed", {}), reset=True)
         self.set_same(data.get("same", []), reset=True)
-        self.set_scale(data.get("scale", {}), reset=True)
 
         # Backward compat: normalise old bare scale keys (without ``r`` suffix)
+        # before calling set_scale (scale_params is now a snapshot dict)
+        scale_data = dict(data.get("scale", {}))
         names = set(self.var_registry.flat_names)
-        for key in list(self._scale_params):
+        for key in list(scale_data):
             if key not in names and key + 'r' in names:
-                val = self._scale_params.pop(key)
-                self._scale_params[key + 'r'] = val
+                scale_data[key + 'r'] = scale_data.pop(key)
+        self.set_scale(scale_data, reset=True)
 
         # Re-apply bounds
         for name, spec in data.get("bounds", {}).items():
