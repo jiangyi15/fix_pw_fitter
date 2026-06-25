@@ -21,7 +21,7 @@ python run_fit.py \
     --data "$DATA" \
     --phsp "$PHSP" \
     --fit --maxiter 1000 \
-    --backend "{name: integrated, base: {name: cuda_v3, batch_size: 10000}}" \
+    --backend "{name: integrated, base: cuda_v3}" \
     --init /home/jiangy/ana/test_4pi/test_amp/pw_cfit5_td6_fix29/final_params_0.json \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/" \
