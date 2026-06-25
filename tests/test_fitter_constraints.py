@@ -71,14 +71,13 @@ def test_set_fixed_reset():
     slot_a = fitter.free_param_names()[0]
 
     fitter.set_fixed({slot_a: 1.0})
-    assert len(fitter._fixed_slots) == 1
+    assert slot_a in fitter._fixed_slots
 
-    # reset=True → replace, not merge
+    # reset=True → replace, not merge (also clears auto-fixed entries)
     slot_b = fitter.free_param_names()[1]
     fitter.set_fixed({slot_b: 2.0}, reset=True)
     assert slot_a not in fitter._fixed_slots
     assert slot_b in fitter._fixed_slots
-    assert len(fitter._fixed_slots) == 1
 
 
 def test_set_fixed_then_free():

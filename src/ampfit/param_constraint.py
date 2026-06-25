@@ -288,11 +288,31 @@ class Transform:
         return self._has_inverse
 
     def forward(self, d):
-        """Transform input dict → output dict."""
+        """Transform input dict → output dict.
+
+        Should only modify entries in ``output_names``.  Other entries
+        are passed through unchanged.
+        """
         raise NotImplementedError
+
+    def apply_forward(self, d):
+        """Apply :meth:`forward` and return the updated dict.
+
+        Only entries in ``output_names`` may change; values for other keys
+        are preserved from the input *d*.  The forward method should not
+        add or remove keys outside ``output_names``.
+        """
+        saved = {k: v for k, v in d.items() if k not in self.output_names}
+        result = self.forward(d)
+        for k, v in saved.items():
+            result[k] = v
+        return result
 
     def backward(self, grad_out, d_in=None):
         """Backpropagate gradient from output space to input space.
+
+        Subclasses implement this.  Returns a dict mapping **only**
+        ``input_names`` to their gradients.
 
         Args
         ----
@@ -304,16 +324,55 @@ class Transform:
         Returns
         -------
         dict
-            Gradients w.r.t. input parameters ``{name: value}``.
+            Gradients w.r.t. input parameters (only ``input_names`` keys).
         """
         raise NotImplementedError
+
+    def apply_backward(self, grad_out, d_in=None):
+        """Apply backward and merge into *grad_out*.
+
+        Calls :meth:`backward`, then:
+
+        1. Updates *grad_out* for keys in ``input_names``
+           (the transform's actual inputs).
+        2. Removes gradients for keys in ``output_names`` but **not** in
+           ``input_names`` — these are derived quantities that the
+           transform computes; the optimizer should not optimise them
+           directly, only through the transform's inputs.
+
+        Use this in pipeline code instead of calling ``backward()`` directly.
+        """
+        back = self.backward(grad_out, d_in=d_in)
+        for name in self.input_names:
+            if name in back:
+                grad_out[name] = back[name]
+        for name in self.output_names:
+            if name not in self.input_names:
+                grad_out.pop(name, None)
+        return grad_out
 
     def inverse(self, d):
         """Reverse of :meth:`forward`: output dict → input dict.
 
+        Should only modify entries in ``input_names``.
         Raise :class:`NotImplementedError` if unsupported.
         """
         raise NotImplementedError
+
+    def apply_inverse(self, d):
+        """Apply :meth:`inverse` and return the updated dict.
+
+        Only entries in ``input_names`` may change; values for other keys
+        are preserved from the input *d*.
+        """
+        saved = {k: v for k, v in d.items() if k not in self.input_names}
+        try:
+            result = self.inverse(d)
+        except NotImplementedError:
+            return d
+        for k, v in saved.items():
+            result[k] = v
+        return result
 
 
 # ScaleTransform — scale a single parameter by a constant factor
@@ -569,9 +628,9 @@ class ConstraintManager:
         d = self.name_res.apply(raw_dict)
         d = self.fixed_tr.apply(d)
         for tr in self.scale_transforms:
-            d = tr.forward(d)
+            d = tr.apply_forward(d)
         for tr in self.mass_width_transforms:
-            d = tr.forward(d)
+            d = tr.apply_forward(d)
         return d
 
     def inverse(self, resolved):
@@ -582,11 +641,9 @@ class ConstraintManager:
         """
         d = resolved
         for tr in reversed(self.mass_width_transforms):
-            if tr.has_inverse:
-                d = tr.inverse(d)
+            d = tr.apply_inverse(d)
         for tr in reversed(self.scale_transforms):
-            if tr.has_inverse:
-                d = tr.inverse(d)
+            d = tr.apply_inverse(d)
         d = self.fixed_tr.inverse(d)
         d = self.name_res.inverse(d)
         return d
@@ -594,12 +651,17 @@ class ConstraintManager:
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve` (mass/width → scale → fixed → same)."""
+        """Reverse of :meth:`resolve` (mass/width → scale → fixed → same).
+
+        Uses :meth:`Transform.apply_backward` on each stage — only
+        ``input_names`` are updated; output-only and unrelated gradients
+        pass through unchanged.
+        """
         grad = grad_resolved
         for tr in reversed(self.mass_width_transforms):
-            grad = tr.backward(grad)
+            grad = tr.apply_backward(grad, d_in=resolved)
         for tr in reversed(self.scale_transforms):
-            grad = tr.backward(grad)
+            grad = tr.apply_backward(grad)
         grad = self.fixed_tr.chain_grad(grad, resolved)
         grad = self.name_res.chain_grad(grad, raw)
         return grad
