@@ -6,6 +6,7 @@ and is available through ``build_particle(model=...)``.
 
 import numpy as np
 from .base import BaseModel, register_model
+from ampfit.param_constraint import Transform
 
 
 # ── Standard Breit-Wigner ────────────────────────────────────────
@@ -16,6 +17,31 @@ class BWModel(BaseModel):
 
     ``gamma(m) = 1``  (constant width).
     """
+
+
+# ── Fix mass/width transform (auto-fixes mass & width params) ────
+
+class _FixMassWidthTransform(Transform):
+    """Pass-through transform that auto-fixes mass and width parameters.
+
+    ``input_names = []``, ``output_names = [mass_name, width_name]``.
+    Since no inputs, the auto-fix mechanism in
+    :meth:`ConstraintManager.set_mass_width_transforms` fixes both.
+    """
+
+    _has_inverse = True
+
+    def __init__(self, mass_name, width_name):
+        super().__init__(input_names=[], output_names=[mass_name, width_name])
+
+    def forward(self, d):
+        return d
+
+    def backward(self, grad_out, d_in=None):
+        return {}
+
+    def inverse(self, d):
+        return d
 
 
 # ── One / constant ───────────────────────────────────────────────
@@ -35,6 +61,11 @@ class OneModel(BaseModel):
         m0 = self.kwargs["mass"]
         g0 = self.kwargs.get("width", 1.0)
         return [1j * (1 - m0**2 + m**2) / m0 / g0]
+
+    def make_mass_width_transform(self):
+        return _FixMassWidthTransform(
+            f"{self.name}_mass", f"{self.name}_width",
+        )
 
 
 # ── Coupled-channel Flatté ───────────────────────────────────────
