@@ -1,6 +1,6 @@
 """CK matrix model v2: Gamma(x) = c_a M_{ab}(x) c_b*.
 
-The total running width at the pole mass is normalized to a
+The total running width at the pole mass is normalised to a
 standalone ``{res}_width`` parameter::
 
     Σ g_i · gamma_i(m₀) = {res}_width
@@ -8,6 +8,9 @@ standalone ``{res}_width`` parameter::
 The transform reads ``{res}_width`` and ck g_ls parameters, computes
 raw outer-product values from ck, normalises them, and writes the
 full gamma set to the param dict.
+
+``{res}_width`` is NOT a gamma parameter (it is not ``re_ab``).
+It is registered separately by the fitter.
 
 Config::
 
@@ -32,36 +35,30 @@ def _gamma_at_m0(x_table, M_table, n_ck, scale, m0):
 
     Returns a list of real values in gamma-name order::
 
-        for a:        M_aa(m₀) / scale
-        for a<b:      Re(M_ab(m₀)) / scale   (for re_ab)
-                      -Im(M_ab(m₀)) / scale  (for im_ab)
+        a=a:       M_aa(m₀) / scale
+        a<b:       Re(M_ab(m₀)) / scale   (for re_ab)
+                  -Im(M_ab(m₀)) / scale  (for im_ab)
     """
     inv = 1.0 / scale if scale != 0 else 1.0
     vals = []
     for a in range(n_ck):
         M_aa = float(np.interp(m0, x_table, M_table[:, a, a].real))
-        vals.append(M_aa * inv)       # gamma_re_aa(m₀)
+        vals.append(M_aa * inv)
         for b in range(a + 1, n_ck):
-            Mab = float(np.interp(m0, x_table, M_table[:, a, b]))
-            vals.append(Mab.real * inv)   # gamma_re_ab(m₀)
-            vals.append(-Mab.imag * inv)  # gamma_im_ab(m₀)
+            Mab = np.interp(m0, x_table, M_table[:, a, b])
+            vals.append(Mab.real * inv)
+            vals.append(-Mab.imag * inv)
     return vals
 
 
 def _reduced_spec(n_ck, name):
-    """Build gamma names and raw-expanded-value function.
+    """Build gamma names (no {res}_width — separate parameter).
 
-    Gamma names::
+    Names::
 
-        [{name}_width, {name}_re_00, {name}_re_01, {name}_im_01, …]
-
-    The raw expanded values from ck are::
-
-        for a:        |c_a|²
-        for a<b:      2·Re(c_a c_b*)    (re)
-                      2·Im(c_a c_b*)    (im)
+        {name}_re_00, {name}_re_01, {name}_im_01, …
     """
-    names = [f"{name}_width"]
+    names = []
     for a in range(n_ck):
         names.append(f"{name}_re_{a}{a}")
         for b in range(a + 1, n_ck):
@@ -93,50 +90,42 @@ class _CKWidthTransform(Transform):
     _has_inverse = False
 
     def __init__(self, name, order_names, gamma_names,
-                 ck_r0, ck_i0, gamma_at_m0, width0):
-        re_00_name = gamma_names[0]   # {res}_width
-        in_names = [re_00_name] + list(order_names) + \
+                 ck_r0, ck_i0, gamma_at_m0, width_name, width0):
+        self.width_name = width_name
+        in_names = [width_name] + list(order_names) + \
                    [n.rstrip('r') + 'i' for n in order_names]
         super().__init__(input_names=in_names, output_names=gamma_names)
         self.name = name
         self.order_names = list(order_names)
         self.gamma_names = list(gamma_names)
         self.n_ck = len(order_names)
-        self.re_00_name = re_00_name
         self.ck_r0 = np.array(ck_r0, dtype=float)
         self.ck_i0 = np.array(ck_i0, dtype=float)
-        self.gamma_at_m0 = np.array(gamma_at_m0, dtype=float)  # pre-computed
+        self.gamma_at_m0 = np.array(gamma_at_m0, dtype=float)
         self.width0 = float(width0)
 
     def forward(self, d):
         d = dict(d)
 
-        # 1. Read {res}_width (standalone global scale)
-        width = d.get(self.re_00_name, self.width0)
+        width = d.get(self.width_name, self.width0)
 
-        # 2. Read ck
         ck = np.zeros(self.n_ck, dtype=complex)
         for a in range(self.n_ck):
             r = d.get(self.order_names[a], self.ck_r0[a])
             i = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
             ck[a] = r + 1j * i
 
-        # 3. Raw expanded values
         raw = _raw_expanded(ck)
-
-        # 4. Normalisation: N = Σ raw_i · gamma_i(m₀)
         N = np.dot(raw, self.gamma_at_m0)
         scale = width / N if N != 0 else 0.0
 
-        # 5. Write outputs
-        d[self.re_00_name] = width     # pass-through
-        idx = 1
+        idx = 0
         for a in range(self.n_ck):
-            d[self.gamma_names[idx]] = raw[idx - 1] * scale  # re_aa = width·|c_a|²/N
+            d[self.gamma_names[idx]] = raw[idx] * scale     # re_aa
             idx += 1
             for b in range(a + 1, self.n_ck):
-                d[self.gamma_names[idx]]     = raw[idx - 1] * scale      # re_ab
-                d[self.gamma_names[idx + 1]] = raw[idx] * scale          # im_ab
+                d[self.gamma_names[idx]]     = raw[idx] * scale      # re_ab
+                d[self.gamma_names[idx + 1]] = raw[idx + 1] * scale  # im_ab
                 idx += 2
         return d
 
@@ -161,12 +150,12 @@ class _CKWidthTransform(Transform):
 class CKMatrixModelV2(BaseModel):
     """Running width from CK outer product, normalised to ``{res}_width``.
 
-    The gamma parameter list starts with ``{res}_width`` (the total width
-    at the pole), followed by the reduced expanded set ``re_aa``, ``re_ab``,
-    ``im_ab`` for all a≤b.
+    The ``{res}_width`` parameter is NOT a gamma parameter — it is
+    registered separately.  The gamma names are only the reduced
+    expanded set ``re_aa``, ``re_ab``, ``im_ab`` for all a≤b.
 
-    The transform scales the raw ck expanded components so that the sum
-    of all gamma contributions at m₀ equals ``{res}_width``.
+    The transform scales the raw ck expanded components so that the
+    sum of all gamma contributions at m₀ equals ``{res}_width``.
     """
 
     def __init__(self, name, **kwargs):
@@ -220,21 +209,20 @@ class CKMatrixModelV2(BaseModel):
             self._ck0_r[0] = 1.0
             self._ck0_i = np.zeros(self.n_ck, dtype=float)
 
-        # ── gamma names & defaults ────────────────────────────────
+        # ── gamma names & defaults (no {res}_width) ──────────────
         self._g_names = _reduced_spec(self.n_ck, self.name)
 
-        # Only-first-channel active -> {res}_width, re_00=|c₀|², then 0
+        # Defaults: only-first-channel active
         ck0 = self._ck0_r + 1j * self._ck0_i
         raw0 = _raw_expanded(ck0)
         N0 = np.dot(raw0, self._gamma_m0)
-        self._g_defaults = [self.width0]
-        for r in raw0:
-            self._g_defaults.append(self.width0 * r / N0 if N0 != 0 else 0.0)
+        self._g_defaults = [self.width0 * r / N0 if N0 != 0 else 0.0
+                            for r in raw0]
 
     # ── gamma interface ──────────────────────────────────────────
 
     def get_gamma_count(self):
-        return 1 + self.n_ck + self.n_ck * (self.n_ck - 1)  # width + re_aa + (re+im)*upper
+        return self.n_ck + self.n_ck * (self.n_ck - 1)  # re_aa + (re+im)*upper
 
     def get_gamma_name(self):
         return list(self._g_names)
@@ -243,33 +231,24 @@ class CKMatrixModelV2(BaseModel):
         return list(self._g_defaults)
 
     def gamma(self, m):
-        """Gamma functions: first entry 0 (for {res}_width), then the
-        normalised M_ab(m)/M_00(m₀) as in ck_matrix."""
+        """Gamma functions: M_ab(m)/M_00(m₀) for each reduced channel."""
         from .ck_matrix_model import _gamma_functions
-        gf = _gamma_functions(m, self.x_table, self.M_table,
-                              self.n_ck, self._gamma_scale)
-        return [np.zeros_like(m, dtype=complex)] + gf
+        return _gamma_functions(m, self.x_table, self.M_table,
+                                self.n_ck, self._gamma_scale)
 
     # ── transform ────────────────────────────────────────────────
 
     def make_mass_width_transform(self):
+        width_name = f"{self.name}_width"
         return _CKWidthTransform(
             self.name, self.order_names, self._g_names,
             self._ck0_r, self._ck0_i,
-            self._gamma_m0, self.width0,
+            self._gamma_m0, width_name, self.width0,
         )
 
     # ── get_bw_params ────────────────────────────────────────────
 
     def get_bw_params(self, params=None):
-        """BW peak mass and width.
-
-        With the normalisation, the total width at the pole is simply
-        the ``{res}_width`` parameter value.  The peak mass is found
-        by solving Re(m₀² - m² - i·m₀·g_bw) = 0.  Since the gamma
-        functions are purely real for the CK matrix model, the peak
-        is at m = m₀ and width_bw = {res}_width.
-        """
         from scipy.optimize import root_scalar
 
         def _p(key, fallback=None):
@@ -289,8 +268,9 @@ class CKMatrixModelV2(BaseModel):
         g0_vals = [_p(gamma_names[i], defaults[i])
                    for i in range(self.get_gamma_count())]
 
-        # The total running width at any m = Σ g_i · gamma_i(m)
-        # gamma_0 = 0 (for the width param itself), others from M table
+        # Read total width from params or kwargs
+        total_width = _p(f"{self.name}_width", self.width0)
+
         def g_bw_re(m):
             g_list = self.gamma(np.array([float(m)]))
             s = 0.0
@@ -313,5 +293,6 @@ class CKMatrixModelV2(BaseModel):
             raise RuntimeError(f"get_bw_params: root finding failed for {self.name}")
 
         mass_bw = float(sol.root)
-        width_bw = g_bw_re(mass_bw)
+        # The total width at the peak should equal {res}_width
+        width_bw = total_width
         return {"mass_bw": mass_bw, "width_bw": width_bw}
