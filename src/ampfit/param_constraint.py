@@ -400,6 +400,12 @@ from ampfit.boundary import BoundTransform  # noqa: F401
 # ConstraintManager — coordinates the pipeline stages
 # ================================================================
 
+# Scalar parameter names (time evolution, production — not per-particle).
+# Defined at module level so external code (Fitter, backends) can
+# reference them without coupling to ConstraintManager internals.
+SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+
+
 class ConstraintManager:
     """Owns :class:`ParameterConstraint`, :class:`VariableRegistry`,
     and the constraint pipeline stages (:class:`NameResolution`,
@@ -407,21 +413,21 @@ class ConstraintManager:
 
     Every ``set_*`` method updates the relevant stage and rebuilds
     the registry — trivial for ~200 parameters.
+
+    Parameter names are passed as a flat ``all_names`` list — no
+    type distinction (ck / m0 / g0 / scalar separation only exists
+    in :meth:`Fitter._build_params`).
     """
 
-    SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
-
-    def __init__(self, all_comb, m0_names, g0_names):
+    def __init__(self, all_comb, all_names):
         self.all_comb = list(all_comb)
-        self.m0_names = list(m0_names)
-        self.g0_names = list(g0_names)
+        self._all_names = list(all_names)
 
         # Pipeline stages (independent objects)
         self.pc = ParameterConstraint(all_comb)
         self.name_res = NameResolution()
         self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.mass_width_transforms = []  # list of Transform from particle models
-        self._extra_names = []        # names registered by transforms (no type distinction)
         self.fixed_tr = FixedOverride()
 
         # Bound transforms (flat-index → BoundTransform)
@@ -494,17 +500,18 @@ class ConstraintManager:
     def set_mass_width_transforms(self, transforms, reset=True):
         if reset:
             self.mass_width_transforms.clear()
-            self._extra_names.clear()
+            # Don't clear _all_names — it also holds m0/g0/scalar names.
+            # Only remove names that were added by a previous call.
+            self._all_names = [n for n in self._all_names
+                               if not any(n in tr.input_names
+                                          for tr in self.mass_width_transforms)]
         for tr in transforms:
             if tr is not None:
                 self.mass_width_transforms.append(tr)
                 input_set = set(tr.input_names)
-                # Register input names — no type distinction (ck/m0/g0
-                # separation only exists in _build_params).
                 for name in tr.input_names:
-                    if name not in self._extra_names:
-                        self._extra_names.append(name)
-                # Auto-fix output names that are NOT also inputs.
+                    if name not in self._all_names:
+                        self._all_names.append(name)
                 for name in tr.output_names:
                     if name not in input_set:
                         self.fixed_tr.values[name] = 0.0
@@ -611,18 +618,8 @@ class ConstraintManager:
             added.add(canon)
             self._var_registry.add(canon)
 
-        # Register ck slot names (_r and _i separately)
-        all_ck_names = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
-        for name in sorted(all_ck_names):
-            _add(name + 'r')
-            _add(name + 'i')
-        for name in self.m0_names:
-            _add(name)
-        for name in self.g0_names:
-            _add(name)
-        for name in self.SCALAR_NAMES:
-            _add(name)
-        for name in self._extra_names:
+        # All names — no type distinction (ck slots, m0, g0, scalar, extra).
+        for name in self._all_names:
             _add(name)
 
 

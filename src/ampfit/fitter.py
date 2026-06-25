@@ -24,6 +24,7 @@ Usage:
 
 import time
 import numpy as np
+from ampfit.param_constraint import SCALAR_NAMES
 
 
 class Fitter:
@@ -65,12 +66,14 @@ class Fitter:
         self.n_m0 = len(self.config.m0_phys_name)
         self.n_g0 = len(self.config.g0_phys_name)
 
-        # Standalone constraint manager (no rebuild on PC — fine-grained dirty flags)
-        self.cm = ConstraintManager(
-            self.all_comb,
-            self.config.m0_phys_name,
-            self.config.g0_phys_name,
-        )
+        # Standalone constraint manager — flat name list, no type distinction.
+        all_ck_bases = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
+        all_names = (sorted([n + 'r' for n in all_ck_bases] +
+                            [n + 'i' for n in all_ck_bases]) +
+                     list(self.config.m0_phys_name) +
+                     list(self.config.g0_phys_name) +
+                     list(SCALAR_NAMES))
+        self.cm = ConstraintManager(self.all_comb, all_names)
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
 
@@ -140,13 +143,6 @@ class Fitter:
                 tfm = model.make_mass_width_transform()
                 if tfm is not None:
                     transforms.append(tfm)
-                    # Register standalone width param (not in gamma names)
-                    if hasattr(tfm, 'width_name'):
-                        wn = tfm.width_name
-                        if wn not in self.config.g0_phys_name:
-                            self.config.g0_phys_name.append(wn)
-                            self.cm.g0_names.append(wn)
-                            self.cm._rebuild()
         self.cm.set_mass_width_transforms(transforms)
 
     def set_free(self, name):
@@ -448,7 +444,7 @@ class Fitter:
             # Scalar defaults
             scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
                            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
-            for name in self.cm.SCALAR_NAMES:
+            for name in SCALAR_NAMES:
                 d.setdefault(name, scalar_base.get(name, 0.0))
             self._defaults = d
         return self._defaults
@@ -468,7 +464,7 @@ class Fitter:
             for name, val in zip(self.config.g0_phys_name, g0):
                 self._defaults[name] = float(val)
         if scalar is not None:
-            for name, val in zip(self.cm.SCALAR_NAMES, scalar):
+            for name, val in zip(SCALAR_NAMES, scalar):
                 self._defaults[name] = float(val)
 
     def _check_data_loaded(self):
@@ -490,7 +486,7 @@ class Fitter:
         if g0 is None:
             g0 = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
         if scalar is None:
-            scalar = [defaults.get(n, 0.0) for n in self.cm.SCALAR_NAMES]
+            scalar = [defaults.get(n, 0.0) for n in SCALAR_NAMES]
         return {"ck": ck, "m0": m0, "g0": g0, "scalar": list(scalar)}
 
     def _compute_norm_derivative(self, norm, P, data):
@@ -585,7 +581,7 @@ class Fitter:
         defaults = self.defaults
         m0_arr = np.array([defaults.get(n, 0.0) for n in self.config.m0_phys_name])
         g0_arr = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
-        scalar_names = self.cm.SCALAR_NAMES
+        scalar_names = SCALAR_NAMES
         scalar_arr = [defaults.get(n, 0.0) for n in scalar_names]
 
         for name, val in resolved.items():
@@ -603,7 +599,7 @@ class Fitter:
         """Full backward pipeline: kernel grads → flat gradient."""
         from ampfit.boundary import apply_bound_grads
 
-        scalar_names = self.cm.SCALAR_NAMES
+        scalar_names = SCALAR_NAMES
 
         # Per-name grads from ck combinatorics
         grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
