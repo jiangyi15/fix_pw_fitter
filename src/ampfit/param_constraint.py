@@ -496,6 +496,12 @@ class ConstraintManager:
         for tr in transforms:
             if tr is not None:
                 self.mass_width_transforms.append(tr)
+                # Auto-fix output names that are NOT also inputs
+                # (pass-through params like re_00 stay free).
+                input_set = set(tr.input_names)
+                for name in tr.output_names:
+                    if name not in input_set:
+                        self.fixed_tr.values[name] = 0.0
         self._rebuild()
 
     def set_free(self, name):

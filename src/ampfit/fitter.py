@@ -71,6 +71,8 @@ class Fitter:
             self.config.m0_phys_name,
             self.config.g0_phys_name,
         )
+        # Auto-register mass/width transforms from particle models
+        self.setup_mass_width_transforms()
 
         # Data holders (created by set_data / set_phsp)
         self._data_holder = None
@@ -123,11 +125,18 @@ class Fitter:
 
         Iterates over all decay chains, calls ``make_mass_width_transform()``
         on each model, and adds non-``None`` results to the constraint pipeline.
+        Duplicate model instances (same particle appearing in multiple chains)
+        are registered only once.
         """
         transforms = []
+        seen = set()
         for chain in self.config.full_decay.chains:
             for decay in chain.decays[1:]:
                 model = decay.core._model
+                mid = id(model)
+                if mid in seen:
+                    continue
+                seen.add(mid)
                 tfm = model.make_mass_width_transform()
                 if tfm is not None:
                     transforms.append(tfm)
