@@ -38,10 +38,7 @@ class _FixMassWidthTransform(Transform):
         return d
 
     def backward(self, grad_out, d_in=None):
-        grad = dict(grad_out)
-        for name in self.output_names:
-            grad.pop(name, None)
-        return grad
+        return {}
 
     def inverse(self, d):
         return d
