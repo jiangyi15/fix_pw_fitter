@@ -295,8 +295,25 @@ def main():
         print("=" * 70)
 
         t0 = time.time()
-        result = fitter.fit(x0, maxiter=args.maxiter, disp=True)
+        try:
+            result = fitter.fit(x0, maxiter=args.maxiter, disp=True)
+        except KeyboardInterrupt:
+            pass
         fit_time = time.time() - t0
+
+        if result is None or not hasattr(result, 'fun'):
+            if fitter._last_xk is not None:
+                ckpt_path = args.save if args.save else f"{os.path.splitext(os.path.basename(args.config))[0]}_fit_results.json"
+                ckpt_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else '.'
+                save_path = os.path.join(ckpt_dir, "checkpoint.json")
+                fitter.save_params(fitter._last_xk, save_path)
+                print(f"\n  Fit interrupted after {fit_time:.1f}s")
+                print(f"  Checkpoint saved to {save_path}")
+                print(f"  Resume with: --init {save_path}")
+            else:
+                print(f"\n  Fit interrupted after {fit_time:.1f}s — no iterations completed")
+            sys.exit(1)
+
         print(f"\n  Fit time: {fit_time:.2f}s")
         print(f"  Final NLL: {result.fun:.6f}")
         print(f"  nfev: {result.nfev}, nit: {result.nit}")
@@ -310,7 +327,7 @@ def main():
         for name, val, err in vals_err:
             print(f"    {name:50s} = {val:+.6f} ± {err:.6f}")
 
-        # Save results if requested
+        # Save results
         save_path = args.save
         if save_path is None:
             prefix = os.path.splitext(os.path.basename(args.config))[0]
@@ -337,11 +354,11 @@ def main():
     print(f"    Phsp       {n_phsp:>10,}")
     print(f"    Free vars  {n_free:>10,}")
     print(f"    Load time  {load_time:>10.2f}s")
-    if args.fit:
+    if args.fit and result is not None and hasattr(result, 'fun'):
         print(f"    Fit time   {fit_time:>10.2f}s")
         print(f"    Fit NLL    {result.fun:>10.6f}")
         print(f"    nfev/nit   {result.nfev:>4d} / {result.nit}")
-    else:
+    elif args.fit:
         print(f"    NLL        {nll:>10.6f}")
         print(f"    Compute    {elapsed:>10.2f}s")
     print("=" * 70)

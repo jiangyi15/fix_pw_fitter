@@ -99,6 +99,9 @@ class Fitter:
         self._bkg_scale = None        # (1-purity)/purity / N_b for bkg scaling
         self._log_purity_const = 0.0  # -log(purity) * sum(data_weight)
 
+        # Last evaluated x vector (stored by get_nll for interrupt checkpoint)
+        self._last_xk = None
+
     # ------------------------------------------------------------------
     # Constraint setup — all delegated to ConstraintManager
     # ------------------------------------------------------------------
@@ -637,6 +640,7 @@ class Fitter:
         Returns:
             ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
         """
+        self._last_xk = x.copy()
         params, resolved, raw, x_mapped = self._build_params(x)
         nll, total_grads = self.get_nll_raw(params)
         grad_flat = self._flat_gradient(total_grads, resolved, raw, x_mapped, x)
@@ -1023,12 +1027,16 @@ class Fitter:
     # ------------------------------------------------------------------
     def save_params(self, fit_result, filepath, grad_scale=1.0):
         """Save fit results to JSON file matching archive pw_cfit5_td6_fix29.py format.
-        
+
+        *fit_result* can be:
+          - an ``OptimizeResult`` from :meth:`fit()` — saves values + errors + status
+          - a flat numpy array ``x`` — saves values only (no errors/status)
+
         The JSON structure:
             value: {name_r: float, name_i: float, time_param: float, ...}
             error: {name_r: float, ...}
             status: {NLL, Ndf, jac, success, message, rhorho}
-        
+
         Handles bound transforms, fixed params, same-param aliases,
         scale params, and time parameter defaults automatically.
         
@@ -1040,12 +1048,31 @@ class Fitter:
         """
         import json, cmath, os
 
+        # Accept flat x vector directly (for checkpoint saves)
+        if isinstance(fit_result, np.ndarray):
+            x = fit_result
+            hess_inv = None
+            fun = float('nan')
+            jac = None
+            success = False
+            message = "No fit result"
+        else:
+            x = fit_result.x
+            hess_inv = getattr(fit_result, 'hess_inv', None)
+            fun = float(fit_result.fun)
+            jac = fit_result.jac
+            success = bool(fit_result.success)
+            message = str(fit_result.message)
+
         flat_names = self._var_registry.flat_names
         # Resolved physical values (post-constraints)
-        _, resolved, _, _ = self._build_params(fit_result.x)
+        _, resolved, _, _ = self._build_params(x)
 
         # Errors from Hessian (transformed to physical space)
-        _, errors = self._params_from_fit(fit_result, return_bounded=True)
+        if hess_inv is not None:
+            _, errors = self._params_from_fit(fit_result, return_bounded=True)
+        else:
+            errors = {}
 
         out = {"value": {}, "error": {}}
         # Store physical values for all resolved keys (canon + alias)
@@ -1089,23 +1116,23 @@ class Fitter:
                 out["error"][name] = 0.0
 
         # Status
-        hess_inv = fit_result.hess_inv
-        n_params = len(fit_result.x)
+        n_params = len(x)
         out["status"] = {
-            "NLL": float(fit_result.fun),
+            "NLL": fun,
             "Ndf": n_params,
-            "jac": fit_result.jac.tolist() if hasattr(fit_result.jac, 'tolist') else list(fit_result.jac),
-            "success": bool(fit_result.success),
-            "message": str(fit_result.message),
+            "jac": jac.tolist() if hasattr(jac, 'tolist') else (list(jac) if jac is not None else []),
+            "success": success,
+            "message": message,
         }
 
         # Correlation matrix for B->rhoA.rhoB params (like archive)
-        corr_items = [[i, n] for i, n in enumerate(flat_names) if "B->rhoA.rhoB" in n]
-        if corr_items:
-            corr_idx = np.array([i for i, n in corr_items])
-            corr_order = [n for i, n in corr_items]
-            corr_mat = hess_inv[np.ix_(corr_idx, corr_idx)] * grad_scale
-            out["status"]["rhorho"] = [corr_order, corr_mat.tolist()]
+        if hess_inv is not None:
+            corr_items = [[i, n] for i, n in enumerate(flat_names) if "B->rhoA.rhoB" in n]
+            if corr_items:
+                corr_idx = np.array([i for i, n in corr_items])
+                corr_order = [n for i, n in corr_items]
+                corr_mat = hess_inv[np.ix_(corr_idx, corr_idx)] * grad_scale
+                out["status"]["rhorho"] = [corr_order, corr_mat.tolist()]
 
         with open(filepath, 'w') as f:
             json.dump(out, f, indent=2)
