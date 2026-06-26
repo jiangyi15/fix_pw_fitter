@@ -558,7 +558,7 @@ class Config:
 
         return self._expand_to_blocks(matching, n_base)
 
-    def get_decay_ck_indices(self, decay_pairs):
+    def get_decay_ck_indices(self, decay_pairs, wave_idx=None):
         """Return ck indices for chains matching specific decay relationships.
 
         A chain matches when *every* ``(parent, child)`` pair in
@@ -573,9 +573,22 @@ class Config:
             cfg.get_decay_ck_indices([("a1(1260)p", "f0(500)"),
                                       ("f0(500)", "pip1")])
 
+            # Only the S-wave (first LS combination) of a1 → ρπ
+            cfg.get_decay_ck_indices([("a1(1260)p", "rhoA")], wave_idx=0)
+
+            # Only the D-wave (second LS combination) of a1 → ρπ
+            cfg.get_decay_ck_indices([("a1(1260)p", "rhoA")], wave_idx=1)
+
         Args:
             decay_pairs: list of ``(parent_name, child_name)`` tuples.
                          All pairs must be satisfied by the same chain.
+            wave_idx: int or None.  If None, include all partial waves
+                      (all base indices in the chain range).  If an int,
+                      include only the *wave_idx*-th partial wave
+                      (i.e. ``start + wave_idx`` within each matching
+                      chain).  This separates individual LS combinations
+                      within a decay, e.g., S-wave (wave_idx=0) from
+                      D-wave (wave_idx=1) for a1 → ρπ.
 
         Returns:
             list[int] — ck indices covering all 8 topology blocks.
@@ -599,7 +612,10 @@ class Config:
                     ok = False
                     break
             if ok:
-                matching.update(range(start, end))
+                if wave_idx is not None:
+                    matching.add(start + wave_idx)
+                else:
+                    matching.update(range(start, end))
 
         return self._expand_to_blocks(matching, n_base)
 
