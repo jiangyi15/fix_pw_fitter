@@ -30,6 +30,32 @@ from .base import BaseModel, register_model
 from ampfit.param_constraint import Transform
 
 
+# ── reduced gamma computation ────────────────────────────────────
+
+def _gamma_functions(m, x_table, M_table, n_ck, scale=1.0):
+    """Compute reduced gamma functions at masses *m*.
+
+    Results are divided by *scale* (so that the first diagonal
+    ``re_00 = 1`` when *m* = *m₀*).
+
+    Returns list of complex arrays in gamma-name order::
+
+        diag:   M_aa(m)/scale         (real)
+        re_ab:  Re(M_ab(m))/scale     (real)
+        im_ab:  -Im(M_ab(m))/scale    (real)
+    """
+    inv = 1.0 / scale if scale != 0 else 1.0
+    out = []
+    for a in range(n_ck):
+        Mab = np.interp(m, x_table, M_table[:, a, a])
+        out.append(Mab.real * inv + 0j)            # re_aa
+        for b in range(a + 1, n_ck):
+            Mab = np.interp(m, x_table, M_table[:, a, b])
+            out.append(Mab.real * inv + 0j)        # re_ab = Re(M_ab)/scale
+            out.append(-Mab.imag * inv + 0j)       # im_ab = -Im(M_ab)/scale
+    return out
+
+
 def _gamma_at_m0(x_table, M_table, n_ck, scale, m0):
     """Compute gamma_i(m₀) for all reduced channels.
 
@@ -319,7 +345,6 @@ class CKMatrixModelV2(BaseModel):
 
     def gamma(self, m):
         """Gamma functions: M_ab(m)/M_00(m₀) for each reduced channel."""
-        from .ck_matrix_model import _gamma_functions
         return _gamma_functions(m, self.x_table, self.M_table,
                                 self.n_ck, self._gamma_scale)
 
