@@ -349,7 +349,7 @@ class Fitter:
         _ = self.pc  # ensure pc and var_registry are built
         return self._var_registry.build_initial(seed=seed)
 
-    def reinitial(self, seed=42):
+    def reinitial(self, seed=None):
         """Deterministic flat vector using stored physical defaults.
 
         Parameters with a config default (mass, width, scalar) use that

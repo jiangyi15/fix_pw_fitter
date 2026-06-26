@@ -250,7 +250,7 @@ def main():
         x0 = fitter.values_from_dict(init_data)
         print(f"Initialized from {args.init}")
     else:
-        x0 = fitter.initial_values(seed=42)
+        x0 = fitter.initial_values(seed=None)
     print(f"x0 shape: {x0.shape}")
 
     t0 = time.time()
