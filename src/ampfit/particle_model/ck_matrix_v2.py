@@ -335,10 +335,14 @@ class CKMatrixModelV2(BaseModel):
     # ── gamma interface ──────────────────────────────────────────
 
     def get_defaults(self):
-        """All physical defaults: mass + reduced gamma values."""
+        """All physical defaults: mass and width only.
+
+        Gamma/reduced values are computed by the transform from
+        ck parameters, so they don't need initial defaults here.
+        """
         mass = float(self.kwargs.get("mass", 0.775))
-        return {f"{self.name}_mass": mass,
-                **dict(zip(self._g_names, self._g_defaults))}
+        width = float(self.kwargs.get("width", 0.1))
+        return {f"{self.name}_mass": mass, f"{self.name}_width": width}
 
     def get_gamma_count(self):
         return self.n_ck + self.n_ck * (self.n_ck - 1)  # re_aa + (re+im)*upper

@@ -574,8 +574,8 @@ class ConstraintManager:
                     if name not in self._all_names:
                         self._all_names.append(name)
                 for name in tr.output_names:
-                    if name not in input_set:
-                        self.fixed_tr.values[name] = 0.0
+                    if name not in input_set and name in self._all_names:
+                        self._all_names.remove(name)
         self._rebuild()
 
     def set_free(self, name):

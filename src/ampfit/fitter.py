@@ -427,9 +427,10 @@ class Fitter:
         if self._defaults is None:
             d = {}
             # Defaults from particle models (mass + gamma/width)
+            # Skip the top decay (B) — it has no fit parameters
             seen = set()
             for chain in self.config.full_decay.chains:
-                for decay in chain.decays:
+                for decay in chain.decays[1:]:
                     model = decay.core._model
                     mid = id(model)
                     if mid in seen:

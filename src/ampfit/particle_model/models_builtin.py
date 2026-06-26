@@ -25,17 +25,19 @@ class _FixMassWidthTransform(Transform):
     """Pass-through transform that auto-fixes mass and width parameters.
 
     ``input_names = []``, ``output_names = [mass_name, width_name]``.
-    Since no inputs, the auto-fix mechanism in
-    :meth:`ConstraintManager.set_mass_width_transforms` fixes both.
+    The transform carries the default values so the constraint manager
+    can set them as fixed overrides instead of hardcoded 0.0.
     """
 
     _has_inverse = True
 
-    def __init__(self, mass_name, width_name):
+    def __init__(self, mass_name, width_name, mass_default=0.775, width_default=0.1):
         super().__init__(input_names=[], output_names=[mass_name, width_name])
+        self._fixed = {mass_name: float(mass_default), width_name: float(width_default)}
 
     def forward(self, d):
-        return d
+        """Override mass and width with their fixed config values."""
+        return {**d, **self._fixed}
 
     def backward(self, grad_out, d_in=None):
         return {}
@@ -52,11 +54,13 @@ class OneModel(BaseModel):
 
     Returns the Gamma value that makes
     ``1 = 1/(m0**2 - m**2 - i m0 g0 Gamma)``
+
+    Mass and width are both fixed (``_FixMassWidthTransform``),
+    so no physical defaults needed.
     """
 
     def get_defaults(self):
-        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
-                f"{self.name}_width": float(self.kwargs.get("width", 1.0))}
+        return {}
 
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 1.0))]
@@ -69,6 +73,8 @@ class OneModel(BaseModel):
     def make_mass_width_transform(self):
         return _FixMassWidthTransform(
             f"{self.name}_mass", f"{self.name}_width",
+            mass_default=self.kwargs.get("mass", 0.775),
+            width_default=self.kwargs.get("width", 1.0),
         )
 
 

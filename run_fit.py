@@ -54,7 +54,7 @@ def build_constraints(all_comb):
                "pi1600", "a2(1700)", "pi2(1670)", "pi1(1600)"]:
         name_ps, name_ms = [], []
         fixed = True
-        for r2 in ["rhoA", "f0(500)", "f0(980)", "f2(1270)"]:
+        for r2 in ["rhoA", "f0(500)", "f0(980)", "f2(1270)", "f0(1370)"]:
             name_p = f"B->{r1}p.pim2{r1}p->{r2}.pip2{r2}->pip1.pim1_total_0"
             name_m = f"B->{r1}m.pip2{r1}m->{r2}.pim2{r2}->pip1.pim1_total_0"
             if name_p in all_params:
@@ -142,12 +142,9 @@ def main():
     fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
     # Optionally add mass/width fixes to the fixed slots
     if args.fix_mass_width:
-        for name in fitter.config.m0_phys_name:
-            val = float(fitter.defaults[name])
-            fixed_slots[name] = val
-        for name in fitter.config.g0_phys_name:
-            val = float(fitter.defaults[name])
-            fixed_slots[name] = val
+        for name, val in fitter.defaults.items():
+            if name.endswith('_mass') or name.endswith('_width'):
+                fixed_slots[name] = float(val)
 
     # gamma is free (fitted time parameter) — do NOT fix to 0
     fixed_slots["delta_gamma"] = 0.0
@@ -173,22 +170,29 @@ def main():
     fitter.set_scale(scale_params)
     # Share re_00 between charge-conjugate pairs (ck_matrix models)
     for particle in ["pi2(1670)"]:
-        p_re00 = f"{particle}p_re_00"
-        m_re00 = f"{particle}m_re_00"
+        p_re00 = f"{particle}p_width"
+        m_re00 = f"{particle}m_width"
         if p_re00 in fitter.free_param_names() and m_re00 in fitter.free_param_names():
             fitter.set_same([[p_re00, m_re00]])
     print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
 
     # Set boundary ranges for masses and widths
+    # Parameters are identified by naming convention rather than
+    # m0_phys_name/g0_phys_name lists:
+    #   *_mass → mass parameter
+    #   *_width → width parameter
+    #   g_ls/total → coupling/amplitude params (no boundary)
+    flat = set(fitter.cm.var_registry.flat_names)
     mass_width_range = {}
-    for name in fitter.config.m0_phys_name:
-        val = float(fitter.defaults[name])
-        mass_width_range[name] = [val - 2, val + 2]
-    for name in fitter.config.g0_phys_name:
-        val = float(fitter.defaults[name])
-        lo = max(0.01, val - 20)
-        hi = min(5.0, val + 4.)
-        mass_width_range[name] = [lo, hi]
+    for name, val in fitter.defaults.items():
+        if name not in flat:
+            continue  # not an optimizer parameter (top decay mass, etc.)
+        if name.endswith('_mass'):
+            mass_width_range[name] = [float(val) - 2, float(val) + 2]
+        elif name.endswith('_width'):
+            lo = max(0.01, float(val) - 20)
+            hi = min(5.0, float(val) + 4.)
+            mass_width_range[name] = [lo, hi]
     mass_width_range["a1(1260)p_mass"] = [1.1, 1.32]
     mass_width_range["a1(1260)m_mass"] = [1.1, 1.32]
     for k, v in mass_width_range.items():
