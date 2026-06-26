@@ -1482,7 +1482,9 @@ if __name__ == "__main__":
     fitter.set_fixed(fixed_params)
 
     print(f"Free params: {fitter.pc.n_free_vars}")
-    print(f"Free param names: {fitter.free_param_names()[:3]}...")
+    print(f"Free param names ({len(fitter.free_param_names())}):")
+    for n in fitter.free_param_names():
+        print(f"  {n}")
 
     # ---- Generate random test data ----
     n_events_data = 200

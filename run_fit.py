@@ -253,6 +253,13 @@ def main():
         x0 = fitter.initial_values(seed=None)
     print(f"x0 shape: {x0.shape}")
 
+    # Print initial parameters
+    names = fitter.free_param_names()
+    print(f"\n  Initial parameters:")
+    for name, val in zip(names, x0):
+        print(f"    {name:50s} = {val:+.6f}")
+    print()
+
     t0 = time.time()
     nll, grad_x = fitter.get_nll(x0)
     elapsed = time.time() - t0
@@ -295,15 +302,12 @@ def main():
         print(f"  nfev: {result.nfev}, nit: {result.nit}")
         print(f"  success: {result.success}")
 
-        # Print uncertainties for top parameters
+        # Print uncertainties for all free parameters
         uncert = fitter.get_uncertainties(result)
         names = list(uncert.keys())
-
-        # Show largest-magnitude free parameters
         vals_err = [(n, uncert[n][0], uncert[n][1]) for n in names]
-        vals_err.sort(key=lambda x: abs(x[1]), reverse=True)
-        print(f"\n  Top free parameters:")
-        for name, val, err in vals_err[:5]:
+        print(f"\n  Fitted parameters:")
+        for name, val, err in vals_err:
             print(f"    {name:50s} = {val:+.6f} ± {err:.6f}")
 
         # Save results if requested
