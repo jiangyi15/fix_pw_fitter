@@ -87,6 +87,10 @@ class BuggModel(BaseModel):
     (``mass``) needs to be set in YAML.
     """
 
+    def get_defaults(self):
+        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.953)),
+                f"{self.name}_width": float(self.kwargs.get("width", 1.0))}
+
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 1.0))]
 

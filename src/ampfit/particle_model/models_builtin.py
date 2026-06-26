@@ -54,6 +54,10 @@ class OneModel(BaseModel):
     ``1 = 1/(m0**2 - m**2 - i m0 g0 Gamma)``
     """
 
+    def get_defaults(self):
+        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
+                f"{self.name}_width": float(self.kwargs.get("width", 1.0))}
+
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 1.0))]
 
@@ -74,6 +78,12 @@ class OneModel(BaseModel):
 class FlatteCModel(BaseModel):
     """Flatté-like parametrisation (see ``flatte_model.py`` for full impl)."""
 
+    def get_defaults(self):
+        mass = float(self.kwargs.get("mass", 0.775))
+        gammas = {f"{self.name}_g{i}": float(self.kwargs.get(f"g_{i}", 0.1))
+                  for i in range(self.get_gamma_count())}
+        return {f"{self.name}_mass": mass, **gammas}
+
     def get_gamma_count(self):
         return len(self.kwargs["mass_list"])
 
@@ -92,6 +102,10 @@ class FlatteCModel(BaseModel):
 @register_model("GS_rho")
 class GSRhoModel(BaseModel):
     """Gounaris-Sakurai lineshape (see ``gs_rho_model.py`` for full impl)."""
+
+    def get_defaults(self):
+        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
+                f"{self.name}_width": float(self.kwargs.get("width", 0.149))}
 
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 0.149))]

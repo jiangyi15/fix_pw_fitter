@@ -77,6 +77,10 @@ class BWRModel(BaseModel):
         daug3Mass     — second daughter mass (required if no decay tree)
     """
 
+    def get_defaults(self):
+        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
+                f"{self.name}_width": float(self.kwargs.get("width", 0.1))}
+
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 0.1))]
 

@@ -57,6 +57,12 @@ class FlatteCModel(BaseModel):
         g_i:  coupling constant for channel i (default 0.1)
     """
 
+    def get_defaults(self):
+        mass = float(self.kwargs.get("mass", 0.775))
+        gammas = {f"{self.name}_g{i}": float(self.kwargs.get(f"g_{i}", 0.1))
+                  for i in range(self.get_gamma_count())}
+        return {f"{self.name}_mass": mass, **gammas}
+
     def get_gamma_count(self):
         return len(self.kwargs["mass_list"])
 

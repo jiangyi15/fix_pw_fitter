@@ -166,6 +166,10 @@ class GSRhoModel(BaseModel):
     _def_m2 = 0.13957039
     _def_m3 = 0.1349768
 
+    def get_defaults(self):
+        return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
+                f"{self.name}_width": float(self.kwargs.get("width", 0.149))}
+
     def get_gamma_defaults(self):
         return [float(self.kwargs.get("width", 0.149))]
 

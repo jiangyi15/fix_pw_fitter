@@ -31,15 +31,28 @@ class BaseModel:
         gamma(self, m) -> list[ndarray]
 
     Subclasses may override:
-        get_gamma_count() -> int       (default 1)
-        get_gamma_name() -> list[str]  (default [`{name}_width`])
-        get_gamma_defaults() -> list   (default [width from kwargs])
+        get_defaults() -> dict[str, float]  (all physical defaults)
+        get_gamma_count() -> int            (default 1)
+        get_gamma_name() -> list[str]       (default [`{name}_width`])
+        get_gamma_defaults() -> list        (default [width from kwargs])
     """
 
     def __init__(self, name, **kwargs):
         self.name = name
         self.kwargs = kwargs
         self._parent = None
+
+    def get_defaults(self):
+        """All physical default values for this model (mass + gamma/width).
+
+        Returns a dict mapping full parameter names to floats, e.g.::
+
+            {"rhoA_mass": 0.775, "rhoA_width": 0.149}
+            {"f0(980)_g0": 0.1, "f0(980)_g1": 0.1, "f0(980)_mass": 0.99}
+        """
+        mass = float(self.kwargs.get("mass", 0.775))
+        width = float(self.kwargs.get("width", 0.1))
+        return {f"{self.name}_mass": mass, f"{self.name}_width": width}
 
     def get_gamma_count(self):
         return 1
@@ -118,9 +131,9 @@ class BaseModel:
             return fallback
 
         m0 = _p(f"{self.name}_mass", 0.775)
-        gamma_names = self.get_gamma_name()
-        defaults = self.get_gamma_defaults()
-        g0_vals = [_p(gamma_names[i], defaults[i]) for i in range(self.get_gamma_count())]
+        defaults = self.get_defaults()
+        gamma_names = [k for k in defaults if k != f"{self.name}_mass"]
+        g0_vals = [_p(n, float(defaults[n])) for n in gamma_names]
         n_ch = len(g0_vals)
 
         def sum_gamma_im(m):

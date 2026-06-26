@@ -334,6 +334,12 @@ class CKMatrixModelV2(BaseModel):
 
     # ── gamma interface ──────────────────────────────────────────
 
+    def get_defaults(self):
+        """All physical defaults: mass + reduced gamma values."""
+        mass = float(self.kwargs.get("mass", 0.775))
+        return {f"{self.name}_mass": mass,
+                **dict(zip(self._g_names, self._g_defaults))}
+
     def get_gamma_count(self):
         return self.n_ck + self.n_ck * (self.n_ck - 1)  # re_aa + (re+im)*upper
 

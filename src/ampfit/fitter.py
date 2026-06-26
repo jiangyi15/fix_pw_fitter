@@ -426,21 +426,17 @@ class Fitter:
         """Unified physical default values for all params (lazy-built)."""
         if self._defaults is None:
             d = {}
-            # Mass defaults from config
-            for name in self.config.m0_phys_name:
-                particle = name.replace('_mass', '')
-                mass = self.config.dic.get('particle', {}).get(particle, {}).get('mass', 0.8)
-                d[name] = float(mass)
-            # Width defaults from particle models (only those in g0_phys_name)
-            gamma_map = {}
+            # Defaults from particle models (mass + gamma/width)
+            seen = set()
             for chain in self.config.full_decay.chains:
                 for decay in chain.decays:
                     model = decay.core._model
-                    for n, v in zip(model.get_gamma_name(), model.get_gamma_defaults()):
-                        gamma_map[n] = float(v)
-            for name in self.config.g0_phys_name:
-                if name in gamma_map:
-                    d[name] = gamma_map[name]
+                    mid = id(model)
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    for k, v in model.get_defaults().items():
+                        d[k] = float(v)
             # Scalar defaults
             scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
                            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
