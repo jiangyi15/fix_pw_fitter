@@ -143,8 +143,11 @@ def main():
     # Optionally add mass/width fixes to the fixed slots
     if args.fix_mass_width:
         for name, val in fitter.defaults.items():
-            if name.endswith('_mass') or name.endswith('_width'):
-                fixed_slots[name] = float(val)
+            if 'g_ls' in name or 'total' in name:
+                continue
+            if name in ('gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'):
+                continue
+            fixed_slots[name] = float(val)
 
     # gamma is free (fitted time parameter) — do NOT fix to 0
     fixed_slots["delta_gamma"] = 0.0
@@ -176,20 +179,23 @@ def main():
             fitter.set_same([[p_re00, m_re00]])
     print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
 
-    # Set boundary ranges for masses and widths
-    # Parameters are identified by naming convention rather than
-    # m0_phys_name/g0_phys_name lists:
-    #   *_mass → mass parameter
-    #   *_width → width parameter
-    #   g_ls/total → coupling/amplitude params (no boundary)
+    # Set boundary ranges for masses and widths.
+    # Parameters are identified by having a resonance prefix
+    # and not being g_ls/total coupling params.
     flat = set(fitter.cm.var_registry.flat_names)
+    _scalars = {'gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'}
     mass_width_range = {}
     for name, val in fitter.defaults.items():
+        if 'g_ls' in name or 'total' in name:
+            continue
+        if name in _scalars:
+            continue
         if name not in flat:
-            continue  # not an optimizer parameter (top decay mass, etc.)
+            continue
         if name.endswith('_mass'):
             mass_width_range[name] = [float(val) - 2, float(val) + 2]
-        elif name.endswith('_width'):
+        else:
+            # width, gamma, Flatte g_i, etc.
             lo = max(0.01, float(val) - 20)
             hi = min(5.0, float(val) + 4.)
             mass_width_range[name] = [lo, hi]
