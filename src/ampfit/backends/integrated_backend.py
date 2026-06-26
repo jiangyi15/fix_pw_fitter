@@ -151,10 +151,10 @@ class IntegratedBackend(ComputeBackend):
         self._gram_g0 = g0.copy()
 
     def _load_phsp_matrices(self, phsp, m0, g0):
-        """Compute 56×56 reduced Gram matrices directly (no full matrix).
+        """Compute ng×ng reduced Gram matrices directly (no full matrix).
 
-        Groups of 4 basis functions (spaced 56 apart) are summed
-        before the outer product, reducing 224×224 → 56×56.
+        Groups of 4 basis functions (spaced ng apart) are summed
+        before the outer product, reducing 4·ng×4·ng → ng×ng.
         """
         n_events = phsp["mass"].shape[0]
         n_wave = self.kernel.n_wave
@@ -199,7 +199,7 @@ class IntegratedBackend(ComputeBackend):
             batch = {k: v[b_start:b_end] for k, v in phsp.items()
                      if isinstance(v, np.ndarray)}
             ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
-            # Project onto groups: sum 4 blocks of 56 → (batch, 56)
+            # Project onto groups: sum 4 blocks of ng → (batch, ng)
             A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
             A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
             Mpp += A0.T.conj() @ A0

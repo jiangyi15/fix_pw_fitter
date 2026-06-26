@@ -146,7 +146,7 @@ __global__ void compute_g_bw_kernel(
 // Shared memory:
 //   s_ka[0..n_angle_k)    — ka_prod
 //   s_grp[0..4*ng)        — group sums
-//   (n_angle_k + 4*ng floats = 560 floats = 2240 B < 48 KB)
+//   (n_angle_k + 4*ng floats < 48 KB)
 //=============================================================================
 __global__ void gram_common_kernel_f32(
     const float* __restrict__ mass,
@@ -181,7 +181,7 @@ __global__ void gram_common_kernel_f32(
     int tid = threadIdx.x;
     int block_sz = blockDim.x;
     int n = n_wave / 2;
-    int ng = n_wave / 8;  // 56
+    int ng = n_wave / 8;  // groups = n_wave / 8
 
     // Shared memory
     extern __shared__ float s_sh[];
@@ -311,7 +311,7 @@ __global__ void gram_reduce_kernel_f32(
 // KERNEL 2c: Main forward computation (bw_p, angular factors, amplitudes, prob)
 //=============================================================================
 // Each block handles one event.
-// Shared memory: ka_prod for all angle_k values (336 doubles)
+// Shared memory: ka_prod for all angle_k values (n_angle_k floats)
 // Each thread handles multiple waves for bw_p, fa, common_amp computations
 //=============================================================================
 __global__ void compute_main_kernel(
@@ -550,7 +550,7 @@ __global__ void compute_main_kernel(
 //=============================================================================
 // Each block handles one event.
 // Key optimization for g0 gradient:
-//   Instead of triple-nested loop (288 × 448 × 3 = 387K iterations),
+// Instead of triple-nested loop (n_gamma_rows × n_wave × n_res iterations),
 //   we:
 //   1. Pre-compute dQ_dbw_dom for all bw_idx (shared memory)
 //   2. Convert to dQ_dg_bw[bw_idx] = dQ_dbw_dom * (-1j * m0)

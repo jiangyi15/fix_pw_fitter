@@ -328,7 +328,7 @@ __global__ void gram_reduce_kernel_v3_f32(
 // KERNEL 2c: Main forward computation (bw_p, angular factors, amplitudes, prob)
 //=============================================================================
 // Each block handles one event.
-// Shared memory: ka_prod for all angle_k values (336 doubles)
+// Shared memory: ka_prod for all angle_k values (n_angle_k floats)
 // Each thread handles multiple waves for bw_p, fa, common_amp computations
 //=============================================================================
 __global__ void compute_main_kernel(
@@ -567,7 +567,7 @@ __global__ void compute_main_kernel(
 //=============================================================================
 // Each block handles one event.
 // Key optimization for g0 gradient:
-//   Instead of triple-nested loop (288 × 448 × 3 = 387K iterations),
+// Instead of triple-nested loop (n_gamma_rows × n_wave × n_res iterations),
 //   we:
 //   1. Pre-compute dQ_dbw_dom for all bw_idx (shared memory)
 //   2. Convert to dQ_dg_bw[bw_idx] = dQ_dbw_dom * (-1j * m0)

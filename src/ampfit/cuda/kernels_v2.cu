@@ -146,7 +146,7 @@ __global__ void compute_g_bw_kernel(
 // Shared memory:
 //   s_ka[0..n_angle_k)    — ka_prod (Phase 1, consumed in Phase 3)
 //   s_grp[0..4*ng)        — group sums (Phase 2-4)
-//   (max(n_angle_k, 4*ng) × 2 = 672 doubles = 5376 B < 48 KB)
+//   max(n_angle_k, 4*ng) × 2 doubles < 48 KB
 //=============================================================================
 __global__ void gram_common_kernel(
     const double* __restrict__ mass,
@@ -181,7 +181,7 @@ __global__ void gram_common_kernel(
     int tid = threadIdx.x;
     int block_sz = blockDim.x;
     int n = n_wave / 2;
-    int ng = n_wave / 8;  // 56
+    int ng = n_wave / 8;  // groups = n_wave / 8
 
     // Shared memory
     extern __shared__ double s_sh[];
@@ -314,7 +314,7 @@ __global__ void gram_reduce_kernel(
 // KERNEL 3: Main forward computation (bw_p, angular factors, amplitudes, prob)
 //=============================================================================
 // Each block handles one event.
-// Shared memory: ka_prod for all angle_k values (336 doubles)
+// Shared memory: ka_prod for all angle_k values (n_angle_k doubles)
 // Each thread handles multiple waves for bw_p, fa, common_amp computations
 //=============================================================================
 __global__ void compute_main_kernel(
@@ -553,7 +553,7 @@ __global__ void compute_main_kernel(
 //=============================================================================
 // Each block handles one event.
 // Key optimization for g0 gradient:
-//   Instead of triple-nested loop (288 × 448 × 3 = 387K iterations),
+// Instead of triple-nested loop (n_gamma_rows × n_wave × n_res iterations),
 //   we:
 //   1. Pre-compute dQ_dbw_dom for all bw_idx (shared memory)
 //   2. Convert to dQ_dg_bw[bw_idx] = dQ_dbw_dom * (-1j * m0)
@@ -1532,7 +1532,7 @@ void cuda_gram_matrix_v2(void* vctx, void* vdh,
     if (ne < bs) bs = ne;
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-    int ng2 = nw / 8;  // number of groups (56)
+    int ng2 = nw / 8;  // number of groups
 
     // Upload m0/g0
     const double* gpu_m0 = (const double*)_up_dbl(m0, c->n_m0_params);

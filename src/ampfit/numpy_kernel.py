@@ -438,7 +438,7 @@ class NumpyKernel:
         n_events = phsp_data["mass"].shape[0]
         n_wave = self.n_wave
         n = n_wave // 2
-        ng = n_wave // 8  # 56 for n_wave = 448
+        ng = n_wave // 8  # number of groups
 
         w = np.asarray(weight if weight is not None
                        else np.ones(n_events), dtype=np.float64)

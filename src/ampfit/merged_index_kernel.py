@@ -5,9 +5,9 @@ Key optimization: Instead of computing BW at unique positions and scattering,
 we directly compute at all wave×res positions using merged indices.
 
 Original flow:
-  m0_all = take(m0, m0_index)           # (216,) unique BW positions
-  bw_dom = m0_all² - m0_m² - 1j*m0_all*g_bw  # (N, 216)
-  bw_all = take(bw_dom, bw_order)       # (N, 896) scatter
+  m0_all = take(m0, m0_index)           # (n_unique_bw,) unique BW positions
+  bw_dom = m0_all² - m0_m² - 1j*m0_all*g_bw  # (N, n_unique_bw)
+  bw_all = take(bw_dom, bw_order)       # (N, n_wave * n_res) scatter
 
 Merged-index flow:
   m0_at_bw = take(m0, m0_index[bw_order])  # (896,) direct
@@ -117,7 +117,7 @@ class MergedIndexKernel:
         g_interp = self.interp(self.gamma_table, self.g0_index, g0_m, 
                                self.gamma_min, self.gamma_delta)
         g = g0_all * g_interp
-        g_bw = np.dot(g, self.matrix_gamma)  # (N, n_unique_bw) = (N, 216)
+        g_bw = np.dot(g, self.matrix_gamma)  # (N, n_unique_bw)
         
         # MERGED INDEX: scatter g_bw to bw_order positions
         g_bw_at_bw = np.take(g_bw, self.bw_order, axis=-1)  # (N, 896)
