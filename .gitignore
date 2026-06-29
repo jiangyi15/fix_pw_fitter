@@ -6,7 +6,7 @@ dist/
 build/
 .vscode/
 data/
-fit_output/
+fit_output*/
 *.png
 *.onnx
 *.om
