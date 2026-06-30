@@ -2,50 +2,18 @@
 """Build the CUDA shared libraries for ampfit.
 
 Usage:
-    python -m ampfit.cuda.build
+    python -m ampfit.cuda.build          # force rebuild all
+    from ampfit.cuda.build import ensure; ensure()  # auto-update on import
 
 Auto-detects nvcc and required compiler flags.  Builds all 4 kernel
 variants: v2/v3 × f64/f32.
+
+Each .so has a companion .hash file (SHA-256 of the .cu source).
+On import, the loader checks the hash and auto-rebuilds if the source changed.
 """
-import os
-import subprocess
-import sys
+import os, hashlib, subprocess, sys
 
-
-def find_nvcc():
-    import shutil
-    nvcc_path = shutil.which('nvcc')
-    if nvcc_path:
-        return nvcc_path
-
-    cuda_path = os.environ.get('CUDA_PATH') or os.environ.get('CUDA_HOME')
-    if cuda_path:
-        nvcc = os.path.join(cuda_path, 'bin', 'nvcc')
-        if os.path.exists(nvcc):
-            return nvcc
-
-    common = ['/usr/local/cuda', '/usr/local/cuda-13.2', '/usr/local/cuda-12.0',
-              '/usr/local/cuda-11.0', '/opt/cuda']
-    for path in common:
-        nvcc = os.path.join(path, 'bin', 'nvcc')
-        if os.path.exists(nvcc):
-            return nvcc
-    return None
-
-
-def detect_gcc():
-    """Find a gcc compatible with this nvcc."""
-    import shutil
-    # Try specific versioned gcc first (nvcc is picky about minor versions)
-    for ver in ['-14', '-13', '-12', '-11']:
-        p = shutil.which(f'gcc{ver}')
-        if p:
-            return p
-    p = shutil.which('gcc')
-    if p:
-        return p
-    return None
-
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 VARIANTS = [
     ("kernels_v2.cu",     "libcuda_kernels_v2.so"),
@@ -55,71 +23,132 @@ VARIANTS = [
 ]
 
 
+# ── helpers ─────────────────────────────────────────────────────
+
+def _cu_hash(src_name):
+    """SHA-256 hex digest of a .cu source file."""
+    path = os.path.join(SCRIPT_DIR, src_name)
+    return hashlib.sha256(open(path, 'rb').read()).hexdigest()
+
+
+def _hash_path(lib_name):
+    return os.path.join(SCRIPT_DIR, lib_name + ".hash")
+
+
+def find_nvcc():
+    import shutil
+    nvcc_path = shutil.which('nvcc')
+    if nvcc_path:
+        return nvcc_path
+    cuda_path = os.environ.get('CUDA_PATH') or os.environ.get('CUDA_HOME')
+    if cuda_path:
+        nvcc = os.path.join(cuda_path, 'bin', 'nvcc')
+        if os.path.exists(nvcc):
+            return nvcc
+    for path in ['/usr/local/cuda', '/usr/local/cuda-13.2',
+                 '/usr/local/cuda-12.0', '/usr/local/cuda-11.0', '/opt/cuda']:
+        nvcc = os.path.join(path, 'bin', 'nvcc')
+        if os.path.exists(nvcc):
+            return nvcc
+    return None
+
+
+def detect_gcc():
+    import shutil
+    for ver in ['-14', '-13', '-12', '-11']:
+        p = shutil.which(f'gcc{ver}')
+        if p:
+            return p
+    p = shutil.which('gcc')
+    return p
+
+
 def _arch_flag(nvcc):
-    """Detect GPU architecture for atomicAdd(double) support."""
-    import subprocess, re
+    import re
     r = subprocess.run([nvcc, '--version'], capture_output=True, text=True)
     m = re.search(r'release (\d+\.\d+)', r.stdout)
     if m and float(m.group(1)) >= 11:
-        return '-arch=sm_86'  # Ampere+ (RTX 30xx)
+        return '-arch=sm_86'
     return ''
 
 
-def build():
+# ── build one variant ───────────────────────────────────────────
+
+def _build_one(src_name, lib_name):
+    """Compile a single .cu → .so. Returns True on success."""
     nvcc = find_nvcc()
     if not nvcc:
-        print("ERROR: CUDA not found. Install CUDA Toolkit or set CUDA_PATH.")
         return False
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     gcc = detect_gcc()
-
-    # Build flags: try plain first, fall back to compat flags
+    script_dir = SCRIPT_DIR
     base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
     arch = _arch_flag(nvcc)
     if arch:
         base.insert(1, arch)
 
-    # Probe one file to detect required extra flags
+    # Probe flags
     probe_file = os.path.join(script_dir, VARIANTS[0][0])
     probe_out = os.path.join(script_dir, '_probe.so')
-
     extra = []
     r = subprocess.run(base + ['-o', probe_out, probe_file],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        err = r.stderr
-        if 'unsupported' in err:
+        if 'unsupported' in r.stderr:
             extra.append('-allow-unsupported-compiler')
         if gcc:
             extra.extend(['-ccbin', gcc])
         r2 = subprocess.run(base + extra + ['-o', probe_out, probe_file],
                             capture_output=True, text=True)
         if r2.returncode != 0:
-            print(f"ERROR: probe compiler:\n{r2.stderr[:500]}")
             if os.path.exists(probe_out):
                 os.remove(probe_out)
             return False
     if os.path.exists(probe_out):
         os.remove(probe_out)
 
-    print(f"Using nvcc: {nvcc}")
-    if extra:
-        print(f"Extra flags: {' '.join(extra)}")
+    src_file = os.path.join(script_dir, src_name)
+    out_file = os.path.join(script_dir, lib_name)
+    cmd = base + extra + ['-o', out_file, src_file]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.returncode == 0
 
+
+# ── public API ──────────────────────────────────────────────────
+
+def ensure(src_name, lib_name):
+    """Rebuild *lib_name* if *src_name* changed or .hash is missing.
+
+    Returns True if .so is ready (up-to-date or freshly built), False on failure.
+    """
+    lib_path = os.path.join(SCRIPT_DIR, lib_name)
+    hash_path = _hash_path(lib_name)
+    current = _cu_hash(src_name)
+
+    if os.path.exists(lib_path) and os.path.exists(hash_path):
+        stored = open(hash_path).read().strip()
+        if stored == current:
+            return True
+
+    print(f"ampfit CUDA: rebuilding {lib_name} ({src_name} changed)")
+    ok = _build_one(src_name, lib_name)
+    if ok:
+        open(hash_path, 'w').write(current)
+    return ok
+
+
+def build():
+    """Build all 4 kernel variants.  Returns True if all succeeded."""
     all_ok = True
     for src_name, lib_name in VARIANTS:
-        src_file = os.path.join(script_dir, src_name)
-        out_file = os.path.join(script_dir, lib_name)
-        cmd = base + extra + ['-o', out_file, src_file]
-        print(f"  {' '.join(cmd)}")
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"  FAILED:\n{r.stderr[:500]}")
-            all_ok = False
+        print(f"  Building {lib_name}...", end=' ')
+        sys.stdout.flush()
+        ok = ensure(src_name, lib_name)
+        if ok:
+            print("✓")
         else:
-            print(f"  ✓ Built {os.path.basename(out_file)}")
-
+            print("FAILED")
+            all_ok = False
     return all_ok
 
 

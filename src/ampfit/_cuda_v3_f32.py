@@ -55,7 +55,9 @@ int cuda_get_device_name(char*,int);
 
 
 def _load_lib():
-    """Load the v3 float32 shared library."""
+    """Load the v3 float32 shared library, auto-building if source changed."""
+    from ampfit.cuda.build import ensure
+    ensure("kernels_v3_f32.cu", "libcuda_kernels_v3_f32.so")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     lib_path = os.path.join(script_dir, "cuda", "libcuda_kernels_v3_f32.so")
     if not os.path.exists(lib_path):
