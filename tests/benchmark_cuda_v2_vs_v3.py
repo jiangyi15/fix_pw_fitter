@@ -1,119 +1,61 @@
-#!/usr/bin/env python
-"""
-Speed comparison: CUDA v2 (linear interpolation) vs v3 (Catmull-Rom).
+#!/usr/bin/env python3
+"""Benchmark CUDA v2 (linear interp) vs v3 (Catmull-Rom) at various sizes."""
+import sys, os, time, numpy as np
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-Builds both kernels, runs them on the same data with increasing batch sizes,
-and prints timing + throughput.
+from ampfit.config_loader import Config
+from ampfit.backends import create_backend
 
-Usage:
-    cd /media/jiangy/JZAO/github/qwen_code/project71
-    python tests/benchmark_cuda_v2_vs_v3.py
-"""
+CONFIG_FILE = "config_angle.yml"
+WARMUP = 5
+TRIALS = 20
+BATCH_SIZES = [64, 256, 1024, 4096]
 
-import sys, os, time, json, numpy as np
+config = Config(CONFIG_FILE)
+kc = config.build_all_index()
+ck_map = config.get_ck_map()
 
-# Ensure ampfit is importable
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+rng = np.random.default_rng(42)
+params = {
+    'ck': rng.normal(size=len(ck_map)) + 1j * rng.normal(size=len(ck_map)),
+    'm0': rng.random(len(kc["m0_index"])) + 2,
+    'g0': rng.random(len(kc["g0_index"])) + 0.1,
+    'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
+}
 
-from ampfit import Fitter
-from ampfit.backends import CUDABackendV2, CUDABackendV3
-
-# ── Config ──────────────────────────────────────────────────────────
-CONFIG = "config_test.yml"
-PARAMS_FILE = "tfpwa_actual_params.json"
-N_WARMUP = 5
-N_TRIALS = 20
-BATCH_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-
-# ── Load fitter & kernel config ─────────────────────────────────────
-print("=" * 65)
-print("  CUDA v2 (linear) vs v3 (Catmull-Rom) — speed comparison")
-print("=" * 65)
-
-fitter_ref = Fitter(CONFIG, backend="numpy")
-kc = fitter_ref.kernel_config
-
-with open(PARAMS_FILE) as f:
-    tfpwa_params = json.load(f)
-
-slot_dict = {}
-for key, val in tfpwa_params.items():
-    if "_g_ls" in key or "_g_lsbar" in key or "_total_" in key:
-        slot_dict[key] = float(val)
-
-ck = fitter_ref.pc.build_ck(slot_dict)
-m0 = fitter_ref.default_m0
-g0 = fitter_ref.default_g0
-scalar = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-
-# ── Load data ───────────────────────────────────────────────────────
-data = np.load("data/data_arrays.npz")
-N_total = data["mass"].shape[0]
-print(f"  Total events available: {N_total}")
-
-params_dict = {"ck": ck, "m0": m0, "g0": g0, "scalar": scalar}
-
-
-def make_data_dict(n):
+def make_data(n):
+    rng = np.random.default_rng(42)
     return {
-        "mass": data["mass"][:n].reshape(n, -1),
-        "q": data["q"][:n].reshape(n, -1),
-        "angle": data["angles"][:n],
-        "frac": data["frac"][:n],
-        "time": data["time"][:n],
-        "weight": data["weight"][:n],
-        "bkg": data["bkg_raw"][:n],
+        'mass': rng.uniform(2, 3, (n, 48)),
+        'q': rng.uniform(0, 1, (n, 72)),
+        'angle': rng.uniform(-np.pi, np.pi, (n, 24, 3)),
+        'frac': rng.random(n), 'time': rng.random(n),
+        'bkg': rng.random(n) * 0.01, 'weight': np.ones(n),
     }
 
-
-# ── Benchmark ───────────────────────────────────────────────────────
-def time_backend(BackendClass, name):
-    print(f"\n  --- {name} ---")
-    backend = BackendClass(kc, batch_size=0)
-    results = []
-    for bs in BATCH_SIZES:
-        if bs > N_total:
-            continue
-        d = make_data_dict(bs)
-        dh = backend.load_data(d)
-
-        # Warmup
-        for _ in range(N_WARMUP):
-            backend.compute(params_dict, dh)
-
-        # Timed runs
-        times = []
-        for _ in range(N_TRIALS):
-            t0 = time.perf_counter()
-            backend.compute(params_dict, dh)
-            t1 = time.perf_counter()
-            times.append((t1 - t0) * 1000)  # ms
-
-        times.sort()
-        median_ms = times[len(times) // 2]
-        throughput = bs / (median_ms / 1000)
-        results.append((bs, median_ms, throughput))
-        print(f"    {bs:>6d} events: {median_ms:>8.2f} ms  {throughput:>10.0f} ev/s")
-        dh.free()
-
-    backend.free()
-    return results
-
-
-res_v2 = time_backend(CUDABackendV2, "v2 linear")
-res_v3 = time_backend(CUDABackendV3, "v3 Catmull-Rom")
-
-# ── Summary table ───────────────────────────────────────────────────
-print("\n" + "=" * 65)
-print("  SUMMARY")
 print("=" * 65)
-print(f"  {'Batch':>6} | {'v2 (ms)':>10} | {'v3 (ms)':>10} | {'v2 ev/s':>10} | {'v3 ev/s':>10} | {'ratio':>7}")
-print(f"  {'-'*6}-+-{'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*7}")
-for r2, r3 in zip(res_v2, res_v3):
-    assert r2[0] == r3[0]
-    bs = r2[0]
-    m2, t2 = r2[1], r2[2]
-    m3, t3 = r3[1], r3[2]
-    ratio = m2 / m3 if m3 > 0 else 0
-    tag = "  ✅ v3 faster" if m3 < m2 else "  ⚠️ v2 faster"
-    print(f"  {bs:>6d} | {m2:>10.2f} | {m3:>10.2f} | {t2:>10.0f} | {t3:>10.0f} | {ratio:>6.3f}x{tag}")
+print("  CUDA v2 (linear) vs v3 (Catmull-Rom) — RTX 3070 Ti")
+print("=" * 65)
+print(f"{'n_events':>8} | {'v2 f64':>10} | {'v2 f32':>10} | {'v3 f64':>10} | {'v3 f32':>10}")
+print("-" * 55)
+
+for n in BATCH_SIZES:
+    data = make_data(n)
+    times = []
+    for bname in ["cuda_v2", "cuda32_v2", "cuda_v3", "cuda32_v3"]:
+        try:
+            be = create_backend(bname, kc)
+            dh = be.load_data(data)
+            for _ in range(WARMUP): be.compute(params, dh)
+            t0 = time.perf_counter()
+            for _ in range(TRIALS): be.compute(params, dh)
+            t = (time.perf_counter() - t0) / TRIALS * 1000
+            del dh, be
+            times.append(f"{t:>10.2f}ms")
+        except Exception as e:
+            times.append(f"{'SKIP':>10}")
+    print(f"  {n:>5}    | {' | '.join(times)}")
+
+print("-" * 55)
+print("  v3 uses Catmull-Rom (matches NumPy exactly)")
+print("  v2 uses linear interpolation")

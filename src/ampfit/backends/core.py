@@ -115,3 +115,6 @@ class ComputeBackend:
 
     def free(self):
         pass
+
+    def __del__(self):
+        self.free()
