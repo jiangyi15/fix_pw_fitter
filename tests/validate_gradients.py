@@ -15,30 +15,36 @@ if _cuda_lib_path not in os.environ.get("LD_LIBRARY_PATH", ""):
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
 
-np.random.seed(42)
 CONFIG_FILE = "config_angle.yml"
 N_EVENTS = 64  # small for speed
 
 
 def make_params():
+    config = Config(CONFIG_FILE)
+    kernel_config = config.build_all_index()
+    n_ck = len(config.get_ck_map())
+    n_m0 = len(kernel_config["m0_index"])
+    n_g0 = len(kernel_config["g0_index"])
+    rng = np.random.default_rng()
     return {
-        "ck": np.random.randn(448).astype(np.complex128)
-              + 1j * np.random.randn(448).astype(np.complex128),
-        "m0": np.random.rand(20).astype(np.float64) + 2.0,
-        "g0": np.random.rand(23).astype(np.float64) + 0.1,
+        "ck": rng.normal(size=n_ck).astype(np.complex128)
+              + 1j * rng.normal(size=n_ck).astype(np.complex128),
+        "m0": (rng.random(n_m0) + 2).astype(np.float64),
+        "g0": (rng.random(n_g0) + 0.1).astype(np.float64),
         "scalar": np.array([0.6, 0.01, 0.506, 0.01, 0.9, 0.2], dtype=np.float64),
     }
 
 
 def make_data(n):
+    rng = np.random.default_rng()
     return {
-        "mass": np.random.rand(n, 48).astype(np.float64),
-        "q": np.random.rand(n, 72).astype(np.float64),
-        "angle": np.random.rand(n, 24, 3).astype(np.float64),
-        "frac": np.random.rand(n).astype(np.float64),
-        "time": np.random.rand(n).astype(np.float64),
+        "mass": rng.random((n, 48)).astype(np.float64),
+        "q": rng.random((n, 72)).astype(np.float64),
+        "angle": rng.random((n, 24, 3)).astype(np.float64),
+        "frac": rng.random(n).astype(np.float64),
+        "time": rng.random(n).astype(np.float64),
         "weight": np.ones(n, dtype=np.float64),
-        "bkg": np.random.rand(n).astype(np.float64) * 0.01,
+        "bkg": rng.random(n).astype(np.float64) * 0.01,
     }
 
 
@@ -134,10 +140,11 @@ def main():
     # ════════════════════════════════════════════════════════════
     print("\n── norm=None (Q = sum(P·weight)) ──")
 
+    nk = create_backend("numpy", kernel_config)
+    dh = nk.load_data(data)
+
     def Q_norm_fn(p):
-        nk = create_backend("numpy", kernel_config)
-        Q, _, _ = nk.compute(p, nk.load_data(data), norm=None)
-        nk.free()
+        Q, _, _ = nk.compute(p, dh, norm=None)
         return float(Q)
 
     print("  Computing numerical reference (3-point)...")
@@ -154,6 +161,7 @@ def main():
     print("-" * 65)
     for label, _ in backends:
         report(label, results_norm[label], num_grads)
+    dh.free()
 
     # ════════════════════════════════════════════════════════════
     # norm=1000 (NLL)
@@ -161,10 +169,11 @@ def main():
     NORM_VAL = 1000.0
     print(f"\n── norm={NORM_VAL} (NLL) ──")
 
+    nk2 = create_backend("numpy", kernel_config)
+    dh2 = nk2.load_data(data)
+
     def Q_nll_fn(p):
-        nk = create_backend("numpy", kernel_config)
-        Q, _, _ = nk.compute(p, nk.load_data(data), norm=NORM_VAL)
-        nk.free()
+        Q, _, _ = nk2.compute(p, dh2, norm=NORM_VAL)
         return float(Q)
 
     print("  Computing numerical reference (3-point)...")

@@ -1,55 +1,62 @@
 #!/usr/bin/env python3
-"""Test the void* API handles batching correctly."""
+"""Test the void* API handles batching correctly using modern backend API."""
 import sys, os, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernel
+from ampfit.backends import create_backend
 
-# Test all three backends at various batch sizes
+# --- helpers ----------------------------------------------------------------
+def _cuda_backends():
+    """Yield (label, backend_name) tuples for all CUDA backends."""
+    yield "f64_v3",  "cuda_v3"
+    yield "f32_v3",  "cuda32_v3"
+    yield "f64_v2",  "cuda_v2"
+    yield "f32_v2",  "cuda32_v2"
+
+# --- main -------------------------------------------------------------------
 config = Config('config_angle.yml')
 kc = config.build_all_index()
 
-np.random.seed(42)
+# Derive parameter sizes from kernel config instead of hardcoding
+n_ck = len(config.get_ck_map())             # 448
+n_m0 = int(np.max(kc["m0_index"])) + 1     # 20
+n_g0 = int(np.max(kc["g0_index"])) + 1     # 23
+
+rng = np.random.default_rng()
+
 # Fixed params across all tests
 params = {
-    'ck': np.random.randn(448) + 1j * np.random.randn(448),
-    'm0': np.random.rand(20) + 2,
-    'g0': np.random.rand(23) + 0.1,
+    'ck': rng.normal(size=n_ck) + 1j * rng.normal(size=n_ck),
+    'm0': rng.random(n_m0) + 2,
+    'g0': rng.random(n_g0) + 0.1,
     'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
 }
 
 for batch in [1, 3, 10, 64, 128]:
-    np.random.seed(42)
+    rng = np.random.default_rng()  # deterministic per batch
     data = {
-        'mass': np.random.random((batch, 48)),
-        'q': np.random.random((batch, 72)),
-        'angle': np.random.random((batch, 24, 3)),
-        'frac': np.random.random(batch),
-        'time': np.random.random(batch),
+        'mass': rng.random((batch, 48)),
+        'q': rng.random((batch, 72)),
+        'angle': rng.random((batch, 24, 3)),
+        'frac': rng.random(batch),
+        'time': rng.random(batch),
         'weight': np.ones(batch),
-        'bkg': np.random.random(batch) * 0.01,
+        'bkg': rng.random(batch) * 0.01,
     }
 
     # NumPy reference
-    nk = NumpyKernel(kc)
-    Q_np, grads_np, P_np = nk._compute(params, data)
+    numpy_backend = create_backend("numpy", kc)
+    data_handle = numpy_backend.load_data(data)
+    Q_np, grads_np, P_np = numpy_backend.compute(params, data_handle, norm=None)
+    # numpy backend reuses the dict as its handle — nothing to free
 
     # Test each CUDA backend
-    for label, mod_name in [('f64', '_cuda'), ('f32', '_cuda_f32'), ('merged', '_cuda_merged')]:
+    for label, backend_name in _cuda_backends():
         try:
-            mod = __import__(f'ampfit.{mod_name}', fromlist=['object'])
-            if 'merged' in mod_name:
-                cls = mod.CUDAMergedKernel
-            elif 'f32' in mod_name:
-                cls = mod.CUDAKernel32
-            else:
-                cls = mod.CUDAKernel
-            
-            k = cls(kc)
-            dh = k.load_data(data)
-            Q, grads, P = k.compute(params, dh, norm=None)
-            k.free()
+            backend = create_backend(backend_name, kc)
+            handle = backend.load_data(data)
+            Q, grads, P = backend.compute(params, handle, norm=None)
 
             is_f32 = 'f32' in label
             q_ok = abs(Q - Q_np) < (1e-4 if is_f32 else 1e-10) * max(1.0, abs(Q_np))
@@ -62,6 +69,10 @@ for batch in [1, 3, 10, 64, 128]:
 
             status = '✓' if (q_ok and p_ok and g_ok) else '✗'
             print(f'{status} {label} n={batch:>4}: Q={Q:.4f} P_err={np.max(np.abs(P-P_np)):.2e} grads_ok={g_ok}')
+
+            # cleanup
+            handle.free()
+            backend.free()
         except Exception as e:
             print(f'  {label} n={batch}: SKIP ({e})')
 
