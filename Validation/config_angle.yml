@@ -31,6 +31,7 @@ data:
     phsp_bg_value: ["../create_data17/phsp_sig_bg_model.npy"]
     phsp_l0_weight: ["../create_data17/phsp_sig_time_weight.npy"]
     bg_frac: 0.914
+    purity: 0.914
     # lazy_file: True
     # lazy_call: True
     no_id_cached: True
@@ -389,6 +390,8 @@ particle:
         P: +1
         mass: 1.255
         width: 0.211
+        model: BWR
+        L: 2
 
 constrains:
     fix_var:
