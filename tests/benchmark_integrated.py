@@ -50,8 +50,8 @@ print("=" * 70)
 for label, bname in [("CUDAv3 (ref)", "cuda_v3"),
                      ("Integrated",  "integrated")]:
     print(f"\n── {label} ──")
-    print(f"{'n_data':>8} | {'n_phsp':>8} | {'Full NLL':>10} | {'Norm only':>10} | {'Data NLL':>10}")
-    print("-" * 55)
+    print(f"{'n_data':>8} | {'n_phsp':>8} | {'Full NLL (norm+data)':>20}")
+    print("-" * 45)
 
     for n in BATCH_SIZES:
         n_data = n
@@ -66,7 +66,7 @@ for label, bname in [("CUDAv3 (ref)", "cuda_v3"),
         dh_data = be.load_data(data)
         dh_phsp = be.load_data(phsp)  # also triggers Gram pre-computation for Integrated
 
-        # 1. Full NLL: compute norm from phsp, then NLL from data
+        # Full NLL: compute norm from phsp, then NLL from data
         norm, _, _ = be.compute(params, dh_phsp, norm=None, return_p=False)
         norm = float(norm)
         for _ in range(WARMUP):
@@ -76,35 +76,13 @@ for label, bname in [("CUDAv3 (ref)", "cuda_v3"),
             be.compute(params, dh_data, norm=norm)
         t_full = (time.perf_counter() - t0) / TRIALS
 
-        # 2. Norm only (return_p=False)
-        for _ in range(WARMUP):
-            be.compute(params, dh_phsp, norm=None, return_p=False)
-        t0 = time.perf_counter()
-        for _ in range(TRIALS):
-            be.compute(params, dh_phsp, norm=None, return_p=False)
-        t_norm = (time.perf_counter() - t0) / TRIALS
-
-        # 3. Data NLL only (no norm re-compute)
-        for _ in range(WARMUP):
-            be.compute(params, dh_data, norm=norm)
-        t_data_only = t_full  # same as full since norm is cached
-        # Actually compute data-only time
-        t0 = time.perf_counter()
-        for _ in range(TRIALS):
-            be.compute(params, dh_data, norm=norm)
-        t_data = (time.perf_counter() - t0) / TRIALS
-
         eps_full = n_data / t_full
-        eps_norm = n_phsp / t_norm
-        eps_data = n_data / t_data
 
-        print(f"  {n_data:>5}  | {n_phsp:>5}  | {eps_full:>8.0f}/s | {eps_norm:>8.0f}/s | {eps_data:>8.0f}/s")
+        print(f"  {n_data:>5}  | {n_phsp:>5}  | {eps_full:>15.0f}/s")
 
         del dh_data, dh_phsp, be
 
 print("\n" + "=" * 70)
-print("  Legend:")
-print("    Full NLL  = norm(phsp) + data_NLL(data)  (BFGS iteration)")
-print("    Norm only = Gram matrix norm (return_p=False)")
-print("    Data NLL  = per-event NLL via base backend")
+print("  Full NLL = norm(phsp, return_p=False) + data_NLL(data)")
+print("  data : phsp = 1 : 10")
 print("=" * 70)
