@@ -31,8 +31,8 @@ def _cu_hash(src_name):
     return hashlib.sha256(open(path, 'rb').read()).hexdigest()
 
 
-def _hash_path(lib_name):
-    return os.path.join(SCRIPT_DIR, lib_name + ".hash")
+def _hash_path(src_name):
+    return os.path.join(SCRIPT_DIR, src_name + ".hash")
 
 
 def find_nvcc():
@@ -122,7 +122,7 @@ def ensure(src_name, lib_name):
     Returns True if .so is ready (up-to-date or freshly built), False on failure.
     """
     lib_path = os.path.join(SCRIPT_DIR, lib_name)
-    hash_path = _hash_path(lib_name)
+    hash_path = _hash_path(src_name)
     current = _cu_hash(src_name)
 
     if os.path.exists(lib_path) and os.path.exists(hash_path):
@@ -153,4 +153,14 @@ def build():
 
 
 if __name__ == "__main__":
-    sys.exit(0 if build() else 1)
+    # Force rebuild: ignore existing .hash files, rebuild all
+    print("ampfit CUDA: force rebuilding all kernels")
+    for src_name, lib_name in VARIANTS:
+        hash_path = _hash_path(src_name)
+        if os.path.exists(hash_path):
+            os.remove(hash_path)
+        print(f"  Building {lib_name}...", end=' ')
+        sys.stdout.flush()
+        ok = ensure(src_name, lib_name)
+        print("✓" if ok else "FAILED")
+    print("Done.")
