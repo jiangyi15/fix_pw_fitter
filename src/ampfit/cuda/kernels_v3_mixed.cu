@@ -1,0 +1,1623 @@
+/**
+ * OPTIMIZED CUDA kernels v3 — mixed‑precision (f32 data/tables, f64 compute)
+ *
+ * All per‑event data (mass, momentum, angle, frac, time, weight, bkg) and
+ * all constant tables (gamma_table, fl_table, matrix_angle, angle_k, angle_b)
+ * are stored in float (f32) on GPU to halve memory bandwidth.
+ *
+ * All arithmetic uses double (f64) internally for full precision.
+ * Index arrays (int) are unchanged.
+ * Params (g0, m0, ck_real, ck_imag) remain double*.
+ * matrix_gamma stays float* (all tables are float in mixed precision).
+ * Output buffers (g_interp, g_bw, Q_out, P_out, gradient scratch) stay double*.
+ *
+ * Key optimizations:
+ * 1. g_bw computation: parallelized across gamma_rows using shared memory
+ * 2. Main compute: ka_prod in shared memory, wave-level parallelism
+ * 3. g0 gradient: pre-compute dQ_dbw_dom, then matrix-vector multiply
+ * 4. Eliminated heap allocation (new double[])
+ * 5. __restrict__ pointers for better compiler optimization
+ * 6. Block size optimized for RTX 3070 Ti (compute 8.6)
+ */
+
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <thrust/complex.h>
+#include <cstdio>
+#include <cmath>
+
+using complex = thrust::complex<double>;
+
+// ── Named constants ──
+#define BLOCK_SIZE      256     // threads per block (RTX 3070 Ti optimal)
+#define N_SCALAR        6       // scalar gradient count
+#define DEFAULT_BATCH_SIZE 50000 // default events per GPU batch
+
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudaGetErrorString(err)); \
+        } \
+    } while(0)
+
+// ── Catmull-Rom interpolation helpers ──────────────────────────────────
+// Uniform Catmull-Rom: p(t) = 0.5 * (
+//     (2*p1) + (-p0+p2)*t + (2*p0-5*p1+4*p2-p3)*t² + (-p0+3*p1-3*p2+p3)*t³ )
+// Uses 4 control points: p[-1]=p0, p[0]=p1, p[1]=p2, p[2]=p3
+// Clamps edge bins to maintain C¹ at boundaries.
+
+__device__ double catmull_rom_1d(
+    double pm1, double p0, double p1, double p2, double t
+) {
+    return p0 + 0.5 * t * (
+        -pm1 + p1 + t * (2.0*pm1 - 5.0*p0 + 4.0*p1 - p2 + t * (-pm1 + 3.0*p0 - 3.0*p1 + p2))
+    );
+}
+
+// Complex Catmull-Rom for gamma table — tables are float, cast to double
+__device__ complex interp_complex_device(
+    const float* __restrict__ table_real,
+    const float* __restrict__ table_imag,
+    int type_idx, double x,
+    double xmin, double xdelta, int n_bins
+) {
+    double diff = (x - xmin) / xdelta;
+    int xbin = max(0, min((int)floor(diff), n_bins - 2));
+    double t = max(0.0, min(diff - xbin, 1.0));
+    int base = type_idx * n_bins + xbin;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    // Need 4 control points: pm1 at base-1, p0 at base, p1 at base+1, p2 at base+2
+    // Clamp to [type_start, end_], duplicate edge values
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
+    double real_val = catmull_rom_1d(
+        (double)table_real[im1], (double)table_real[base],
+        (double)table_real[base + 1], (double)table_real[i2], t);
+    double imag_val = catmull_rom_1d(
+        (double)table_imag[im1], (double)table_imag[base],
+        (double)table_imag[base + 1], (double)table_imag[i2], t);
+    return complex(real_val, imag_val);
+}
+
+// Real Catmull-Rom for FL factor — table is float, cast to double
+__device__ double interp_real_device(
+    const float* __restrict__ table,
+    int type_idx, double x,
+    double xmin, double xdelta, int n_bins
+) {
+    double diff = (x - xmin) / xdelta;
+    int xbin = max(0, min((int)floor(diff), n_bins - 2));
+    double t = max(0.0, min(diff - xbin, 1.0));
+    int base = type_idx * n_bins + xbin;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
+    return catmull_rom_1d(
+        (double)table[im1], (double)table[base],
+        (double)table[base + 1], (double)table[i2], t);
+}
+
+//=============================================================================
+// KERNEL 1: g_bw computation (parallelized within each event)
+//=============================================================================
+// Each block handles one event.
+// Phase 1: Threads cooperatively compute g[i] for all gamma_rows
+// Phase 2: Threads cooperatively compute g_bw[j] = sum_i g[i] * matrix_gamma[i,j]
+//          using coalesced global reads of matrix_gamma
+//=============================================================================
+__global__ void compute_g_bw_kernel(
+    const float* __restrict__ mass,
+    const double* __restrict__ g0,
+    const int* __restrict__ g0_index,
+    const int* __restrict__ g0_mass_index,
+    const float* __restrict__ matrix_gamma,
+    const float* __restrict__ gamma_table_real,
+    const float* __restrict__ gamma_table_imag,
+    double gamma_min, double gamma_delta,
+    int n_gamma_rows, int n_unique_bw, int n_mass, int gamma_table_bins,
+    double* __restrict__ g_interp_real,
+    double* __restrict__ g_interp_imag,
+    double* __restrict__ g_bw_real,
+    double* __restrict__ g_bw_imag,
+    int n_events
+) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+
+    // Shared memory for g values (all gamma rows, dynamic size)
+    extern __shared__ double s_g_dyn[];
+    double* s_g_real = s_g_dyn;
+    double* s_g_imag = s_g_dyn + n_gamma_rows;
+
+    // Phase 1: Each thread computes g for its assigned gamma rows
+    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
+        int g0_idx = g0_index[gamma_idx];
+        double g0_val = g0[g0_idx];
+        double mass_val = (double)mass[event_idx * n_mass + g0_mass_index[gamma_idx]];
+
+        complex g_interp = interp_complex_device(
+            gamma_table_real, gamma_table_imag,
+            g0_idx, mass_val,
+            gamma_min, gamma_delta, gamma_table_bins
+        );
+
+        g_interp_real[event_idx * n_gamma_rows + gamma_idx] = g_interp.real();
+        g_interp_imag[event_idx * n_gamma_rows + gamma_idx] = g_interp.imag();
+
+        complex g_val = g0_val * g_interp;
+        s_g_real[gamma_idx] = g_val.real();
+        s_g_imag[gamma_idx] = g_val.imag();
+    }
+    __syncthreads();
+
+    // Phase 2: Matrix-vector multiply: g_bw[j] = sum_i g[i] * matrix_gamma[i, j]
+    int cols_per_thread = (n_unique_bw + block_sz - 1) / block_sz;
+    int col_start = tid * cols_per_thread;
+    int col_end = min(col_start + cols_per_thread, n_unique_bw);
+
+    for (int c = col_start; c < col_end; c++) {
+        double sum_r = 0.0, sum_i = 0.0;
+        for (int i = 0; i < n_gamma_rows; i++) {
+            double mg = (double)matrix_gamma[i * n_unique_bw + c];
+            sum_r += s_g_real[i] * mg;
+            sum_i += s_g_imag[i] * mg;
+        }
+        g_bw_real[event_idx * n_unique_bw + c] = sum_r;
+        g_bw_imag[event_idx * n_unique_bw + c] = sum_i;
+    }
+}
+
+//=============================================================================
+// KERNEL 2a: Gram‑matrix common factor — per‑event common_amp → group reduce → A0/A1
+//=============================================================================
+// Each block handles one event.
+// Shared memory:
+//   s_ka[0..n_angle_k)    — ka_prod (Phase 1, consumed in Phase 3)
+//   s_grp[0..4*ng)        — group sums (Phase 2-4)
+//   (n_angle_k + 4*ng doubles < 48 KB)
+//=============================================================================
+__global__ void gram_common_kernel_v3(
+    const float* __restrict__ mass,
+    const float* __restrict__ momentum,
+    const float* __restrict__ angle,
+    const float* __restrict__ weight,
+    const int* __restrict__ m0_index,
+    const int* __restrict__ fl_type,
+    const int* __restrict__ mass_index,
+    const int* __restrict__ fl_q_index,
+    const int* __restrict__ bw_order,
+    const int* __restrict__ fl_order,
+    const int* __restrict__ angle_index,
+    const float* __restrict__ angle_k,
+    const float* __restrict__ angle_b,
+    const float* __restrict__ matrix_angle_real,
+    const float* __restrict__ matrix_angle_imag,
+    const double* __restrict__ g_bw_real,
+    const double* __restrict__ g_bw_imag,
+    const float* __restrict__ fl_table,
+    double fl_min, double fl_delta,
+    int n_wave, int n_res, int n_decay, int n_unique_bw,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
+    int fl_table_bins,
+    const double* __restrict__ m0,
+    // Outputs (per‑event)
+    double* __restrict__ A0_real, double* __restrict__ A0_imag,
+    double* __restrict__ A1_real, double* __restrict__ A1_imag,
+    int n_events
+) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+    int n = n_wave / 2;
+    int ng = n_wave / 8;  // groups = n_wave / 8
+
+    // Shared memory
+    extern __shared__ double s_sh[];
+    double* s_ka = s_sh;                 // [0 .. n_angle_k)
+    double* s_grp = s_sh + n_angle_k;    // [0 .. 4*ng)
+
+    // ── Phase 1: ka_prod ────────────────────────────────────────────
+    for (int k_idx = tid; k_idx < n_angle_k; k_idx += block_sz) {
+        int angle_pos = angle_index[k_idx];
+        double ka = 1.0;
+        for (int comp = 0; comp < n_angle_comp; comp++) {
+            int idx = event_idx * n_angle_total * n_angle_comp
+                      + angle_pos * n_angle_comp + comp;
+            ka *= cos((double)angle[idx] * (double)angle_k[k_idx * n_angle_comp + comp]
+                      + (double)angle_b[k_idx * n_angle_comp + comp]);
+        }
+        s_ka[k_idx] = ka;
+    }
+    __syncthreads();
+
+    // ── Phase 2: initialise group sums ──────────────────────────────
+    if (tid < 4 * ng) s_grp[tid] = 0.0;
+    __syncthreads();
+
+    // ── Phase 3: compute common_amp per wave, accumulate into groups ─
+    int waves_per_thread = (n_wave + block_sz - 1) / block_sz;
+    int wave_start = tid * waves_per_thread;
+    int wave_end = min(wave_start + waves_per_thread, n_wave);
+
+    for (int w = wave_start; w < wave_end; w++) {
+        // --- bw_p = product of bw_dom over resonances ---
+        complex bw_p(1.0, 0.0);
+        for (int r = 0; r < n_res; r++) {
+            int bw_idx = bw_order[w * n_res + r];
+            double m0v = m0[m0_index[bw_idx]];
+            double mv = (double)mass[event_idx * n_mass + mass_index[bw_idx]];
+            complex gbw(g_bw_real[event_idx * n_unique_bw + bw_idx],
+                        g_bw_imag[event_idx * n_unique_bw + bw_idx]);
+            complex dom(m0v * m0v - mv * mv + m0v * gbw.imag(),
+                        -m0v * gbw.real());
+            bw_p *= dom;
+        }
+
+        // --- fa = dot(ka_prod, matrix_angle_row) ---
+        complex fa_val(0.0, 0.0);
+        for (int k = 0; k < n_angle_k; k++) {
+            int idx = k * n_wave + w;
+            fa_val += s_ka[k] * complex(
+                (double)matrix_angle_real[idx], (double)matrix_angle_imag[idx]);
+        }
+        complex common_amp = complex(1.0, 0.0) / bw_p * fa_val;
+
+        // --- FL factor (Catmull-Rom in v3) ---
+        double fl = 1.0;
+        for (int d = 0; d < n_decay; d++) {
+            int fl_idx = fl_order[w * n_decay + d];
+            double q = (double)momentum[event_idx * n_momentum + fl_q_index[fl_idx]];
+            fl *= interp_real_device(fl_table, fl_type[fl_idx],
+                                     q, fl_min, fl_delta, fl_table_bins);
+        }
+        common_amp *= fl;
+
+        // --- group reduction ---
+        bool is_B0 = w < n;
+        int g = is_B0 ? w % ng : (w - n) % ng;
+        int slab_offset = is_B0 ? 0 : (2 * ng);
+        atomicAdd(&s_grp[slab_offset + g], common_amp.real());
+        atomicAdd(&s_grp[slab_offset + ng + g], common_amp.imag());
+    }
+    __syncthreads();
+
+    // ── Phase 4: write group sums to global A0/A1 ───────────────────
+    if (tid < ng) {
+        double sw = sqrt((double)weight[event_idx]);
+        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid] * sw;
+        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid] * sw;
+        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid] * sw;
+        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid] * sw;
+    }
+}
+
+//=============================================================================
+// KERNEL 2b: Gram‑matrix reduction — batch of A0/A1 → Mpp/Mmm/Mpm
+//=============================================================================
+// Grid of (ng, ng) blocks × 1 thread each.
+//=============================================================================
+__global__ void gram_reduce_kernel_v3(
+    const double* __restrict__ A0_real, const double* __restrict__ A0_imag,
+    const double* __restrict__ A1_real, const double* __restrict__ A1_imag,
+    int n_events, int ng,
+    double* __restrict__ Mpp_r, double* __restrict__ Mpp_i,
+    double* __restrict__ Mmm_r, double* __restrict__ Mmm_i,
+    double* __restrict__ Mpm_r, double* __restrict__ Mpm_i
+) {
+    int gi = blockIdx.x;
+    int gj = blockIdx.y;
+    if (gi >= ng || gj >= ng) return;
+
+    double sum_pp_r = 0.0, sum_pp_i = 0.0;
+    double sum_mm_r = 0.0, sum_mm_i = 0.0;
+    double sum_pm_r = 0.0, sum_pm_i = 0.0;
+
+    for (int e = 0; e < n_events; e++) {
+        int base = e * ng;
+        double a0ri = A0_real[base + gi], a0ii = A0_imag[base + gi];
+        double a0rj = A0_real[base + gj], a0ij = A0_imag[base + gj];
+        sum_pp_r += a0ri * a0rj + a0ii * a0ij;
+        sum_pp_i += a0ri * a0ij - a0ii * a0rj;
+
+        double a1ri = A1_real[base + gi], a1ii = A1_imag[base + gi];
+        double a1rj = A1_real[base + gj], a1ij = A1_imag[base + gj];
+        sum_mm_r += a1ri * a1rj + a1ii * a1ij;
+        sum_mm_i += a1ri * a1ij - a1ii * a1rj;
+
+        sum_pm_r += a0ri * a1rj + a0ii * a1ij;
+        sum_pm_i += a0ri * a1ij - a0ii * a1rj;
+    }
+
+    Mpp_r[gi * ng + gj] = sum_pp_r;
+    Mpp_i[gi * ng + gj] = sum_pp_i;
+    Mmm_r[gi * ng + gj] = sum_mm_r;
+    Mmm_i[gi * ng + gj] = sum_mm_i;
+    Mpm_r[gi * ng + gj] = sum_pm_r;
+    Mpm_i[gi * ng + gj] = sum_pm_i;
+}
+
+//=============================================================================
+// KERNEL 2: Main forward computation (bw_p, angular factors, amplitudes, prob)
+//=============================================================================
+// Each block handles one event.
+// Shared memory: ka_prod for all angle_k values (n_angle_k doubles)
+// Each thread handles multiple waves for bw_p, fa, common_amp computations
+//=============================================================================
+__global__ void compute_main_kernel(
+    const float* __restrict__ mass,
+    const float* __restrict__ momentum,
+    const float* __restrict__ angle,
+    const float* __restrict__ frac,
+    const float* __restrict__ time,
+    const float* __restrict__ weight,
+    const float* __restrict__ bkg,
+    const int* __restrict__ m0_index,
+    const int* __restrict__ fl_type,
+    const int* __restrict__ mass_index,
+    const int* __restrict__ fl_q_index,
+    const int* __restrict__ bw_order,
+    const int* __restrict__ fl_order,
+    const int* __restrict__ angle_index,
+    const float* __restrict__ angle_k,
+    const float* __restrict__ angle_b,
+    const float* __restrict__ matrix_angle_real,
+    const float* __restrict__ matrix_angle_imag,
+    const double* __restrict__ g_bw_real,
+    const double* __restrict__ g_bw_imag,
+    const float* __restrict__ fl_table,
+    double fl_min, double fl_delta,
+    int n_wave, int n_res, int n_decay, int n_unique_bw,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
+    int fl_table_bins,
+    const double* __restrict__ ck_real,
+    const double* __restrict__ ck_imag,
+    const double* __restrict__ m0,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double A_p, double poq_rho, double pop_phi,
+    double* __restrict__ Q_out,
+    double* __restrict__ P_out,
+    double* __restrict__ pap_real, double* __restrict__ pap_imag,
+    double* __restrict__ pam_real, double* __restrict__ pam_imag,
+    double* __restrict__ gp_real, double* __restrict__ gp_imag,
+    double* __restrict__ gm_real, double* __restrict__ gm_imag,
+    double* __restrict__ poq_real, double* __restrict__ poq_imag,
+    double* __restrict__ bw_p_real, double* __restrict__ bw_p_imag,
+    double* __restrict__ common_amp_factor_real,
+    double* __restrict__ common_amp_factor_imag,
+    double* __restrict__ ap_real, double* __restrict__ ap_imag,
+    double* __restrict__ am_real, double* __restrict__ am_imag,
+    double* __restrict__ dQ_dP,
+    double* __restrict__ bw_dom_real, double* __restrict__ bw_dom_imag,
+    int n_events, int use_norm, double norm
+) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+
+    //=========================================================================
+    // Phase 1: Compute ka_prod for all angle_k values (parallel across threads)
+    //=========================================================================
+    extern __shared__ double s_ka_prod[];
+
+    for (int k_idx = tid; k_idx < n_angle_k; k_idx += block_sz) {
+        int angle_pos = angle_index[k_idx];
+        double ka_prod = 1.0;
+        for (int comp = 0; comp < n_angle_comp; comp++) {
+            int angle_idx = event_idx * n_angle_total * n_angle_comp + angle_pos * n_angle_comp + comp;
+            double k_val = (double)angle_k[k_idx * n_angle_comp + comp];
+            double b_val = (double)angle_b[k_idx * n_angle_comp + comp];
+            ka_prod *= cos((double)angle[angle_idx] * k_val + b_val);
+        }
+        s_ka_prod[k_idx] = ka_prod;
+    }
+    __syncthreads();
+
+    //=========================================================================
+    // Phase 2: Compute bw_p, fa, fl_factor, common_amp for each wave
+    // Each thread handles its assigned subset of waves
+    //=========================================================================
+    int waves_per_thread = (n_wave + block_sz - 1) / block_sz;
+    int wave_start = tid * waves_per_thread;
+    int wave_end = min(wave_start + waves_per_thread, n_wave);
+
+    for (int wave_idx = wave_start; wave_idx < wave_end; wave_idx++) {
+        // --- bw_p = product of bw_dom over resonances ---
+        complex bw_p_val(1.0, 0.0);
+        for (int res_idx = 0; res_idx < n_res; res_idx++) {
+            int bw_idx = bw_order[wave_idx * n_res + res_idx];
+            double m0_val = m0[m0_index[bw_idx]];
+            double mass_val = (double)mass[event_idx * n_mass + mass_index[bw_idx]];
+            double m0_sq = m0_val * m0_val;
+            double mass_sq = mass_val * mass_val;
+
+            complex g_bw_val(
+                g_bw_real[event_idx * n_unique_bw + bw_idx],
+                g_bw_imag[event_idx * n_unique_bw + bw_idx]
+            );
+
+            // bw_dom = m0² - m² + m0*g_bw.imag  -  1j*m0*g_bw.real
+            complex bw_dom(m0_sq - mass_sq + m0_val * g_bw_val.imag(),
+                           -m0_val * g_bw_val.real());
+
+            bw_p_val *= bw_dom;
+
+            bw_dom_real[event_idx * n_unique_bw + bw_idx] = bw_dom.real();
+            bw_dom_imag[event_idx * n_unique_bw + bw_idx] = bw_dom.imag();
+        }
+        bw_p_real[event_idx * n_wave + wave_idx] = bw_p_val.real();
+        bw_p_imag[event_idx * n_wave + wave_idx] = bw_p_val.imag();
+
+        // --- fa = dot(ka_prod, matrix_angle_row) ---
+        complex fa(0.0, 0.0);
+        for (int k_idx = 0; k_idx < n_angle_k; k_idx++) {
+            int idx = k_idx * n_wave + wave_idx;
+            fa += s_ka_prod[k_idx] * complex(
+                (double)matrix_angle_real[idx], (double)matrix_angle_imag[idx]);
+        }
+
+        // --- FL factor (real interpolation) ---
+        double fl_p = 1.0;
+        for (int decay_idx = 0; decay_idx < n_decay; decay_idx++) {
+            int fl_idx = fl_order[wave_idx * n_decay + decay_idx];
+            double fl_q_val = (double)momentum[event_idx * n_momentum + fl_q_index[fl_idx]];
+            fl_p *= interp_real_device(fl_table, fl_type[fl_idx],
+                                       fl_q_val, fl_min, fl_delta, fl_table_bins);
+        }
+
+        // --- common_amp = (1/bw_p) * fa * fl_p ---
+        complex one_over_bw = complex(1.0, 0.0) / bw_p_val;
+        complex common_amp = one_over_bw * fa * fl_p;
+        common_amp_factor_real[event_idx * n_wave + wave_idx] = common_amp.real();
+        common_amp_factor_imag[event_idx * n_wave + wave_idx] = common_amp.imag();
+    }
+    __syncthreads();
+
+    //=========================================================================
+    // Phase 3: Compute amplitudes ap, am (parallelized across threads)
+    //=========================================================================
+    int n_wave_half = n_wave / 2;
+    double ap_sum_r = 0.0, ap_sum_i = 0.0;
+    double am_sum_r = 0.0, am_sum_i = 0.0;
+
+    for (int i = tid; i < n_wave_half; i += block_sz) {
+        complex ck_i(ck_real[i], ck_imag[i]);
+        complex common_i(
+            common_amp_factor_real[event_idx * n_wave + i],
+            common_amp_factor_imag[event_idx * n_wave + i]);
+        complex prod_i = ck_i * common_i;
+        ap_sum_r += prod_i.real();
+        ap_sum_i += prod_i.imag();
+
+        complex ck_j(ck_real[n_wave_half + i], ck_imag[n_wave_half + i]);
+        complex common_j(
+            common_amp_factor_real[event_idx * n_wave + n_wave_half + i],
+            common_amp_factor_imag[event_idx * n_wave + n_wave_half + i]);
+        complex prod_j = ck_j * common_j;
+        am_sum_r += prod_j.real();
+        am_sum_i += prod_j.imag();
+    }
+
+    // Reduce across threads within block
+    __shared__ double s_ap_r[256]; // max block size
+    __shared__ double s_ap_i[256];
+    __shared__ double s_am_r[256];
+    __shared__ double s_am_i[256];
+
+    s_ap_r[tid] = ap_sum_r;
+    s_ap_i[tid] = ap_sum_i;
+    s_am_r[tid] = am_sum_r;
+    s_am_i[tid] = am_sum_i;
+    __syncthreads();
+
+    // Tree reduction
+    for (int s = block_sz / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_ap_r[tid] += s_ap_r[tid + s];
+            s_ap_i[tid] += s_ap_i[tid + s];
+            s_am_r[tid] += s_am_r[tid + s];
+            s_am_i[tid] += s_am_i[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        complex ap(s_ap_r[0], s_ap_i[0]);
+        complex am(s_am_r[0], s_am_i[0]);
+        ap_real[event_idx] = ap.real();
+        ap_imag[event_idx] = ap.imag();
+        am_real[event_idx] = am.real();
+        am_imag[event_idx] = am.imag();
+
+        //=========================================================================
+        // Phase 4: Time evolution and probability (scalar per event, thread 0 only)
+        //=========================================================================
+        double t = (double)time[event_idx];
+        complex i_const(0.0, 1.0);
+        complex eL = exp(-i_const * t * complex(-Delta_m / 2, -(Gamma + Delta_Gamma / 2) / 2));
+        complex eH = exp(-i_const * t * complex(Delta_m / 2, -(Gamma - Delta_Gamma / 2) / 2));
+        complex gp = (eL + eH) / 2.0;
+        complex gm = (eL - eH) / 2.0;
+
+        gp_real[event_idx] = gp.real();
+        gp_imag[event_idx] = gp.imag();
+        gm_real[event_idx] = gm.real();
+        gm_imag[event_idx] = gm.imag();
+
+        complex poq = poq_rho * exp(i_const * pop_phi);
+        poq_real[event_idx] = poq.real();
+        poq_imag[event_idx] = poq.imag();
+
+        complex pap = gp * ap + gm * poq * am;
+        complex pam_val = (gm / poq) * ap + gp * am;
+
+        pap_real[event_idx] = pap.real();
+        pap_imag[event_idx] = pap.imag();
+        pam_real[event_idx] = pam_val.real();
+        pam_imag[event_idx] = pam_val.imag();
+
+        double pb = thrust::norm(pap);
+        double pbbar = thrust::norm(pam_val);
+        double frac_val = (double)frac[event_idx];
+        double P = frac_val * pb * (1.0 - A_p) + (1.0 - frac_val) * pbbar * (1.0 + A_p);
+        P_out[event_idx] = P;
+
+        double weight_val = (double)weight[event_idx];
+        double bkg_val = (double)bkg[event_idx];
+
+        if (use_norm == 0) {
+            Q_out[event_idx] = weight_val * P;
+            dQ_dP[event_idx] = weight_val;
+        } else {
+            Q_out[event_idx] = -weight_val * log(P / norm + bkg_val);
+            dQ_dP[event_idx] = -weight_val / (P + bkg_val * norm);
+        }
+    }
+}
+
+//=============================================================================
+// KERNEL 3: Optimized gradient computation
+//=============================================================================
+// Each block handles one event.
+// Key optimization for g0 gradient:
+// Instead of triple-nested loop (n_gamma_rows × n_wave × n_res iterations),
+//   we:
+//   1. Pre-compute dQ_dbw_dom for all bw_idx (shared memory)
+//   2. Convert to dQ_dg_bw[bw_idx] = dQ_dbw_dom * (-1j * m0)
+//   3. Compute g0 gradient as dot product with matrix_gamma
+//      (same shared-memory pattern as forward g_bw kernel)
+//=============================================================================
+__global__ void gradient_kernel(
+    const double* __restrict__ P,
+    const double* __restrict__ pap_real, const double* __restrict__ pap_imag,
+    const double* __restrict__ pam_real, const double* __restrict__ pam_imag,
+    const double* __restrict__ gp_real, const double* __restrict__ gp_imag,
+    const double* __restrict__ gm_real, const double* __restrict__ gm_imag,
+    const double* __restrict__ poq_real, const double* __restrict__ poq_imag,
+    const double* __restrict__ bw_p_real, const double* __restrict__ bw_p_imag,
+    const double* __restrict__ common_amp_factor_real,
+    const double* __restrict__ common_amp_factor_imag,
+    const double* __restrict__ ap_real, const double* __restrict__ ap_imag,
+    const double* __restrict__ am_real, const double* __restrict__ am_imag,
+    const double* __restrict__ dQ_dP,
+    const double* __restrict__ bw_dom_real, const double* __restrict__ bw_dom_imag,
+    const double* __restrict__ g_interp_real, const double* __restrict__ g_interp_imag,
+    const double* __restrict__ g_bw_real, const double* __restrict__ g_bw_imag,
+    const float* __restrict__ frac, const float* __restrict__ time,
+    const int* __restrict__ m0_index, const int* __restrict__ g0_index,
+    const int* __restrict__ bw_order,
+    const float* __restrict__ matrix_gamma,
+    const double* __restrict__ m0, const double* __restrict__ g0,
+    const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double A_p, double poq_rho, double pop_phi,
+    int n_wave, int n_res, int n_unique_bw, int n_gamma_rows, int n_mass,
+    double* __restrict__ grad_ck_real_partial,
+    double* __restrict__ grad_ck_imag_partial,
+    double* __restrict__ grad_m0_partial,
+    double* __restrict__ grad_g0_partial,
+    double* __restrict__ grad_Gamma_partial,
+    double* __restrict__ grad_DeltaGamma_partial,
+    double* __restrict__ grad_DeltaM_partial,
+    double* __restrict__ grad_Ap_partial,
+    double* __restrict__ grad_poq_rho_partial,
+    double* __restrict__ grad_pop_phi_partial,
+    int n_events
+) {
+    int event_idx = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_sz = blockDim.x;
+
+    // Load forward outputs
+    complex pap(pap_real[event_idx], pap_imag[event_idx]);
+    complex pam(pam_real[event_idx], pam_imag[event_idx]);
+    complex gp(gp_real[event_idx], gp_imag[event_idx]);
+    complex gm(gm_real[event_idx], gm_imag[event_idx]);
+    complex poq(poq_real[event_idx], poq_imag[event_idx]);
+    complex ap(ap_real[event_idx], ap_imag[event_idx]);
+    complex am(am_real[event_idx], am_imag[event_idx]);
+
+    double dQ_dP_val = dQ_dP[event_idx];
+    double frac_val = (double)frac[event_idx];
+    double t = (double)time[event_idx];
+
+    double pb = thrust::norm(pap);
+    double pbbar = thrust::norm(pam);
+    double dP_dpb = frac_val * (1.0 - A_p);
+    double dP_dpbbar = (1.0 - frac_val) * (1.0 + A_p);
+    double dP_dAp = -frac_val * pb + (1.0 - frac_val) * pbbar;
+
+    grad_Ap_partial[event_idx] = dQ_dP_val * dP_dAp;
+
+    double dQ_dpb = dQ_dP_val * dP_dpb;
+    double dQ_dpbbar = dQ_dP_val * dP_dpbbar;
+
+    complex d_pb_dap = conj(pap) * gp;
+    complex d_pb_dam = conj(pap) * gm * poq;
+    complex d_pbbar_dap = conj(pam) * (gm / poq);
+    complex d_pbbar_dam = conj(pam) * gp;
+
+    complex dQ_dap_val = dQ_dpb * d_pb_dap + dQ_dpbbar * d_pbbar_dap;
+    complex dQ_dam_val = dQ_dpb * d_pb_dam + dQ_dpbbar * d_pbbar_dam;
+
+    //=========================================================================
+    // Phase 1: ck gradients (parallel across waves)
+    //=========================================================================
+    int n_wave_half = n_wave / 2;
+
+    for (int i = tid; i < n_wave_half; i += block_sz) {
+        complex common_i(
+            common_amp_factor_real[event_idx * n_wave + i],
+            common_amp_factor_imag[event_idx * n_wave + i]);
+        complex grad_ck = dQ_dap_val * common_i;
+        grad_ck_real_partial[event_idx * n_wave + i] = grad_ck.real();
+        grad_ck_imag_partial[event_idx * n_wave + i] = grad_ck.imag();
+
+        complex common_j(
+            common_amp_factor_real[event_idx * n_wave + n_wave_half + i],
+            common_amp_factor_imag[event_idx * n_wave + n_wave_half + i]);
+        complex grad_ck2 = dQ_dam_val * common_j;
+        grad_ck_real_partial[event_idx * n_wave + n_wave_half + i] = grad_ck2.real();
+        grad_ck_imag_partial[event_idx * n_wave + n_wave_half + i] = grad_ck2.imag();
+    }
+
+    //=========================================================================
+    // Phase 2: Pre-compute dQ_dbw_dom for all unique_bw
+    // and accumulate m0 gradients simultaneously
+    //=========================================================================
+    // Shared memory for g_bw gradients (dynamic size)
+    extern __shared__ double s_grad_dyn[];
+    double* s_dQ_dbw_dom_real = s_grad_dyn;
+    double* s_dQ_dbw_dom_imag = s_grad_dyn + n_unique_bw;
+    double* s_dQ_dg_bw_real    = s_grad_dyn + 2 * n_unique_bw;
+    double* s_dQ_dg_bw_imag    = s_grad_dyn + 3 * n_unique_bw;
+
+    // Initialize m0 partials to zero
+    for (int bw_idx = tid; bw_idx < n_unique_bw; bw_idx += block_sz) {
+        grad_m0_partial[event_idx * n_unique_bw + bw_idx] = 0.0;
+        s_dQ_dbw_dom_real[bw_idx] = 0.0;
+        s_dQ_dbw_dom_imag[bw_idx] = 0.0;
+    }
+    __syncthreads();
+
+    // Accumulate dQ_dbw_dom and m0 gradient contributions
+    for (int wave_idx = tid; wave_idx < n_wave; wave_idx += block_sz) {
+        complex bw_p_val(bw_p_real[event_idx * n_wave + wave_idx],
+                         bw_p_imag[event_idx * n_wave + wave_idx]);
+        complex one_over_bw = complex(1.0, 0.0) / bw_p_val;
+        complex common_amp(
+            common_amp_factor_real[event_idx * n_wave + wave_idx],
+            common_amp_factor_imag[event_idx * n_wave + wave_idx]);
+        complex dQ_da = (wave_idx < n_wave_half) ? dQ_dap_val : dQ_dam_val;
+        complex ck(ck_real[wave_idx], ck_imag[wave_idx]);
+        complex dQ_dbw_p = dQ_da * (-ck * one_over_bw * common_amp);
+
+        for (int res_idx = 0; res_idx < n_res; res_idx++) {
+            int bw_idx = bw_order[wave_idx * n_res + res_idx];
+
+            complex bw_dom_val(
+                bw_dom_real[event_idx * n_unique_bw + bw_idx],
+                bw_dom_imag[event_idx * n_unique_bw + bw_idx]);
+            complex dQ_dbw_dom_contrib = dQ_dbw_p * (bw_p_val / bw_dom_val);
+
+            // Threads may conflict for same bw_idx across waves - use atomicAdd
+            atomicAdd(&s_dQ_dbw_dom_real[bw_idx], dQ_dbw_dom_contrib.real());
+            atomicAdd(&s_dQ_dbw_dom_imag[bw_idx], dQ_dbw_dom_contrib.imag());
+
+            // m0 gradient (atomic: multiple wave/res pairs can map to same bw_idx)
+            double m0_val = m0[m0_index[bw_idx]];
+            complex g_bw_val(g_bw_real[event_idx * n_unique_bw + bw_idx],
+                             g_bw_imag[event_idx * n_unique_bw + bw_idx]);
+            complex dbw_dom_dm0 = complex(2.0 * m0_val, 0.0) - complex(0.0, 1.0) * g_bw_val;
+            atomicAdd(&grad_m0_partial[event_idx * n_unique_bw + bw_idx],
+                2.0 * (dQ_dbw_dom_contrib * dbw_dom_dm0).real());
+        }
+    }
+    __syncthreads();
+
+    // Convert dQ_dbw_dom to dQ_dg_bw = dQ_dbw_dom * (-1j * m0)
+    if (tid < n_unique_bw) {
+        double m0_val = m0[m0_index[tid]];
+        complex dm0(s_dQ_dbw_dom_real[tid], s_dQ_dbw_dom_imag[tid]);
+        complex dg_bw = dm0 * complex(0.0, -m0_val);
+        s_dQ_dg_bw_real[tid] = dg_bw.real();
+        s_dQ_dg_bw_imag[tid] = dg_bw.imag();
+    }
+    __syncthreads();
+
+    //=========================================================================
+    // Phase 3: g0 gradient via matrix-vector multiply with shared memory
+    //=========================================================================
+    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
+        double sum_r = 0.0, sum_i = 0.0;
+        for (int bw_idx = 0; bw_idx < n_unique_bw; bw_idx++) {
+            double mg = (double)matrix_gamma[gamma_idx * n_unique_bw + bw_idx];
+            sum_r += s_dQ_dg_bw_real[bw_idx] * mg;
+            sum_i += s_dQ_dg_bw_imag[bw_idx] * mg;
+        }
+
+        complex dQ_dg_val(sum_r, sum_i);
+        complex g_interp_val(
+            g_interp_real[event_idx * n_gamma_rows + gamma_idx],
+            g_interp_imag[event_idx * n_gamma_rows + gamma_idx]);
+
+        // Wirtinger gradient for real parameter: ∂Q/∂g0 = 2*Re(dQ_dg * g_interp)
+        grad_g0_partial[event_idx * n_gamma_rows + gamma_idx] =
+            2.0 * (dQ_dg_val * g_interp_val).real();
+    }
+
+    //=========================================================================
+    // Phase 4: Time evolution gradients (scalar, thread 0 only)
+    //=========================================================================
+    if (tid == 0) {
+        complex d_pb_dgp = conj(pap) * ap;
+        complex d_pb_dgm = conj(pap) * poq * am;
+        complex d_pbbar_dgp = conj(pam) * am;
+        complex d_pbbar_dgm = conj(pam) * ap / poq;
+
+        complex dQ_dgp = dQ_dpb * d_pb_dgp + dQ_dpbbar * d_pbbar_dgp;
+        complex dQ_dgm = dQ_dpb * d_pb_dgm + dQ_dpbbar * d_pbbar_dgm;
+
+        complex dgp_dGamma = (-t / 2.0) * gp;
+        complex dgm_dGamma = (-t / 2.0) * gm;
+        complex dgp_dDeltaGamma = (-t / 4.0) * gm;
+        complex dgm_dDeltaGamma = (-t / 4.0) * gp;
+        complex dgp_dDeltaM = complex(0.0, t / 2.0) * gm;
+        complex dgm_dDeltaM = complex(0.0, t / 2.0) * gp;
+
+        grad_Gamma_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dGamma + dQ_dgm * dgm_dGamma).real();
+        grad_DeltaGamma_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dDeltaGamma + dQ_dgm * dgm_dDeltaGamma).real();
+        grad_DeltaM_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dDeltaM + dQ_dgm * dgm_dDeltaM).real();
+
+        complex d_pb_dpoq = conj(pap) * gm * am;
+        complex d_pbbar_dpoq = conj(pam) * (-gm / (poq * poq)) * ap;
+        complex dQ_dpoq = dQ_dpb * d_pb_dpoq + dQ_dpbbar * d_pbbar_dpoq;
+
+        complex exp_phi = exp(complex(0.0, 1.0) * pop_phi);
+        grad_poq_rho_partial[event_idx] = 2.0 * (dQ_dpoq * exp_phi).real();
+        grad_pop_phi_partial[event_idx] = 2.0 * (dQ_dpoq * poq_rho * complex(0.0, 1.0) * exp_phi).real();
+    }
+}
+
+//=============================================================================
+// Reduction kernels (output buffers stay double*)
+//=============================================================================
+__global__ void reduce_sum_kernel(const double* input, double* output, int n) {
+    extern __shared__ double sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    sdata[tid] = (idx < n) ? input[idx] : 0.0;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) atomicAdd(output, sdata[0]);
+}
+
+__global__ void reduce_sum_complex_kernel(
+    const double* real_in, const double* imag_in,
+    double* real_out, double* imag_out, int n
+) {
+    extern __shared__ double sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    double* sreal = sdata;
+    double* simag = sdata + blockDim.x;
+    sreal[tid] = (idx < n) ? real_in[idx] : 0.0;
+    simag[tid] = (idx < n) ? imag_in[idx] : 0.0;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { sreal[tid] += sreal[tid + s]; simag[tid] += simag[tid + s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { atomicAdd(real_out, sreal[0]); atomicAdd(imag_out, simag[0]); }
+}
+
+__global__ void reduce_sum_features_kernel(
+    const double* input, double* output,
+    int n_events, int n_features
+) {
+    extern __shared__ double sdata[];
+    int tid = threadIdx.x;
+    int feat = blockIdx.x;
+    if (feat >= n_features) return;
+    double sum = 0.0;
+    for (int i = tid; i < n_events; i += blockDim.x) {
+        sum += input[feat + i * n_features];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) output[feat] = sdata[0];
+}
+
+__global__ void reduce_sum_complex_features_kernel(
+    const double* real_in, const double* imag_in,
+    double* real_out, double* imag_out,
+    int n_events, int n_features
+) {
+    extern __shared__ double sdata[];
+    int tid = threadIdx.x;
+    int feat = blockIdx.x;
+    if (feat >= n_features) return;
+    double real_sum = 0.0, imag_sum = 0.0;
+    for (int i = tid; i < n_events; i += blockDim.x) {
+        real_sum += real_in[feat + i * n_features];
+        imag_sum += imag_in[feat + i * n_features];
+    }
+    double* sreal = sdata;
+    double* simag = sdata + blockDim.x;
+    sreal[tid] = real_sum;
+    simag[tid] = imag_sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) { sreal[tid] += sreal[tid + s]; simag[tid] += simag[tid + s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { real_out[feat] = sreal[0]; imag_out[feat] = simag[0]; }
+}
+
+//=============================================================================
+// Host-callable launch functions
+//=============================================================================
+extern "C" {
+
+// ── Structs for clean unified API ──
+// Mixed precision: data arrays are float*, scratch/output buffers are double*
+typedef struct {
+    // Event data (GPU) — float in mixed precision
+    const float* mass; const float* momentum; const float* angle;
+    const float* frac; const float* time; const float* weight; const float* bkg;
+    // Scratch buffers (GPU) — double (outputs)
+    double* g_interp_real; double* g_interp_imag;
+    double* g_bw_real; double* g_bw_imag;
+    double* Q_out; double* P_out;
+    double* pap_real; double* pap_imag; double* pam_real; double* pam_imag;
+    double* gp_real; double* gp_imag; double* gm_real; double* gm_imag;
+    double* poq_real; double* poq_imag;
+    double* bw_p_real; double* bw_p_imag;
+    double* common_amp_factor_real; double* common_amp_factor_imag;
+    double* ap_real; double* ap_imag; double* am_real; double* am_imag;
+    double* dQ_dP;
+    double* bw_dom_real; double* bw_dom_imag;
+    double* grad_ck_real_partial; double* grad_ck_imag_partial;
+    double* grad_m0_partial; double* grad_g0_partial;
+    double* grad_Gamma_partial; double* grad_DeltaGamma_partial;
+    double* grad_DeltaM_partial; double* grad_Ap_partial;
+    double* grad_poq_rho_partial; double* grad_pop_phi_partial;
+    int n_events;
+} ComputeData;
+
+typedef struct {
+    // Index arrays (GPU) — unchanged
+    const int* m0_index; const int* g0_index;
+    const int* g0_mass_index; const int* mass_index;
+    const int* fl_type; const int* fl_q_index;
+    const int* bw_order; const int* fl_order; const int* angle_index;
+    // Constant arrays (GPU) — float in mixed precision
+    const float* angle_k; const float* angle_b;
+    const float* matrix_angle_real; const float* matrix_angle_imag;
+    const float* gamma_table_real; const float* gamma_table_imag;
+    double gamma_min; double gamma_delta; int gamma_table_bins;
+    const float* matrix_gamma;   // float in mixed precision
+    const float* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+    // Dimensions
+    int n_wave; int n_res; int n_decay; int n_unique_bw;
+    int n_gamma_rows; int n_mass; int n_momentum;
+    int n_angle_k; int n_angle_total; int n_angle_comp;
+    int batch_size;
+    int n_m0_params;   // actual m0/g0 array sizes (from max(index)+1)
+    int n_g0_params;
+    ComputeData* scratch;
+    double* Q_red_gpu;
+} ComputeContext;
+
+typedef struct {
+    const double* ck_real; const double* ck_imag;
+    const double* m0; const double* g0;
+    double Gamma; double Delta_Gamma; double Delta_m;
+    double A_prod; double poq_rho; double pop_phi;
+} ComputeParams;
+
+cudaError_t cuda_alloc(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
+cudaError_t cuda_free(void* ptr) { return cudaFree(ptr); }
+cudaError_t cuda_memcpy_to_device(void* dst, const void* src, size_t size) {
+    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
+}
+cudaError_t cuda_memcpy_to_host(void* dst, const void* src, size_t size) {
+    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
+}
+cudaError_t cuda_memset(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
+int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
+cudaError_t cuda_get_device_name(char* name, int len) {
+    cudaDeviceProp prop;
+    cudaError_t err = cudaGetDeviceProperties(&prop, 0);
+    if (err == cudaSuccess) strncpy(name, prop.name, len);
+    return err;
+}
+
+// ── Launch wrappers ──
+
+void launch_compute_g_bw(
+    const float* mass, const double* g0,
+    const int* g0_index, const int* g0_mass_index,
+    const float* matrix_gamma,
+    const float* gamma_table_real, const float* gamma_table_imag,
+    double gamma_min, double gamma_delta,
+    int n_gamma_rows, int n_unique_bw, int n_mass, int gamma_table_bins,
+    double* g_interp_real, double* g_interp_imag,
+    double* g_bw_real, double* g_bw_imag,
+    int n_events) {
+
+    size_t shmem = 2 * n_gamma_rows * sizeof(double);
+    compute_g_bw_kernel<<<n_events, BLOCK_SIZE, shmem>>>(
+        mass, g0, g0_index, g0_mass_index, matrix_gamma,
+        gamma_table_real, gamma_table_imag,
+        gamma_min, gamma_delta,
+        n_gamma_rows, n_unique_bw, n_mass, gamma_table_bins,
+        g_interp_real, g_interp_imag,
+        g_bw_real, g_bw_imag, n_events);
+}
+
+void launch_compute_main(
+    const float* mass, const float* momentum, const float* angle,
+    const float* frac, const float* time, const float* weight, const float* bkg,
+    const int* m0_index, const int* fl_type,
+    const int* mass_index, const int* fl_q_index,
+    const int* bw_order, const int* fl_order, const int* angle_index,
+    const float* angle_k, const float* angle_b,
+    const float* matrix_angle_real, const float* matrix_angle_imag,
+    const double* g_bw_real, const double* g_bw_imag,
+    const float* fl_table,
+    double fl_min, double fl_delta,
+    int n_wave, int n_res, int n_decay, int n_unique_bw,
+    int n_mass, int n_momentum, int n_angle_k, int n_angle_total, int n_angle_comp,
+    int fl_table_bins,
+    const double* ck_real, const double* ck_imag, const double* m0,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double A_p, double poq_rho, double pop_phi,
+    double* Q_out, double* P_out,
+    double* pap_real, double* pap_imag, double* pam_real, double* pam_imag,
+    double* gp_real, double* gp_imag, double* gm_real, double* gm_imag,
+    double* poq_real, double* poq_imag,
+    double* bw_p_real, double* bw_p_imag,
+    double* common_amp_factor_real, double* common_amp_factor_imag,
+    double* ap_real, double* ap_imag, double* am_real, double* am_imag, double* dQ_dP,
+    double* bw_dom_real, double* bw_dom_imag,
+    int n_events, int use_norm, double norm) {
+
+    compute_main_kernel<<<n_events, BLOCK_SIZE, n_angle_k * sizeof(double)>>>(
+        mass, momentum, angle, frac, time, weight, bkg,
+        m0_index, fl_type, mass_index, fl_q_index,
+        bw_order, fl_order, angle_index,
+        angle_k, angle_b, matrix_angle_real, matrix_angle_imag,
+        g_bw_real, g_bw_imag, fl_table,
+        fl_min, fl_delta,
+        n_wave, n_res, n_decay, n_unique_bw,
+        n_mass, n_momentum, n_angle_k, n_angle_total, n_angle_comp,
+        fl_table_bins,
+        ck_real, ck_imag, m0,
+        Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
+        Q_out, P_out,
+        pap_real, pap_imag, pam_real, pam_imag,
+        gp_real, gp_imag, gm_real, gm_imag,
+        poq_real, poq_imag,
+        bw_p_real, bw_p_imag,
+        common_amp_factor_real, common_amp_factor_imag,
+        ap_real, ap_imag, am_real, am_imag, dQ_dP,
+        bw_dom_real, bw_dom_imag,
+        n_events, use_norm, norm);
+}
+
+void launch_gradient(
+    const double* P, const double* pap_real, const double* pap_imag,
+    const double* pam_real, const double* pam_imag,
+    const double* gp_real, const double* gp_imag,
+    const double* gm_real, const double* gm_imag,
+    const double* poq_real, const double* poq_imag,
+    const double* bw_p_real, const double* bw_p_imag,
+    const double* common_amp_factor_real, const double* common_amp_factor_imag,
+    const double* ap_real, const double* ap_imag,
+    const double* am_real, const double* am_imag,
+    const double* dQ_dP,
+    const double* bw_dom_real, const double* bw_dom_imag,
+    const double* g_interp_real, const double* g_interp_imag,
+    const double* g_bw_real, const double* g_bw_imag,
+    const float* frac, const float* time,
+    const int* m0_index, const int* g0_index, const int* bw_order,
+    const float* matrix_gamma,
+    const double* m0, const double* g0, const double* ck_real, const double* ck_imag,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double A_p, double poq_rho, double pop_phi,
+    int n_wave, int n_res, int n_unique_bw, int n_gamma_rows, int n_mass,
+    double* grad_ck_real_partial, double* grad_ck_imag_partial,
+    double* grad_m0_partial, double* grad_g0_partial,
+    double* grad_Gamma_partial, double* grad_DeltaGamma_partial,
+    double* grad_DeltaM_partial, double* grad_Ap_partial,
+    double* grad_poq_rho_partial, double* grad_pop_phi_partial,
+    int n_events) {
+
+    size_t shmem_grad = 4 * n_unique_bw * sizeof(double);
+    gradient_kernel<<<n_events, BLOCK_SIZE, shmem_grad>>>(
+        P, pap_real, pap_imag, pam_real, pam_imag,
+        gp_real, gp_imag, gm_real, gm_imag, poq_real, poq_imag,
+        bw_p_real, bw_p_imag, common_amp_factor_real, common_amp_factor_imag,
+        ap_real, ap_imag, am_real, am_imag, dQ_dP,
+        bw_dom_real, bw_dom_imag, g_interp_real, g_interp_imag,
+        g_bw_real, g_bw_imag,
+        frac, time,
+        m0_index, g0_index, bw_order, matrix_gamma,
+        m0, g0, ck_real, ck_imag,
+        Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
+        n_wave, n_res, n_unique_bw, n_gamma_rows, n_mass,
+        grad_ck_real_partial, grad_ck_imag_partial,
+        grad_m0_partial, grad_g0_partial,
+        grad_Gamma_partial, grad_DeltaGamma_partial,
+        grad_DeltaM_partial, grad_Ap_partial,
+        grad_poq_rho_partial, grad_pop_phi_partial,
+        n_events);
+}
+
+// ── Reduction launch wrappers ──
+
+void launch_reduce_sum(const double* input, double* output, int n) {
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    reduce_sum_kernel<<<grid_size, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(input, output, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_reduce_sum_complex(const double* real_in, const double* imag_in,
+    double* real_out, double* imag_out, int n) {
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    reduce_sum_complex_kernel<<<grid_size, BLOCK_SIZE, 2 * BLOCK_SIZE * sizeof(double)>>>(
+        real_in, imag_in, real_out, imag_out, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_reduce_sum_features(const double* input, double* output,
+    int n_events, int n_features) {
+    reduce_sum_features_kernel<<<n_features, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(
+        input, output, n_events, n_features);
+}
+
+void launch_reduce_sum_complex_features(const double* real_in, const double* imag_in,
+    double* real_out, double* imag_out,
+    int n_events, int n_features) {
+    reduce_sum_complex_features_kernel<<<n_features, BLOCK_SIZE, 2 * BLOCK_SIZE * sizeof(double)>>>(
+        real_in, imag_in, real_out, imag_out, n_events, n_features);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ── Gram matrix kernel launches ──
+
+void launch_gram_common_v3(
+    const ComputeContext* ctx, ComputeData* data,
+    const double* m0,
+    double* A0_real, double* A0_imag,
+    double* A1_real, double* A1_imag) {
+
+    int ng = ctx->n_wave / 8;
+    int n_events = data->n_events;
+    int shmem = (ctx->n_angle_k + 4 * ng) * sizeof(double);
+    gram_common_kernel_v3<<<n_events, BLOCK_SIZE, shmem>>>(
+        data->mass, data->momentum, data->angle, data->weight,
+        ctx->m0_index, ctx->fl_type,
+        ctx->mass_index, ctx->fl_q_index,
+        ctx->bw_order, ctx->fl_order, ctx->angle_index,
+        ctx->angle_k, ctx->angle_b,
+        ctx->matrix_angle_real, ctx->matrix_angle_imag,
+        data->g_bw_real, data->g_bw_imag,
+        ctx->fl_table, ctx->fl_min, ctx->fl_delta,
+        ctx->n_wave, ctx->n_res, ctx->n_decay, ctx->n_unique_bw,
+        ctx->n_mass, ctx->n_momentum, ctx->n_angle_k, ctx->n_angle_total, ctx->n_angle_comp,
+        ctx->fl_table_bins, m0,
+        A0_real, A0_imag, A1_real, A1_imag, n_events);
+}
+
+void launch_gram_reduce_v3(
+    const double* A0_real, const double* A0_imag,
+    const double* A1_real, const double* A1_imag,
+    int n_events, int ng,
+    double* Mpp_r, double* Mpp_i,
+    double* Mmm_r, double* Mmm_i,
+    double* Mpm_r, double* Mpm_i) {
+
+    dim3 grid(ng, ng);
+    gram_reduce_kernel_v3<<<grid, 1>>>(
+        A0_real, A0_imag, A1_real, A1_imag,
+        n_events, ng,
+        Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
+}
+
+// ── Unified launch: (Context*, Data*, Params*, norm, use_norm) ──
+
+void launch_compute_all(
+    const ComputeContext* ctx, ComputeData* data,
+    const ComputeParams* params, double norm, int use_norm
+) {
+    launch_compute_g_bw(
+        data->mass, params->g0, ctx->g0_index, ctx->g0_mass_index,
+        ctx->matrix_gamma,
+        ctx->gamma_table_real, ctx->gamma_table_imag,
+        ctx->gamma_min, ctx->gamma_delta,
+        ctx->n_gamma_rows, ctx->n_unique_bw, ctx->n_mass, ctx->gamma_table_bins,
+        data->g_interp_real, data->g_interp_imag,
+        data->g_bw_real, data->g_bw_imag,
+        data->n_events);
+
+    launch_compute_main(
+        data->mass, data->momentum, data->angle,
+        data->frac, data->time, data->weight, data->bkg,
+        ctx->m0_index, ctx->fl_type,
+        ctx->mass_index, ctx->fl_q_index,
+        ctx->bw_order, ctx->fl_order, ctx->angle_index,
+        ctx->angle_k, ctx->angle_b,
+        ctx->matrix_angle_real, ctx->matrix_angle_imag,
+        data->g_bw_real, data->g_bw_imag,
+        ctx->fl_table, ctx->fl_min, ctx->fl_delta,
+        ctx->n_wave, ctx->n_res, ctx->n_decay, ctx->n_unique_bw,
+        ctx->n_mass, ctx->n_momentum, ctx->n_angle_k, ctx->n_angle_total, ctx->n_angle_comp,
+        ctx->fl_table_bins,
+        params->ck_real, params->ck_imag, params->m0,
+        params->Gamma, params->Delta_Gamma, params->Delta_m,
+        params->A_prod, params->poq_rho, params->pop_phi,
+        data->Q_out, data->P_out,
+        data->pap_real, data->pap_imag, data->pam_real, data->pam_imag,
+        data->gp_real, data->gp_imag, data->gm_real, data->gm_imag,
+        data->poq_real, data->poq_imag,
+        data->bw_p_real, data->bw_p_imag,
+        data->common_amp_factor_real, data->common_amp_factor_imag,
+        data->ap_real, data->ap_imag, data->am_real, data->am_imag, data->dQ_dP,
+        data->bw_dom_real, data->bw_dom_imag,
+        data->n_events, use_norm, norm);
+
+    launch_gradient(
+        data->P_out,
+        data->pap_real, data->pap_imag, data->pam_real, data->pam_imag,
+        data->gp_real, data->gp_imag, data->gm_real, data->gm_imag,
+        data->poq_real, data->poq_imag,
+        data->bw_p_real, data->bw_p_imag,
+        data->common_amp_factor_real, data->common_amp_factor_imag,
+        data->ap_real, data->ap_imag, data->am_real, data->am_imag, data->dQ_dP,
+        data->bw_dom_real, data->bw_dom_imag,
+        data->g_interp_real, data->g_interp_imag,
+        data->g_bw_real, data->g_bw_imag,
+        data->frac, data->time,
+        ctx->m0_index, ctx->g0_index, ctx->bw_order, ctx->matrix_gamma,
+        params->m0, params->g0, params->ck_real, params->ck_imag,
+        params->Gamma, params->Delta_Gamma, params->Delta_m,
+        params->A_prod, params->poq_rho, params->pop_phi,
+        ctx->n_wave, ctx->n_res, ctx->n_unique_bw, ctx->n_gamma_rows, ctx->n_mass,
+        data->grad_ck_real_partial, data->grad_ck_imag_partial,
+        data->grad_m0_partial, data->grad_g0_partial,
+        data->grad_Gamma_partial, data->grad_DeltaGamma_partial,
+        data->grad_DeltaM_partial, data->grad_Ap_partial,
+        data->grad_poq_rho_partial, data->grad_pop_phi_partial,
+        data->n_events);
+    // Flush gradient kernel errors (kernel param validation is synchronous)
+    cudaGetLastError();
+}
+
+// ── Upload helpers (plain C) ──
+static void* _up_int(const int* src, int n) {
+    int* d; cudaMalloc(&d, n * sizeof(int));
+    cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
+}
+static void* _up_dbl(const double* src, int n) {
+    double* d; cudaMalloc(&d, n * sizeof(double));
+    cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice); return d;
+}
+static void* _up_flt(const float* src, int n) {
+    float* d; cudaMalloc(&d, n * sizeof(float));
+    cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
+}
+
+
+
+// ════════════════════════════════════════════════════════════════════════
+//  v3_mixed API — mixed-precision (f32 data/tables, f64 compute)
+// ════════════════════════════════════════════════════════════════════════
+
+typedef struct { const float* m; const float* mo; const float* a;
+    const float* f; const float* t; const float* w; const float* b;
+    int ne; int nm; int nmom; int nat; int nac;
+} DataHandle2;
+
+void* cuda_create_context_v3_mixed(
+    const int* m0_i,int n1, const int* g0_i,int n2,
+    const int* g0_m,int n3, const int* mass_i,int n4,
+    const int* fl_t,int n5, const int* fl_q,int n6,
+    const int* bw_o,int n7, const int* fl_o,int n8,
+    const int* ang_i,int n9,
+    const float* ak,int n10, const float* ab,int n11,
+    const float* mar,int n12, const float* mai,int n13,
+    const float* gtr,int n14, const float* gti,int n15,
+    float gmin,float gdel,int gbins,
+    const float* mg,int n16,
+    const float* ft,int n17, float flmin,float fldel,int fbins,
+    int nw,int nr,int nd,int nub,int ngr,
+    int nm,int nmom,int nak_,int nat,int nac,
+    int n_m0p, int n_g0p,
+    int batch_size
+) {
+    ComputeContext* c = (ComputeContext*)calloc(1, sizeof(ComputeContext));
+    c->m0_index = (int*)_up_int(m0_i, n1); c->g0_index = (int*)_up_int(g0_i, n2);
+    c->g0_mass_index = (int*)_up_int(g0_m, n3); c->mass_index = (int*)_up_int(mass_i, n4);
+    c->fl_type = (int*)_up_int(fl_t, n5); c->fl_q_index = (int*)_up_int(fl_q, n6);
+    c->bw_order = (int*)_up_int(bw_o, n7); c->fl_order = (int*)_up_int(fl_o, n8);
+    c->angle_index = (int*)_up_int(ang_i, n9);
+    c->angle_k = (float*)_up_flt(ak, n10); c->angle_b = (float*)_up_flt(ab, n11);
+    c->matrix_angle_real = (float*)_up_flt(mar, n12); c->matrix_angle_imag = (float*)_up_flt(mai, n13);
+    c->gamma_table_real = (float*)_up_flt(gtr, n14); c->gamma_table_imag = (float*)_up_flt(gti, n15);
+    c->gamma_min = (double)gmin; c->gamma_delta = (double)gdel; c->gamma_table_bins = gbins;
+    c->matrix_gamma = (float*)_up_flt(mg, n16);
+    c->fl_table = (float*)_up_flt(ft, n17); c->fl_min = (double)flmin; c->fl_delta = (double)fldel; c->fl_table_bins = fbins;
+    c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
+    c->n_unique_bw = nub; c->n_gamma_rows = ngr;
+    c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat; c->n_angle_comp = nac;
+    c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
+    c->batch_size = batch_size > 0 ? batch_size : DEFAULT_BATCH_SIZE;
+
+    // Pre-allocate scratch buffers when batch_size is known
+    if (c->batch_size > 0) {
+        int bs = c->batch_size;
+        c->scratch = (ComputeData*)calloc(1, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&c->scratch->f, bs * sizeof(double))
+        #define S2(f,n) cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double))
+        S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
+        S2(g_bw_real, nub); S2(g_bw_imag, nub);
+        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
+        S2(bw_p_real, nw); S2(bw_p_imag, nw);
+        S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
+        S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S2(bw_dom_real, nub); S2(bw_dom_imag, nub);
+        S2(grad_ck_real_partial, nw); S2(grad_ck_imag_partial, nw);
+        S2(grad_m0_partial, nub); S2(grad_g0_partial, ngr);
+        S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
+        S(grad_DeltaM_partial); S(grad_Ap_partial);
+        S(grad_poq_rho_partial); S(grad_pop_phi_partial);
+        #undef S
+        #undef S2
+        cudaMalloc(&c->Q_red_gpu, 8);
+    } else {
+        c->scratch = NULL;
+        c->Q_red_gpu = NULL;
+    }
+    return c;
+}
+
+void cuda_free_context_v3_mixed(void* vctx) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    #define F(p) cudaFree((void*)c->p)
+    F(m0_index); F(g0_index); F(g0_mass_index); F(mass_index);
+    F(fl_type); F(fl_q_index); F(bw_order); F(fl_order); F(angle_index);
+    F(angle_k); F(angle_b); F(matrix_angle_real); F(matrix_angle_imag);
+    F(gamma_table_real); F(gamma_table_imag); F(matrix_gamma); F(fl_table);
+    #undef F
+    // Free pre-allocated scratch
+    if (c->scratch) {
+        #define SF(f) cudaFree(c->scratch->f)
+        SF(g_interp_real); SF(g_interp_imag); SF(g_bw_real); SF(g_bw_imag);
+        SF(Q_out); SF(P_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
+        SF(gp_real); SF(gp_imag); SF(gm_real); SF(gm_imag); SF(poq_real); SF(poq_imag);
+        SF(bw_p_real); SF(bw_p_imag); SF(common_amp_factor_real); SF(common_amp_factor_imag);
+        SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag); SF(dQ_dP);
+        SF(bw_dom_real); SF(bw_dom_imag);
+        SF(grad_ck_real_partial); SF(grad_ck_imag_partial);
+        SF(grad_m0_partial); SF(grad_g0_partial);
+        SF(grad_Gamma_partial); SF(grad_DeltaGamma_partial);
+        SF(grad_DeltaM_partial); SF(grad_Ap_partial);
+        SF(grad_poq_rho_partial); SF(grad_pop_phi_partial);
+        #undef SF
+        free(c->scratch);
+    }
+    if (c->Q_red_gpu) cudaFree(c->Q_red_gpu);
+    free(c);
+}
+
+void* cuda_load_data_v3_mixed(void* vctx,
+    const float* mass,int nmass, const float* mom,int nmom,
+    const float* ang,int nang, const float* frac,const float* time,
+    const float* wgt,const float* bkg,int ne
+) {
+    DataHandle2* h = (DataHandle2*)calloc(1, sizeof(DataHandle2));
+    ComputeContext* c_ctx = (ComputeContext*)vctx;
+    int nac = c_ctx ? c_ctx->n_angle_comp : 3;
+    h->m = (const float*)_up_flt(mass, ne * nmass);
+    h->mo = (const float*)_up_flt(mom, ne * nmom);
+    h->a = (const float*)_up_flt(ang, ne * nang * nac);
+    h->f = (const float*)_up_flt(frac, ne);
+    h->t = (const float*)_up_flt(time, ne);
+    h->w = (const float*)_up_flt(wgt, ne);
+    h->b = (const float*)_up_flt(bkg, ne);
+    h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang; h->nac = nac;
+    return h;
+}
+
+void cuda_free_data_v3_mixed(void* vh) {
+    DataHandle2* h = (DataHandle2*)vh;
+    cudaFree((void*)h->m); cudaFree((void*)h->mo); cudaFree((void*)h->a);
+    cudaFree((void*)h->f); cudaFree((void*)h->t); cudaFree((void*)h->w); cudaFree((void*)h->b);
+    free(h);
+}
+
+void cuda_gram_matrix_v3_mixed(void* vctx, void* vdh,
+    const double* m0, const double* g0,
+    double* oMpp_r, double* oMpp_i,
+    double* oMmm_r, double* oMmm_i,
+    double* oMpm_r, double* oMpm_i) {
+
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne, bs = c->batch_size;
+    if (ne < bs) bs = ne;
+    // Gram path: cap batch to avoid oversized scratch with large n_gamma_rows
+    if (bs > 5000) bs = 5000;
+    int nbat = (ne + bs - 1) / bs;
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+    int ng2 = nw / 8;
+
+    const double* gpu_m0 = (const double*)_up_dbl(m0, c->n_m0_params);
+    const double* gpu_g0 = (const double*)_up_dbl(g0, c->n_g0_params);
+
+    ComputeData s;
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
+        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        #undef S
+        #undef S2
+    }
+
+    double *A0r, *A0i, *A1r, *A1i;
+    size_t a_sz = (size_t)bs * ng2 * sizeof(double);
+    cudaMalloc(&A0r, a_sz); cudaMalloc(&A0i, a_sz);
+    cudaMalloc(&A1r, a_sz); cudaMalloc(&A1i, a_sz);
+
+    size_t g_sz = (size_t)ng2 * ng2 * sizeof(double);
+    double *Mpp_r, *Mpp_i, *Mmm_r, *Mmm_i, *Mpm_r, *Mpm_i;
+    cudaMalloc(&Mpp_r, g_sz); cudaMalloc(&Mpp_i, g_sz);
+    cudaMalloc(&Mmm_r, g_sz); cudaMalloc(&Mmm_i, g_sz);
+    cudaMalloc(&Mpm_r, g_sz); cudaMalloc(&Mpm_i, g_sz);
+
+    memset(oMpp_r, 0, g_sz); memset(oMpp_i, 0, g_sz);
+    memset(oMmm_r, 0, g_sz); memset(oMmm_i, 0, g_sz);
+    memset(oMpm_r, 0, g_sz); memset(oMpm_i, 0, g_sz);
+
+    double* hbuf = (double*)malloc(g_sz);
+
+    for (int b = 0; b < nbat; b++) {
+        int st = b * bs;
+        int nb = (ne - st > bs) ? bs : (ne - st);
+
+        ComputeData d = s;
+        d.mass = h->m + st * h->nm;
+        d.momentum = h->mo + st * h->nmom;
+        d.angle = h->a + st * h->nat * h->nac;
+        d.weight = h->w + st;
+        d.n_events = nb;
+
+        cudaMemset(d.g_interp_real, 0, bs * ng * sizeof(double));
+        cudaMemset(d.g_interp_imag, 0, bs * ng * sizeof(double));
+        cudaMemset(d.g_bw_real, 0, bs * nu * sizeof(double));
+        cudaMemset(d.g_bw_imag, 0, bs * nu * sizeof(double));
+
+        launch_compute_g_bw(
+            d.mass, gpu_g0, c->g0_index, c->g0_mass_index,
+            c->matrix_gamma,
+            c->gamma_table_real, c->gamma_table_imag,
+            c->gamma_min, c->gamma_delta,
+            c->n_gamma_rows, c->n_unique_bw, c->n_mass, c->gamma_table_bins,
+            d.g_interp_real, d.g_interp_imag,
+            d.g_bw_real, d.g_bw_imag, nb);
+        CUDA_CHECK(cudaGetLastError());
+
+        launch_gram_common_v3(c, &d, gpu_m0, A0r, A0i, A1r, A1i);
+        CUDA_CHECK(cudaGetLastError());
+
+        launch_gram_reduce_v3(
+            A0r, A0i, A1r, A1i, nb, ng2,
+            Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
+        CUDA_CHECK(cudaGetLastError());
+
+        cudaMemcpy(hbuf, Mpp_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpp_r[i] += hbuf[i];
+        cudaMemcpy(hbuf, Mpp_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpp_i[i] += hbuf[i];
+        cudaMemcpy(hbuf, Mmm_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMmm_r[i] += hbuf[i];
+        cudaMemcpy(hbuf, Mmm_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMmm_i[i] += hbuf[i];
+        cudaMemcpy(hbuf, Mpm_r, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpm_r[i] += hbuf[i];
+        cudaMemcpy(hbuf, Mpm_i, g_sz, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < (size_t)ng2 * ng2; i++) oMpm_i[i] += hbuf[i];
+    }
+
+    free(hbuf);
+    cudaFree((void*)gpu_m0); cudaFree((void*)gpu_g0);
+    cudaFree(A0r); cudaFree(A0i); cudaFree(A1r); cudaFree(A1i);
+    cudaFree(Mpp_r); cudaFree(Mpp_i); cudaFree(Mmm_r); cudaFree(Mmm_i);
+    cudaFree(Mpm_r); cudaFree(Mpm_i);
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        #undef F
+    }
+}
+
+void cuda_compute_v3_mixed(void* vctx, void* vdh,
+    const double* ck_r,const double* ck_i,
+    const double* m0,const double* g0,
+    double G,double DG,double DM,double Ap,double pr,double pp,
+    double nv,int use_norm,
+    double* oQ,double* oP,
+    double* ogck_r,double* ogck_i,
+    double* ogm0,double* ogg0,
+    double* ogsc
+) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne, bs = c->batch_size;
+    if (ne < bs) bs = ne;
+    int nbat = (ne + bs - 1) / bs;
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+
+    // Upload per-call params via _up_dbl (always fresh)
+    ComputeParams p;
+    p.ck_real = (double*)_up_dbl(ck_r, nw);
+    p.ck_imag = (double*)_up_dbl(ck_i, nw);
+    p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
+    p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
+    p.Gamma = G; p.Delta_Gamma = DG; p.Delta_m = DM;
+    p.A_prod = Ap; p.poq_rho = pr; p.pop_phi = pp;
+
+    // Use context-allocated scratch (avoids per-call cudaMalloc/free)
+    ComputeData s;
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
+        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
+        S2(bw_p_real,nw); S2(bw_p_imag,nw);
+        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
+        S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
+        S2(grad_ck_real_partial,nw); S2(grad_ck_imag_partial,nw);
+        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
+        S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
+        S(grad_DeltaM_partial); S(grad_Ap_partial);
+        S(grad_poq_rho_partial); S(grad_pop_phi_partial);
+        #undef S
+        #undef S2
+    }
+
+    *oQ = 0; memset(oP, 0, ne * sizeof(double));
+    memset(ogck_r, 0, nw * sizeof(double)); memset(ogck_i, 0, nw * sizeof(double));
+    memset(ogm0, 0, nu * sizeof(double)); memset(ogg0, 0, ng * sizeof(double));
+    memset(ogsc, 0, N_SCALAR * sizeof(double));
+
+    // Zero reduction output buffers (stale from previous call)
+    cudaMemset(s.g_bw_real, 0, bs * nu * sizeof(double));
+    cudaMemset(s.g_bw_imag, 0, bs * nu * sizeof(double));
+    cudaMemset(s.g_interp_real, 0, bs * ng * sizeof(double));
+    cudaMemset(s.g_interp_imag, 0, bs * ng * sizeof(double));
+
+    double* Ph = (double*)malloc(bs * sizeof(double));
+    double* gck_buf = (double*)malloc(nw * sizeof(double));
+    double* gm0_buf = (double*)malloc(nu * sizeof(double));
+    double* gg0_buf = (double*)malloc(ng * sizeof(double));
+
+    for (int b = 0; b < nbat; b++) {
+        int st = b * bs;
+        int nb = (ne - st > bs) ? bs : (ne - st);
+
+        ComputeData d = s;
+        d.mass = h->m + st * h->nm;
+        d.momentum = h->mo + st * h->nmom;
+        d.angle = h->a + st * h->nat * h->nac;
+        d.frac = h->f + st; d.time = h->t + st;
+        d.weight = h->w + st; d.bkg = h->b + st;
+        d.n_events = nb;
+
+        launch_compute_all(c, &d, &p, nv, use_norm);
+
+        // Clear any pending errors from launch_compute_all
+        cudaGetLastError();
+
+        // CPU sum for Q (reliable, no stale-buffer edge case)
+        cudaMemcpy(Ph, d.Q_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oQ += Ph[i];
+
+        cudaMemcpy(Ph, d.P_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
+        memcpy(oP + st, Ph, nb * sizeof(double));
+
+        // GPU reductions: sum per-event gradients across events
+        launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
+        cudaMemcpy(gck_buf, s.g_bw_real, nw * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
+
+        launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, nw);
+        cudaMemcpy(gck_buf, s.g_bw_imag, nw * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
+
+        launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
+        cudaMemcpy(gm0_buf, s.g_interp_real, nu * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
+
+        launch_reduce_sum_features(d.grad_g0_partial, s.g_interp_imag, nb, ng);
+        cudaMemcpy(gg0_buf, s.g_interp_imag, ng * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
+
+        // Scalar gradients: download per-event and sum on CPU
+        #define SA(f, idx) do { \
+            double* bf = (double*)malloc(nb * sizeof(double)); \
+            cudaMemcpy(bf, d.f, nb * sizeof(double), cudaMemcpyDeviceToHost); \
+            for (int i = 0; i < nb; i++) ogsc[idx] += bf[i]; \
+            free(bf); \
+        } while(0)
+        SA(grad_Gamma_partial,0); SA(grad_DeltaGamma_partial,1);
+        SA(grad_DeltaM_partial,2); SA(grad_Ap_partial,3);
+        SA(grad_poq_rho_partial,4); SA(grad_pop_phi_partial,5);
+        #undef SA
+    }
+
+    // Free scratch (only if allocated per-call, not from context)
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        F(Q_out); F(P_out); F(pap_real); F(pap_imag); F(pam_real); F(pam_imag);
+        F(gp_real); F(gp_imag); F(gm_real); F(gm_imag); F(poq_real); F(poq_imag);
+        F(bw_p_real); F(bw_p_imag); F(common_amp_factor_real); F(common_amp_factor_imag);
+        F(ap_real); F(ap_imag); F(am_real); F(am_imag); F(dQ_dP);
+        F(bw_dom_real); F(bw_dom_imag);
+        F(grad_ck_real_partial); F(grad_ck_imag_partial);
+        F(grad_m0_partial); F(grad_g0_partial);
+        F(grad_Gamma_partial); F(grad_DeltaGamma_partial); F(grad_DeltaM_partial);
+        F(grad_Ap_partial); F(grad_poq_rho_partial); F(grad_pop_phi_partial);
+        #undef F
+    }
+    // Q_red_gpu is allocated in context, freed in cuda_free_context_v3_mixed
+    free(Ph); free(gck_buf); free(gm0_buf); free(gg0_buf);
+
+    cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
+    cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+}
+
+} // extern "C"
