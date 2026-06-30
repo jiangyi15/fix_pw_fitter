@@ -170,36 +170,37 @@ Q, grads, P = ck.compute(params, dh)
 
 ## Performance
 
-All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher is better):
+All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher is better).
+Mean ± 1σ over 5 runs:
 
-| Backend | 64 | 256 | 1024 | 8192 | vs NumPy (max) |
-|---------|:---:|:---:|:----:|:----:|:--------------:|
-| **NumPy f64** CPU | 5.5K | 5.6K | 5.3K | 5.2K | 1× |
-| **CUDA f64 v2** GPU | 72K | 119K | 142K | 188K | **36×** |
-| **CUDA f64 v3** GPU | 84K | 142K | 172K | 187K | **36×** |
-| **CUDA f32 v2** GPU | 142K | 396K | 717K | 831K | **160×** |
-| **CUDA f32 v3** GPU | 138K | 355K | 504K | 609K | **117×** |
-| **ONNX f32** CPU | 3K | 11K | 40K | 32K | 8× |
-| **ONNX f32** CUDA | 21K | 79K | 355K | 338K | **65×** |
+| Backend | 64 | 256 | 1024 | 10000 | vs NumPy (max) |
+|---------|:---:|:---:|:----:|:-----:|:--------------:|
+| **NumPy f64** CPU | 6.9±0.1K | 6.6±0.1K | 6.1±0.2K | 4.4±0.0K | 1× |
+| **CUDA f64 v2** GPU | 84±1K | 128±14K | 175±1K | 187±0.4K | **29×** |
+| **CUDA f64 v3** GPU | 74±6K | 114±1K | 147±5K | 186±0.3K | **24×** |
+| **CUDA f32 v2** GPU | 137±6K | 376±1K | 680±10K | 786±3K | **111×** |
+| **CUDA f32 v3** GPU | 124±8K | 290±3K | 484±4K | 612±2K | **79×** |
+| **ONNX f32** CPU | 3.0±0.2K | 12±1K | 48±3K | 47±2K | 8× |
+| **ONNX f32** CUDA | 22.2±0.1K | 88±1K | 360±2K | 343±3K | **59×** |
 
 **Latency** (forward + backward pass, 1024 events):
 
 | Backend | Time | Speedup |
 |---------|:----:|:-------:|
-| **NumPy f64** CPU | 193 ms | 1× |
-| **ONNX** CPU | 26 ms | 7.4× |
-| **ONNX** CUDA | **2.9 ms** | **67×** |
-| **CUDA f64 v2** GPU | 7.2 ms | 27× |
-| **CUDA f64 v3** GPU | 6.0 ms | 32× |
-| **CUDA f32 v2** GPU | **1.4 ms** | **135×** |
-| **CUDA f32 v3** GPU | 2.0 ms | 94× |
+| **NumPy f64** CPU | 169 ms | 1× |
+| **ONNX** CPU | 21 ms | 8.0× |
+| **ONNX** CUDA | **2.8 ms** | **60×** |
+| **CUDA f64 v2** GPU | 5.9 ms | 29× |
+| **CUDA f64 v3** GPU | 7.0 ms | 24× |
+| **CUDA f32 v2** GPU | **1.5 ms** | **112×** |
+| **CUDA f32 v3** GPU | 2.1 ms | 80× |
 
 ### Key observations
 
-- **CUDA f32 v2** is the fastest overall: **160× vs NumPy**, **4.4× faster than CUDA f64**
+- **CUDA f32 v2** is the fastest overall: **111× vs NumPy**, **~4× faster than CUDA f64**
 - **CUDA f32 v3** has better numerical stability for large datasets but slightly slower than v2
-- **CUDA v3 (f64)** shows better small-batch latency than v2 due to Catmull-Rom interpolation
-- **ONNX CUDA** offers 65× speedup without requiring CUDA Toolkit at build time
+- **CUDA v2 (f64)** is slightly faster than v3 at large batches (per-event norm vs Gram matrix)
+- **ONNX CUDA** offers 59× speedup without requiring CUDA Toolkit at build time
 - **ONNX CPU** is 8× vs NumPy — useful on machines without GPU
 - Custom CUDA kernels outperform ONNX because they are purpose-built for this computation
 - ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
