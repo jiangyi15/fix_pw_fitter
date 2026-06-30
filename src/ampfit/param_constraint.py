@@ -377,29 +377,32 @@ class Transform:
         return result
 
 
-# ScaleTransform — scale a single parameter by a constant factor
+# ================================================================
+# LinearTransform — scale + bias a single parameter
 # ================================================================
 
-class ScaleTransform(Transform):
-    """Scales a single named parameter by a constant factor.
+class LinearTransform(Transform):
+    """Apply a linear transform to a single named parameter.
 
-    ``forward``:  ``d[name] *= factor``
-    ``backward``: ``grad[name] *= factor``
+    ``forward``:  ``d[name] = factor * d[name] + bias``
+    ``backward``: ``grad[name] *= factor``  (bias doesn't affect gradient)
+    ``inverse``:  ``d[name] = (d[name] - bias) / factor``
 
     Input and output share the same parameter name; only the value
-    is multiplied.  Multiple independent ``ScaleTransform`` instances
+    is transformed.  Multiple independent ``LinearTransform`` instances
     are composed as a list in :class:`ConstraintManager`.
     """
 
-    def __init__(self, name, factor):
+    def __init__(self, name, factor, bias=0.0):
         super().__init__(input_names=[name], output_names=[name])
         self.name = name
         self.factor = float(factor)
+        self.bias = float(bias)
 
     def forward(self, d):
         d = dict(d)
         if self.name in d:
-            d[self.name] = d[self.name] * self.factor
+            d[self.name] = self.factor * d[self.name] + self.bias
         return d
 
     def backward(self, grad_out, d_in=None):
@@ -411,8 +414,12 @@ class ScaleTransform(Transform):
     def inverse(self, d):
         d = dict(d)
         if self.name in d and self.factor != 0:
-            d[self.name] = d[self.name] / self.factor
+            d[self.name] = (d[self.name] - self.bias) / self.factor
         return d
+
+
+# Backward-compatible alias
+ScaleTransform = LinearTransform
 
 
 # ================================================================
@@ -554,8 +561,12 @@ class ConstraintManager:
     def set_scale(self, scale_params, reset=False):
         if reset:
             self.scale_transforms.clear()
-        for name, factor in scale_params.items():
-            self.scale_transforms.append(ScaleTransform(name, factor))
+        for name, val in scale_params.items():
+            if isinstance(val, (list, tuple)):
+                factor, bias = val[0], val[1] if len(val) > 1 else 0.0
+            else:
+                factor, bias = val, 0.0
+            self.scale_transforms.append(LinearTransform(name, factor, bias))
         self._rebuild()
 
     def set_mass_width_transforms(self, transforms, reset=True):
