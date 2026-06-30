@@ -18,8 +18,8 @@ ck_map = config.get_ck_map()
 rng = np.random.default_rng(42)
 params = {
     'ck': rng.normal(size=len(ck_map)) + 1j * rng.normal(size=len(ck_map)),
-    'm0': rng.random(len(kc["m0_index"])) + 2,
-    'g0': rng.random(len(kc["g0_index"])) + 0.1,
+    'm0': rng.random(int(np.max(kc["m0_index"])) + 1) + 2,
+    'g0': rng.random(int(np.max(kc["g0_index"])) + 1) + 0.1,
     'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
 }
 

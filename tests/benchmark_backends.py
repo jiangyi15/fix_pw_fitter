@@ -9,7 +9,7 @@ from ampfit.backends import create_backend
 CONFIG_FILE = "config_angle.yml"
 WARMUP = 5
 TRIALS = 20
-BATCH_SIZES = [64, 256, 1024]
+BATCH_SIZES = [64, 256, 1024, 10000]
 
 def make_data(n):
     rng = np.random.default_rng(42)
@@ -30,17 +30,19 @@ ck_map = config.get_ck_map()
 rng = np.random.default_rng(42)
 params = {
     'ck': rng.normal(size=len(ck_map)) + 1j * rng.normal(size=len(ck_map)),
-    'm0': rng.random(len(kc["m0_index"])) + 2,
-    'g0': rng.random(len(kc["g0_index"])) + 0.1,
+    'm0': rng.random(int(np.max(kc["m0_index"])) + 1) + 2,
+    'g0': rng.random(int(np.max(kc["g0_index"])) + 1) + 0.1,
     'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
 }
 
 backends = [
-    ("NumPy",   "numpy"),
-    ("CUDAv3",  "cuda_v3"),
-    ("CUDA32v3","cuda32_v3"),
-    ("CUDAv2",  "cuda_v2"),
-    ("CUDA32v2","cuda32_v2"),
+    ("NumPy",     "numpy"),
+    ("CUDAv3",    "cuda_v3"),
+    ("CUDA32v3",  "cuda32_v3"),
+    ("CUDAv2",    "cuda_v2"),
+    ("CUDA32v2",  "cuda32_v2"),
+    ("ONNXcpu",   "onnx_cpu"),
+    ("Integrated","integrated"),
 ]
 
 print(f"{'n_events':>8}", end="")
