@@ -3,7 +3,7 @@ Compares TFPWA K (from data_all_amp.npy) with ampfit K (from kin_factor).
 Match by signature (g_ls names), not by position."""
 
 import numpy as np, json, glob, sys
-sys.path.insert(0, 'src')
+import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src")); sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ---------- 1. Load TFPWA reference ----------
 p = '/home/jiangy/ana/test_4pi/test_amp/'
@@ -27,12 +27,14 @@ from ampfit.backends import create_backend
 import ampfit.fitter as ft
 from run_fit import build_constraints
 
-config = Config('config_amp.yml')
+config = Config(os.path.join(os.path.dirname(__file__), 'config_angle.yml'))
 kc = config.build_all_index(); be = create_backend("numpy", kc); kernel = be.kernel
-fitter = ft.Fitter('config_amp.yml', backend='numpy')
+fitter = ft.Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'), backend='numpy')
 fs, sp, sc = build_constraints(fitter.all_comb)
-for n in fitter.config.m0_phys_name: fs[n] = float(fitter.defaults[n])
-for n in fitter.config.g0_phys_name: fs[n] = float(fitter.defaults[n])
+for n in fitter.config.m0_phys_name:
+        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
+for n in fitter.config.g0_phys_name:
+        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
 for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]: fs[n] = v
 fitter.set_fixed(fs); fitter.set_same(sp); fitter.set_scale(sc)
 with open(p + "pw_cfit5_td6_fix29/final_params_0.json") as f: pdat = json.load(f)

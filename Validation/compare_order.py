@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Compare Ai (Re) and Aibar (Im) from TFPWA with 'a' from ampfit.
 Order defined by data_all_comb.json ↔ build_ck_map()."""
+import os
 import numpy as np, json, glob, sys
-sys.path.insert(0,'src')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src")); sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import yaml
 
 p = '/home/jiangy/ana/test_4pi/test_amp/'
@@ -23,15 +25,18 @@ Aibar = data[:, 1::2]  # (N, 112) Im parts of K
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
 import ampfit.fitter as ft
-from run_fit import build_constraints, load_npz
+from run_fit import build_constraints
+from ampfit import Fitter
 
-config = Config('config_amp.yml')
+config = Config(os.path.join(os.path.dirname(__file__), 'config_angle.yml'))
 kc = config.build_all_index(); be = create_backend("numpy", kc); kernel = be.kernel
 
-fitter=ft.Fitter('config_amp.yml',backend='numpy')
+fitter=ft.Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'),backend='numpy')
 fs,sp,sc=build_constraints(fitter.all_comb)
-for n in fitter.config.m0_phys_name: fs[n]=float(fitter.defaults[n])
-for n in fitter.config.g0_phys_name: fs[n]=float(fitter.defaults[n])
+for n in fitter.config.m0_phys_name:
+        if n in fitter.defaults: fs[n]=float(fitter.defaults[n])
+for n in fitter.config.g0_phys_name:
+        if n in fitter.defaults: fs[n]=float(fitter.defaults[n])
 for n,v in [('delta_gamma',0),('delta_m',0.506),('A_prod',0),('poqr',1),('poqi',0)]: fs[n]=v
 fitter.set_fixed(fs);fitter.set_same(sp);fitter.set_scale(sc)
 
@@ -40,7 +45,7 @@ x0 = fitter.values_from_dict(pdat)
 params,_,_,_ = fitter._build_params(x0)
 ck = params["ck"]; m0_p = params["m0"]; g0_p = params["g0"]
 
-data_np, _ = load_npz('data/data_arrays.npz', max_events=1000)
+data_np, _ = Fitter.load_npz('data/data_arrays.npz', max_events=1000)
 m = data_np['mass']; q = data_np['q']; angle = data_np['angle']
 ne = m.shape[0]
 
@@ -148,4 +153,3 @@ print("\n=== First 5 and last 5 combos ===")
 for ri in [0,1,2,3,4,107,108,109,110,111]:
     c = all_comb[ri]
     print(f"combo[{ri:3d}]: {c[0][:40]}...  sig={c[1:]}")
-EOF

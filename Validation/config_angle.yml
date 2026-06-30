@@ -1,0 +1,421 @@
+data:
+    dat_order: [pip1, pim1, pip2, pim2]
+    identical_particles: [[pip1, pip2], [pim1, pim2]]
+    cp_particles: [[ pip1, pim1], [pip2, pim2]]
+    extra_var:
+        time:
+            default: 1.0
+        tag:
+            default: 1
+        tag1:
+            default: 1
+        eta1:
+            default: 0.5
+    data: ["../create_data17/data_sig.npy"]
+    data_time: ["../create_data17/data_sig_time.npy"]
+    data_tag1: ["../create_data17/data_sig_tag.npy"]
+    data_eta1: ["../create_data17/data_sig_tageta.npy"]
+    data_com_tag1: ["./tmp_eta/data_sig_com_tag.npy"]
+    data_com_eta1: ["./tmp_eta/data_sig_com_tageta.npy"]
+    data_bg_value: ["../create_data17/data_sig_bg_model.npy"]
+    dataall: ["../create_data17/data.npy"]
+    dataall_time: ["../create_data17/data_time.npy"]
+    dataall_com_tag1: ["./tmp_eta/data_com_tag.npy"]
+    dataall_com_eta1: ["./tmp_eta/data_com_tageta.npy"]
+    # data_weight: ["../data_1/data_weight.npy"]
+    phsp: ["../create_data17/phsp_sig.npy"]
+    phsp_time: ["../create_data17/phsp_sig_time.npy"]
+    phsp_tag1: ["../create_data17/phsp_sig_tag.npy"]
+    phsp_eta1: ["../create_data17/phsp_sig_tageta.npy"]
+    phsp_weight: ["../create_data17/phsp_sig_time_weight.npy"]
+    phsp_bg_value: ["../create_data17/phsp_sig_bg_model.npy"]
+    phsp_l0_weight: ["../create_data17/phsp_sig_time_weight.npy"]
+    bg_frac: 0.914
+    # lazy_file: True
+    # lazy_call: True
+    no_id_cached: True
+    no_p4: True
+    no_left_angle: True
+    amp_model: p4_directly
+    preprocessor: p4_directly
+    # use_tf_function: True
+
+decay:
+    B:
+    - [ pipi1, pipi2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipi1S, pipi2S, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipi1CPV, pipi2CPV, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi2, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipipi3, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi4, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipipi5, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi6, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipipi7, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi8, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipipi9, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi10, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipi1f, pipi2f, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    pipi1: [pip1, pim1, no_q0: True]
+    pipi2: [pip2, pim2, no_q0: True]
+    pipi1S: [pip1, pim1, no_q0: True]
+    pipi2S: [pip2, pim2, no_q0: True]
+    pipi1CPV: [pip1, pim1, no_q0: True]
+    pipi2CPV: [pip2, pim2, no_q0: True]
+    pipi1f: [pip1, pim1, no_q0: True]
+    pipi2f: [pip2, pim2, no_q0: True]
+    pipipi: [ pipia, pip2 , no_q0: True]
+    pipipi2: [ pipia, pim2 , no_q0: True]
+    pipipi3: [ pipib, pip2 , no_q0: True]
+    pipipi4: [ pipib, pim2 , no_q0: True]
+    pipipi5: [ pipic, pip2 , no_q0: True]
+    pipipi6: [ pipic, pim2 , no_q0: True]
+    pipipi7: [ pipid, pip2 , no_q0: True]
+    pipipi8: [ pipid, pim2 , no_q0: True]
+    pipipi9: [ pipie, pip2 , no_q0: True]
+    pipipi10: [ pipie, pim2 , no_q0: True]
+    pipia: [pip1, pim1, no_q0: True]
+    pipib: [pip1, pim1, no_q0: True]
+    pipic: [pip1, pim1, no_q0: True]
+    pipid: [pip1, pim1, no_q0: True]
+    pipie: [pip1, pim1, no_q0: True]
+
+particle:
+    $top: B
+    $finals: [pip1, pip2, pim1, pim2]
+    B:
+        J: 0
+        P: -1
+        mass: 5.279
+    pip1:
+        J: 0
+        P: -1
+        mass: 0.139
+    pip2:
+        J: 0
+        P: -1
+        mass: 0.139
+    pim1:
+        J: 0
+        P: -1
+        mass: 0.139
+    pim2:
+        J: 0
+        P: -1
+        mass: 0.139
+    pipipi: [ a2(1320)p, pi1(1600)p]
+    pipipi2: [ a2(1320)m, pi1(1600)m]
+    pipipi3: [ a1(1260)p, a1(1640)p ]
+    pipipi4: [ a1(1260)m, a1(1640)m ]
+    pipipi5: [ a1(1260)p, a1(1640)p ]
+    pipipi6: [ a1(1260)m, a1(1640)m ]
+    pipipi7: [ a1(1640)p, pi2(1670)p ]
+    pipipi8: [ a1(1640)m, pi2(1670)m ]
+    pipipi9: [ pi1300p, pi1600p, pi2(1670)p ]
+    pipipi10: [ pi1300m, pi1600m, pi2(1670)m ]
+    pipi1: [ rhoA ]
+    pipi2: [ rhoB ]
+    pipi1CPV: [ f0(980), f0(500), NR0 ]
+    pipi2CPV: [ rhoB ]
+    pipi1S: [ ] # KMA ]
+    pipi2S: [ ] # KMB ]
+    pipia: [ rhoA ]
+    pipib: [ rhoA ]
+    pipic: [ f0(980), f0(500)]
+    pipid: [ f2(1270)]
+    pipie: [ f0(980), f0(500), rhoA ]
+    pipi1f: [ ]
+    pipi2f: [ ]
+    a1(1260)p:
+        J: 1
+        P: +1
+        mass: 1.2422
+        width: 0.466
+        model: width_linear_npy
+        width_scale: True
+        file: /home/jiangy/ana/test_4pi/fit_ls4/Gamma_symm_disp.npy
+    a1(1260)m:
+        J: 1
+        P: +1
+        mass: 1.2422
+        width: 0.466
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls4/Gamma_symm_disp.npy
+    a2(1320)p:
+        J: 2
+        P: +1
+        mass: 1.323
+        width: 0.120
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a2(1320)p_gamma.npy
+    a2(1320)m:
+        J: 2
+        P: +1
+        mass: 1.323
+        width: 0.120
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a2(1320)p_gamma.npy
+    a2(1700)p:
+        J: 2
+        P: +1
+        mass: 1.8375
+        width: 0.377
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a2(1320)p_gamma.npy
+    a2(1700)m:
+        J: 2
+        P: +1
+        mass: 1.8375
+        width: 0.377
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a2(1320)p_gamma.npy
+    pi2(1670)p:
+        J: 2
+        P: -1
+        mass: 1.716
+        width: 0.480
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi2(1670)p_gamma.npy
+    pi2(1670)m:
+        J: 2
+        P: -1
+        mass: 1.716
+        width: 0.480
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi2(1670)p_gamma.npy
+    pi1(1600)p:
+        J: 1
+        P: -1
+        mass: 1.814
+        width: 0.592
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1(1600)p_gamma.npy
+    pi1(1600)m:
+        J: 1
+        P: -1
+        mass: 1.814
+        width: 0.592
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1(1600)p_gamma.npy
+    a1(1640)p:
+        J: 1
+        P: +1
+        mass: 1.7488
+        width: 0.640
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a1(1640)p_gamma.npy
+    a1(1640)m:
+        J: 1
+        P: +1
+        mass: 1.7488
+        width: 0.640
+        width_scale: True
+        model: width_linear_npy
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/a1(1640)p_gamma.npy
+    rhoA:
+        J: 1
+        P: -1
+        C: -1
+        mass: 0.7690
+        width: 0.1506
+        model: GS_rho # _omega
+        no_num: True
+    rhoB:
+        J: 1
+        P: -1
+        C: -1
+        mass: 0.7690
+        width: 0.1506
+        model: GS_rho # _omega
+        no_num: True
+    KMA:
+        J: 0
+        P: +1
+        C: +1
+        mass: 0.7690
+        width: 0.1506
+        model: pipi_Swave
+        all_tokens: [ pole.0, pole.1, pole.2, prod.0]
+    KM2:
+        J: 0
+        P: +1
+        C: +1
+        mass: 0.7690
+        width: 0.1506
+        model: pipi_Swave
+        all_tokens: [ pole.0, pole.1, pole.2, prod.0]
+        # all_tokens: [ pole.0, pole.1, prod.0, prod.1]
+    KMB:
+        J: 0
+        P: +1
+        C: +1
+        mass: 0.7690
+        width: 0.1506
+        model: pipi_Swave
+        all_tokens: [ pole.0, pole.1, pole.2, prod.0]
+    KMC:
+        J: 0
+        P: +1
+        C: +1
+        mass: 0.7690
+        width: 0.1506
+        model: pipi_Swave
+        all_tokens: [ pole.0, pole.1, pole.2, prod.0]
+        # all_tokens: [ pole.0, pole.1, prod.0, prod.1]
+    a1_MIp:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    a1_MIm:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    a1_MI0p:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    a1_MI0m:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    a1_MI2p:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    a1_MI2m:
+        J: 1
+        P: 1
+        mass: 1.655
+        width: 0.380
+        model: spline_c_idx
+        with_bound: True
+        points: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 1.8, 2.2, 2.8, 3.6, 4.4, 5.4]
+    pi1300p:
+        J: 0
+        P: -1
+        mass: 1.845
+        width: 2.580
+        model: width_linear_npy
+        width_scale: True
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1300p_gamma.npy
+    pi1300m:
+        J: 0
+        P: -1
+        mass: 1.845
+        width: 2.580
+        model: width_linear_npy
+        width_scale: True
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1300p_gamma.npy
+    pi1600p:
+        J: 0
+        P: -1
+        mass: 1.742
+        width: 0.457
+        model: width_linear_npy
+        width_scale: True
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1600p_gamma.npy
+    pi1600m:
+        J: 0
+        P: -1
+        mass: 1.742
+        width: 0.457
+        model: width_linear_npy
+        width_scale: True
+        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi1600p_gamma.npy
+    f0(980):
+        J: 0
+        P: +1
+        mass: 0.965
+        g_0: 0.110
+        g_1: 0.055
+        g_2: 0.347325
+        g_3: 0.347325
+        model: FlatteC
+        mass_list: [ [0.13957039, 0.13957039], [0.1349768,0.1349768], [0.493677,0.493677], [0.497611, 0.497611] ]
+    f0(980)b:
+        J: 0
+        P: +1
+        mass: 0.965
+        g_0: 0.110
+        g_1: 0.055
+        g_2: 0.347325
+        g_3: 0.347325
+        model: FlatteC
+        mass_list: [ [0.13957039, 0.13957039], [0.1349768,0.1349768], [0.493677,0.493677], [0.497611, 0.497611] ]
+    f0(500):
+        J: 0
+        P: +1
+        mass: 0.475
+        width: 0.550
+        model: Bugg
+    NR0:
+        J: 0
+        P: +1
+        mass: 0.475
+        width: 0.550
+        model: one
+    f2(1270):
+        J: 2
+        P: +1
+        mass: 1.255
+        width: 0.211
+
+constrains:
+    fix_var:
+        "KMA_prod.2r": 0.0
+        "KMA_prod.2i": 0.0
+        "KMA_prod.3r": 0.0
+        "KMA_prod.3i": 0.0
+        "KMA_prod.4r": 0.0
+        "KMA_prod.4i": 0.0
+    var_equal:
+        - [ "KMA_pole.0r", "KMB_pole.0r"]
+        - [ "KMA_pole.0i", "KMB_pole.0i"]
+        - [ "KMA_pole.1r", "KMB_pole.1r"]
+        - [ "KMA_pole.1i", "KMB_pole.1i"]
+        - [ "KMA_pole.2r", "KMB_pole.2r"]
+        - [ "KMA_pole.2i", "KMB_pole.2i"]
+        - [ "KMA_pole.3r", "KMB_pole.3r"]
+        - [ "KMA_pole.3i", "KMB_pole.3i"]
+        - [ "KMA_pole.4r", "KMB_pole.4r"]
+        - [ "KMA_pole.4i", "KMB_pole.4i"]
+        - [ "KMA_prod.0r", "KMB_prod.0r"]
+        - [ "KMA_prod.0i", "KMB_prod.0i"]
+        - [ "KMA_prod.1r", "KMB_prod.1r"]
+        - [ "KMA_prod.1i", "KMB_prod.1i"]
+        - [ "KMA_prod.2r", "KMB_prod.2r"]
+        - [ "KMA_prod.2i", "KMB_prod.2i"]
+        - [ "KMA_prod.3r", "KMB_prod.3r"]
+        - [ "KMA_prod.3i", "KMB_prod.3i"]
+        - [ "KMA_prod.4r", "KMB_prod.4r"]
+        - [ "KMA_prod.4i", "KMB_prod.4i"]

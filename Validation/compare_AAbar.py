@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare A/Abar between TFPWA reference and ampfit kernel"""
 import numpy as np, json, glob, sys, os
-sys.path.insert(0,'src')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src")); sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # ── 1. TFPWA A/Abar ──
 p = '/home/jiangy/ana/test_4pi/test_amp/'
@@ -92,19 +92,21 @@ from ampfit.backends import create_backend
 import ampfit.fitter as ft
 from run_fit import build_constraints
 
-config_ampfit = AmpConfig('config_amp.yml')
+config_ampfit = AmpConfig(os.path.join(os.path.dirname(__file__), 'config_angle.yml'))
 kc = config_ampfit.build_all_index()
 be = create_backend("numpy", kc); kernel = be.kernel
 
-fitter=ft.Fitter('config_amp.yml',backend='numpy')
+fitter=ft.Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'),backend='numpy')
 fs,sp,sc=build_constraints(fitter.all_comb)
-for n in fitter.config.m0_phys_name: fs[n]=float(fitter.defaults[n])
-for n in fitter.config.g0_phys_name: fs[n]=float(fitter.defaults[n])
+for n in fitter.config.m0_phys_name:
+        if n in fitter.defaults: fs[n]=float(fitter.defaults[n])
+for n in fitter.config.g0_phys_name:
+        if n in fitter.defaults: fs[n]=float(fitter.defaults[n])
 for n,v in [('delta_gamma',0),('delta_m',0.506),('A_prod',0),('poqr',1),('poqi',0)]: fs[n]=v
 fitter.set_fixed(fs);fitter.set_same(sp);fitter.set_scale(sc)
 
 # Load data the ampfit way
-from run_fit import load_npz
+from ampfit import Fitter; load_npz = Fitter.load_npz
 data_np, _ = load_npz('data/data_arrays.npz', max_events=n_test)
 m = data_np['mass']; q = data_np['q']; angle = data_np['angle']
 
