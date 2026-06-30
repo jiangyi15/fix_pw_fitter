@@ -45,19 +45,11 @@ backends = [
     ("ONNXcuda",  "onnx_cuda"),
 ]
 
-# Integrated backend benchmarks (separate: full + norm-only via Gram)
-integrated_backends = [
-    ("IntgrFull", "integrated"),   # full compute (→base for data NLL)
-    ("IntgrNorm", "integrated"),   # norm-only via Gram (return_p=False)
-]
-
 print(f"{'n_events':>8}", end="")
 for label, _ in backends:
     print(f" | {label:>10}", end="")
-for label, _ in integrated_backends:
-    print(f" | {label:>10}", end="")
 print()
-print("-" * (8 + 14 * (len(backends) + len(integrated_backends))))
+print("-" * (8 + 14 * len(backends)))
 
 for n in BATCH_SIZES:
     sys.stdout.write(f"  n={n:>5}...")
@@ -79,26 +71,6 @@ for n in BATCH_SIZES:
             rates.append(f"{eps:>10.0f}/s")
         except Exception as e:
             rates.append(f"{'SKIP':>10}")
-
-    # Integrated variants (full + Gram norm-only)
-    for label, bname in integrated_backends:
-        try:
-            be = create_backend(bname, kc)
-            # Load same data as phsp (Gram matrix pre-computation)
-            dh = be.load_data(data)
-            return_p = label != "IntgrNorm"
-            for _ in range(WARMUP):
-                be.compute(params, dh, return_p=return_p)
-            t0 = time.perf_counter()
-            for _ in range(TRIALS):
-                be.compute(params, dh, return_p=return_p)
-            t = (time.perf_counter() - t0) / TRIALS
-            del dh, be
-            eps = n / t
-            rates.append(f"{eps:>10.0f}/s")
-        except Exception as e:
-            rates.append(f"{'SKIP':>10}")
-
     print(f"\r  {n:>5}    | {' | '.join(rates)}")
 
-print("-" * (8 + 14 * (len(backends) + len(integrated_backends))))
+print("-" * (8 + 14 * len(backends)))
