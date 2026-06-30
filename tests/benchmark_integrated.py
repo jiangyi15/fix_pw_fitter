@@ -66,13 +66,15 @@ for label, bname in [("CUDAv3 (ref)", "cuda_v3"),
         dh_data = be.load_data(data)
         dh_phsp = be.load_data(phsp)  # also triggers Gram pre-computation for Integrated
 
-        # Full NLL: compute norm from phsp, then NLL from data
-        norm, _, _ = be.compute(params, dh_phsp, norm=None, return_p=False)
-        norm = float(norm)
+        # Full BFGS iteration: compute norm from phsp, then NLL from data
         for _ in range(WARMUP):
+            norm, _, _ = be.compute(params, dh_phsp, norm=None, return_p=False)
+            norm = float(norm)
             be.compute(params, dh_data, norm=norm)
         t0 = time.perf_counter()
         for _ in range(TRIALS):
+            norm, _, _ = be.compute(params, dh_phsp, norm=None, return_p=False)
+            norm = float(norm)
             be.compute(params, dh_data, norm=norm)
         t_full = (time.perf_counter() - t0) / TRIALS
 
