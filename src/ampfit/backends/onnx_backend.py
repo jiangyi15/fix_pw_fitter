@@ -154,7 +154,7 @@ class ONNXCPUBackend(_ONNXBackendBase):
     """ONNX Runtime on CPU."""
     def __init__(self, kernel_config=None, model_path=None,
                  norm_model_path="pwa_forward_norm.onnx",
-                 batch_size=8192):
+                 batch_size=1024):
         super().__init__(kernel_config, model_path, norm_model_path,
                          batch_size, providers=['CPUExecutionProvider'])
 
@@ -166,7 +166,7 @@ class ONNXCUDABackend(_ONNXBackendBase):
     """ONNX Runtime on GPU (falls back to CPU for unsupported ops)."""
     def __init__(self, kernel_config=None, model_path=None,
                  norm_model_path="pwa_forward_norm.onnx",
-                 batch_size=8192):
+                 batch_size=1024):
         super().__init__(kernel_config, model_path, norm_model_path,
                          batch_size,
                          providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
