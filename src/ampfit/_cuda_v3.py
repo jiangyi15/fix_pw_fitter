@@ -85,6 +85,9 @@ class DataHandle:
             self.ptr = None
             self._keep.clear()
 
+    def __del__(self):
+        self.free()
+
 
 class CUDAKernelV3:
     """High-level v3 CUDA kernel backend (Catmull-Rom interpolation).

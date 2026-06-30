@@ -78,6 +78,9 @@ class DataHandleF32:
             self.ptr = None
             self._keep.clear()
 
+    def __del__(self):
+        self.free()
+
 
 class CUDAKernelV2F32:
     """High-level v2 float32 CUDA kernel backend.

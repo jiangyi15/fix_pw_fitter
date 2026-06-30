@@ -85,6 +85,9 @@ class DataHandleF32:
             self.ptr = None
             self._keep.clear()
 
+    def __del__(self):
+        self.free()
+
 
 class CUDAKernelV3F32:
     """High-level v3 float32 CUDA kernel backend (Catmull-Rom interpolation).

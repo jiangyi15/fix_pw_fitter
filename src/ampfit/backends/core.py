@@ -80,7 +80,10 @@ def create_backend(spec, kernel_config, **kwargs):
 
 class DataHandle:
     """Opaque handle for data loaded on a backend."""
-    pass
+    def free(self):
+        pass
+    def __del__(self):
+        self.free()
 
 
 class ComputeBackend:

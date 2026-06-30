@@ -81,6 +81,9 @@ class DataHandle:
             self.ptr = None
             self._keep.clear()
 
+    def __del__(self):
+        self.free()
+
 
 class CUDAKernelV2:
     """High-level v2 CUDA kernel backend.
