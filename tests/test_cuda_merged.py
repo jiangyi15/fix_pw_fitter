@@ -22,7 +22,7 @@ params = {
 
 for n in [64, 128, 256]:
     data = {
-        'mass': rng.random((n, 48)),
+        'mass': rng.uniform(2, 3, (n, 48)),
         'q': rng.random((n, 72)),
         'angle': rng.random((n, 24, 3)),
         'frac': rng.random((n,)),

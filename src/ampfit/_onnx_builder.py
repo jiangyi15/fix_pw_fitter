@@ -261,7 +261,9 @@ class PWAONNXBuilder:
         Parameters
         ----------
         batch_size : int
-            Fixed batch dimension for event-level inputs.
+            Fixed batch dimension for event-level inputs.  The backend
+            splits larger datasets into chunks of this size and sums
+            the results (batch summation).
         norm_model : bool
             If True, build a norm-only model (Q = sum(P*weight)) suitable
             for computing the normalisation integral.  The forward model (default)

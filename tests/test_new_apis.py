@@ -339,7 +339,7 @@ def _make_fitter():
     fitter = Fitter('config_amp.yml', backend='numpy')
     n_d, n_p = 10, 20
     data = {
-        'mass': np.random.random((n_d, 48)),
+        'mass': np.random.uniform(2, 3, (n_d, 48)),
         'q': np.random.random((n_d, 72)),
         'angle': np.random.random((n_d, 24, 3)),
         'frac': np.random.random((n_d,)),
@@ -350,8 +350,8 @@ def _make_fitter():
     phsp = {k: np.random.random((n_p,) + v.shape[1:]) if v.ndim > 1
             else np.random.random(n_p)
             for k, v in data.items()}
-    fitter.set_data(data)
     fitter.set_phsp(phsp)
+    fitter.set_data(data)
     return fitter
 
 

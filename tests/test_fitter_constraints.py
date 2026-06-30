@@ -18,7 +18,7 @@ N_PHSP = 200
 
 def make_data(n_events):
     return {
-        'mass': np.random.random((n_events, 48)),
+        'mass': np.random.uniform(2, 3, (n_events, 48)),
         'q': np.random.random((n_events, 72)),
         'angle': np.random.random((n_events, 24, 3)),
         'frac': np.random.random((n_events,)),

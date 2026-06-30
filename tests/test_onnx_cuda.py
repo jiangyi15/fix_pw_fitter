@@ -42,13 +42,13 @@ def make_data(n_events, n_ck=448, n_m0=20, n_g0=23, n_scalar=6):
         "time": np.random.rand(n_events).astype(np.float32),
         "weight": np.ones(n_events, dtype=np.float32),
         "bkg": np.random.rand(n_events).astype(np.float32) * 0.01,
-        "norm": np.array(1.0, dtype=np.float32),
-        "Gamma": np.array(0.5, dtype=np.float32),
-        "Delta_Gamma": np.array(0.2, dtype=np.float32),
-        "Delta_m": np.array(0.3, dtype=np.float32),
-        "A_prod": np.array(0.4, dtype=np.float32),
-        "poq_rho": np.array(0.6, dtype=np.float32),
-        "pop_phi": np.array(0.7, dtype=np.float32),
+        "norm": np.array([1.0], dtype=np.float32),
+        "Gamma": np.array([0.5], dtype=np.float32),
+        "Delta_Gamma": np.array([0.2], dtype=np.float32),
+        "Delta_m": np.array([0.3], dtype=np.float32),
+        "A_prod": np.array([0.4], dtype=np.float32),
+        "poq_rho": np.array([0.6], dtype=np.float32),
+        "pop_phi": np.array([0.7], dtype=np.float32),
     }
 
 

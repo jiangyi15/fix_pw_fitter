@@ -36,7 +36,7 @@ params = {
 for batch in [1, 3, 10, 64, 128]:
     rng = np.random.default_rng()  # deterministic per batch
     data = {
-        'mass': rng.random((batch, 48)),
+        'mass': rng.uniform(2, 3, (batch, 48)),
         'q': rng.random((batch, 72)),
         'angle': rng.random((batch, 24, 3)),
         'frac': rng.random(batch),

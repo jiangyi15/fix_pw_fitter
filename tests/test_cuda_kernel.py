@@ -15,9 +15,8 @@ from ampfit.backends import create_backend
 CONFIG_FILE = "config_angle.yml"
 
 
-def make_params(kernel_config):
+def make_params(kernel_config, ck_map):
     """Build random params dict with correct shapes from the kernel config."""
-    ck_map = kernel_config.get("ck_map", [])
     n_ck = len(ck_map)
     n_m0 = len(kernel_config.get("m0_index", []))
     n_g0 = len(kernel_config.get("g0_index", []))
@@ -31,7 +30,7 @@ def make_params(kernel_config):
 
 def make_data(n_events):
     return {
-        'mass': np.random.random((n_events, 48)),
+        'mass': np.random.uniform(2, 3, (n_events, 48)),
         'q': np.random.random((n_events, 72)),
         'angle': np.random.random((n_events, 24, 3)),
         'frac': np.random.random((n_events,)),
@@ -45,18 +44,17 @@ def test_backend_vs_numpy(backend_name="cuda_v3"):
     """Compare Q, P, and gradients between a GPU backend and NumPy."""
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config)
+    params = make_params(kernel_config, config.get_ck_map())
 
     # NumPy reference
     np_backend = create_backend("numpy", kernel_config)
     data = make_data(100)
-    np_handle = np_backend.prepare_data(data)
+    np_handle = np_backend.load_data(data)
     Q_np, grads_np, P_np = np_backend.compute(params, np_handle)
-    np_handle.free()
 
     # Target backend (CUDA)
     target = create_backend(backend_name, kernel_config)
-    target_handle = target.prepare_data(data)
+    target_handle = target.load_data(data)
     Q_cu, grads_cu, P_cu = target.compute(params, target_handle)
     target_handle.free()
 
@@ -75,11 +73,11 @@ def test_multi_dataset(backend_name="cuda_v3"):
     """Verify different data → different Q, same data → same Q."""
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config)
+    params = make_params(kernel_config, config.get_ck_map())
 
     backend = create_backend(backend_name, kernel_config)
-    dh1 = backend.prepare_data(make_data(50))
-    dh2 = backend.prepare_data(make_data(50))
+    dh1 = backend.load_data(make_data(50))
+    dh2 = backend.load_data(make_data(50))
 
     Q1, _, _ = backend.compute(params, dh1)
     Q2, _, _ = backend.compute(params, dh2)
@@ -97,15 +95,15 @@ def test_with_norm(backend_name="cuda_v3"):
     """Compute NLL with norm — should give finite values."""
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config)
+    params = make_params(kernel_config, config.get_ck_map())
 
     backend = create_backend(backend_name, kernel_config)
     data = make_data(50)
     phsp = make_data(100)
     phsp['bkg'] = np.zeros(100)
 
-    dh = backend.prepare_data(data)
-    ph = backend.prepare_data(phsp)
+    dh = backend.load_data(data)
+    ph = backend.load_data(phsp)
 
     norm, ng, _ = backend.compute(params, ph, norm=None)
     norm = float(norm)
