@@ -7,7 +7,6 @@ Backend validation for the B → 4π amplitude analysis fitting framework.
 TFPWA fit result: `pw_cfit5_td6_fix29/final_params_0.json`
 - **NLL:** -29656.14
 - **Norm:** 34717.11
-- **Data:** zero phsp time → `frac_avg=0.5` halves norm to **17358.56**
 
 ## NLL Reproduction
 
