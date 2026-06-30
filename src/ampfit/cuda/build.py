@@ -63,13 +63,31 @@ def detect_gcc():
     return p
 
 
-def _arch_flag(nvcc):
+def _arch_flags(nvcc):
+    """Auto-detect GPU compute capability from nvidia-smi.
+
+    Falls back to sm_86 (Ampere+) with optional sm_70 (Volta) for
+    CUDA < 13, when nvidia-smi is not available.
+    """
+    try:
+        r = subprocess.run(
+            ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            ver = r.stdout.strip()
+            sm = f'sm_{ver.replace(".", "")}'
+            return [f'-arch={sm}']
+    except Exception:
+        pass
+    # Fallback: detect CUDA version for compatible arch list
     import re
     r = subprocess.run([nvcc, '--version'], capture_output=True, text=True)
     m = re.search(r'release (\d+\.\d+)', r.stdout)
-    if m and float(m.group(1)) >= 11:
-        return '-arch=sm_86'
-    return ''
+    cuda_ver = float(m.group(1)) if m else 0
+    flags = ['-gencode', 'arch=compute_86,code=sm_86']  # Ampere+
+    if cuda_ver < 13:
+        flags = ['-gencode', 'arch=compute_70,code=sm_70'] + flags  # +Volta
+    return flags
 
 
 # ── build one variant ───────────────────────────────────────────
@@ -83,9 +101,7 @@ def _build_one(src_name, lib_name):
     gcc = detect_gcc()
     script_dir = SCRIPT_DIR
     base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
-    arch = _arch_flag(nvcc)
-    if arch:
-        base.insert(1, arch)
+    base.extend(_arch_flags(nvcc))
 
     # Probe flags
     probe_file = os.path.join(script_dir, VARIANTS[0][0])
