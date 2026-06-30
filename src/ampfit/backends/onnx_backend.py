@@ -24,16 +24,33 @@ class _ONNXBackendBase(ComputeBackend):
             providers = ['CPUExecutionProvider']
         if kernel_config is not None:
             from ampfit._onnx_builder import PWAONNXBuilder
+            # Store scatter indices for g0/m0 reduction (gamma_rows→unique)
+            self._g0_idx = np.asarray(kernel_config.get("g0_index", []))
+            self._m0_idx = np.asarray(kernel_config.get("m0_index", []))
             builder = PWAONNXBuilder(kernel_config)
-            forward_model = builder.build(batch_size=batch_size, norm_model=False)
+            model = builder.build(batch_size=batch_size, norm_model=False)
             norm_model = builder.build(batch_size=batch_size, norm_model=True)
-            self.sess = ort.InferenceSession(forward_model.SerializeToString(), providers=providers)
+            # Strip unused initializers to silence onnxruntime warnings
+            for m in (model, norm_model):
+                used = set()
+                for n in m.graph.node: used.update(n.input); used.update(n.output)
+                kept = [i for i in m.graph.initializer if i.name in used]
+                del m.graph.initializer[:]
+                m.graph.initializer.extend(kept)
+            self.sess = ort.InferenceSession(model.SerializeToString(), providers=providers)
             self.sess_norm = ort.InferenceSession(norm_model.SerializeToString(), providers=providers)
         else:
+            self._g0_idx = self._m0_idx = np.array([])
             if model_path is None:
                 raise ValueError("model_path required when kernel_config not provided")
             self.sess = ort.InferenceSession(model_path, providers=providers)
             self.sess_norm = ort.InferenceSession(norm_model_path, providers=providers)
+        # Store expected input sizes for g0/m0 reduction
+        self._input_sizes = {}
+        for inp in self.sess.get_inputs():
+            shape = inp.shape
+            if shape and len(shape) == 1:  # 1D inputs like g0, m0, etc.
+                self._input_sizes[inp.name] = shape[0]
         self._input_names = [i.name for i in self.sess.get_inputs()]
         self._output_names = [o.name for o in self.sess.get_outputs()]
         self._input_names_norm = [i.name for i in self.sess_norm.get_inputs()]
@@ -58,7 +75,15 @@ class _ONNXBackendBase(ComputeBackend):
                 scalar = params.get("scalar", np.zeros(6, dtype=np.float32))
                 feed[name] = np.asarray([scalar[self._SCALAR_NAMES.index(name)]], dtype=np.float32)
             elif name in params:
-                feed[name] = np.asarray(params[name], dtype=np.float32)
+                val = np.asarray(params[name], dtype=np.float32)
+                # Reduce g0/m0 if model expects smaller size than params provides.
+                expected = self._input_sizes.get(name, len(val))
+                if len(val) > expected:
+                    idx_arr = self._g0_idx if name == "g0" else (self._m0_idx if name == "m0" else None)
+                    if idx_arr is not None and len(idx_arr) > 0:
+                        _, first = np.unique(idx_arr, return_index=True)
+                        val = val[np.sort(first)][:expected]
+                feed[name] = val
             elif name in data_slice:
                 feed[name] = np.asarray(data_slice[name], dtype=np.float32)
             elif name == "norm":
