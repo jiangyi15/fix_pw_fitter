@@ -53,7 +53,7 @@ for n in BATCH_SIZES:
     sys.stdout.write(f"  n={n:>5}...")
     sys.stdout.flush()
     data = make_data(n)
-    times = []
+    rates = []
     for label, bname in backends:
         try:
             be = create_backend(bname, kc)
@@ -63,11 +63,12 @@ for n in BATCH_SIZES:
             t0 = time.perf_counter()
             for _ in range(TRIALS):
                 be.compute(params, dh)
-            t = (time.perf_counter() - t0) / TRIALS * 1000
+            t = (time.perf_counter() - t0) / TRIALS
             del dh, be
-            times.append(f"{t:>10.2f}ms")
+            eps = n / t
+            rates.append(f"{eps:>10.0f}/s")
         except Exception as e:
-            times.append(f"{'SKIP':>10}")
-    print(f"\r  n={n:>5} | {' | '.join(times)}")
+            rates.append(f"{'SKIP':>10}")
+    print(f"\r  {n:>5}    | {' | '.join(rates)}")
 
 print("-" * (8 + 14 * len(backends)))

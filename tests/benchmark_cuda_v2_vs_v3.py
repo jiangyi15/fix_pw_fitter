@@ -41,7 +41,7 @@ print("-" * 55)
 
 for n in BATCH_SIZES:
     data = make_data(n)
-    times = []
+    rates = []
     for bname in ["cuda_v2", "cuda32_v2", "cuda_v3", "cuda32_v3"]:
         try:
             be = create_backend(bname, kc)
@@ -49,12 +49,13 @@ for n in BATCH_SIZES:
             for _ in range(WARMUP): be.compute(params, dh)
             t0 = time.perf_counter()
             for _ in range(TRIALS): be.compute(params, dh)
-            t = (time.perf_counter() - t0) / TRIALS * 1000
+            t = (time.perf_counter() - t0) / TRIALS
             del dh, be
-            times.append(f"{t:>10.2f}ms")
+            eps = n / t
+            rates.append(f"{eps:>10.0f}/s")
         except Exception as e:
-            times.append(f"{'SKIP':>10}")
-    print(f"  {n:>5}    | {' | '.join(times)}")
+            rates.append(f"{'SKIP':>10}")
+    print(f"  {n:>5}    | {' | '.join(rates)}")
 
 print("-" * 55)
 print("  v3 uses Catmull-Rom (matches NumPy exactly)")
