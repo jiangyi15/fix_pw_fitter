@@ -22,6 +22,8 @@ VARIANTS = [
     ("kernels_v3_f32.cu", "libcuda_kernels_v3_f32.so"),
 ]
 
+_override_arch = None  # set via set_arch() or --arch
+
 
 # ── helpers ─────────────────────────────────────────────────────
 
@@ -63,12 +65,31 @@ def detect_gcc():
     return p
 
 
+def set_arch(arch):
+    """Override GPU architecture for compilation.
+
+    *arch* can be a single SM like ``"sm_86"`` or a comma-separated
+    list like ``"sm_70,sm_86"``.  Each entry becomes a separate
+    ``-gencode`` flag, producing a fat binary.
+    """
+    global _override_arch
+    _override_arch = arch
+
+
 def _arch_flags(nvcc):
     """Auto-detect GPU compute capability from nvidia-smi.
 
     Falls back to sm_86 (Ampere+) with optional sm_70 (Volta) for
     CUDA < 13, when nvidia-smi is not available.
     """
+    # Manual override via set_arch() or --arch flag
+    if _override_arch:
+        sms = _override_arch.replace('compute_', 'sm_').split(',')
+        flags = []
+        for sm in sms:
+            sm = sm.strip()
+            flags.extend(['-gencode', f'arch=compute_{sm[3:]},code={sm}'])
+        return flags
     try:
         r = subprocess.run(
             ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
@@ -169,6 +190,15 @@ def build():
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Build CUDA kernels for ampfit")
+    ap.add_argument("--arch", default=None,
+                    help="Override GPU arch (e.g. 'sm_86' or 'sm_70,sm_86')")
+    args = ap.parse_args()
+
+    if args.arch:
+        set_arch(args.arch)
+
     # Force rebuild: ignore existing .hash files, rebuild all
     print("ampfit CUDA: force rebuilding all kernels")
     for src_name, lib_name in VARIANTS:
