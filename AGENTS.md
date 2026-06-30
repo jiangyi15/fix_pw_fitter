@@ -31,7 +31,7 @@ Base backend handles data NLL.  Default base is `cuda_v3` (was `numpy`).
 
 ### CUDA Build
 
-All 4 `.cu` files compiled via:
+Kernels auto-build on import — `.so` is rebuilt automatically when the corresponding `.cu` source file changes (SHA-256 check).  Force rebuild all:
 ```bash
 python -m ampfit.cuda.build
 ```
