@@ -27,8 +27,7 @@ Each backend tested in an isolated process (no GPU context cross-contamination).
 ### Key observations
 
 - All four CUDA kernels agree within 0.04 on NLL and within 0.5 of TFPWA/2 norm.
-- The +31.6 NLL difference from reference is from the per-event `frac` inconsistency between data and phsp (zero phsp time).
-- **Integrated backend** using Gram matrix norms handles `frac` consistently, reaching +1.6 (f64 base) or **+0.88** (f32 base).
+- **Integrated backend** norm uses Gram matrices and is time-independent, which gives a different norm and a closer NLL (+1.6 for f64 base, **+0.88** for f32 base).
 - Always run in separate processes when switching backends — `__del__` alone does not fully reset GPU context between different kernel versions.
 
 ## Scripts
