@@ -167,6 +167,7 @@ class Config:
         self.unique_gamma = []
         self.unique_fl = []
         self.unique_angle_basis = []
+        self.n_interp_gamma = 2000  # gamma table interpolation points
 
     def get_topo_index(self, decay):
         topo_id = {}
@@ -264,7 +265,9 @@ class Config:
         m_min = m_finals[0]+ m_finals[1]
         return m_min, m_max
 
-    def build_gamma_table(self, n_interp=2000):
+    def build_gamma_table(self, n_interp=None):
+        if n_interp is None:
+            n_interp = self.n_interp_gamma
         gamma_table = {}
         m_min, m_max = self.get_max_mass_range()
         m = np.linspace(m_min-0.01, m_max + 0.01, n_interp)
