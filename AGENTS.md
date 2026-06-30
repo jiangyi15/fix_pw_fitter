@@ -31,10 +31,17 @@ Base backend handles data NLL.  Default base is `cuda_v3` (was `numpy`).
 
 ### CUDA Build
 
-Kernels auto-build on import — `.so` is rebuilt automatically when the corresponding `.cu` source file changes (SHA-256 check).  Force rebuild all:
+Kernels auto-build on import — `.so` is rebuilt automatically when the corresponding `.cu` source file changes (SHA-256 check).  Force rebuild all or specify arch:
+
 ```bash
-python -m ampfit.cuda.build
+python -m ampfit.cuda.build                       # auto-detect (nvidia-smi)
+python -m ampfit.cuda.build --arch sm_86           # single arch
+python -m ampfit.cuda.build --arch sm_70,sm_86     # fat binary (multi-arch)
 ```
+
+Auto-detection priority:
+1. `nvidia-smi` → exact `-arch=sm_XY` for the installed GPU
+2. `nvcc --version` → fat binary: `sm_70+sm_86` (CUDA < 13) or `sm_86` only (CUDA ≥ 13)
 
 ## Key Architecture
 
