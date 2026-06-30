@@ -31,27 +31,26 @@ def setup(fitter):
 
 
 def main():
-    ref_nll = -29656.1422505652  # from final_params_0.json
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--backend', default=None,
+                        help='Single backend to test (default: test all)')
+    args = parser.parse_args()
 
-    fitter = Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'),
-                    backend='cuda_v3')
-    fitter._phsp_batch_size = 5000
-    setup(fitter)
+    ref_nll = -29656.1422505652  # from final_params_0.json
+    backends = args.backend.split(',') if args.backend else ['cuda_v3', 'integrated']
 
     data_np, _ = Fitter.load_npz('data/data_arrays.npz')
     phsp_np, _ = Fitter.load_npz('data/phsp_arrays.npz')
-    fitter.set_phsp(phsp_np)
-    fitter.set_data(data_np)
 
     with open('/home/jiangy/ana/test_4pi/test_amp/pw_cfit5_td6_fix29/final_params_0.json') as f:
         fit_data = json.load(f)
-    x0 = fitter.values_from_dict(fit_data)
 
     print(f"{'Backend':<15s} {'Norm':>12s} {'NLL':>15s} {'Diff':>12s}")
     print("-" * 55)
     print(f"{'TFPWA ref':<15s} {'34717.11':>12s} {'-29656.142251':>15s} {'—':>12s}")
 
-    for backend in ['cuda_v3', 'integrated']:
+    for backend in backends:
         fitter = Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'),
                         backend=backend)
         if backend != 'integrated':
@@ -67,8 +66,9 @@ def main():
 
         print(f"{backend:<15s} {norm:>12.4f} {nll:>15.6f} {diff:>+11.4f}")
 
-    print()
-    print("All backends validated — K factors 112/112, amplitudes < 0.001, NLL < 32")
+    if not args.backend:
+        print()
+        print("All backends validated — K factors 112/112, amplitudes < 0.001, NLL < 32")
 
 
 if __name__ == "__main__":
