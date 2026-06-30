@@ -42,6 +42,7 @@ backends = [
     ("CUDAv2",    "cuda_v2"),
     ("CUDA32v2",  "cuda32_v2"),
     ("ONNXcpu",   "onnx_cpu"),
+    ("ONNXcuda",  "onnx_cuda"),
     ("Integrated","integrated"),
 ]
 
