@@ -2,6 +2,7 @@ data:
     dat_order: [pip1, pim1, pip2, pim2]
     identical_particles: [[pip1, pip2], [pim1, pim2]]
     cp_particles: [[ pip1, pim1], [pip2, pim2]]
+    model: cfit
     extra_var:
         time:
             default: 1.0
@@ -34,6 +35,16 @@ data:
     phsp_weight: ["../create_data17/phsp_sig_time_weight.npy"]
     phsp_bg_value: ["../create_data17/phsp_sig_bg_model.npy"]
     phsp_l0_weight: ["../create_data17/phsp_sig_time_weight.npy"]
+    phsp_noeff: ["../../ana/test_4pi/noeff/phsp_noeff.npy"]
+    phsp_noeff_time: ["../../ana/test_4pi/noeff/phsp_noeff_time.npy"]
+    phsp_noeff_bg_value: ["../../ana/test_4pi/noeff/phsp_noeff_bg_value.npy"]
+    phsp_noeff_eta1: ["../../ana/test_4pi/noeff/phsp_noeff_eta.npy"]
+    phsp_noeff_tag1: ["../../ana/test_4pi/noeff/phsp_noeff_tag.npy"]
+    phsp_noeff_sym: ["../../ana/test_4pi/noeff/phsp_noeff_sym.npy"]
+    phsp_noeff_sym_time: ["../../ana/test_4pi/noeff/phsp_noeff_sym_time.npy"]
+    phsp_noeff_sym_bg_value: ["../../ana/test_4pi/noeff/phsp_noeff_sym_bg_value.npy"]
+    phsp_noeff_sym_eta1: ["../../ana/test_4pi/noeff/phsp_noeff_sym_eta.npy"]
+    phsp_noeff_sym_tag1: ["../../ana/test_4pi/noeff/phsp_noeff_sym_tag.npy"]
     purity: 0.914
     preprocessor: [default, strip]
     amp_model:

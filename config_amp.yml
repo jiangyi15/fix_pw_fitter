@@ -56,6 +56,8 @@ decay:
     - [ pipipi8, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
     - [ pipipi9, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
     - [ pipipi10, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
+    - [ pipipi11, pim2, p_break: True, model: gls_cpv_aabar, no_q0: True]
+    - [ pipipi12, pip2, p_break: True, model: gls_cpv_aabar , no_q0: True]
     - [ pipi1f, pipi2f, p_break: True, model: gls_cpv_aabar, no_q0: True]
     pipi1: [pip1, pim1, no_q0: True]
     pipi2: [pip2, pim2, no_q0: True]
@@ -75,11 +77,14 @@ decay:
     pipipi8: [ pipid, pim2 , no_q0: True]
     pipipi9: [ pipie, pip2 , no_q0: True]
     pipipi10: [ pipie, pim2 , no_q0: True]
+    pipipi11: [ pipif, pip2 , no_q0: True]
+    pipipi12: [ pipif, pim2 , no_q0: True]
     pipia: [pip1, pim1, no_q0: True]
     pipib: [pip1, pim1, no_q0: True]
     pipic: [pip1, pim1, no_q0: True]
     pipid: [pip1, pim1, no_q0: True]
     pipie: [pip1, pim1, no_q0: True]
+    pipif: [pip1, pim1, no_q0: True]
 
 particle:
     $top: B
@@ -110,10 +115,12 @@ particle:
     pipipi4: [ a1(1260)m, a1(1640)m ]
     pipipi5: [ a1(1260)p, a1(1640)p ]
     pipipi6: [ a1(1260)m, a1(1640)m ]
-    pipipi7: [ a1(1640)p, pi2(1670)p ]
-    pipipi8: [ a1(1640)m, pi2(1670)m ]
+    pipipi7: [ a1(1260)p, a1(1640)p, pi2(1670)p ]
+    pipipi8: [ a1(1260)m, a1(1640)m, pi2(1670)m ]
     pipipi9: [ pi1300p, pi1600p, pi2(1670)p ]
     pipipi10: [ pi1300m, pi1600m, pi2(1670)m ]
+    pipipi11: [ a1(1260)p ]
+    pipipi12: [ a1(1260)m ]
     pipi1: [ rhoA ]
     pipi2: [ rhoB ]
     pipi1CPV: [ f0(980), f0(500), NR0 ]
@@ -123,8 +130,9 @@ particle:
     pipia: [ rhoA ]
     pipib: [ rhoA ]
     pipic: [ f0(980), f0(500)]
-    pipid: [ f2(1270)]
+    pipid: [ f2(1270) ]
     pipie: [ f0(980), f0(500), rhoA ]
+    pipif: [ f0(1370) ]
     pipi1f: [ ]
     pipi2f: [ ]
     a1(1260)p:
@@ -180,17 +188,20 @@ particle:
         P: -1
         mass: 1.716
         width: 0.480
-        width_scale: True
-        model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi2(1670)p_gamma.npy
+        model: ck_matrix_v2
+        gamma_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_gamma.npy
+        order_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_partial_order.json
+        partial_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_partial.npy
     pi2(1670)m:
         J: 2
         P: -1
         mass: 1.716
         width: 0.480
-        width_scale: True
-        model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls5_mass_width_pi2(1670)_2/lineshapes4/pi2(1670)p_gamma.npy
+        model: ck_matrix_v2
+        gamma_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_gamma.npy
+        order_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_partial_order.json
+        partial_file: /home/jiangy/ana/test_4pi/test_amp/lineshapes7/pi2(1670)p_partial.npy
+
     pi1(1600)p:
         J: 1
         P: -1
@@ -392,6 +403,13 @@ particle:
         width: 0.211
         model: BWR
         L: 2
+    f0(1370):
+        J: 0
+        P: +1
+        mass: 1.400
+        width: 0.300
+        model: BWR
+        L: 0
 
 constrains:
     fix_var:

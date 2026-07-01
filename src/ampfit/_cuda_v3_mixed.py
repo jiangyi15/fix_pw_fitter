@@ -216,7 +216,7 @@ class CUDAKernelV3Mixed:
     # -- compute -------------------------------------------------------
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        """Compute forward + backward pass (params/outputs in f64)."""
+        """Compute forward + backward pass (API matches f64, f64↔f32 converted in C)."""
         ck = params["ck"]
         nw = self.n_wave
         nu_ = self.n_unique_bw
@@ -227,14 +227,13 @@ class CUDAKernelV3Mixed:
 
         ck_r = np.real(ck).astype(np.float64)
         ck_i = np.imag(ck).astype(np.float64)
-
         m0 = np.zeros(nu_, np.float64)
         m0[:len(params["m0"])] = np.asarray(params["m0"])
         g0 = np.zeros(ng_, np.float64)
         g0[:len(params["g0"])] = np.asarray(params["g0"])
         G, DG, DM, Ap_, pr_, pp_ = params["scalar"]
 
-        # f64 output buffers
+        # All output buffers in f64 (matching f64 API)
         oQ = _ffi.new("double*")
         oP = np.zeros(data_handle.ne, np.float64)
         ogck_r = np.zeros(nw, np.float64)

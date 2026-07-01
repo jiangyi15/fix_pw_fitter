@@ -5,7 +5,7 @@ set -e
 CONFIG="${1:-config_amp.yml}"
 DATA="${2:-data/data_arrays.npz}"
 PHSP="${3:-data/phsp_arrays.npz}"
-PREFIX="${4:-fit_output}"
+PREFIX="${4:-fit_output13}"
 
 echo "=== ampfit full fit ==="
 echo "config: $CONFIG"
@@ -21,8 +21,8 @@ python run_fit.py \
     --data "$DATA" \
     --phsp "$PHSP" \
     --fit --maxiter 1000 \
-    --backend "{name: integrated, base: cuda_v3}" \
-    --init /home/jiangy/ana/test_4pi/test_amp/pw_cfit5_td6_fix29/final_params_0.json \
+    --backend "cuda32_v3" \
+    --init fit_output11/results.json \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/" \
     --fix-mass-width

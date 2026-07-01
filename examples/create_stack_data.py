@@ -1,4 +1,6 @@
 from tf_pwa.config_loader import ConfigLoader
+import sys
+sys.path.insert(0, "../../ana/test_4pi/test_full_gpu")
 import extra_amp
 import tensorflow as tf
 from tf_pwa.data import data_index
@@ -74,9 +76,12 @@ def read_data(data):
     return {"mass": mass, "q": q, "angles": angle, "frac": frac, "time": time, "bkg_raw": bkg, "weight": weight}
 
 with tf.device("CPU"):
-    data  = config.get_data("data")[0]
+    # data  = config.get_data("data")[0]
+    # var= read_data(data)
+    # np.savez("data_arrays.npz", **var)
+    # data  = config.get_data("phsp")[0]
+    # var= read_data(data)
+    # np.savez("phsp_arrays.npz", **var)
+    data  = config.get_data("phsp_noeff_sym")[0]
     var= read_data(data)
-    np.savez("data_arrays.npz", **var)
-    data  = config.get_data("phsp")[0]
-    var= read_data(data)
-    np.savez("phsp_arrays.npz", **var)
+    np.savez("data/phsp_noeff_sym_arrays.npz", **var)
