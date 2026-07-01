@@ -28,6 +28,7 @@ def setup(fitter):
     for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]:
         fs[n] = v
     fitter.set_fixed(fs); fitter.set_same(sp); fitter.set_scale(sc)
+    fitter.load_all_data()
 
 
 def main():
@@ -40,9 +41,6 @@ def main():
     ref_nll = -29656.1422505652  # from final_params_0.json
     backends = args.backend.split(',') if args.backend else ['cuda_v3', 'integrated']
 
-    data_np, _ = Fitter.load_npz('data/data_arrays.npz')
-    phsp_np, _ = Fitter.load_npz('data/phsp_arrays.npz')
-
     with open('/home/jiangy/ana/test_4pi/test_amp/pw_cfit5_td6_fix29/final_params_0.json') as f:
         fit_data = json.load(f)
 
@@ -53,11 +51,7 @@ def main():
     for backend in backends:
         fitter = Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'),
                         backend=backend)
-        if backend != 'integrated':
-            fitter._phsp_batch_size = 5000
         setup(fitter)
-        fitter.set_phsp(phsp_np)
-        fitter.set_data(data_np)
         x0 = fitter.values_from_dict(fit_data)
 
         norm, _ = fitter._compute_norm_batched(fitter._build_params(x0)[0])
