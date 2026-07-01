@@ -5,22 +5,22 @@ Usage:
     python -m ampfit.cuda.build          # force rebuild all
     from ampfit.cuda.build import ensure; ensure()  # auto-update on import
 
-Auto-detects nvcc and required compiler flags.  Builds all 4 kernel
-variants: v2/v3 × f64/f32.
+Auto-detects nvcc and required compiler flags.  Auto-discovers all
+``kernels_*.cu`` files and builds them into ``libcuda_kernels_*.so``.
 
 Each .so has a companion .hash file (SHA-256 of the .cu source).
 On import, the loader checks the hash and auto-rebuilds if the source changed.
 """
-import os, hashlib, subprocess, sys
+import os, hashlib, subprocess, sys, glob
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VARIANTS = [
-    ("kernels_v2.cu",     "libcuda_kernels_v2.so"),
-    ("kernels_v2_f32.cu", "libcuda_kernels_v2_f32.so"),
-    ("kernels_v3.cu",     "libcuda_kernels_v3.so"),
-    ("kernels_v3_f32.cu", "libcuda_kernels_v3_f32.so"),
-]
+# Auto-discover all kernel source files: kernels_*.cu → libcuda_kernels_*.so
+VARIANTS = []
+for cu_path in sorted(glob.glob(os.path.join(SCRIPT_DIR, "kernels_*.cu"))):
+    src_name = os.path.basename(cu_path)
+    lib_name = "libcuda_" + os.path.splitext(src_name)[0] + ".so"
+    VARIANTS.append((src_name, lib_name))
 
 _override_arch = None  # set via set_arch() or --arch
 
@@ -175,7 +175,7 @@ def ensure(src_name, lib_name):
 
 
 def build():
-    """Build all 4 kernel variants.  Returns True if all succeeded."""
+    """Build all discovered kernel variants.  Returns True if all succeeded."""
     all_ok = True
     for src_name, lib_name in VARIANTS:
         print(f"  Building {lib_name}...", end=' ')
