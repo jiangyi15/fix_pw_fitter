@@ -1,4 +1,6 @@
 data:
+    data_arr: "data/data_arrays.npz"
+    phsp_arr: "data/phsp_arrays.npz"
     dat_order: [pip1, pim1, pip2, pim2]
     identical_particles: [[pip1, pip2], [pim1, pim2]]
     cp_particles: [[ pip1, pim1], [pip2, pim2]]

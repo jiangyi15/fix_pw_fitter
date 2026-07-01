@@ -247,6 +247,34 @@ class Fitter:
         assert not np.any(np.isnan(out["mass"])), "NaN in mass"
         return out, n_events
 
+    def load_all_data(self):
+        """Load data and phsp from ``data_arr`` / ``phsp_arr`` in config.
+
+        Config keys ``data.data_arr`` and ``data.phsp_arr`` specify paths
+        to ``.npz`` files (relative to the config file directory).
+        Calls :meth:`set_phsp` and :meth:`set_data` automatically.
+
+        Returns:
+            ``(data_np, phsp_np)`` — the loaded numpy dicts.
+        """
+        import os
+        cfg_dir = os.path.dirname(os.path.abspath(
+            self.config._config_path))
+        data_path = self.config.dic.get("data", {}).get("data_arr")
+        phsp_path = self.config.dic.get("data", {}).get("phsp_arr")
+        if not data_path or not phsp_path:
+            raise ValueError(
+                "Config must have 'data.data_arr' and 'data.phsp_arr' "
+                "pointing to .npz files.")
+        # Resolve relative to config file
+        data_path = os.path.join(cfg_dir, data_path)
+        phsp_path = os.path.join(cfg_dir, phsp_path)
+        data_np, _ = self.load_npz(data_path)
+        phsp_np, _ = self.load_npz(phsp_path)
+        self.set_phsp(phsp_np)
+        self.set_data(data_np)
+        return data_np, phsp_np
+
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
 

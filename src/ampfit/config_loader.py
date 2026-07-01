@@ -144,6 +144,7 @@ class DecayGroup:
 class Config:
     def __init__(self, filename):
         self.dic = load_config(filename)
+        self._config_path = filename if isinstance(filename, str) else ""
         top = self.dic["particle"]["$top"]
         finals = list(self.dic["particle"]["$finals"])
         self.top = top
