@@ -11,7 +11,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _SCRIPT_DIR)
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
-from ampfit.utils import fmt_meas
+from ampfit.utils import fmt_meas, fmt_particle
 from run_fit import build_constraints
 
 
@@ -253,17 +253,9 @@ def main():
         P(r" & PDG & ours\\\hline")
 
         # Emit each resonance section
-        section_labels = {
-            "a1(1260)": "$a_1(1260)$",
-            "a1(1640)": "$a_1(1640)$",
-            "a2(1320)": "$a_2(1320)$",
-            "pi2(1670)": "$\\pi_2(1670)$",
-            "pi(1300)": "$\\pi(1300)$",
-            "pi(1800)": "$\\pi(1800)$",
-        }
-        for key in section_labels:
+        for key in PDG:
             sec = PDG[key]
-            emit_section(tex, section_labels[key], sec["modes"], sec["den"], af, cfg)
+            emit_section(tex, fmt_particle(key), sec["modes"], sec["den"], af, cfg)
 
         P(r"\hline\end{tabular}\end{table}\end{document}")
 
