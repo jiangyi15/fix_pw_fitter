@@ -159,26 +159,93 @@ Mean ± 1σ over 5 runs:
 - ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
 - `cuda` / `cuda64` are aliases for `cuda_v3` / `cuda64_v3` (the latest stable v3 backend)
 
-## Backend Architecture
+## Architecture: Three Layers
+
+### 1. Kernel — raw compute engine
+
+The lowest level. Pure number crunching with no knowledge of constraints, normalization, or data management.
+
+```python
+class CUDAKernelV3:        # _cuda_v3.py
+    def __init__(self, config)           # config dict from build_all_index()
+    def load_data(self, data) → Handle  # upload to GPU
+    def compute(self, params, handle, norm=None) → (Q, grads, P)
+    def compute_gram(self, phsp_handle, m0, g0) → Gram matrices
+```
+
+Implementations: **NumpyKernel** (reference), **CUDAKernelV3/V2** (f64/f32), **ONNXKernel**.
+
+### 2. Backend — standard interface around a kernel
+
+Wraps a kernel with a uniform API for the Fitter. Handles batching, `return_p` semantics, and optional pre‑computation (e.g. Gram matrices for IntegratedBackend).
+
+```python
+class _CUDABackend(ComputeBackend):   # backends/cuda_backends.py
+    def load_data(self, data_np) → Handle
+    def compute(self, params, handle, norm=None, return_p=True)
+    def free(self)
+```
+
+All CUDA backends share `_CUDABackend` — each subclass just selects which kernel to wrap.
+**IntegratedBackend** adds Gram‑matrix based norm for O(n²) instead of O(N_phsp · n_wave).
+
+### 3. Fitter — orchestrator with constraint pipeline
+
+Owns data, constraints, and the full parameter transform chain. The only layer that stores numpy arrays.
+
+```python
+class Fitter:
+    set_data(data), set_phsp(phsp)     # store data → backend.load_data()
+    set_fixed(slots), set_same(pairs)  # constraint transforms
+    get_nll(x) → (nll, grad)           # full pipeline
+    fit(x0, ...) → result              # BFGS optimizer
+```
+
+### Data ownership
 
 ```
-x (flat vector)
-  ↓
-├─ VariableRegistry: names → indices
-├─ ParameterConstraint: ck = build_ck(x_ck)  (combination products)
-├─ apply_bounds (arctan transform for bounded params)
-├─ backend.compute: forward + backward pass
-│   │
-│   ├─ NumPyBackend   — pure NumPy f64, reference implementation
-│   ├─ CUDABackendV3  — CUDA C kernels f64/f32 v3 (Catmull-Rom, default)
-│   ├─ CUDABackendV2  — CUDA C kernels f64/f32 v2 (linear interpolation)
-│   └─ ONNXBackend    — ONNX Runtime (CPU/CUDA)
-│
-├─ norm from phsp (batched for large datasets)
-├─ purity-based likelihood: -log(purity·P/norm + (1-purity)·bkg/Nb)
-├─ gradient combination: direct + norm chain
-└─ BFGS fit → Hessian → uncertainties → JSON + error_matrix.npy
+Storage:        Fitter owns numpy arrays (_data_np, _phsp_np)
+                    ↓  backend.load_data()
+Handle:         Backend returns a handle (numpy dict or CUDA DataHandle)
+                    ↓  passed to compute()
+Compute:        Kernel reads arrays/handle, produces Q, grads, P
 ```
+
+- **NumPy**: `load_data` is a no‑op — returns the dict itself (zero copy).
+- **CUDA**: `load_data` uploads to GPU, returns a `DataHandle` (GPU pointer).
+- **IntegratedBackend**: passes the phsp `handle` through to `_load_phsp_matrices`,
+  avoiding a redundant GPU re‑upload for Gram computation.
+
+### Pipeline
+
+```
+x (flat vector, 115 params)
+  ↓ _build_params
+apply_bounds → to_dict → resolve → build_ck  (constraint chain)
+  ↓ params dict {ck, m0, g0, scalar}
+  ├── Fitter._compute_norm_batched:
+  │     backend.compute(params, phsp_handle, norm=None, return_p=False) → norm
+  ├── Fitter.get_nll_raw:
+  │     backend.compute(params, data_handle, norm=norm) → (nll, grads)
+  │     total_grad = kernel_grad + dNLL_dnorm · norm_grad
+  └── Fitter._flat_gradient:
+        chain_gradient(mass_width → scale → fixed) → bound_grad
+  ↓
+(nll, grad_x)  → BFGS optimizer
+```
+
+### Registered backends
+
+| Name | Backend class | Precision |
+|------|:-------------|:---------:|
+| `numpy` | NumpyBackend | f64 |
+| `cuda_v3` / `cuda64_v3` / `cuda` | CUDABackendV3 | f64 |
+| `cuda32_v3` | CUDABackendV3F32 | f32 |
+| `cuda_mixed_v3` | CUDABackendV3Mixed | f32+f64 |
+| `cuda_v2` / `cuda64_v2` | CUDABackendV2 | f64 |
+| `cuda32_v2` | CUDABackendV2F32 | f32 |
+| `integrated` | IntegratedBackend | base‑dependent |
+| `onnx_cpu` / `onnx_cuda` | ONNXBackend | f32 |
 
 ### Result persistence
 

@@ -43,22 +43,59 @@ Auto-detection priority:
 1. `nvidia-smi` → exact `-arch=sm_XY` for the installed GPU
 2. `nvcc --version` → fat binary: `sm_70+sm_86` (CUDA < 13) or `sm_86` only (CUDA ≥ 13)
 
-## Key Architecture
+## Three-Layer Architecture
 
 ```
-x (flat optimizer vector)
-  → apply_bounds (arctan bijective)
-  → to_dict → resolve (same → fixed → scale → mass_width_transforms)
-  → build_ck → kernel.compute(params, data_handle, norm)
-      ├─ NumPy / CUDA v2/v3 / ONNX / Integrated (via Gram matrix)
-  → _flat_gradient (backprop_grad → chain_gradient → bound_grad)
-  → (nll, grad_x)
+Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
+  │  set_data / set_phsp → backend.load_data() → handle
+  │  get_nll(x) → _build_params → _compute_norm → get_nll_raw → _flat_gradient
+  │
+  ├── Backend (standard interface) — wraps kernel, handles batching
+  │     load_data(data_np) → Handle
+  │     compute(params, handle, norm=None, return_p=?) → (Q, grads, P)
+  │     free()
+  │     │
+  │     ├── _CUDABackend (base for CUDA v2/v3/f32/mixed)
+  │     ├── NumpyBackend     — load_data returns dict itself (zero-copy)
+  │     ├── IntegratedBackend — Gram matrix norm + delegates data NLL to base
+  │     └── ONNXBackend       — ONNX Runtime with batching
+  │
+  └── Kernel (raw compute) — no constraints, no norm, just math
+        __init__(config) → set up indices/tables
+        load_data(data) → upload to device
+        compute(params, handle, norm=None) → (Q, grads, P)
+        └── NumpyKernel / CUDAKernelV3/V2 / ONNXKernel
 ```
 
-- **`resolve()`** pipeline order: `name_res → fixed_tr → scale_transforms[] → mass_width_transforms[]`
-- **`chain_gradient()`** reverses: `mass_width → scale → fixed → name_res`
-- **`Transform.forward(d)`** returns updated dict; **`backward(grad)`** returns only `input_names` gradients
-- Output-only transform names (inputs empty or not in output_names) are **removed from the optimizer** (`_all_names`) — they're constants injected by `forward()`.
+### Data flow
+
+```
+Fitter._data_np / _phsp_np  (numpy arrays, CPU)
+  → backend.load_data(data)
+      → NumPy: returns dict (zero copy)
+      → CUDA:  uploads to GPU, returns DataHandle
+  → backend.compute(params, handle, ...)
+      → kernel reads compute-relevant data from handle
+      → returns (Q, grads, P)
+
+Fitter._compute_norm_batched(params):
+  backend.compute(params, phsp_handle, norm=None, return_p=False)
+    → Integrated: uses Gram matrices (cached, O(n²))
+    → CUDA/NumPy: full forward pass (batched internally)
+
+Fitter.get_nll_raw(params):
+  norm, norm_grads = _compute_norm_batched(params)
+  nll, grads, P = backend.compute(params, data_handle, norm=norm)
+  total_grad = kernel_grad + dNLL_dnorm * norm_grad
+```
+
+- **Fitter** is the only layer that stores numpy arrays.
+- **Backend** adds `return_p` semantics, `prepare_phsp_batched`, optional pre‑computation (Gram).
+- **Kernel** is pure compute — knows nothing about constraints, normalization, or the fitter.
+- All batching is handled inside the backend (CUDA C code or numpy backend split loop).
+- `_compute_norm_batched` always calls `backend.compute(norm=None, return_p=False)`:
+  - IntegratedBackend → Gram path (O(n²) matmul from cached matrices)
+  - Other backends → full forward pass (batched internally, `return_p=False` just skips P).
 
 ### `compute(params, data_handle, norm=None, return_p=True)`
 
