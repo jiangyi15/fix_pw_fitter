@@ -9,7 +9,6 @@ APPIMAGETOOL="$SCRIPT_DIR/appimagetool-x86_64.AppImage"
 APP_DIR="$SCRIPT_DIR/AppDir"
 OUTPUT="$SCRIPT_DIR/ampfit-python3.10-cuda12.AppImage"
 CONDA="/home/jiangy/miniconda3"
-CUDA12_ENV="$CONDA/envs/code2"  # has full CUDA toolkit with nvcc
 
 step() { echo "=== $1 ==="; }
 
@@ -39,42 +38,40 @@ for lib in libcudart.so libcublas.so libcublasLt.so libcufft.so libcurand.so; do
 done
 find "$CUDA_LIB" -name "*.so*" -exec strip --strip-unneeded {} \; 2>/dev/null || true
 
-# 4. Bundle nvcc + headers + compilation tools
-step "Bundle nvcc + CUDA toolkit"
+# 4. Bundle CUDA 12.8 toolkit (nvcc + headers + compilation tools)
+step "Bundle CUDA 12.8 toolkit"
 CUDA_TK="$APP_DIR/usr/local/cuda"
 mkdir -p "$CUDA_TK/bin" "$CUDA_TK/nvvm/bin" "$CUDA_TK/nvvm/lib64"
-mkdir -p "$CUDA_TK/nvvm/libdevice" "$CUDA_TK/lib64"
+mkdir -p "$CUDA_TK/nvvm/libdevice" "$CUDA_TK/lib64" "$CUDA_TK/targets"
 
-# nvcc + its profile (needed for include path resolution)
-cp -aL "$CUDA12_ENV/bin/nvcc" "$CUDA12_ENV/bin/nvcc.profile" "$CUDA_TK/bin/"
+# All CUDA tools from base conda (complete CUDA 12.8 installation)
+for tool in nvcc nvcc.profile ptxas nvlink bin2c cudafe++ fatbinary __nvcc_device_query; do
+    [ -f "$CONDA/bin/$tool" ] && cp -L "$CONDA/bin/$tool" "$CUDA_TK/bin/"
+done
+cp -rL "$CONDA/bin/crt" "$CUDA_TK/bin/"
+
+# nvvm (JIT compiler)
+cp -L "$CONDA/nvvm/bin/cicc" "$CUDA_TK/nvvm/bin/"
+cp -L "$CONDA/nvvm/lib64/libnvvm"* "$CUDA_TK/nvvm/lib64/"
+cp -L "$CONDA/nvvm/libdevice/"* "$CUDA_TK/nvvm/libdevice/"
 
 # Headers (targets structure expected by nvcc)
-cp -rL "$CUDA12_ENV/targets" "$CUDA_TK/"
-
-# nvvm (jit compiler)
-cp -rL "$CUDA12_ENV/nvvm/lib64/"libnvvm* "$CUDA_TK/nvvm/lib64/"
-cp -rL "$CUDA12_ENV/nvvm/libdevice/"* "$CUDA_TK/nvvm/libdevice/"
-cp -rL "$CUDA12_ENV/nvvm/bin/"* "$CUDA_TK/nvvm/bin/"
-
-# Companion tools (ptxas, crt, nvlink, bin2c)
-for tool in ptxas crt nvlink bin2c; do
-    cp -aL "$CUDA12_ENV/bin/$tool" "$CUDA_TK/bin/" 2>/dev/null || true
-done
-
-# libnvJitLink
-find "$CUDA12_ENV" -name "libnvJitLink*" -not -name "*.a" 2>/dev/null | while read f; do
-    cp -aL "$f" "$CUDA_TK/lib64/"
-done
+cp -rL "$CONDA/targets" "$CUDA_TK/"
 
 # 5. Pre-compile CUDA kernels (sm_70, sm_75, sm_86, sm_89)
 step "Pre-compile CUDA kernels"
-export PATH="$CUDA_TK/bin:$CUDA_TK/nvvm/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_TK/lib64:$CUDA_TK/nvvm/lib64:$CUDA_LIB:${LD_LIBRARY_PATH:-}"
 TMP_SRC="/tmp/ampfit_build_$$"
 mkdir -p "$TMP_SRC"
 cp -r "$PROJECT_DIR/src/ampfit" "$TMP_SRC/"
+# Use clean environment to avoid conda GCC version conflicts
 "$APP_DIR/AppRun" -c "
-import sys; sys.path.insert(0, '$TMP_SRC')
+import sys, os
+os.environ.clear()
+os.environ['PATH'] = '$CUDA_TK/bin:$CUDA_TK/nvvm/bin:/usr/bin:/bin'
+os.environ['LD_LIBRARY_PATH'] = '$CUDA_TK/lib64:$CUDA_TK/nvvm/lib64'
+os.environ['HOME'] = '/tmp'
+os.environ['AMPFIT_HASH_DIR'] = '/tmp'
+sys.path.insert(0, '$TMP_SRC')
 from ampfit.cuda.build import set_arch, build
 set_arch('sm_70,sm_75,sm_86,sm_89')
 print('Building kernels...', end='')
@@ -119,15 +116,17 @@ echo -n "  cudart: "
 $APP_DIR/AppRun -c "import ctypes; ctypes.CDLL('libcudart.so')
 v=ctypes.c_int(); ctypes.CDLL('libcudart.so').cudaRuntimeGetVersion(ctypes.byref(v))
 print(f'CUDA {v.value//1000}.{(v.value%1000)//10}')" 2>&1
-echo -n "  compile: "
+echo -n "  nvcc: "
 echo '#include <cuda_runtime.h>
 __global__ void k(){}' > /tmp/_test.cu
 $APP_DIR/AppRun -c "
 import subprocess, os
-os.environ.update(PATH='/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:'+os.environ.get('PATH',''),
-    LD_LIBRARY_PATH='/usr/local/cuda/lib64:/usr/local/cuda/nvvm/lib64:/usr/lib/cuda')
-r=subprocess.run(['nvcc','-c','/tmp/_test.cu','-o','/tmp/_test.o'])
-print('OK' if r.returncode==0 else f'FAIL({r.returncode})')
+os.environ.clear()
+os.environ['PATH'] = '/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:/usr/bin:/bin'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/nvvm/lib64'
+r=subprocess.run(['nvcc','--version'], capture_output=True, text=True)
+r2=subprocess.run(['nvcc','-c','/tmp/_test.cu','-o','/tmp/_test.o'])
+print(f'{\"OK\" if r2.returncode==0 else \"FAIL\"} ({[l for l in r.stdout.split(chr(10)) if \"release\" in l][0].strip()})')
 " 2>&1
 rm -f /tmp/_test.cu /tmp/_test.o 2>/dev/null
 
