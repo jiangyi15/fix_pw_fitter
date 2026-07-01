@@ -779,7 +779,7 @@ __global__ void gradient_kernel(
         complex dgp_dDeltaM = complex(0.0, t / 2.0) * gm;
         complex dgm_dDeltaM = complex(0.0, t / 2.0) * gp;
 
-        grad_Gamma_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dGamma + dQ_dgm * dgm_dGamma).real();
+        grad_Gamma_partial[event_idx] = (float)(dQ_dP_val * (-t) * P[event_idx]);
         grad_DeltaGamma_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dDeltaGamma + dQ_dgm * dgm_dDeltaGamma).real();
         grad_DeltaM_partial[event_idx] = 2.0 * (dQ_dgp * dgp_dDeltaM + dQ_dgm * dgm_dDeltaM).real();
 
