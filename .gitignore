@@ -17,3 +17,4 @@ atc/*.json
 # Kernel compilation cache
 kernel_meta/
 *.hash
+*.AppImage
