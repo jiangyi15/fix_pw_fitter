@@ -133,7 +133,7 @@ class IntegratedBackend(ComputeBackend):
                 idcht, idct, idsht, idst,
                 expt, cht, sht, ct, st, t, w, ws)
 
-    def _ensure_gram(self, params):
+    def _ensure_gram(self, params, phsp_handle=None):
         """Build reduced Gram matrices from stored phsp data if needed."""
         if self._phsp_data is None:
             raise RuntimeError("IntegratedBackend: phsp not loaded. "
@@ -146,15 +146,18 @@ class IntegratedBackend(ComputeBackend):
             return
         phsp = {**self._phsp_data, "weight": self._phsp_weights,
                 "frac": self._phsp_frac, "time": self._phsp_time}
-        self._load_phsp_matrices(phsp, m0, g0)
+        self._load_phsp_matrices(phsp, m0, g0, phsp_handle=phsp_handle)
         self._gram_m0 = m0.copy()
         self._gram_g0 = g0.copy()
 
-    def _load_phsp_matrices(self, phsp, m0, g0):
+    def _load_phsp_matrices(self, phsp, m0, g0, phsp_handle=None):
         """Compute ng×ng reduced Gram matrices directly (no full matrix).
 
         Groups of 4 basis functions (spaced ng apart) are summed
         before the outer product, reducing 4·ng×4·ng → ng×ng.
+
+        If *phsp_handle* is provided, reuses it instead of uploading
+        the phsp data again (avoids redundant GPU memory allocation).
         """
         n_events = phsp["mass"].shape[0]
         n_wave = self.kernel.n_wave
@@ -164,14 +167,18 @@ class IntegratedBackend(ComputeBackend):
         # ── CUDA accelerated path (via base backend's kernel) ─────
         if self._gram_compute is not None:
             w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
-            cuda_phsp = {k: v for k, v in phsp.items() if isinstance(v, np.ndarray)}
-            cuda_phsp.setdefault("frac", np.ones(n_events) * 0.5)
-            cuda_phsp.setdefault("time", np.zeros(n_events))
-            cuda_phsp.setdefault("bkg_raw", np.zeros(n_events))
-            # Use the base backend's own data handle for phsp data
-            dh = self.base.load_data(cuda_phsp)
+            # Reuse existing GPU handle if available, otherwise upload
+            if phsp_handle is not None:
+                dh = phsp_handle
+            else:
+                cuda_phsp = {k: v for k, v in phsp.items() if isinstance(v, np.ndarray)}
+                cuda_phsp.setdefault("frac", np.ones(n_events) * 0.5)
+                cuda_phsp.setdefault("time", np.zeros(n_events))
+                cuda_phsp.setdefault("bkg_raw", np.zeros(n_events))
+                dh = self.base.load_data(cuda_phsp)
             Mpp, Mmm, Mpm = self._gram_compute(dh, m0, g0)
-            dh.free()
+            if phsp_handle is None:
+                dh.free()
             self._Mpp_r = (Mpp + Mpp.conj().T) / 2
             self._Mmm_r = (Mmm + Mmm.conj().T) / 2
             self._Mpm_r = Mpm
@@ -249,6 +256,7 @@ class IntegratedBackend(ComputeBackend):
                 data_np.get("time", np.zeros(n)), dtype=np.float64)
             self._phsp_data = {k: np.asarray(data_np[k])
                                for k in ("mass", "q", "angle") if k in data_np}
+            self._phsp_handle = h  # cache for Gram reuse
         return h
 
     def compute(self, params, data_handle, norm=None, return_p=True):
@@ -263,7 +271,7 @@ class IntegratedBackend(ComputeBackend):
                                     return_p=return_p)
 
         # ── Fast norm from pre‑integrated Gram matrices ──────────
-        self._ensure_gram(params)
+        self._ensure_gram(params, phsp_handle=data_handle)
 
         if self._Mpp_r is None:
             raise RuntimeError("IntegratedBackend: phsp not loaded. "
