@@ -18,11 +18,19 @@ import numpy as np
 import onnxruntime as ort
 
 
-MODEL_PATH = "pwa_forward.onnx"
+# Build ONNX model from config (matches how onnx_backend.py does it).
+CONFIG_FILE = "config_angle.yml"
+BATCH_SIZE = 1024
 
-# The ONNX model was built with a fixed batch size.
-# Adjust if you rebuild with --batch-size N.
-BATCH_SIZE = 256
+import warnings
+from ampfit.config_loader import Config
+from ampfit._onnx_builder import PWAONNXBuilder
+config = Config(CONFIG_FILE)
+kc = config.build_all_index()
+builder = PWAONNXBuilder(kc)
+_model = builder.build(batch_size=BATCH_SIZE, norm_model=False)
+_model_norm = builder.build(batch_size=BATCH_SIZE, norm_model=True)
+del config, kc, builder
 
 WARMUP = 3
 TRIALS = 10
@@ -63,12 +71,14 @@ def test_providers_available():
     print("✓ CUDA and CPU execution providers are available")
 
 
+def _sess(providers):
+    return ort.InferenceSession(_model.SerializeToString(), providers=providers)
+def _sess_norm(providers):
+    return ort.InferenceSession(_model_norm.SerializeToString(), providers=providers)
+
 def test_model_loads():
     """Model loads successfully with CUDA provider."""
-    sess = ort.InferenceSession(
-        MODEL_PATH,
-        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-    )
+    sess = _sess(["CUDAExecutionProvider", "CPUExecutionProvider"])
     input_names = [i.name for i in sess.get_inputs()]
     output_names = [o.name for o in sess.get_outputs()]
     print(f"Model inputs ({len(input_names)}): {input_names}")
@@ -80,10 +90,8 @@ def test_model_loads():
 
 def test_cpu_cuda_numerical_agreement():
     """CPU and CUDA inference must produce identical results within tolerance."""
-    cpu_sess = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
-    cuda_sess = ort.InferenceSession(
-        MODEL_PATH, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-    )
+    cpu_sess = _sess(["CPUExecutionProvider"])
+    cuda_sess = _sess(["CUDAExecutionProvider", "CPUExecutionProvider"])
 
     n = BATCH_SIZE
     data = make_data(n)
@@ -116,9 +124,7 @@ def test_cpu_cuda_numerical_agreement():
 
 def test_cuda_provider_actually_used():
     """Verify the CUDA execution provider is actually selected (not CPU fallback)."""
-    sess = ort.InferenceSession(
-        MODEL_PATH, providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-    )
+    sess = _sess(["CUDAExecutionProvider", "CPUExecutionProvider"])
     active_provider = sess.get_providers()[0]
     print(f"  Active provider: {active_provider}")
     assert "CUDA" in active_provider, (
@@ -139,7 +145,7 @@ def test_cpu_vs_cuda_performance():
     """Rough performance comparison between CPU and CUDA providers."""
 
     def benchmark(provider, n, warmup=WARMUP, trials=TRIALS):
-        sess = ort.InferenceSession(MODEL_PATH, providers=[provider])
+        sess = _sess([provider])
         data = make_data(n)
         feed = {k: v for k, v in data.items()}
         # Warmup

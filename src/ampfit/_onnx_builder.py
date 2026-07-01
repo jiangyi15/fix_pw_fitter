@@ -821,4 +821,10 @@ class PWAONNXBuilder:
             helper.make_opsetid("", 11)
         ])
         onnx.checker.check_model(model)
+        # Strip unused initializers (keeps onnxruntime from spamming warnings)
+        used = set()
+        for n in model.graph.node: used.update(n.input); used.update(n.output)
+        kept = [i for i in model.graph.initializer if i.name in used]
+        del model.graph.initializer[:]
+        model.graph.initializer.extend(kept)
         return model

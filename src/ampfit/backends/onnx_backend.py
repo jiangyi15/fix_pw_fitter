@@ -30,13 +30,6 @@ class _ONNXBackendBase(ComputeBackend):
             builder = PWAONNXBuilder(kernel_config)
             model = builder.build(batch_size=batch_size, norm_model=False)
             norm_model = builder.build(batch_size=batch_size, norm_model=True)
-            # Strip unused initializers to silence onnxruntime warnings
-            for m in (model, norm_model):
-                used = set()
-                for n in m.graph.node: used.update(n.input); used.update(n.output)
-                kept = [i for i in m.graph.initializer if i.name in used]
-                del m.graph.initializer[:]
-                m.graph.initializer.extend(kept)
             self.sess = ort.InferenceSession(model.SerializeToString(), providers=providers)
             self.sess_norm = ort.InferenceSession(norm_model.SerializeToString(), providers=providers)
         else:
