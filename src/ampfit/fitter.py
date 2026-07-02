@@ -671,15 +671,17 @@ class Fitter:
     def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
             method='BFGS', disp=True, **kwargs):
         """Minimize NLL using BFGS (default) or any scipy optimizer.
-        
+
         BFGS provides the full Hessian inverse (result.hess_inv) for
         computing parameter uncertainties:
           errors = sqrt(diag(result.hess_inv))
-        
+
         Bound transforms (set via set_range) are applied automatically
         inside get_nll(), so the optimizer sees unbounded values.
         To get uncertainties in the bounded space, use BoundTransform.trans_err.
-        
+
+        For constrained fits (f(x) = 0), use :meth:`fit_constrained`.
+
         Args:
             x0: starting point. If None, uses initial_values().
             maxiter: maximum number of iterations.
@@ -689,7 +691,7 @@ class Fitter:
             method: scipy.optimize.minimize method (default 'BFGS').
             disp: print convergence messages.
             **kwargs: passed to scipy.optimize.minimize.
-        
+
         Returns:
             OptimizeResult from scipy.optimize.minimize.
             For BFGS: result.hess_inv contains the inverse Hessian.
@@ -734,7 +736,10 @@ class Fitter:
                 tracker(xk)
                 user_cb(xk)
 
+        # Build options dict, skipping None-valued keys (e.g. gtol=None
+        # from fit_constrained which uses SLSQP without gradient tolerance).
         opts = {'maxiter': maxiter, 'gtol': gtol, 'disp': disp}
+        opts = {k: v for k, v in opts.items() if v is not None}
         if method in ('L-BFGS-B', 'L-BFGS-B'):
             opts['ftol'] = ftol
         result = minimize(
@@ -746,29 +751,73 @@ class Fitter:
         )
         return result
 
+    def fit_constrained(self, x0=None, maxiter=1000, ftol=1e-5, callback=None,
+                        disp=True, constraints=None, **kwargs):
+        """Minimize NLL subject to equality/inequality constraints.
+
+        Uses scipy's SLSQP method, which supports constraints of the
+        form ``f(x) = 0`` (equality) or ``f(x) >= 0`` (inequality).
+
+        Unlike :meth:`fit`, SLSQP does **not** return ``hess_inv``, so
+        parameter uncertainties are not available from this method.
+
+        Args:
+            x0: starting point. If None, uses initial_values().
+            maxiter: maximum number of iterations.
+            ftol: convergence tolerance on function value change.
+            callback: optional callback function(xk) called after each step.
+            disp: print convergence messages.
+            constraints: list of scipy-style constraints, e.g.:
+
+                .. code-block:: python
+
+                    [{'type': 'eq',
+                      'fun': lambda x: x[0] + x[1] - 1.0,
+                      'jac': lambda x: [1.0, 1.0] + [0.0]*(len(x)-2)}]
+
+                Each constraint must provide ``'fun'`` and ``'jac'``
+                (Jacobian of the constraint function).
+            **kwargs: passed to ``scipy.optimize.minimize``.
+
+        Returns:
+            ``OptimizeResult`` from ``scipy.optimize.minimize`` with
+            ``method='SLSQP'``.  No ``hess_inv``.
+        """
+        return self.fit(x0=x0, maxiter=maxiter, ftol=ftol, gtol=None,
+                        callback=callback, disp=disp, method='SLSQP',
+                        constraints=constraints, **kwargs)
+
     def _params_from_fit(self, fit_result, return_bounded=True, hess_inv=None):
-        """Build dicts of parameter values and errors from a BFGS fit result.
-        
+        """Build dicts of parameter values and errors from a fit result.
+
+        When *hess_inv* is not available (e.g. constrained SLSQP fit),
+        errors will be empty.
+
         Args:
             fit_result: OptimizeResult from fit() method.
             return_bounded: if True, transform values back through
                             BoundTransform (physical space).
                             if False, return raw unbounded optimizer values.
-            hess_inv: optional inverse Hessian. If None, uses
+            hess_inv: optional inverse Hessian. If None, tries
                       ``fit_result.hess_inv``.
-        
+
         Returns:
             (values_dict, errors_dict) where each maps slot_name -> float.
             values_dict: best-fit parameter values.
-            errors_dict: 1-sigma uncertainties from Hessian diagonal.
+            errors_dict: 1-sigma uncertainties from Hessian diagonal
+                         (empty dict if hess_inv unavailable).
         """
         from ampfit.boundary import BoundTransform
 
         x_best = fit_result.x
         if hess_inv is None:
-            hess_inv = fit_result.hess_inv
-        raw_errors = np.sqrt(np.diag(hess_inv))
+            hess_inv = getattr(fit_result, 'hess_inv', None)
+        if hess_inv is None:
+            names = self._var_registry.flat_names
+            values = {name: float(x_best[i]) for i, name in enumerate(names)}
+            return values, {}
         names = self._var_registry.flat_names
+        raw_errors = np.sqrt(np.diag(hess_inv))
 
         values = {}
         errors = {}
@@ -799,19 +848,23 @@ class Fitter:
         Bound transforms are automatically propagated for parameters
         set via ``set_range()``.
 
+        For constrained fits (SLSQP), *use_cached* is ignored — the
+        Hessian is not available, and no uncertainties are returned.
+
         Args:
             fit_result: OptimizeResult from ``fit()`` method.
             return_bounded: if True (default), returns values and errors
                             in the physical (bounded) space.
-                            if False, returns raw optimizer space values.
+                            if False, returns raw unbounded optimizer values.
             use_cached: if True (default), use ``fit_result.hess_inv``.
                         if False, compute numerical Hessian from
                         ``fit_result.x`` via :meth:`compute_numerical_hessian`.
 
         Returns:
             dict of {slot_name: (value, error)} for every free parameter.
+            Errors are 0.0 if Hessian is not available.
         """
-        if not use_cached:
+        if not use_cached and hasattr(fit_result, 'hess_inv'):
             import numpy as np
             H = self.compute_numerical_hessian(fit_result.x)
             hess_inv = np.linalg.inv(H)
@@ -819,7 +872,7 @@ class Fitter:
                                                     hess_inv=hess_inv)
         else:
             values, errors = self._params_from_fit(fit_result, return_bounded)
-        return {name: (values[name], errors[name]) for name in values}
+        return {name: (values[name], errors.get(name, 0.0)) for name in values}
 
     def compute_numerical_hessian(self, x, eps=1e-5):
         """Numerical Hessian via 2-point gradient difference.

@@ -293,53 +293,25 @@ class Config:
     def build_fl_table(self, l_list, n_interp=2000):
         """
         Build Blatt-Weisskopf form factor table with TFPWA normalization.
-        
-        TFPWA normalizes form factors so that F(q0) = q0 at reference momentum q0.
-        This ensures consistency with TFPWA amplitudes.
+
+        Delegates to ``ampfit.utils.bw_form_factor`` for the per-point
+        calculation.
+
+        TFPWA normalizes form factors so that F(q0) = q0 at reference
+        momentum q0 = 1 GeV.  This ensures consistency with TFPWA
+        amplitudes.
         """
-        ret = []
-        d = 3.0  # Barrier radius in GeV^-1
-        q0 = 1.0  # Reference momentum in GeV
-        
+        from ampfit.bw_form_factor import form_factor as bw_form_factor
+
+        d = 3.0   # Barrier radius (GeV⁻¹)
+        q0 = 1.0  # Reference momentum (GeV)
+
         q_min, q_max = self.get_max_q_range()
         q = np.linspace(q_min, q_max, n_interp)
         q = np.clip(q, 0, np.inf)
-        
-        for l in l_list:
-            if l == 0:
-                # L=0: F = 1 (no normalization needed)
-                ret.append(np.ones_like(q))
-            elif l == 1:
-                # L=1: F = q / sqrt(1 + (q*d)²)
-                # Normalized: F = q * sqrt(1 + (q0*d)²) / sqrt(1 + (q*d)²)
-                z = (q * d)**2
-                z0 = (q0 * d)**2
-                norm_factor = np.sqrt(1 + z0)  # sqrt(10) ≈ 3.162
-                ret.append(q * norm_factor / np.sqrt(1 + z))
-            elif l == 2:
-                # L=2: F = q² / sqrt(9 + 3(q*d)² + (q*d)⁴)
-                # Normalized: F = q² * sqrt(9 + 3(q0*d)² + (q0*d)⁴) / sqrt(9 + 3(q*d)² + (q*d)⁴)
-                z = (q * d)**2
-                z0 = (q0 * d)**2
-                norm_factor = np.sqrt(9 + 3*z0 + z0**2)  # ≈ 10.817
-                ret.append(q**2 * norm_factor / np.sqrt(9 + 3*z + z**2))
-            elif l == 3:
-                # L=3: P(z) = 225 + 45z + 6z² + z³
-                z = (q * d)**2
-                z0 = (q0 * d)**2
-                norm_factor = np.sqrt(225 + 45*z0 + 6*z0**2 + z0**3)
-                ret.append(q**3 * norm_factor / np.sqrt(225 + 45*z + 6*z**2 + z**3))
-            elif l == 4:
-                # L=4: P(z) = 11025 + 1575z + 135z² + 10z³ + z⁴
-                z = (q * d)**2
-                z0 = (q0 * d)**2
-                norm_factor = np.sqrt(11025 + 1575*z0 + 135*z0**2 + 10*z0**3 + z0**4)
-                ret.append(q**4 * norm_factor / np.sqrt(11025 + 1575*z + 135*z**2 + 10*z**3 + z**4))
-            else:
-                # Not implemented - use L=0 as fallback
-                ret.append(np.ones_like(q))
-        
-        return np.stack(ret, axis=0), q[0], q[1]-q[0]
+
+        rows = [bw_form_factor(L, q, q0_ref=q0, d=d) for L in l_list]
+        return np.stack(rows, axis=0), q[0], q[1] - q[0]
 
 
 

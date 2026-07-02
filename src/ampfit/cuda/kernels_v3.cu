@@ -1546,8 +1546,6 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
     DataHandle2* h = (DataHandle2*)vdh;
     int ne = h->ne, bs = c->batch_size;
     if (ne < bs) bs = ne;
-    // Gram path: cap batch to avoid oversized scratch with large n_gamma_rows
-    if (bs > 5000) bs = 5000;
     int nbat = (ne + bs - 1) / bs;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
     int ng2 = nw / 8;

@@ -22,6 +22,7 @@ except Exception:
 
 from .fitter import Fitter
 from . import backends
+from .bw_form_factor import form_factor as bw_form_factor
 
 __all__ = [
     "Config",
@@ -33,4 +34,5 @@ __all__ = [
     "ConstraintManager",
     "Fitter",
     "backends",
+    "bw_form_factor",
 ]

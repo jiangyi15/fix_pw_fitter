@@ -23,8 +23,8 @@ def make_params():
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
     n_ck = len(config.get_ck_map())
-    n_m0 = len(kernel_config["m0_index"])
-    n_g0 = len(kernel_config["g0_index"])
+    n_m0 = int(np.max(kernel_config["m0_index"])) + 1
+    n_g0 = int(np.max(kernel_config["g0_index"])) + 1
     rng = np.random.default_rng()
     return {
         "ck": rng.normal(size=n_ck).astype(np.complex128)
@@ -161,7 +161,8 @@ def main():
     print("-" * 65)
     for label, _ in backends:
         report(label, results_norm[label], num_grads)
-    dh.free()
+    if hasattr(dh, 'free'): dh.free()
+    nk.free()
 
     # ════════════════════════════════════════════════════════════
     # norm=1000 (NLL)
@@ -196,6 +197,8 @@ def main():
     print("-" * 65)
     for label, _ in backends:
         report(label, results_nll[label], num_grads_nll)
+    if hasattr(dh2, 'free'): dh2.free()
+    nk2.free()
 
     print("\n" + "=" * 70)
     print("  SUMMARY")
