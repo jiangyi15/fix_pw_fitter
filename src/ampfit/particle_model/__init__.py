@@ -29,6 +29,7 @@ from . import gs_rho_model     # noqa: F401 — register GS_rho model
 from . import flatte_model     # noqa: F401 — register FlatteC model
 from . import bwr_model        # noqa: F401 — register BWR model
 from . import ck_matrix_v2     # noqa: F401 — register ck_matrix_v2 model
+from . import rho_omega_model  # noqa: F401 — register RhoOmega model
 __all__ = [
     "BaseModel", "ALL_MODELS", "register_model", "build_particle",
 ]

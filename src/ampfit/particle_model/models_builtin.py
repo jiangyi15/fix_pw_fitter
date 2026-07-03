@@ -46,6 +46,65 @@ class _FixMassWidthTransform(Transform):
         return d
 
 
+# ── Fixed-shape base ────────────────────────────────────────────
+
+class FixedShapeModel(BaseModel):
+    """Base for pre-computed fixed-shape models.
+
+    Subclasses override ``fixed_shape(m)`` to return the **complex
+    amplitude** :math:`A(m)` (i.e. the full lineshape value, typically
+    the product of propagators).
+
+    The base class converts this to ``gamma(m)`` automatically::
+
+        gamma(m) = (m₀² − m² − 1/A(m)) / (i·m₀·g₀)
+
+    so the kernel reproduces the desired shape.
+
+    Mass and width are auto-fixed via Transform (not fitted).
+    All shape parameters come from the YAML config.
+
+    Example::
+
+        @register_model("MyProduct")
+        class MyProduct(FixedShapeModel):
+            def fixed_shape(self, m):
+                m0 = float(self.kwargs["mass"])
+                g0 = float(self.kwargs.get("width", 0.1))
+                # Amplitude = BW₁ · BW₂
+                bw1 = 1 / (m0**2 - m**2 - 1j*m0*g0)
+                bw2 = 1 / (1.2**2 - m**2 - 1j*1.2*0.05)
+                return bw1 * bw2
+    """
+
+    def fixed_shape(self, m):
+        """Return the complex amplitude A(m).
+
+        Subclasses MUST override this.  Read parameters from
+        ``self.kwargs`` (set from YAML config).
+        """
+        raise NotImplementedError
+
+    def gamma(self, m):
+        m0 = float(self.kwargs.get("mass", 0.775))
+        g0 = float(self.kwargs.get("width", 0.1))
+        A = self.fixed_shape(m)
+        # Convert amplitude → gamma(m) for the kernel BW denominator
+        #   A = 1/(m₀² − m² − i·m₀·g₀·γ)  →  γ = (m₀² − m² − 1/A) / (i·m₀·g₀)
+        gamma_m = (m0**2 - m**2 - 1.0/A) / (1j * m0 * g0)
+        return [gamma_m]
+
+    def get_defaults(self):
+        return {}  # no free params — all fixed via Transform
+
+    def make_mass_width_transform(self):
+        return _FixMassWidthTransform(
+            f"{self.name}_mass", f"{self.name}_width",
+            mass_default=float(self.kwargs.get("mass", 0.775)),
+            width_default=float(self.kwargs.get("width", 0.1)),
+        )
+
+
 # ── One / constant ───────────────────────────────────────────────
 
 @register_model("one")

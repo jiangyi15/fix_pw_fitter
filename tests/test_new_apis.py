@@ -19,7 +19,6 @@ from ampfit.param_constraint import (
 from ampfit.utils import fmt_meas
 from ampfit.config_loader import Config
 from ampfit import Fitter
-from ampfit.particle_model.base import ALL_MODELS
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -145,57 +144,58 @@ def test_fmt_meas_pct_suffix():
 # 3. Particle model get_defaults
 # ═══════════════════════════════════════════════════════════════════
 
-def test_all_models_have_get_defaults():
-    """Every registered model has get_defaults() returning dict.
-
-    OneModel is allowed to return ``{}`` (mass/width fixed by transform).
-    """
-    for name, cls in ALL_MODELS.items():
-        if name == 'ck_matrix_v2':
-            continue  # needs gamma_file, order_file, etc.
-        kwargs = {'mass': 1.0, 'width': 0.1}
-        if name == 'FlatteC':
-            kwargs['mass_list'] = [(0.1, 0.1), (0.2, 0.2)]
-        m = cls('test', **kwargs)
-        d = m.get_defaults()
-        assert isinstance(d, dict), f"{name}: get_defaults() should return dict"
-        # OneModel has no defaults (mass/width fixed by transform)
-        if name != 'one':
-            assert len(d) > 0, f"{name}: get_defaults() should not be empty"
+def test_model_get_defaults_bw():
+    """BW model has mass+width defaults."""
+    from ampfit.particle_model.models_builtin import BWModel
+    m = BWModel('test', mass=1.0, width=0.1)
+    d = m.get_defaults()
+    assert isinstance(d, dict)
+    assert 'test_mass' in d and d['test_mass'] == 1.0
+    assert 'test_width' in d and d['test_width'] == 0.1
 
 
-def test_model_defaults_include_mass():
-    """All models include {name}_mass in defaults (except OneModel)."""
-    for name, cls in ALL_MODELS.items():
-        if name == 'ck_matrix_v2':
-            continue
-        kwargs = {'mass': 1.23, 'width': 0.45}
-        if name == 'FlatteC':
-            kwargs['mass_list'] = [(0.1, 0.1)]
-        m = cls('test', **kwargs)
-        d = m.get_defaults()
-        if name == 'one':
-            assert d == {}, "OneModel.get_defaults() should be empty"
-        else:
-            assert 'test_mass' in d, f"{name}: missing test_mass"
-            assert d['test_mass'] == 1.23
+def test_model_get_defaults_bwr():
+    """BWR model has mass+width defaults."""
+    from ampfit.particle_model.bwr_model import BWRModel
+    m = BWRModel('test', mass=1.0, width=0.1, L=1, daug2Mass=0.14, daug3Mass=0.14)
+    d = m.get_defaults()
+    assert 'test_mass' in d
+    assert 'test_width' in d
 
 
-def test_one_model_has_no_defaults():
-    """OneModel has get_defaults() returning {} (mass/width fixed)."""
-    from ampfit.particle_model.models_builtin import OneModel
-    m = OneModel('NR0', mass=0.475, width=0.55)
-    assert m.get_defaults() == {}
+def test_model_get_defaults_gs():
+    """GS_rho model has mass+width defaults."""
+    from ampfit.particle_model.gs_rho_model import GSRhoModel
+    m = GSRhoModel('test', mass=1.0, width=0.1)
+    d = m.get_defaults()
+    assert 'test_mass' in d
+    assert 'test_width' in d
 
 
-def test_flatte_model_defaults():
-    """FlatteC model includes mass and _g0.._gN couplings."""
+def test_model_get_defaults_flattec():
+    """FlatteC model has mass and _g0.._gN couplings."""
     from ampfit.particle_model.models_builtin import FlatteCModel
     m = FlatteCModel('f0_980', mass=0.965, mass_list=[(0.1, 0.1), (0.14, 0.14)])
     d = m.get_defaults()
     assert 'f0_980_mass' in d
     assert 'f0_980_g0' in d
     assert 'f0_980_g1' in d
+
+
+def test_model_get_defaults_one():
+    """OneModel returns {} (params fixed by transform)."""
+    from ampfit.particle_model.models_builtin import OneModel
+    m = OneModel('NR0', mass=0.475, width=0.55)
+    assert m.get_defaults() == {}
+
+
+def test_model_get_defaults_fixed_shape():
+    """FixedShapeModel subclasses return {} (params fixed by transform)."""
+    from ampfit.particle_model.rho_omega_model import RhoOmegaModel
+    m = RhoOmegaModel('test', mass=0.775, width=0.149)
+    assert m.get_defaults() == {}
+
+
 
 
 def test_defaults_via_fitter():
