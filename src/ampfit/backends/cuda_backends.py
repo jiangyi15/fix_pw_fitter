@@ -61,3 +61,16 @@ class CUDABackendV3Mixed(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit._cuda_v3_mixed import CUDAKernelV3Mixed as K
         return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_cache")
+class CUDABackendV3Cache(_CUDABackend):
+    """CUDA v3 cache — lazy amplitude caching for fast data NLL.
+
+    Suitable as the base backend for IntegratedBackend.  On first
+    compute() call, caches per-wave complex amplitudes.  Subsequent
+    calls skip BW/angular/FF evaluation.
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit._cuda_v3_cache import CUDAKernelV3Cache as K
+        return K(kc, batch_size=bs)
