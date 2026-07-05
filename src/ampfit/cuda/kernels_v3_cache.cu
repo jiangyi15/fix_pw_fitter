@@ -2098,7 +2098,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
         cudaMemcpy(gg0_buf, s.g_interp_imag, ng * 8, cudaMemcpyDeviceToHost);
         for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
 
-        // Scalar gradients
+        // Scalar gradients (download per-event, sum on CPU)
         #define SA(f, idx) do { \
             double* bf = (double*)malloc(nb * 8); \
             cudaMemcpy(bf, d.f, nb * 8, cudaMemcpyDeviceToHost); \
