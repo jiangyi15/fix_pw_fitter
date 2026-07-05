@@ -797,18 +797,16 @@ __global__ void gradient_kernel(
 }
 
 //=============================================================================
-// CACHE REDUCTION: common_amp_factor → cached_amp (CP × base)
+// CACHE REDUCTION: common_amp_factor → cached_amp (interleaved double2)
 //=============================================================================
 // 448 waves = 2 CP × (4 permutations × 56 base waves).
-// CK is the same for all 4 permutations of the same base wave within a CP.
-// Cache stores the SUM of the 4 per-permutation common_amp values:
-//   n_cache = 2 CP × 56 base = 112 per event
+// Cache stores the SUM of the 4 per-permutation common_amp values
+// as interleaved double2[r,i]: n_cache = 2 CP × 56 base = 112 per event.
 //=============================================================================
 __global__ void cache_reduce_kernel(
     const double* __restrict__ src_real,
     const double* __restrict__ src_imag,
-    double* __restrict__ dst_real,
-    double* __restrict__ dst_imag,
+    double2* __restrict__ dst,
     int n_wave, int n_cache
 ) {
     int event_idx = blockIdx.x;
@@ -825,238 +823,169 @@ __global__ void cache_reduce_kernel(
                 sum_i += src_imag[src_off];
             }
             int dst_off = event_idx * n_cache + cp * n_base + base;
-            dst_real[dst_off] = sum_r;
-            dst_imag[dst_off] = sum_i;
+            dst[dst_off] = make_double2(sum_r, sum_i);
         }
     }
 }
 
 //=============================================================================
-// CACHED NLL KERNEL: fast data NLL using pre-computed cached amplitudes
+// KERNEL 1/3: Forward matrix-vector (1 event/block, warp-level)
+// 1 ev/blk, 32 thr — measured 154 GB/s (51% of 300 GB/s achievable).
 //=============================================================================
-// Skips BW propagator, angular factors, form factors — reads cached
-// per-wave complex amplitude (full n_wave values per event) and computes:
-//   ap  = sum_{B0} ck[w] × cached_amp[w]
-//   am  = sum_{B0bar} ck[w] × cached_amp[w]
-// then time evolution, probability, NLL, and CK gradients.
+__global__ void forward_mv_kernel(
+    const double* __restrict__ ck_real,
+    const double* __restrict__ ck_imag,
+    const double2* __restrict__ cached_amp,
+    double* __restrict__ ap_real, double* __restrict__ ap_imag,
+    double* __restrict__ am_real, double* __restrict__ am_imag,
+    int n_events, int n_cache, int n_wave
+) {
+    int event_idx = blockIdx.x;
+    int lane = threadIdx.x;
+    if (event_idx >= n_events) return;
+
+    int n_wave_half = n_wave / 2;
+    int n_base = n_cache / 2;
+    int off_ev = event_idx * n_cache;
+
+    double ap_r = 0, ap_i = 0, am_r = 0, am_i = 0;
+    for (int base = lane; base < n_base; base += 32) {
+        double2 cv = cached_amp[off_ev + 0 * n_base + base];
+        ap_r += ck_real[base] * cv.x - ck_imag[base] * cv.y;
+        ap_i += ck_real[base] * cv.y + ck_imag[base] * cv.x;
+        double2 cv1 = cached_amp[off_ev + 1 * n_base + base];
+        am_r += ck_real[n_wave_half + base] * cv1.x - ck_imag[n_wave_half + base] * cv1.y;
+        am_i += ck_real[n_wave_half + base] * cv1.y + ck_imag[n_wave_half + base] * cv1.x;
+    }
+    for (int m = 16; m > 0; m >>= 1) {
+        ap_r += __shfl_xor_sync(0xFFFFFFFF, ap_r, m);
+        ap_i += __shfl_xor_sync(0xFFFFFFFF, ap_i, m);
+        am_r += __shfl_xor_sync(0xFFFFFFFF, am_r, m);
+        am_i += __shfl_xor_sync(0xFFFFFFFF, am_i, m);
+    }
+    if (lane == 0) {
+        ap_real[event_idx] = ap_r;
+        ap_imag[event_idx] = ap_i;
+        am_real[event_idx] = am_r;
+        am_imag[event_idx] = am_i;
+    }
+}
+
 //=============================================================================
-__global__ void compute_cached_nll_kernel(
+// KERNEL 2/3: Time evolution + scalar gradients (element-wise, 1 thread/event)
+//=============================================================================
+__global__ void time_evol_kernel(
     const double* __restrict__ frac,
     const double* __restrict__ time,
     const double* __restrict__ weight,
     const double* __restrict__ bkg,
-    const double* __restrict__ ck_real,
-    const double* __restrict__ ck_imag,
-    const double* __restrict__ cached_amp_real,
-    const double* __restrict__ cached_amp_imag,
+    const double* __restrict__ ap_real, const double* __restrict__ ap_imag,
+    const double* __restrict__ am_real, const double* __restrict__ am_imag,
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
-    double* __restrict__ Q_out,
-    double* __restrict__ P_out,
+    double* __restrict__ Q_out, double* __restrict__ P_out,
     double* __restrict__ pap_real, double* __restrict__ pap_imag,
     double* __restrict__ pam_real, double* __restrict__ pam_imag,
     double* __restrict__ gp_real, double* __restrict__ gp_imag,
     double* __restrict__ gm_real, double* __restrict__ gm_imag,
     double* __restrict__ poq_real, double* __restrict__ poq_imag,
-    double* __restrict__ ap_real, double* __restrict__ ap_imag,
-    double* __restrict__ am_real, double* __restrict__ am_imag,
     double* __restrict__ dQ_dP,
-    double* __restrict__ grad_ck_real_partial,
-    double* __restrict__ grad_ck_imag_partial,
+    double* __restrict__ dQ_ap_real, double* __restrict__ dQ_ap_imag,
+    double* __restrict__ dQ_am_real, double* __restrict__ dQ_am_imag,
     double* __restrict__ grad_Gamma_partial,
     double* __restrict__ grad_DeltaGamma_partial,
     double* __restrict__ grad_DeltaM_partial,
     double* __restrict__ grad_Ap_partial,
     double* __restrict__ grad_poq_rho_partial,
     double* __restrict__ grad_pop_phi_partial,
-    int n_events, int use_norm, double norm,
-    int n_cache, int n_wave
+    int n_events, int use_norm, double norm
+) {
+    int event_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (event_idx >= n_events) return;
+
+    complex ap(ap_real[event_idx], ap_imag[event_idx]);
+    complex am(am_real[event_idx], am_imag[event_idx]);
+    double t = time[event_idx];
+    complex i_const(0.0, 1.0);
+    complex eL = exp(-i_const * t * complex(-Delta_m / 2, -(Gamma + Delta_Gamma / 2) / 2));
+    complex eH = exp(-i_const * t * complex(Delta_m / 2, -(Gamma - Delta_Gamma / 2) / 2));
+    complex gp = (eL + eH) / 2.0;
+    complex gm = (eL - eH) / 2.0;
+
+    gp_real[event_idx] = gp.real(); gp_imag[event_idx] = gp.imag();
+    gm_real[event_idx] = gm.real(); gm_imag[event_idx] = gm.imag();
+
+    complex poq = poq_rho * exp(i_const * pop_phi);
+    poq_real[event_idx] = poq.real(); poq_imag[event_idx] = poq.imag();
+
+    complex pap = gp * ap + gm * poq * am;
+    complex pam = (gm / poq) * ap + gp * am;
+
+    pap_real[event_idx] = pap.real(); pap_imag[event_idx] = pap.imag();
+    pam_real[event_idx] = pam.real(); pam_imag[event_idx] = pam.imag();
+
+    double pb = thrust::norm(pap);
+    double pbbar = thrust::norm(pam);
+    double frac_val = frac[event_idx];
+    double P = frac_val * pb * (1.0 - A_p) + (1.0 - frac_val) * pbbar * (1.0 + A_p);
+    P_out[event_idx] = P;
+
+    double wgt = weight[event_idx], bkg_v = bkg[event_idx];
+    if (use_norm == 0) { Q_out[event_idx] = wgt * P; dQ_dP[event_idx] = wgt; }
+    else { Q_out[event_idx] = -wgt * log(P / norm + bkg_v); dQ_dP[event_idx] = -wgt / (P + bkg_v * norm); }
+
+    using thrust::conj;
+    double dP_dpb = frac_val * (1.0 - A_p), dP_dbb = (1.0 - frac_val) * (1.0 + A_p);
+    double dQ_dpb = dQ_dP[event_idx] * dP_dpb, dQ_dbb = dQ_dP[event_idx] * dP_dbb;
+
+    dQ_ap_real[event_idx] = (dQ_dpb * conj(pap) * gp + dQ_dbb * conj(pam) * (gm / poq)).real();
+    dQ_ap_imag[event_idx] = (dQ_dpb * conj(pap) * gp + dQ_dbb * conj(pam) * (gm / poq)).imag();
+    dQ_am_real[event_idx] = (dQ_dpb * conj(pap) * gm * poq + dQ_dbb * conj(pam) * gp).real();
+    dQ_am_imag[event_idx] = (dQ_dpb * conj(pap) * gm * poq + dQ_dbb * conj(pam) * gp).imag();
+
+    grad_Ap_partial[event_idx] = dQ_dP[event_idx] * (-frac_val * pb + (1.0 - frac_val) * pbbar);
+    complex dQ_dgp = dQ_dpb * (conj(pap) * ap) + dQ_dbb * (conj(pam) * am);
+    complex dQ_dgm = dQ_dpb * (conj(pap) * poq * am) + dQ_dbb * (conj(pam) * ap / poq);
+    grad_Gamma_partial[event_idx] = dQ_dP[event_idx] * (-t) * P;
+    grad_DeltaGamma_partial[event_idx] = 2.0 * (dQ_dgp * (-t/4.0*gm) + dQ_dgm * (-t/4.0*gp)).real();
+    grad_DeltaM_partial[event_idx] = 2.0 * (dQ_dgp * complex(0,t/2)*gm + dQ_dgm * complex(0,t/2)*gp).real();
+    complex d_pb_dpq = conj(pap) * gm * am;
+    complex d_pbbar_dpq = conj(pam) * (-gm / (poq * poq)) * ap;
+    complex dQ_dpq = dQ_dpb * d_pb_dpq + dQ_dbb * d_pbbar_dpq;
+    complex e_pp = exp(complex(0,1)*pop_phi);
+    grad_poq_rho_partial[event_idx] = 2.0*(dQ_dpq * e_pp).real();
+    grad_pop_phi_partial[event_idx] = 2.0*(dQ_dpq * poq_rho * complex(0,1) * e_pp).real();
+}
+
+//=============================================================================
+// KERNEL 3/3: Backward matrix-vector (warp-level BLAS)
+// Same structure as forward: 8 events/block, 1 warp/event.
+// Computes dQ_da × cached_amp → grad_ck (first slot per group).
+//=============================================================================
+__global__ void backward_mv_kernel(
+    const double* __restrict__ dQ_ap_real, const double* __restrict__ dQ_ap_imag,
+    const double* __restrict__ dQ_am_real, const double* __restrict__ dQ_am_imag,
+    const double2* __restrict__ cached_amp,
+    double* __restrict__ grad_ck_real_partial,
+    double* __restrict__ grad_ck_imag_partial,
+    int n_events, int n_cache, int n_wave
 ) {
     int event_idx = blockIdx.x;
-    int tid = threadIdx.x;
-    int block_sz = blockDim.x;
+    int lane = threadIdx.x;
+    if (event_idx >= n_events) return;
 
-    int n_wave_half = n_wave / 2;      // 224
-    int n_base = n_cache / 2;          // 56 base waves per CP
+    int n_wave_half = n_wave / 2;
+    int n_base = n_cache / 2;
+    int off_ev = event_idx * n_cache;
 
-    // ── Phase 1: Sum CK-weighted cached amplitudes ──────────────
-    double ap_sum_r = 0.0, ap_sum_i = 0.0;
-    double am_sum_r = 0.0, am_sum_i = 0.0;
+    if (lane < n_base) {
+        double2 cv = cached_amp[off_ev + 0 * n_base + lane];
+        grad_ck_real_partial[event_idx * n_wave + lane] = dQ_ap_real[event_idx] * cv.x - dQ_ap_imag[event_idx] * cv.y;
+        grad_ck_imag_partial[event_idx * n_wave + lane] = dQ_ap_real[event_idx] * cv.y + dQ_ap_imag[event_idx] * cv.x;
 
-    // CK is same for all 4 permutations of the same base wave.
-    // Cache stores SUM of 4 common_amp values per (CP, base).
-    // Amplitude = CK_sum × cached_amp (no division — both are sums)
-    for (int base = tid; base < n_base; base += block_sz) {
-        // B0: CK = ck[0*56+base] (same for all 4 perms)
-        // cached_amp = sum_perm common_amp[perm*56+base]
-        complex ck_b0(ck_real[base], ck_imag[base]);
-        complex camp_b0(
-            cached_amp_real[event_idx * n_cache + 0 * n_base + base],
-            cached_amp_imag[event_idx * n_cache + 0 * n_base + base]);
-        complex contrib_b0 = ck_b0 * camp_b0;
-        ap_sum_r += contrib_b0.real();
-        ap_sum_i += contrib_b0.imag();
-
-        // B0bar: CK = ck[224+base]
-        complex ck_b1(ck_real[n_wave_half + base], ck_imag[n_wave_half + base]);
-        complex camp_b1(
-            cached_amp_real[event_idx * n_cache + 1 * n_base + base],
-            cached_amp_imag[event_idx * n_cache + 1 * n_base + base]);
-        complex contrib_b1 = ck_b1 * camp_b1;
-        am_sum_r += contrib_b1.real();
-        am_sum_i += contrib_b1.imag();
-    }
-
-    // ── Tree reduction ──────────────────────────────────────────
-    __shared__ double s_ar[256], s_ai[256], s_mr[256], s_mi[256];
-    s_ar[tid] = ap_sum_r; s_ai[tid] = ap_sum_i;
-    s_mr[tid] = am_sum_r; s_mi[tid] = am_sum_i;
-    __syncthreads();
-    for (int s = block_sz / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_ar[tid] += s_ar[tid + s]; s_ai[tid] += s_ai[tid + s];
-            s_mr[tid] += s_mr[tid + s]; s_mi[tid] += s_mi[tid + s];
-        }
-        __syncthreads();
-    }
-
-    // Shared memory for dQ derivatives (broadcast from thread 0)
-    __shared__ double s_dQ_apr, s_dQ_api, s_dQ_amr, s_dQ_ami;
-
-    if (tid == 0) {
-        complex ap(s_ar[0], s_ai[0]);
-        complex am(s_mr[0], s_mi[0]);
-        ap_real[event_idx] = ap.real();
-        ap_imag[event_idx] = ap.imag();
-        am_real[event_idx] = am.real();
-        am_imag[event_idx] = am.imag();
-
-        // ── Time evolution ──────────────────────────────────────
-        double t = time[event_idx];
-        complex i_const(0.0, 1.0);
-        complex eL = exp(-i_const * t *
-            complex(-Delta_m / 2, -(Gamma + Delta_Gamma / 2) / 2));
-        complex eH = exp(-i_const * t *
-            complex(Delta_m / 2, -(Gamma - Delta_Gamma / 2) / 2));
-        complex gp = (eL + eH) / 2.0;
-        complex gm = (eL - eH) / 2.0;
-
-        gp_real[event_idx] = gp.real(); gp_imag[event_idx] = gp.imag();
-        gm_real[event_idx] = gm.real(); gm_imag[event_idx] = gm.imag();
-
-        complex poq = poq_rho * exp(i_const * pop_phi);
-        poq_real[event_idx] = poq.real(); poq_imag[event_idx] = poq.imag();
-
-        complex pap = gp * ap + gm * poq * am;
-        complex pam = (gm / poq) * ap + gp * am;
-
-        pap_real[event_idx] = pap.real(); pap_imag[event_idx] = pap.imag();
-        pam_real[event_idx] = pam.real(); pam_imag[event_idx] = pam.imag();
-
-        double pb = thrust::norm(pap);
-        double pbbar = thrust::norm(pam);
-        double frac_val = frac[event_idx];
-        double P = frac_val * pb * (1.0 - A_p)
-                 + (1.0 - frac_val) * pbbar * (1.0 + A_p);
-        P_out[event_idx] = P;
-
-        double wgt = weight[event_idx];
-        double bkg_v = bkg[event_idx];
-
-        if (use_norm == 0) {
-            Q_out[event_idx] = wgt * P;
-            dQ_dP[event_idx] = wgt;
-        } else {
-            Q_out[event_idx] = -wgt * log(P / norm + bkg_v);
-            dQ_dP[event_idx] = -wgt / (P + bkg_v * norm);
-        }
-
-        // ── dQ/dap, dQ/dam ──────────────────────────────────────
-        double dP_dpb = frac_val * (1.0 - A_p);
-        double dP_dbb = (1.0 - frac_val) * (1.0 + A_p);
-        double dQ_dpb = dQ_dP[event_idx] * dP_dpb;
-        double dQ_dbb = dQ_dP[event_idx] * dP_dbb;
-
-        using thrust::conj;
-
-        s_dQ_apr = (dQ_dpb * conj(pap) * gp
-                    + dQ_dbb * conj(pam) * (gm / poq)).real();
-        s_dQ_api = (dQ_dpb * conj(pap) * gp
-                    + dQ_dbb * conj(pam) * (gm / poq)).imag();
-        s_dQ_amr = (dQ_dpb * conj(pap) * gm * poq
-                    + dQ_dbb * conj(pam) * gp).real();
-        s_dQ_ami = (dQ_dpb * conj(pap) * gm * poq
-                    + dQ_dbb * conj(pam) * gp).imag();
-
-        // ── Scalar gradients (same as gradient_kernel Phase 4) ──
-        grad_Ap_partial[event_idx] = dQ_dP[event_idx]
-            * (-frac_val * pb + (1.0 - frac_val) * pbbar);
-
-        complex dQ_dap_val(s_dQ_apr, s_dQ_api);
-        complex dQ_dam_val(s_dQ_amr, s_dQ_ami);
-
-        complex d_pb_dgp = conj(pap) * ap;
-        complex d_pb_dgm = conj(pap) * poq * am;
-        complex d_pbbar_dgp = conj(pam) * am;
-        complex d_pbbar_dgm = conj(pam) * ap / poq;
-
-        complex dQ_dgp = dQ_dpb * d_pb_dgp + dQ_dbb * d_pbbar_dgp;
-        complex dQ_dgm = dQ_dpb * d_pb_dgm + dQ_dbb * d_pbbar_dgm;
-
-        complex dgp_dtG = (-t / 2.0) * gp;
-        complex dgm_dtG = (-t / 2.0) * gm;
-        complex dgp_dtD = (-t / 4.0) * gm;
-        complex dgm_dtD = (-t / 4.0) * gp;
-        complex dgp_dtM = complex(0.0, t / 2.0) * gm;
-        complex dgm_dtM = complex(0.0, t / 2.0) * gp;
-
-        grad_Gamma_partial[event_idx] = dQ_dP[event_idx] * (-t) * P;
-        grad_DeltaGamma_partial[event_idx] =
-            2.0 * (dQ_dgp * dgp_dtD + dQ_dgm * dgm_dtD).real();
-        grad_DeltaM_partial[event_idx] =
-            2.0 * (dQ_dgp * dgp_dtM + dQ_dgm * dgm_dtM).real();
-
-        complex d_pb_dpq = conj(pap) * gm * am;
-        complex d_pbbar_dpq = conj(pam) * (-gm / (poq * poq)) * ap;
-        complex dQ_dpq = dQ_dpb * d_pb_dpq + dQ_dbb * d_pbbar_dpq;
-
-        complex e_pp = exp(complex(0.0, 1.0) * pop_phi);
-        grad_poq_rho_partial[event_idx] = 2.0 * (dQ_dpq * e_pp).real();
-        grad_pop_phi_partial[event_idx] =
-            2.0 * (dQ_dpq * poq_rho * complex(0.0, 1.0) * e_pp).real();
-    }
-    __syncthreads();
-
-    // ── Phase 2: CK gradients ───────────────────────────────────
-    // CK is same for all 4 perms of the same base wave.
-    // Each wave slot gets dQ_da × cached_amp / 4, so sum over 4 = dQ_da × cached_amp.
-    complex dQ_dap_val(s_dQ_apr, s_dQ_api);
-    complex dQ_dam_val(s_dQ_amr, s_dQ_ami);
-    complex dq4_ap = dQ_dap_val * complex(0.25, 0.0);
-    complex dq4_am = dQ_dam_val * complex(0.25, 0.0);
-
-    for (int base = tid; base < n_base; base += block_sz) {
-        // B0: 4 slots all get same value
-        complex camp_b0(
-            cached_amp_real[event_idx * n_cache + 0 * n_base + base],
-            cached_amp_imag[event_idx * n_cache + 0 * n_base + base]);
-        complex gc = dq4_ap * camp_b0;
-        for (int p = 0; p < 4; p++) {
-            int w = p * n_base + base;
-            grad_ck_real_partial[event_idx * n_wave + w] = gc.real();
-            grad_ck_imag_partial[event_idx * n_wave + w] = gc.imag();
-        }
-
-        // B0bar: 4 slots all get same value
-        complex camp_b1(
-            cached_amp_real[event_idx * n_cache + 1 * n_base + base],
-            cached_amp_imag[event_idx * n_cache + 1 * n_base + base]);
-        complex gc2 = dq4_am * camp_b1;
-        for (int p = 0; p < 4; p++) {
-            int w = n_wave_half + p * n_base + base;
-            grad_ck_real_partial[event_idx * n_wave + w] = gc2.real();
-            grad_ck_imag_partial[event_idx * n_wave + w] = gc2.imag();
-        }
+        double2 cv1 = cached_amp[off_ev + 1 * n_base + lane];
+        grad_ck_real_partial[event_idx * n_wave + n_wave_half + lane] = dQ_am_real[event_idx] * cv1.x - dQ_am_imag[event_idx] * cv1.y;
+        grad_ck_imag_partial[event_idx * n_wave + n_wave_half + lane] = dQ_am_real[event_idx] * cv1.y + dQ_am_imag[event_idx] * cv1.x;
     }
 }
 
@@ -1065,18 +994,31 @@ __global__ void compute_cached_nll_kernel(
 //=============================================================================
 void launch_cache_reduce(
     const double* src_real, const double* src_imag,
-    double* dst_real, double* dst_imag,
+    double2* dst,
     int n_wave, int n_cache, int n_events) {
     cache_reduce_kernel<<<n_events, 128>>>(
-        src_real, src_imag, dst_real, dst_imag, n_wave, n_cache);
+        src_real, src_imag, dst, n_wave, n_cache);
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_compute_cached_nll(
+void launch_forward_mv(
+    const double* ck_real, const double* ck_imag,
+    const double2* cached_amp,
+    double* ap_real, double* ap_imag,
+    double* am_real, double* am_imag,
+    int n_events, int n_cache, int n_wave) {
+    forward_mv_kernel<<<n_events, 32>>>(
+        ck_real, ck_imag, cached_amp,
+        ap_real, ap_imag, am_real, am_imag,
+        n_events, n_cache, n_wave);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_evol(
     const double* frac, const double* time,
     const double* weight, const double* bkg,
-    const double* ck_real, const double* ck_imag,
-    const double* cached_amp_real, const double* cached_amp_imag,
+    const double* ap_real, const double* ap_imag,
+    const double* am_real, const double* am_imag,
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
     double* Q_out, double* P_out,
@@ -1085,29 +1027,41 @@ void launch_compute_cached_nll(
     double* gp_real, double* gp_imag,
     double* gm_real, double* gm_imag,
     double* poq_real, double* poq_imag,
-    double* ap_real, double* ap_imag,
-    double* am_real, double* am_imag, double* dQ_dP,
-    double* grad_ck_real_partial, double* grad_ck_imag_partial,
+    double* dQ_dP,
+    double* dQ_ap_real, double* dQ_ap_imag,
+    double* dQ_am_real, double* dQ_am_imag,
     double* grad_Gamma_partial, double* grad_DeltaGamma_partial,
     double* grad_DeltaM_partial, double* grad_Ap_partial,
     double* grad_poq_rho_partial, double* grad_pop_phi_partial,
-    int n_events, int use_norm, double norm,
-    int n_cached_wave, int n_wave) {
-    compute_cached_nll_kernel<<<n_events, BLOCK_SIZE>>>(
-        frac, time, weight, bkg, ck_real, ck_imag,
-        cached_amp_real, cached_amp_imag,
+    int n_events, int use_norm, double norm) {
+    time_evol_kernel<<<n_events, 32>>>(
+        frac, time, weight, bkg,
+        ap_real, ap_imag, am_real, am_imag,
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
         Q_out, P_out,
         pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag,
         poq_real, poq_imag,
-        ap_real, ap_imag, am_real, am_imag, dQ_dP,
-        grad_ck_real_partial, grad_ck_imag_partial,
+        dQ_dP,
+        dQ_ap_real, dQ_ap_imag, dQ_am_real, dQ_am_imag,
         grad_Gamma_partial, grad_DeltaGamma_partial,
         grad_DeltaM_partial, grad_Ap_partial,
         grad_poq_rho_partial, grad_pop_phi_partial,
-        n_events, use_norm, norm,
-        n_cached_wave, n_wave);
+        n_events, use_norm, norm);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_backward_mv(
+    const double* dQ_ap_real, const double* dQ_ap_imag,
+    const double* dQ_am_real, const double* dQ_am_imag,
+    const double2* cached_amp,
+    double* grad_ck_real_partial, double* grad_ck_imag_partial,
+    int n_events, int n_cache, int n_wave) {
+    backward_mv_kernel<<<n_events, 32>>>(
+        dQ_ap_real, dQ_ap_imag, dQ_am_real, dQ_am_imag,
+        cached_amp,
+        grad_ck_real_partial, grad_ck_imag_partial,
+        n_events, n_cache, n_wave);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1213,6 +1167,8 @@ typedef struct {
     double* bw_p_real; double* bw_p_imag;
     double* common_amp_factor_real; double* common_amp_factor_imag;
     double* ap_real; double* ap_imag; double* am_real; double* am_imag;
+    double* dQ_ap_real; double* dQ_ap_imag;
+    double* dQ_am_real; double* dQ_am_imag;
     double* dQ_dP;
     double* bw_dom_real; double* bw_dom_imag;
     double* grad_ck_real_partial; double* grad_ck_imag_partial;
@@ -1617,7 +1573,7 @@ void* cuda_load_data(void* vctx, const double* mass, const double* mom,
     S2(bw_p_real, nw); S2(bw_p_imag, nw);
     S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
     S(ap_real); S(ap_imag); S(am_real); S(am_imag);
-    S(dQ_dP);
+    S(dQ_dP); S(dQ_ap_real); S(dQ_ap_imag); S(dQ_am_real); S(dQ_am_imag);
     S2(bw_dom_real, nu); S2(bw_dom_imag, nu);
     S2(grad_ck_real_partial, nw); S2(grad_ck_imag_partial, nw);
     S2(grad_m0_partial, nu); S2(grad_g0_partial, ng);
@@ -1732,8 +1688,7 @@ void cuda_free_data(void* vdh) {
 typedef struct { const double* m; const double* mo; const double* a;
     const double* f; const double* t; const double* w; const double* b;
     int ne; int nm; int nmom; int nat; int nac;
-    double* cached_amp_real;
-    double* cached_amp_imag;
+    double2* cached_amp;  // interleaved [r0,i0, r1,i1, ...]
     int n_cache;
     int cache_valid;
 } DataHandle2;
@@ -1816,7 +1771,8 @@ void cuda_free_context_v3(void* vctx) {
         SF(Q_out); SF(P_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
         SF(gp_real); SF(gp_imag); SF(gm_real); SF(gm_imag); SF(poq_real); SF(poq_imag);
         SF(bw_p_real); SF(bw_p_imag); SF(common_amp_factor_real); SF(common_amp_factor_imag);
-        SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag); SF(dQ_dP);
+        SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag);
+        SF(dQ_dP); SF(dQ_ap_real); SF(dQ_ap_imag); SF(dQ_am_real); SF(dQ_am_imag);
         SF(bw_dom_real); SF(bw_dom_imag);
         SF(grad_ck_real_partial); SF(grad_ck_imag_partial);
         SF(grad_m0_partial); SF(grad_g0_partial);
@@ -1846,16 +1802,14 @@ void* cuda_load_data_v3(void* vctx,
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
     h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang; h->nac = nac;
-    // Allocate cache buffers (init to NULL — filled lazily on first compute)
+    // Allocate cache buffer (interleaved double2, init to NULL)
     if (c_ctx) {
-        h->n_cache = c_ctx->n_wave / 4;  // 112 = 2 configs × 56 base (B0/B0bar share common_amp)
-        h->cached_amp_real = NULL;
-        h->cached_amp_imag = NULL;
+        h->n_cache = c_ctx->n_wave / 4;  // 112 = 2 CP × 56 base waves
+        h->cached_amp = NULL;
         h->cache_valid = 0;
     } else {
         h->n_cache = 0;
-        h->cached_amp_real = NULL;
-        h->cached_amp_imag = NULL;
+        h->cached_amp = NULL;
         h->cache_valid = 0;
     }
     return h;
@@ -1864,8 +1818,7 @@ void cuda_free_data_v3(void* vh) {
     DataHandle2* h = (DataHandle2*)vh;
     cudaFree((void*)h->m); cudaFree((void*)h->mo); cudaFree((void*)h->a);
     cudaFree((void*)h->f); cudaFree((void*)h->t); cudaFree((void*)h->w); cudaFree((void*)h->b);
-    if (h->cached_amp_real) cudaFree(h->cached_amp_real);
-    if (h->cached_amp_imag) cudaFree(h->cached_amp_imag);
+    if (h->cached_amp) cudaFree(h->cached_amp);
     free(h);
 }
 
@@ -2005,9 +1958,8 @@ void cuda_compute_v3(void* vctx, void* vdh,
 
     // Allocate cache buffers lazily (only for data NLL, use_norm == 1)
     int want_cache = (use_norm != 0) && (n_cache > 0);
-    if (want_cache && h->cached_amp_real == NULL) {
-        cudaMalloc(&h->cached_amp_real, ne * n_cache * sizeof(double));
-        cudaMalloc(&h->cached_amp_imag, ne * n_cache * sizeof(double));
+    if (want_cache && h->cached_amp == NULL) {
+        cudaMalloc(&h->cached_amp, ne * n_cache * sizeof(double2));
     }
 
     // Use context-allocated scratch (avoids per-call cudaMalloc/free)
@@ -2025,6 +1977,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
         S2(bw_p_real,nw); S2(bw_p_imag,nw);
         S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
         S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S(dQ_ap_real); S(dQ_ap_imag); S(dQ_am_real); S(dQ_am_imag);
         S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
         S2(grad_ck_real_partial,nw); S2(grad_ck_imag_partial,nw);
         S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
@@ -2064,12 +2017,19 @@ void cuda_compute_v3(void* vctx, void* vdh,
         d.n_events = nb;
 
         if (want_cache && h->cache_valid) {
-            // ── Cached NLL (fast path, data NLL only) ────────────
-            launch_compute_cached_nll(
+            // ── Cached NLL (3 warp-level kernels) ────────────────
+            double2* camp = h->cached_amp + st * n_cache;
+
+            // 1) Forward: cached_amp × ck → ap, am
+            launch_forward_mv(
+                p.ck_real, p.ck_imag, camp,
+                d.ap_real, d.ap_imag, d.am_real, d.am_imag,
+                nb, n_cache, nw);
+
+            // 2) Time evolution + scalar grads
+            launch_time_evol(
                 d.frac, d.time, d.weight, d.bkg,
-                p.ck_real, p.ck_imag,
-                h->cached_amp_real + st * n_cache,
-                h->cached_amp_imag + st * n_cache,
+                d.ap_real, d.ap_imag, d.am_real, d.am_imag,
                 G, DG, DM, Ap, pr, pp,
                 d.Q_out, d.P_out,
                 d.pap_real, d.pap_imag,
@@ -2077,15 +2037,23 @@ void cuda_compute_v3(void* vctx, void* vdh,
                 d.gp_real, d.gp_imag,
                 d.gm_real, d.gm_imag,
                 d.poq_real, d.poq_imag,
-                d.ap_real, d.ap_imag,
-                d.am_real, d.am_imag, d.dQ_dP,
-                d.grad_ck_real_partial, d.grad_ck_imag_partial,
+                d.dQ_dP,
+                d.dQ_ap_real, d.dQ_ap_imag,
+                d.dQ_am_real, d.dQ_am_imag,
                 d.grad_Gamma_partial, d.grad_DeltaGamma_partial,
                 d.grad_DeltaM_partial, d.grad_Ap_partial,
                 d.grad_poq_rho_partial, d.grad_pop_phi_partial,
-                nb, use_norm, nv, n_cache, nw);
+                nb, use_norm, nv);
 
-            // Zero m0/g0 gradients (BW params fixed — cached amp invariant)
+            // 3) Backward: dQ_da × cached_amp → grad_ck
+            launch_backward_mv(
+                d.dQ_ap_real, d.dQ_ap_imag,
+                d.dQ_am_real, d.dQ_am_imag,
+                camp,
+                d.grad_ck_real_partial, d.grad_ck_imag_partial,
+                nb, n_cache, nw);
+
+            // Zero m0/g0 gradients (BW params fixed)
             for (int i = 0; i < nb; i++) {
                 cudaMemset(d.grad_m0_partial + i * nu, 0, nu * 8);
                 cudaMemset(d.grad_g0_partial + i * ng, 0, ng * 8);
@@ -2099,13 +2067,11 @@ void cuda_compute_v3(void* vctx, void* vdh,
             if (want_cache && !h->cache_valid) {
                 launch_cache_reduce(
                     d.common_amp_factor_real, d.common_amp_factor_imag,
-                    h->cached_amp_real + st * n_cache,
-                    h->cached_amp_imag + st * n_cache,
+                    h->cached_amp + st * n_cache,
                     nw, n_cache, nb);
             }
         }
 
-        // Clear any pending errors
         cudaGetLastError();
 
         // CPU sum for Q
@@ -2115,7 +2081,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
         cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
         memcpy(oP + st, Ph, nb * 8);
 
-        // GPU reductions: sum per-event gradients across events
+        // GPU reductions
         launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
         cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
         for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
@@ -2124,7 +2090,6 @@ void cuda_compute_v3(void* vctx, void* vdh,
         cudaMemcpy(gck_buf, s.g_bw_imag, nw * 8, cudaMemcpyDeviceToHost);
         for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
 
-        // m0 + g0 gradients (from full compute, or zeroed for cached pass)
         launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
         cudaMemcpy(gm0_buf, s.g_interp_real, nu * 8, cudaMemcpyDeviceToHost);
         for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
@@ -2146,6 +2111,24 @@ void cuda_compute_v3(void* vctx, void* vdh,
         #undef SA
     }
 
+    // CK gradient: expand 112 (first slot per group) → 448, then ÷4
+    if (use_norm != 0) {
+        int n_base = nw / 8;  // 56 base waves per CP
+        int n_wave_half = nw / 2;  // 224
+        for (int base = n_base - 1; base >= 0; base--) {
+            for (int cp = 0; cp < 2; cp++) {
+                int off0 = cp * n_wave_half + base;  // first perm slot
+                double vr = 0.25 * ogck_r[off0];
+                double vi = 0.25 * ogck_i[off0];
+                for (int p = 3; p >= 0; p--) {
+                    int w = cp * n_wave_half + p * n_base + base;
+                    ogck_r[w] = vr;
+                    ogck_i[w] = vi;
+                }
+            }
+        }
+    }
+
     // Mark cache valid after first successful data NLL run
     if (want_cache && !h->cache_valid) {
         h->cache_valid = 1;
@@ -2160,6 +2143,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
         F(bw_p_real); F(bw_p_imag);
         F(common_amp_factor_real); F(common_amp_factor_imag);
         F(ap_real); F(ap_imag); F(am_real); F(am_imag); F(dQ_dP);
+        F(dQ_ap_real); F(dQ_ap_imag); F(dQ_am_real); F(dQ_am_imag);
         F(bw_dom_real); F(bw_dom_imag);
         F(grad_ck_real_partial); F(grad_ck_imag_partial);
         F(grad_m0_partial); F(grad_g0_partial);
