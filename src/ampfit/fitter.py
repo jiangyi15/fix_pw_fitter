@@ -39,7 +39,7 @@ class Fitter:
                      a ``dict``.  Strings are resolved via
                      :func:`create_backend`.  Dicts use::
 
-                         {"name": "integrated", "base": "cuda_v3"}
+                         {"name": "integrated", "base": "cuda_v3_cache"}
 
                      where ``"base"`` is itself a recursive backend spec.
         """
