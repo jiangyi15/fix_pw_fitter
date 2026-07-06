@@ -49,6 +49,8 @@ void cuda_compute_v3(void*,void*,
 void cuda_gram_matrix_v3(void*,void*,
     const double*,const double*,
     double*,double*,double*,double*,double*,double*);
+void cuda_time_averages_v3(void*,void*,
+    double,double,double,double*);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -356,6 +358,37 @@ class CUDAKernelV3Cache:
         Mpm = oMpm_r.reshape(ng2, ng2) + 1j * oMpm_i.reshape(ng2, ng2)
 
         return Mpp, Mmm, Mpm
+
+    # -- time averages (GPU-accelerated) -------------------------------
+
+    def compute_time_averages(self, phsp_handle, scalar):
+        """Compute time averages on GPU, returns 11 scalar averages.
+
+        Args:
+            phsp_handle: DataHandle from load_data().
+            scalar: [Gamma, Delta_Gamma, Delta_m, A_prod, poqr, poqi].
+
+        Returns:
+            (gp2_avg, gm2_avg, gpgm_avg,
+             icht, ict, isht, ist,
+             idcht, idct, idsht, idst)
+        """
+        G, DG, DM = scalar[0], scalar[1], scalar[2]
+        out = np.zeros(12, np.float64)
+        ka = []
+        def _db(a):
+            arr = np.ascontiguousarray(a, np.float64)
+            buf = _ffi.from_buffer(arr)
+            ka.append(buf)
+            return _ffi.cast("double*", buf)
+
+        self._lib.cuda_time_averages_v3(
+            self._ctx, phsp_handle.ptr,
+            G, DG, DM, _db(out))
+
+        return (out[0], out[1], complex(out[2], out[3]),
+                out[4], out[5], out[6], out[7],
+                out[8], out[9], out[10], out[11])
 
     # -- cleanup -------------------------------------------------------
 

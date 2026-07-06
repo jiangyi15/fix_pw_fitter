@@ -832,6 +832,46 @@ __global__ void cache_reduce_kernel(
 // KERNEL 1/3: Forward matrix-vector (1 event/block, warp-level)
 // 1 ev/blk, 32 thr — measured 154 GB/s (51% of 300 GB/s achievable).
 //=============================================================================
+//=============================================================================
+// KERNEL: Time average partial sums (GPU-accelerated)
+// 1 thread/event, computes weighted trig/exp contributions for time averages.
+// Output: (n_events, 9) array of partial sums, reduced by reduce_sum_features.
+//=============================================================================
+__global__ void time_avg_partial_kernel(
+    const double* __restrict__ time,
+    const double* __restrict__ weight,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double* __restrict__ partial,
+    int n_events
+) {
+    int event_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (event_idx >= n_events) return;
+
+    double t = time[event_idx];
+    double w = weight[event_idx];
+    double Gt = Gamma * t;
+    double Dt2 = Delta_Gamma * t / 2;
+    double Dmt = Delta_m * t;
+
+    double expt = exp(-Gt);
+    double cht = cosh(Dt2);
+    double sht = sinh(Dt2);
+    double ct = cos(Dmt);
+    double st = sin(Dmt);
+
+    double* p = partial + event_idx * 9;
+    p[0] = w * cht * expt;       // icht
+    p[1] = w * ct * expt;        // ict
+    p[2] = w * sht * expt;       // isht
+    p[3] = w * st * expt;        // ist
+    p[4] = w * t * expt * sht;   // idcht * 2
+    p[5] = w * t * expt * st;    // idct (negative)
+    p[6] = w * t * expt * cht;   // idsht * 2
+    p[7] = w * t * expt * ct;    // idst
+    p[8] = w;                     // total weight
+}
+
+//=============================================================================
 __global__ void forward_mv_kernel(
     const double* __restrict__ ck_real,
     const double* __restrict__ ck_imag,
@@ -1062,6 +1102,16 @@ void launch_backward_mv(
         cached_amp,
         grad_ck_real_partial, grad_ck_imag_partial,
         n_events, n_cache, n_wave);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_time_avg_partial(
+    const double* time, const double* weight,
+    double Gamma, double Delta_Gamma, double Delta_m,
+    double* partial, int n_events) {
+    int grid = (n_events + 255) / 256;
+    time_avg_partial_kernel<<<grid, 256>>>(
+        time, weight, Gamma, Delta_Gamma, Delta_m, partial, n_events);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1927,6 +1977,53 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
         F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
         #undef F
     }
+}
+
+void cuda_time_averages_v3(void* vctx, void* vdh,
+    double Gamma, double DG, double Dm,
+    double* out  // [11] = gp2, gm2, gpgm_r, gpgm_i, icht, ict, isht, ist, idcht, idct, idsht, idst
+) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne;
+
+    // Allocate partial sums buffer: ne * 9 doubles
+    double* partial;
+    cudaMalloc(&partial, ne * 9 * sizeof(double));
+
+    // Launch partial sum kernel (1 thread/event)
+    launch_time_avg_partial(h->t, h->w, Gamma, DG, Dm, partial, ne);
+
+    // Reduce 9 features over all events
+    double* reduced;
+    cudaMalloc(&reduced, 9 * sizeof(double));
+    launch_reduce_sum_features(partial, reduced, ne, 9);
+    cudaDeviceSynchronize();
+
+    // Download 9 values
+    double buf[9];
+    cudaMemcpy(buf, reduced, 9 * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // Compute final averages
+    double ws = buf[8];
+    double icht = buf[0] / ws, ict = buf[1] / ws;
+    double isht = buf[2] / ws, ist = buf[3] / ws;
+    double idcht = buf[4] / ws / 2.0;
+    double idct = -buf[5] / ws;
+    double idsht = buf[6] / ws / 2.0;
+    double idst = buf[7] / ws;
+
+    double gp2 = (icht + ict) / 2.0;
+    double gm2 = (icht - ict) / 2.0;
+    double gpgmr = -isht / 2.0;
+    double gpgmi = ist / 2.0;
+
+    out[0] = gp2; out[1] = gm2; out[2] = gpgmr; out[3] = gpgmi;
+    out[4] = icht; out[5] = ict; out[6] = isht; out[7] = ist;
+    out[8] = idcht; out[9] = idct; out[10] = idsht; out[11] = idst;
+
+    cudaFree(partial);
+    cudaFree(reduced);
 }
 
 void cuda_compute_v3(void* vctx, void* vdh,

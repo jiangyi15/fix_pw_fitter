@@ -330,10 +330,17 @@ class IntegratedBackend(ComputeBackend):
         self.int_Am2 = float(I_mm.real)
         self.int_ApAm = complex(I_pm)
 
-        # Time averages with cosh/cos/sinh/sin decomposition
-        (gp2_avg, gm2_avg, gpgm_avg,
-         icht, ict, isht, ist,
-         idcht, idct, idsht, idst) = self._time_averages(params["scalar"])[:11]
+        # Time averages via GPU (fast) or CPU fallback
+        base_kernel = getattr(self.base, "kernel", None)
+        gpu_ta = getattr(base_kernel, "compute_time_averages", None)
+        if gpu_ta is not None and self._phsp_handle is not None:
+            (gp2_avg, gm2_avg, gpgm_avg,
+             icht, ict, isht, ist,
+             idcht, idct, idsht, idst) = gpu_ta(self._phsp_handle, params["scalar"])
+        else:
+            (gp2_avg, gm2_avg, gpgm_avg,
+             icht, ict, isht, ist,
+             idcht, idct, idsht, idst) = self._time_averages(params["scalar"])[:11]
 
         # Combine
         frac_avg = float(np.sum(self._phsp_weights * self._phsp_frac))
