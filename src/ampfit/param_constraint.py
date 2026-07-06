@@ -299,11 +299,13 @@ class Transform:
         """Apply :meth:`forward` and return the updated dict.
 
         Only entries in ``output_names`` may change; values for other keys
-        are preserved from the input *d*.  The forward method should not
-        add or remove keys outside ``output_names``.
+        are preserved from the input *d*.  Only ``input_names`` entries are
+        passed to :meth:`forward` — transforms should not read values they
+        didn't declare as inputs.
         """
         saved = {k: v for k, v in d.items() if k not in self.output_names}
-        result = self.forward(d)
+        inputs = {k: v for k, v in d.items() if k in self.input_names}
+        result = self.forward(inputs)
         for k, v in saved.items():
             result[k] = v
         return result

@@ -140,11 +140,14 @@ class _CKWidthTransform(Transform):
 
         width = d.get(self.width_name, self._default_width)
 
-        ck = np.zeros(self.n_ck, dtype=complex)
-        for a in range(self.n_ck):
-            r = d.get(self.order_names[a], self.ck_r0[a])
-            theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
-            ck[a] = r * np.exp(1j * theta)
+        if self.use_ref:
+            ck = self.ck_r0 * np.exp(1j * self.ck_i0)
+        else:
+            ck = np.zeros(self.n_ck, dtype=complex)
+            for a in range(self.n_ck):
+                r = d.get(self.order_names[a], self.ck_r0[a])
+                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                ck[a] = r * np.exp(1j * theta)
 
         raw = _raw_expanded(ck)
         N = np.dot(raw, self.gamma_at_m0)
@@ -165,11 +168,14 @@ class _CKWidthTransform(Transform):
 
         # 1. Read inputs
         width = d.get(self.width_name, self._default_width)
-        ck = np.zeros(self.n_ck, dtype=complex)
-        for a in range(self.n_ck):
-            r = d.get(self.order_names[a], self.ck_r0[a])
-            theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
-            ck[a] = r * np.exp(1j * theta)
+        if self.use_ref:
+            ck = self.ck_r0 * np.exp(1j * self.ck_i0)
+        else:
+            ck = np.zeros(self.n_ck, dtype=complex)
+            for a in range(self.n_ck):
+                r = d.get(self.order_names[a], self.ck_r0[a])
+                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                ck[a] = r * np.exp(1j * theta)
 
         # 2. Raw, N, scale
         raw = _raw_expanded(ck)
