@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import json, io, tempfile
+import pytest
 
 from ampfit.param_constraint import (
     LinearTransform, ScaleTransform, ConstraintManager,
@@ -461,6 +462,143 @@ def test_last_xk_updates():
     x1 = x0 + 0.1
     _, _ = fitter.get_nll(x1)
     assert np.allclose(fitter._last_xk, x1)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. CK matrix v2 — polar convention + ref_file (standalone, no config)
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.fixture(scope="module")
+def ck_matrix_test_data(tmp_path_factory):
+    """Create synthetic gamma/partial/order files for CK matrix model tests."""
+    tmp = tmp_path_factory.mktemp("ck_data")
+    n_ck = 3
+    n_x = 50
+
+    # Gamma table: x values + M_00 data (minimal — only needed for gamma_scale)
+    x = np.linspace(0.5, 2.0, n_x)
+    # Need 4 columns: x, real part of M_00, imag part, something for gamma
+    gamma_data = np.zeros((n_x, 4))
+    gamma_data[:, 0] = x
+    gamma_data[:, 1] = 1.0 / (1.0 + (x - 1.0)**2)  # simple BW-like shape
+    np.save(str(tmp / "gamma.npy"), gamma_data)
+
+    # Partial matrix M_ab: (n_x, n_ck, n_ck) complex
+    M = np.zeros((n_x, n_ck, n_ck), dtype=np.complex128)
+    for i in range(n_x):
+        for a in range(n_ck):
+            M[i, a, a] = 1.0 + 0.1j * (a + 1)  # diag terms
+            for b in range(a + 1, n_ck):
+                M[i, a, b] = 0.1 * (a + 1) / (1.0 + (x[i] - 1.0)**2)
+                M[i, b, a] = M[i, a, b].conj()
+    np.save(str(tmp / "partial.npy"), M)
+
+    # Order file
+    order_names = [f"test_g_ls_{a}r" for a in range(n_ck)]
+    with open(str(tmp / "order.json"), "w") as f:
+        json.dump(order_names, f)
+
+    return {
+        "gamma_file": str(tmp / "gamma.npy"),
+        "partial_file": str(tmp / "partial.npy"),
+        "order_file": str(tmp / "order.json"),
+        "n_ck": n_ck,
+    }
+
+
+def _ck_model_kwargs(ck_matrix_test_data, extra=None):
+    kw = dict(ck_matrix_test_data)
+    kw.pop("n_ck")
+    if extra:
+        kw.update(extra)
+    return kw
+
+
+def test_ck_matrix_v2_polar_forward(ck_matrix_test_data):
+    """CK matrix v2: forward with magnitude/phase convention (r*exp(j*θ))."""
+    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    kw = _ck_model_kwargs(ck_matrix_test_data, {
+        "mass": 1.0, "width": 0.1,
+        "ck": [2.0, 0.5, 1.5, -0.3, 3.0, 1.2],
+    })
+    m = CKMatrixModelV2("test", **kw)
+    tr = m.make_mass_width_transform()
+    d = {"test_width": 0.1}
+    for a in range(tr.n_ck):
+        d[tr.order_names[a]] = tr.ck_r0[a]
+        d[tr.order_names[a].rstrip("r") + "i"] = tr.ck_i0[a]
+    fwd = tr.forward(d)
+    for name in tr.gamma_names:
+        assert np.isfinite(fwd[name]), f"Non-finite gamma: {name}"
+
+
+def test_ck_matrix_v2_polar_gradients(ck_matrix_test_data):
+    """CK matrix v2: polar gradients match numerical (r≠1, θ≠0)."""
+    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    kw = _ck_model_kwargs(ck_matrix_test_data, {
+        "mass": 1.0, "width": 0.1,
+        "ck": [2.0, 0.5, 1.5, -0.3, 3.0, 1.2],
+    })
+    m = CKMatrixModelV2("test", **kw)
+    tr = m.make_mass_width_transform()
+
+    gamma_names = set(tr.gamma_names)
+    loss_fn = lambda dd: sum(v for k, v in tr.forward(dd).items() if k in gamma_names)
+    d = {"test_width": 0.1}
+    for a in range(tr.n_ck):
+        d[tr.order_names[a]] = tr.ck_r0[a]
+        d[tr.order_names[a].rstrip("r") + "i"] = tr.ck_i0[a]
+
+    grad = tr.backward({n: 1.0 for n in tr.gamma_names}, d)
+    eps = 1e-6
+
+    for a in range(tr.n_ck):
+        name = tr.order_names[a]
+        iname = name.rstrip("r") + "i"
+        r0, t0 = tr.ck_r0[a], tr.ck_i0[a]
+        num_r = (loss_fn({**d, name: r0+eps}) - loss_fn({**d, name: r0-eps})) / (2*eps)
+        num_t = (loss_fn({**d, iname: t0+eps}) - loss_fn({**d, iname: t0-eps})) / (2*eps)
+        ana_r = grad.get(name, 0)
+        ana_t = grad.get(iname, 0)
+        assert abs(num_r - ana_r) < 1e-4, f"Mag gradient mismatch for {name}: {abs(num_r-ana_r):.2e}"
+        assert abs(num_t - ana_t) < 1e-4, f"Phase gradient mismatch for {iname}: {abs(num_t-ana_t):.2e}"
+
+
+def test_ck_matrix_v2_ref_file(ck_matrix_test_data, tmp_path):
+    """CK matrix v2: ref_file loads g_ls from reference JSON."""
+    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    # Create a reference JSON with known g_ls values
+    ref = {
+        "test_width": 0.15,
+        "test_g_ls_0r": 3.0, "test_g_ls_0i": 0.8,
+        "test_g_ls_1r": 2.5, "test_g_ls_1i": -0.5,
+        "test_g_ls_2r": 1.2, "test_g_ls_2i": 0.3,
+    }
+    ref_path = tmp_path / "ref.json"
+    with open(ref_path, "w") as f:
+        json.dump(ref, f)
+
+    kw = _ck_model_kwargs(ck_matrix_test_data, {
+        "mass": 1.0, "width": 0.1,
+        "ref_file": str(ref_path),
+    })
+    m = CKMatrixModelV2("test", **kw)
+    tr = m.make_mass_width_transform()
+
+    # g_ls not in input_names (reference mode)
+    gls_in = [n for n in tr.input_names if "g_ls" in n]
+    assert len(gls_in) == 0, f"g_ls should not be in input_names, found {len(gls_in)}"
+    assert any("width" in n for n in tr.input_names), "width should be in input_names"
+
+    # _ref_ck populated with reference values
+    assert m._ref_ck is not None
+    assert len(m._ref_ck) == ck_matrix_test_data["n_ck"]
+    assert abs(abs(m._ref_ck[0]) - 3.0) < 1e-6
+    assert abs(np.angle(m._ref_ck[0]) - 0.8) < 1e-6
+
+    # get_bw_params works
+    bw = m.get_bw_params()
+    assert "mass_bw" in bw and "width_bw" in bw
 
 
 if __name__ == "__main__":

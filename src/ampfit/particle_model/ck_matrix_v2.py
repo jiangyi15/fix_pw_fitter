@@ -116,10 +116,15 @@ class _CKWidthTransform(Transform):
     _has_inverse = False
 
     def __init__(self, name, order_names, gamma_names,
-                 ck_r0, ck_i0, gamma_at_m0, width_name, default_width):
+                 ck_r0, ck_i0, gamma_at_m0, width_name, default_width,
+                 use_ref=False):
         self.width_name = width_name
-        in_names = [width_name] + list(order_names) + \
-                   [n.rstrip('r') + 'i' for n in order_names]
+        self.use_ref = use_ref
+        if use_ref:
+            in_names = [width_name]  # g_ls from reference, not free
+        else:
+            in_names = [width_name] + list(order_names) + \
+                       [n.rstrip('r') + 'i' for n in order_names]
         super().__init__(input_names=in_names, output_names=gamma_names)
         self.name = name
         self.order_names = list(order_names)
@@ -138,8 +143,8 @@ class _CKWidthTransform(Transform):
         ck = np.zeros(self.n_ck, dtype=complex)
         for a in range(self.n_ck):
             r = d.get(self.order_names[a], self.ck_r0[a])
-            i = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
-            ck[a] = r + 1j * i
+            theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+            ck[a] = r * np.exp(1j * theta)
 
         raw = _raw_expanded(ck)
         N = np.dot(raw, self.gamma_at_m0)
@@ -163,8 +168,8 @@ class _CKWidthTransform(Transform):
         ck = np.zeros(self.n_ck, dtype=complex)
         for a in range(self.n_ck):
             r = d.get(self.order_names[a], self.ck_r0[a])
-            i = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
-            ck[a] = r + 1j * i
+            theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+            ck[a] = r * np.exp(1j * theta)
 
         # 2. Raw, N, scale
         raw = _raw_expanded(ck)
@@ -183,79 +188,75 @@ class _CKWidthTransform(Transform):
         # 4. Gradient w.r.t. width
         grad[self.width_name] = B / N
 
-        # 5. Gradients w.r.t. each ck component
-        n = self.n_ck
-        gammas = self.gamma_at_m0
+        # 5. Gradients w.r.t. each ck component (skip in ref mode)
+        if not self.use_ref:
+            n = self.n_ck
+            gammas = self.gamma_at_m0
 
-        # Pre-compute: for each ck component a, collect all raw indices
-        # that depend on it, with their derivatives.
-        # Build index-to-(a,b) mapping once if not cached
-        if not hasattr(self, '_raw_idx_map'):
-            self._raw_idx_map = []  # (a, b, type) for each raw index
-            ri = 0
-            for aa in range(n):
-                self._raw_idx_map.append((aa, aa, 're'))  # diagonal
-                ri += 1
-                for bb in range(aa + 1, n):
-                    self._raw_idx_map.append((aa, bb, 're'))
-                    self._raw_idx_map.append((aa, bb, 'im'))
-                    ri += 2
+            # Pre-compute index mapping once
+            if not hasattr(self, '_raw_idx_map'):
+                self._raw_idx_map = []
+                ri = 0
+                for aa in range(n):
+                    self._raw_idx_map.append((aa, aa, 're'))
+                    ri += 1
+                    for bb in range(aa + 1, n):
+                        self._raw_idx_map.append((aa, bb, 're'))
+                        self._raw_idx_map.append((aa, bb, 'im'))
+                        ri += 2
 
-        for a in range(n):
-            dN_dr = 0.0; dN_di = 0.0  # dN/d(ck_r[a]), dN/d(ck_i[a])
-            A_re  = 0.0; A_im  = 0.0   # Σ grad · ∂raw/∂ck
+            # Pre-compute polar components for all ck
+            ck_abs = np.abs(ck)    # r_a = |ck_a|
+            ck_ang = np.angle(ck)  # theta_a = arg(ck_a)
 
-            for ri, (aa, bb, rtype) in enumerate(self._raw_idx_map):
-                g_out = grad_out.get(self.gamma_names[ri], 0.0)
-                gamma_val = gammas[ri]
+            for a in range(n):
+                dN_dr = 0.0; dN_dt = 0.0  # dN/d(r_a), dN/d(theta_a)
+                A_r   = 0.0; A_t   = 0.0  # Σ grad · ∂raw/∂r, Σ grad · ∂raw/∂theta
+                ra = ck_abs[a]
+                ta = ck_ang[a]
 
-                if aa == bb and aa == a:
-                    # Diagonal: |c_a|²
-                    # ∂/∂r: 2·r_a, ∂/∂i: 2·i_a
-                    dr_dr = 2.0 * ck[a].real
-                    dr_di = 2.0 * ck[a].imag
-                    dN_dr += dr_dr * gamma_val
-                    dN_di += dr_di * gamma_val
-                    A_re  += g_out * dr_dr
-                    A_im  += g_out * dr_di
+                for ri, (aa, bb, rtype) in enumerate(self._raw_idx_map):
+                    g_out = grad_out.get(self.gamma_names[ri], 0.0)
+                    gamma_val = gammas[ri]
 
-                elif aa == a and bb > a:
-                    if rtype == 're':
-                        # 2·Re(c_a c_b*) = 2(r_a·r_b + i_a·i_b)
-                        # ∂/∂r_a: 2·r_b, ∂/∂i_a: 2·i_b
-                        dr_dr = 2.0 * ck[bb].real
-                        dr_di = 2.0 * ck[bb].imag
+                    if aa == bb and aa == a:
+                        # |c_a|² = r_a²
+                        dr = 2.0 * ra       # ∂/∂r_a
+                        dt = 0.0            # ∂/∂theta_a
+                    elif aa == a and bb > a:
+                        rb = ck_abs[bb]; tb = ck_ang[bb]
+                        dth = ta - tb
+                        if rtype == 're':
+                            # 2·Re(c_a·c_b*) = 2·ra·rb·cos(dth)
+                            dr = 2.0 * rb * np.cos(dth)
+                            dt = -2.0 * ra * rb * np.sin(dth)
+                        else:
+                            # 2·Im(c_a·c_b*) = 2·ra·rb·sin(dth)
+                            dr = 2.0 * rb * np.sin(dth)
+                            dt = 2.0 * ra * rb * np.cos(dth)
+                    elif bb == a and aa < a:
+                        # Here bb=a, so rb should be the OTHER component (aa)
+                        rb = ck_abs[aa]; tb = ck_ang[aa]
+                        dth = ta - tb
+                        if rtype == 're':
+                            # 2·Re(c_aa·c_a*) = 2·ra·rb·cos(dth)
+                            dr = 2.0 * rb * np.cos(dth)
+                            dt = -2.0 * ra * rb * np.sin(dth)
+                        else:
+                            # 2·Im(c_aa·c_a*) = -2·ra·rb·sin(dth)
+                            dr = -2.0 * rb * np.sin(dth)
+                            dt = -2.0 * ra * rb * np.cos(dth)
                     else:
-                        # 2·Im(c_a c_b*) = 2(i_a·r_b - r_a·i_b)
-                        # ∂/∂r_a: -2·i_b, ∂/∂i_a: 2·r_b
-                        dr_dr = -2.0 * ck[bb].imag
-                        dr_di =  2.0 * ck[bb].real
-                    dN_dr += dr_dr * gamma_val
-                    dN_di += dr_di * gamma_val
-                    A_re  += g_out * dr_dr
-                    A_im  += g_out * dr_di
+                        continue
 
-                elif bb == a and aa < a:
-                    # re_ba or im_ba where b<a (stored as pair (b,a))
-                    if rtype == 're':
-                        # 2·Re(c_b c_a*) = 2(r_b·r_a + i_b·i_a)
-                        # ∂/∂r_a: 2·r_b, ∂/∂i_a: 2·i_b
-                        dr_dr = 2.0 * ck[aa].real
-                        dr_di = 2.0 * ck[aa].imag
-                    else:
-                        # 2·Im(c_b c_a*) = 2(i_b·r_a - r_b·i_a)
-                        # ∂/∂r_a: 2·i_b, ∂/∂i_a: -2·r_b
-                        dr_dr = 2.0 * ck[aa].imag
-                        dr_di = -2.0 * ck[aa].real
-                    dN_dr += dr_dr * gamma_val
-                    dN_di += dr_di * gamma_val
-                    A_re  += g_out * dr_dr
-                    A_im  += g_out * dr_di
+                    dN_dr += dr * gamma_val
+                    dN_dt += dt * gamma_val
+                    A_r   += g_out * dr
+                    A_t   += g_out * dt
 
-            # ∂loss/∂ck[a]_r = scale · A_re − (scale/N) · dN_dr · B
-            grad[self.order_names[a]] = scale * A_re - (scale / N) * dN_dr * B
-            iname_i = self.order_names[a].rstrip('r') + 'i'
-            grad[iname_i] = scale * A_im - (scale / N) * dN_di * B
+                grad[self.order_names[a]] = scale * A_r - (scale / N) * dN_dr * B
+                iname = self.order_names[a].rstrip('r') + 'i'
+                grad[iname] = scale * A_t - (scale / N) * dN_dt * B
 
         return grad
 
@@ -270,6 +271,10 @@ class CKMatrixModelV2(BaseModel):
 
     The transform scales the raw ck expanded components so that the
     sum of all gamma contributions at m₀ equals ``{res}_width``.
+
+    Optional *ref_file*: a JSON file with parameter values. When provided,
+    g_ls values are taken from the file and the transform has no free
+    inputs — gamma is computed from fixed reference values directly.
     """
 
     def __init__(self, name, **kwargs):
@@ -307,7 +312,7 @@ class CKMatrixModelV2(BaseModel):
             self.x_table, self.M_table, self.n_ck,
             self._gamma_scale, self.m0)
 
-        # ── ck defaults ───────────────────────────────────────────
+        # ── ck defaults ──────────────────────────────────────────
         ck_raw = kwargs.get("ck", None)
         if ck_raw is not None:
             n_parts = 2 * self.n_ck
@@ -322,11 +327,24 @@ class CKMatrixModelV2(BaseModel):
             self._ck0_r[0] = 1.0
             self._ck0_i = np.zeros(self.n_ck, dtype=float)
 
+        # ── reference file mode ──────────────────────────────────
+        # Store reference g_ls values for BW lineshape computation.
+        self.ref_file = kwargs.get("ref_file", None)
+        self._ref_ck = None  # (n_ck,) complex array from reference
+        if self.ref_file:
+            with open(self.ref_file) as f:
+                ref_data = json.load(f)
+            ref = ref_data.get("value") or ref_data
+            ck_r = np.array([float(ref.get(n, self._ck0_r[i]))
+                             for i, n in enumerate(self.order_names)])
+            ck_i = np.array([float(ref.get(n.rstrip('r') + 'i', self._ck0_i[i]))
+                             for i, n in enumerate(self.order_names)])
+            self._ref_ck = ck_r * np.exp(1j * ck_i)  # magnitude/phase convention
+
         # ── gamma names & defaults (no {res}_width) ──────────────
         self._g_names = _reduced_spec(self.n_ck, self.name)
 
-        # Defaults: only-first-channel active
-        ck0 = self._ck0_r + 1j * self._ck0_i
+        ck0 = self._ck0_r * np.exp(1j * self._ck0_i)  # magnitude/phase
         raw0 = _raw_expanded(ck0)
         N0 = np.dot(raw0, self._gamma_m0)
         self._g_defaults = [float(self.kwargs.get("width", 0.1)) * r / N0 if N0 != 0 else 0.0
@@ -335,11 +353,7 @@ class CKMatrixModelV2(BaseModel):
     # ── gamma interface ──────────────────────────────────────────
 
     def get_defaults(self):
-        """All physical defaults: mass and width only.
-
-        Gamma/reduced values are computed by the transform from
-        ck parameters, so they don't need initial defaults here.
-        """
+        """All physical defaults: mass and width only (from config)."""
         mass = float(self.kwargs.get("mass", 0.775))
         width = float(self.kwargs.get("width", 0.1))
         return {f"{self.name}_mass": mass, f"{self.name}_width": width}
@@ -362,10 +376,18 @@ class CKMatrixModelV2(BaseModel):
 
     def make_mass_width_transform(self):
         width_name = f"{self.name}_width"
+        # Use reference values for ck defaults when ref_file given
+        if self._ref_ck is not None:
+            ck_r0 = np.abs(self._ref_ck)     # magnitude
+            ck_i0 = np.angle(self._ref_ck)   # phase
+        else:
+            ck_r0 = self._ck0_r
+            ck_i0 = self._ck0_i
         return _CKWidthTransform(
             self.name, self.order_names, self._g_names,
-            self._ck0_r, self._ck0_i,
+            ck_r0, ck_i0,
             self._gamma_m0, width_name, float(self.kwargs.get("width", 0.1)),
+            use_ref=self.ref_file is not None,
         )
 
     # ── get_bw_params ────────────────────────────────────────────
@@ -385,10 +407,20 @@ class CKMatrixModelV2(BaseModel):
             return fallback
 
         m0 = _p(f"{self.name}_mass", 0.775)
-        gamma_names = self.get_gamma_name()
-        defaults = self.get_gamma_defaults()
-        g0_vals = [_p(gamma_names[i], defaults[i])
-                   for i in range(self.get_gamma_count())]
+
+        # Use reference g_ls for BW computation when available
+        if self._ref_ck is not None:
+            ck = self._ref_ck
+            raw_ref = _raw_expanded(ck)
+            N_ref = np.dot(raw_ref, self._gamma_m0)
+            width = _p(f"{self.name}_width", self.kwargs.get("width", 0.1))
+            scale = width / N_ref if N_ref != 0 else 0.0
+            g0_vals = [float(r * scale) for r in raw_ref]
+        else:
+            gamma_names = self.get_gamma_name()
+            defaults = self.get_gamma_defaults()
+            g0_vals = [_p(gamma_names[i], defaults[i])
+                       for i in range(self.get_gamma_count())]
 
         # Read total width from params or kwargs
         total_width = _p(f"{self.name}_width", float(self.kwargs.get("width", 0.1)))
