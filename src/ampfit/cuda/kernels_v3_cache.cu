@@ -15,6 +15,7 @@
 #include <thrust/complex.h>
 #include <cstdio>
 #include <cmath>
+#include <cassert>
 
 using complex = thrust::complex<double>;
 
@@ -1791,6 +1792,7 @@ void* cuda_create_context_v3(
         S2(bw_p_real, nw); S2(bw_p_imag, nw);
         S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
         S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
+        S(dQ_ap_real); S(dQ_ap_imag); S(dQ_am_real); S(dQ_am_imag);
         S2(bw_dom_real, nub); S2(bw_dom_imag, nub);
         S2(grad_ck_real_partial, nw); S2(grad_ck_imag_partial, nw);
         S2(grad_m0_partial, nub); S2(grad_g0_partial, ngr);
@@ -1804,6 +1806,11 @@ void* cuda_create_context_v3(
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
     }
+    assert(c->scratch != NULL);
+    assert(c->scratch->dQ_ap_real != NULL);
+    assert(c->scratch->dQ_ap_imag != NULL);
+    assert(c->scratch->dQ_am_real != NULL);
+    assert(c->scratch->dQ_am_imag != NULL);
     return c;
 }
 void cuda_free_context_v3(void* vctx) {
@@ -1889,18 +1896,7 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
     const double* gpu_m0 = (const double*)_up_dbl(m0, c->n_m0_params);
     const double* gpu_g0 = (const double*)_up_dbl(g0, c->n_g0_params);
 
-    ComputeData s;
-    if (c->scratch) {
-        s = *c->scratch;
-    } else {
-        memset(&s, 0, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
-        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
-        S2(g_interp_real,ng); S2(g_interp_imag,ng);
-        S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        #undef S
-        #undef S2
-    }
+    ComputeData s = *c->scratch;
 
     double *A0r, *A0i, *A1r, *A1i;
     size_t a_sz = (size_t)bs * ng2 * sizeof(double);
@@ -1972,11 +1968,6 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
     cudaFree(A0r); cudaFree(A0i); cudaFree(A1r); cudaFree(A1i);
     cudaFree(Mpp_r); cudaFree(Mpp_i); cudaFree(Mmm_r); cudaFree(Mmm_i);
     cudaFree(Mpm_r); cudaFree(Mpm_i);
-    if (!c->scratch) {
-        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
-        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-        #undef F
-    }
 }
 
 void cuda_time_averages_v3(void* vctx, void* vdh,
@@ -2059,31 +2050,8 @@ void cuda_compute_v3(void* vctx, void* vdh,
         cudaMalloc(&h->cached_amp, ne * n_cache * sizeof(double2));
     }
 
-    // Use context-allocated scratch (avoids per-call cudaMalloc/free)
-    ComputeData s;
-    if (c->scratch) {
-        s = *c->scratch;
-    } else {
-        memset(&s, 0, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&s.f, bs * sizeof(double))
-        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(double))
-        S2(g_interp_real,ng); S2(g_interp_imag,ng);
-        S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
-        S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
-        S2(bw_p_real,nw); S2(bw_p_imag,nw);
-        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
-        S(ap_real); S(ap_imag); S(am_real); S(am_imag); S(dQ_dP);
-        S(dQ_ap_real); S(dQ_ap_imag); S(dQ_am_real); S(dQ_am_imag);
-        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
-        S2(grad_ck_real_partial,nw); S2(grad_ck_imag_partial,nw);
-        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
-        S(grad_Gamma_partial); S(grad_DeltaGamma_partial);
-        S(grad_DeltaM_partial); S(grad_Ap_partial);
-        S(grad_poq_rho_partial); S(grad_pop_phi_partial);
-        #undef S
-        #undef S2
-    }
+    // Use context-allocated scratch (pre-allocated in cuda_create_context_v3)
+    ComputeData s = *c->scratch;
 
     *oQ = 0; memset(oP, 0, ne * 8);
     memset(ogck_r, 0, nw * 8); memset(ogck_i, 0, nw * 8);
