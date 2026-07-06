@@ -1993,11 +1993,8 @@ void cuda_compute_v3(void* vctx, void* vdh,
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
     memset(ogsc, 0, N_SCALAR * sizeof(double));
 
-    // Zero reduction output buffers (stale from previous call)
-    cudaMemset(s.g_bw_real, 0, bs * nu * 8);
-    cudaMemset(s.g_bw_imag, 0, bs * nu * 8);
-    cudaMemset(s.g_interp_real, 0, bs * ng * 8);
-    cudaMemset(s.g_interp_imag, 0, bs * ng * 8);
+    // Reduction output buffers are fully overwritten by reduce_sum_features
+    // (output[feat] = sum, not +=). No memset needed.
 
     double* Ph = (double*)malloc(bs * 8);
     double* gck_buf = (double*)malloc(nw * 8);
@@ -2017,117 +2014,122 @@ void cuda_compute_v3(void* vctx, void* vdh,
         d.n_events = nb;
 
         if (want_cache && h->cache_valid) {
-            // ── Cached NLL (3 warp-level kernels) ────────────────
+            // ── CACHED PATH (completely separate, no interp/m0/g0) ──
             double2* camp = h->cached_amp + st * n_cache;
 
-            // 1) Forward: cached_amp × ck → ap, am
-            launch_forward_mv(
-                p.ck_real, p.ck_imag, camp,
-                d.ap_real, d.ap_imag, d.am_real, d.am_imag,
-                nb, n_cache, nw);
-
-            // 2) Time evolution + scalar grads
-            launch_time_evol(
-                d.frac, d.time, d.weight, d.bkg,
+            // 3 compute kernels
+            launch_forward_mv(p.ck_real, p.ck_imag, camp,
+                d.ap_real, d.ap_imag, d.am_real, d.am_imag, nb, n_cache, nw);
+            launch_time_evol(d.frac, d.time, d.weight, d.bkg,
                 d.ap_real, d.ap_imag, d.am_real, d.am_imag,
                 G, DG, DM, Ap, pr, pp,
                 d.Q_out, d.P_out,
-                d.pap_real, d.pap_imag,
-                d.pam_real, d.pam_imag,
-                d.gp_real, d.gp_imag,
-                d.gm_real, d.gm_imag,
-                d.poq_real, d.poq_imag,
-                d.dQ_dP,
+                d.pap_real, d.pap_imag, d.pam_real, d.pam_imag,
+                d.gp_real, d.gp_imag, d.gm_real, d.gm_imag,
+                d.poq_real, d.poq_imag, d.dQ_dP,
                 d.dQ_ap_real, d.dQ_ap_imag,
                 d.dQ_am_real, d.dQ_am_imag,
                 d.grad_Gamma_partial, d.grad_DeltaGamma_partial,
                 d.grad_DeltaM_partial, d.grad_Ap_partial,
                 d.grad_poq_rho_partial, d.grad_pop_phi_partial,
                 nb, use_norm, nv);
-
-            // 3) Backward: dQ_da × cached_amp → grad_ck
-            launch_backward_mv(
-                d.dQ_ap_real, d.dQ_ap_imag,
-                d.dQ_am_real, d.dQ_am_imag,
-                camp,
+            launch_backward_mv(d.dQ_ap_real, d.dQ_ap_imag,
+                d.dQ_am_real, d.dQ_am_imag, camp,
                 d.grad_ck_real_partial, d.grad_ck_imag_partial,
                 nb, n_cache, nw);
 
-            // Zero m0/g0 gradients (BW params fixed)
-            for (int i = 0; i < nb; i++) {
-                cudaMemset(d.grad_m0_partial + i * nu, 0, nu * 8);
-                cudaMemset(d.grad_g0_partial + i * ng, 0, ng * 8);
+            // Post-processing: Q, P, CK red, scalars (no m0/g0/interp)
+            cudaGetLastError();
+            cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
+            for (int i = 0; i < nb; i++) *oQ += Ph[i];
+            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+            memcpy(oP + st, Ph, nb * 8);
+
+            launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
+            cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
+            launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, nw);
+            cudaMemcpy(gck_buf, s.g_bw_imag, nw * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
+
+            // m0/g0: already zero from init, set output directly
+            // (no reduce_sum_features, no cudaMemset, no interp buffers)
+
+            // Scalars: reuse Ph buffer
+            #define SC(f,i) do { cudaMemcpy(Ph,d.f,nb*8,cudaMemcpyDeviceToHost); \
+                for(int _i=0;_i<nb;_i++) ogsc[i]+=Ph[_i]; } while(0)
+            SC(grad_Gamma_partial,0); SC(grad_DeltaGamma_partial,1);
+            SC(grad_DeltaM_partial,2); SC(grad_Ap_partial,3);
+            SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
+            #undef SC
+
+            // CK gradient expansion + ÷4
+            {
+                int nb2 = nw / 8, hw2 = nw / 2;
+                for (int b = nb2 - 1; b >= 0; b--)
+                    for (int cp = 0; cp < 2; cp++) {
+                        int o = cp * hw2 + b;
+                        double vr = 0.25 * ogck_r[o], vi = 0.25 * ogck_i[o];
+                        for (int p = 3; p >= 0; p--) {
+                            int w = cp * hw2 + p * nb2 + b;
+                            ogck_r[w] = vr; ogck_i[w] = vi;
+                        }
+                    }
             }
         } else {
-            // ── Full compute ─────────────────────────────────────
+            // ── FULL COMPUTE PATH (with interp/m0/g0) ─────────────
             launch_compute_all(c, &d, &p, nv, use_norm);
             cudaGetLastError();
 
-            // Fill cache for data NLL (first call with use_norm == 1)
+            // Fill cache on first data NLL call
             if (want_cache && !h->cache_valid) {
-                launch_cache_reduce(
-                    d.common_amp_factor_real, d.common_amp_factor_imag,
-                    h->cached_amp + st * n_cache,
-                    nw, n_cache, nb);
+                launch_cache_reduce(d.common_amp_factor_real, d.common_amp_factor_imag,
+                    h->cached_amp + st * n_cache, nw, n_cache, nb);
+            }
+
+            cudaGetLastError();
+            cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
+            for (int i = 0; i < nb; i++) *oQ += Ph[i];
+            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+            memcpy(oP + st, Ph, nb * 8);
+
+            launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
+            cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
+            launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, nw);
+            cudaMemcpy(gck_buf, s.g_bw_imag, nw * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
+
+            launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
+            cudaMemcpy(gm0_buf, s.g_interp_real, nu * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
+            launch_reduce_sum_features(d.grad_g0_partial, s.g_interp_imag, nb, ng);
+            cudaMemcpy(gg0_buf, s.g_interp_imag, ng * 8, cudaMemcpyDeviceToHost);
+            for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
+
+            #define SC(f,i) do { cudaMemcpy(Ph,d.f,nb*8,cudaMemcpyDeviceToHost); \
+                for(int _i=0;_i<nb;_i++) ogsc[i]+=Ph[_i]; } while(0)
+            SC(grad_Gamma_partial,0); SC(grad_DeltaGamma_partial,1);
+            SC(grad_DeltaM_partial,2); SC(grad_Ap_partial,3);
+            SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
+            #undef SC
+
+            // CK gradient expansion
+            if (use_norm != 0) {
+                int nb2 = nw / 8, hw2 = nw / 2;
+                for (int b = nb2 - 1; b >= 0; b--)
+                    for (int cp = 0; cp < 2; cp++) {
+                        int o = cp * hw2 + b;
+                        double vr = 0.25 * ogck_r[o], vi = 0.25 * ogck_i[o];
+                        for (int p = 3; p >= 0; p--) {
+                            int w = cp * hw2 + p * nb2 + b;
+                            ogck_r[w] = vr; ogck_i[w] = vi;
+                        }
+                    }
             }
         }
 
-        cudaGetLastError();
-
-        // CPU sum for Q
-        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
-        for (int i = 0; i < nb; i++) *oQ += Ph[i];
-
-        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * 8);
-
-        // GPU reductions
-        launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
-        cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < nw; j++) ogck_r[j] += gck_buf[j];
-
-        launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, nw);
-        cudaMemcpy(gck_buf, s.g_bw_imag, nw * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < nw; j++) ogck_i[j] += gck_buf[j];
-
-        launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
-        cudaMemcpy(gm0_buf, s.g_interp_real, nu * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
-
-        launch_reduce_sum_features(d.grad_g0_partial, s.g_interp_imag, nb, ng);
-        cudaMemcpy(gg0_buf, s.g_interp_imag, ng * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
-
-        // Scalar gradients (download per-event, sum on CPU)
-        #define SA(f, idx) do { \
-            double* bf = (double*)malloc(nb * 8); \
-            cudaMemcpy(bf, d.f, nb * 8, cudaMemcpyDeviceToHost); \
-            for (int i = 0; i < nb; i++) ogsc[idx] += bf[i]; \
-            free(bf); \
-        } while(0)
-        SA(grad_Gamma_partial,0); SA(grad_DeltaGamma_partial,1);
-        SA(grad_DeltaM_partial,2); SA(grad_Ap_partial,3);
-        SA(grad_poq_rho_partial,4); SA(grad_pop_phi_partial,5);
-        #undef SA
-    }
-
-    // CK gradient: expand 112 (first slot per group) → 448, then ÷4
-    if (use_norm != 0) {
-        int n_base = nw / 8;  // 56 base waves per CP
-        int n_wave_half = nw / 2;  // 224
-        for (int base = n_base - 1; base >= 0; base--) {
-            for (int cp = 0; cp < 2; cp++) {
-                int off0 = cp * n_wave_half + base;  // first perm slot
-                double vr = 0.25 * ogck_r[off0];
-                double vi = 0.25 * ogck_i[off0];
-                for (int p = 3; p >= 0; p--) {
-                    int w = cp * n_wave_half + p * n_base + base;
-                    ogck_r[w] = vr;
-                    ogck_i[w] = vi;
-                }
-            }
-        }
-    }
+    }  // end batch loop
 
     // Mark cache valid after first successful data NLL run
     if (want_cache && !h->cache_valid) {
