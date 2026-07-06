@@ -82,6 +82,18 @@ class IntegratedBackend(ComputeBackend):
         self.int_Am2 = None
         self.int_ApAm = None
 
+        # ── Time average caching (per-array + scalar result) ──
+        self._cached_Gam = None
+        self._cached_DG = None
+        self._cached_Dm = None
+        self._cache_expt = None
+        self._cache_cht = None
+        self._cache_sht = None
+        self._cache_ct = None
+        self._cache_st = None
+        self._ta_key = None
+        self._ta_result = None
+
     # ═══════════════════════════════════════════════════════════════
     #  Phsp pre‑integration
     # ═══════════════════════════════════════════════════════════════
@@ -94,21 +106,41 @@ class IntegratedBackend(ComputeBackend):
         return (eL + eH) / 2, (eL - eH) / 2
 
     def _time_averages(self, scalar):
-        """Time integrals using cosh/cos/sinh/sin decomposition.
+        """Time integrals with per-array caching keyed by scalar params.
 
-        Returns gp2_avg, gm2_avg, gpgm_avg + derivative integrals
-        for efficient scalar gradient computation.
+        Caches each 1.85M-element trig/exp array independently so that
+        changing only Gamma recomputes only expt (~8ms) instead of all
+        5 arrays (~73ms). Final scalar results cached by full key.
         """
-        Gam, DG, Dm, Ap, r, phi = scalar
+        Gam, DG, Dm = scalar[0], scalar[1], scalar[2]
         t = self._phsp_time
         w = self._phsp_weights
         ws = np.sum(w)
 
-        expt = np.exp(-Gam * t)
-        cht = np.cosh(DG * t / 2)
-        sht = np.sinh(DG * t / 2)
-        ct = np.cos(Dm * t)
-        st = np.sin(Dm * t)
+        # Per-array cache (recompute only changed params)
+        eps = 1e-15
+        if self._cached_Gam is None or abs(Gam - self._cached_Gam) > eps:
+            self._cache_expt = np.exp(-Gam * t)
+            self._cached_Gam = Gam
+        if self._cached_DG is None or abs(DG - self._cached_DG) > eps:
+            self._cache_cht = np.cosh(DG * t / 2)
+            self._cache_sht = np.sinh(DG * t / 2)
+            self._cached_DG = DG
+        if self._cached_Dm is None or abs(Dm - self._cached_Dm) > eps:
+            self._cache_ct = np.cos(Dm * t)
+            self._cache_st = np.sin(Dm * t)
+            self._cached_Dm = Dm
+
+        # Check if final scalar averages are cached
+        key = (Gam, DG, Dm)
+        if self._ta_key is not None and self._ta_key == key:
+            return self._ta_result
+
+        expt = self._cache_expt
+        cht = self._cache_cht
+        sht = self._cache_sht
+        ct = self._cache_ct
+        st = self._cache_st
 
         def avg(f): return float(np.sum(w * f) / ws)
         def avg_c(f): return complex(np.sum(w * f) / ws)
@@ -128,10 +160,12 @@ class IntegratedBackend(ComputeBackend):
         idsht = avg(t * expt * cht) / 2       # d(isht)/dDG
         idst = avg(t * expt * ct)             # d(ist)/dDm
 
-        return (gp2_avg, gm2_avg, gpgm_avg,
-                icht, ict, isht, ist,
-                idcht, idct, idsht, idst,
-                expt, cht, sht, ct, st, t, w, ws)
+        self._ta_result = (gp2_avg, gm2_avg, gpgm_avg,
+                           icht, ict, isht, ist,
+                           idcht, idct, idsht, idst,
+                           expt, cht, sht, ct, st, t, w, ws)
+        self._ta_key = key
+        return self._ta_result
 
     def _ensure_gram(self, params, phsp_handle=None):
         """Build reduced Gram matrices from stored phsp data if needed."""
@@ -379,11 +413,15 @@ class IntegratedBackend(ComputeBackend):
                      else norm_val), grads, P
 
     def free(self):
-        """Release all resources (matrices + base backend)."""
+        """Release all resources (matrices + base backend + time avg cache)."""
         self._Mpp_r = self._Mmm_r = self._Mpm_r = None
         self._gram_m0 = self._gram_g0 = None
         self._phsp_data = None
         self._phsp_weights = self._phsp_frac = self._phsp_time = None
+        self._cached_Gam = self._cached_DG = self._cached_Dm = None
+        self._cache_expt = self._cache_cht = self._cache_sht = None
+        self._cache_ct = self._cache_st = None
+        self._ta_key = self._ta_result = None
         self.phsp_n = 0
         try:
             self.base.free()
