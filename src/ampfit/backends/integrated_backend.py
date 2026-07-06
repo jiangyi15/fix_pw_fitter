@@ -41,9 +41,10 @@ class IntegratedBackend(ComputeBackend):
         Spatial integrals for the latest call (user‑accessible).
     """
 
-    def __init__(self, kernel_config, base="cuda_v3_cache"):
+    def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True):
         from ampfit.numpy_kernel import NumpyKernel
         self.kernel = NumpyKernel(kernel_config)
+        self.strict_gram = strict_gram
 
         # ── Base backend for data NLL ─────────────────────────────
         if isinstance(base, ComputeBackend):
@@ -57,6 +58,7 @@ class IntegratedBackend(ComputeBackend):
         self._Mpp_r = None
         self._Mmm_r = None
         self._Mpm_r = None
+        self._gram_m0 = self._gram_g0 = None
         self._groups_B0 = [list(range(k, self.kernel.n_wave // 2, self._ng))
                            for k in range(self._ng)]
         self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
@@ -180,17 +182,24 @@ class IntegratedBackend(ComputeBackend):
         if self._phsp_data is None:
             raise RuntimeError("IntegratedBackend: phsp not loaded. "
                                "Call prepare_phsp_batched() first.")
-        m0 = np.asarray(params["m0"])
-        g0 = np.asarray(params["g0"])
-        if (self._Mpp_r is not None
-                and np.array_equal(m0, self._gram_m0)
-                and np.array_equal(g0, self._gram_g0)):
-            return
-        phsp = {**self._phsp_data, "weight": self._phsp_weights,
-                "frac": self._phsp_frac, "time": self._phsp_time}
-        self._load_phsp_matrices(phsp, m0, g0, phsp_handle=phsp_handle)
-        self._gram_m0 = m0.copy()
-        self._gram_g0 = g0.copy()
+        if self._Mpp_r is None:
+            m0 = np.asarray(params["m0"])
+            g0 = np.asarray(params["g0"])
+            phsp = {**self._phsp_data, "weight": self._phsp_weights,
+                    "frac": self._phsp_frac, "time": self._phsp_time}
+            self._load_phsp_matrices(phsp, m0, g0, phsp_handle=phsp_handle)
+            self._gram_m0 = m0.copy()
+            self._gram_g0 = g0.copy()
+        else:
+            m0_ok = np.array_equal(params["m0"], self._gram_m0)
+            g0_ok = np.array_equal(params["g0"], self._gram_g0)
+            if not (m0_ok and g0_ok):
+                msg = ("IntegratedBackend: m0/g0 changed after Gram matrix was built. "
+                       "m0/g0 must be fixed when using the integrated backend.")
+                if self.strict_gram:
+                    raise RuntimeError(msg)
+                import warnings
+                warnings.warn(msg)
 
     def _load_phsp_matrices(self, phsp, m0, g0, phsp_handle=None):
         """Compute ng×ng reduced Gram matrices directly (no full matrix).
