@@ -1020,15 +1020,16 @@ __global__ void backward_mv_kernel(
     int off_ev = event_idx * n_cache;
 
     if (lane < n_base) {
-        // cached_amp sums common_amp across 4 perms → divide by 4
-        const double inv4 = 0.25;
-        double2 cv = cached_amp[off_ev + 0 * n_base + lane];
-        grad_ck_real_partial[event_idx * n_wave + lane] = inv4 * (dQ_ap_real[event_idx] * cv.x - dQ_ap_imag[event_idx] * cv.y);
-        grad_ck_imag_partial[event_idx * n_wave + lane] = inv4 * (dQ_ap_real[event_idx] * cv.y + dQ_ap_imag[event_idx] * cv.x);
+        // Use stride-32 loop (like forward_mv) to cover all n_base=64 lanes
+        for (int base = lane; base < n_base; base += 32) {
+            double2 cv = cached_amp[off_ev + 0 * n_base + base];
+            grad_ck_real_partial[event_idx * n_wave + base] = dQ_ap_real[event_idx] * cv.x - dQ_ap_imag[event_idx] * cv.y;
+            grad_ck_imag_partial[event_idx * n_wave + base] = dQ_ap_real[event_idx] * cv.y + dQ_ap_imag[event_idx] * cv.x;
 
-        double2 cv1 = cached_amp[off_ev + 1 * n_base + lane];
-        grad_ck_real_partial[event_idx * n_wave + n_wave_half + lane] = inv4 * (dQ_am_real[event_idx] * cv1.x - dQ_am_imag[event_idx] * cv1.y);
-        grad_ck_imag_partial[event_idx * n_wave + n_wave_half + lane] = inv4 * (dQ_am_real[event_idx] * cv1.y + dQ_am_imag[event_idx] * cv1.x);
+            double2 cv1 = cached_amp[off_ev + 1 * n_base + base];
+            grad_ck_real_partial[event_idx * n_wave + n_wave_half + base] = dQ_am_real[event_idx] * cv1.x - dQ_am_imag[event_idx] * cv1.y;
+            grad_ck_imag_partial[event_idx * n_wave + n_wave_half + base] = dQ_am_real[event_idx] * cv1.y + dQ_am_imag[event_idx] * cv1.x;
+        }
     }
 }
 
@@ -2084,6 +2085,10 @@ void cuda_compute_v3(void* vctx, void* vdh,
             // ── CACHED PATH (completely separate, no interp/m0/g0) ──
             double2* camp = h->cached_amp + st * n_cache;
 
+            // Clear stale GPU gradient data from previous calls
+            cudaMemset(d.grad_ck_real_partial, 0, bs * nw * 8);
+            cudaMemset(d.grad_ck_imag_partial, 0, bs * nw * 8);
+
             // 3 compute kernels
             launch_forward_mv(p.ck_real, p.ck_imag, camp,
                 d.ap_real, d.ap_imag, d.am_real, d.am_imag, nb, n_cache, nw);
@@ -2130,19 +2135,9 @@ void cuda_compute_v3(void* vctx, void* vdh,
             SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
             #undef SC
 
-            // CK gradient expansion (backward_mv already ÷4 per perm)
-            {
-                int nb2 = nw / 8, hw2 = nw / 2;
-                for (int b = nb2 - 1; b >= 0; b--)
-                    for (int cp = 0; cp < 2; cp++) {
-                        int o = cp * hw2 + b;
-                        double vr = ogck_r[o], vi = ogck_i[o];
-                        for (int p = 3; p >= 0; p--) {
-                            int w = cp * hw2 + p * nb2 + b;
-                            ogck_r[w] = vr; ogck_i[w] = vi;
-                        }
-                    }
-            }
+            // CK gradient: keep summed level only (first block per CP)
+            // — fits the summed amplitude convention of cached_amp.
+            // Other perm blocks are zero; backpropagation handles summation.
         } else {
             // ── FULL COMPUTE PATH (with interp/m0/g0) ─────────────
             launch_compute_all(c, &d, &p, nv, use_norm);
@@ -2181,10 +2176,31 @@ void cuda_compute_v3(void* vctx, void* vdh,
             SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
             #undef SC
 
-            // CK gradient already per-slot from gradient_kernel — no expansion needed
+            // CK gradient: keep only first block per CP (summed convention)
+            //  — matches cached path; backpropagation handles summation.
         }
 
     }  // end batch loop
+
+    // Summarize per-perm gradients into first block per CP (summed convention).
+    // Both cached and full paths: first block gets Σ over 4 perms, others zero.
+    {
+        int nb2 = nw / 8, hw2 = nw / 2;
+        for (int cp = 0; cp < 2; cp++) {
+            int off = cp * hw2;
+            for (int b = nb2 - 1; b >= 0; b--) {
+                double sr = ogck_r[off + b], si = ogck_i[off + b];
+                for (int p = 1; p < 4; p++) {
+                    sr += ogck_r[off + p * nb2 + b];
+                    si += ogck_i[off + p * nb2 + b];
+                    ogck_r[off + p * nb2 + b] = 0;
+                    ogck_i[off + p * nb2 + b] = 0;
+                }
+                ogck_r[off + b] = sr;
+                ogck_i[off + b] = si;
+            }
+        }
+    }
 
     // Mark cache valid after first successful data NLL run
     if (want_cache && !h->cache_valid) {
