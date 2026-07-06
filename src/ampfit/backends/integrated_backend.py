@@ -105,7 +105,15 @@ class IntegratedBackend(ComputeBackend):
         eH = np.exp(-1j * t * (+Dm/2 - 1j * (Gam - DG/2) / 2))
         return (eL + eH) / 2, (eL - eH) / 2
 
-    def _time_averages(self, scalar):
+    def _compute_time_averages(self, scalar):
+        """Compute time averages via GPU if available, else CPU."""
+        base_kernel = getattr(self.base, "kernel", None)
+        gpu_ta = getattr(base_kernel, "compute_time_averages", None)
+        if gpu_ta is not None and self._phsp_handle is not None:
+            return gpu_ta(self._phsp_handle, scalar)
+        return self._time_averages_cpu(scalar)[:11]
+
+    def _time_averages_cpu(self, scalar):
         """Time integrals with per-array caching keyed by scalar params.
 
         Caches each 1.85M-element trig/exp array independently so that
@@ -330,17 +338,10 @@ class IntegratedBackend(ComputeBackend):
         self.int_Am2 = float(I_mm.real)
         self.int_ApAm = complex(I_pm)
 
-        # Time averages via GPU (fast) or CPU fallback
-        base_kernel = getattr(self.base, "kernel", None)
-        gpu_ta = getattr(base_kernel, "compute_time_averages", None)
-        if gpu_ta is not None and self._phsp_handle is not None:
-            (gp2_avg, gm2_avg, gpgm_avg,
-             icht, ict, isht, ist,
-             idcht, idct, idsht, idst) = gpu_ta(self._phsp_handle, params["scalar"])
-        else:
-            (gp2_avg, gm2_avg, gpgm_avg,
-             icht, ict, isht, ist,
-             idcht, idct, idsht, idst) = self._time_averages(params["scalar"])[:11]
+        # Time averages via unified method (GPU if available, else CPU)
+        (gp2_avg, gm2_avg, gpgm_avg,
+         icht, ict, isht, ist,
+         idcht, idct, idsht, idst) = self._compute_time_averages(params["scalar"])
 
         # Combine
         frac_avg = float(np.sum(self._phsp_weights * self._phsp_frac))
