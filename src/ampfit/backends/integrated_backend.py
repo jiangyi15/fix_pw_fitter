@@ -316,10 +316,15 @@ class IntegratedBackend(ComputeBackend):
         * *norm=float* — data NLL → delegate to base backend.
         * *norm=None, return_p=True*  — per-event P → delegate to base (plot).
         * *norm=None, return_p=False* — fast norm from Gram matrices.
+
+        m0/g0 gradients are always zero (fixed at Gram pre‑computation).
         """
         if norm is not None or return_p:
-            return self.base.compute(params, data_handle, norm=norm,
-                                    return_p=return_p)
+            Q, grads, P = self.base.compute(params, data_handle, norm=norm,
+                                            return_p=return_p)
+            grads["m0"] = np.zeros_like(grads["m0"])
+            grads["g0"] = np.zeros_like(grads["g0"])
+            return Q, grads, P
 
         # ── Fast norm from pre‑integrated Gram matrices ──────────
         self._ensure_gram(params, phsp_handle=data_handle)

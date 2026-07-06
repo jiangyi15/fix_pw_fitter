@@ -1020,13 +1020,15 @@ __global__ void backward_mv_kernel(
     int off_ev = event_idx * n_cache;
 
     if (lane < n_base) {
+        // cached_amp sums common_amp across 4 perms → divide by 4
+        const double inv4 = 0.25;
         double2 cv = cached_amp[off_ev + 0 * n_base + lane];
-        grad_ck_real_partial[event_idx * n_wave + lane] = dQ_ap_real[event_idx] * cv.x - dQ_ap_imag[event_idx] * cv.y;
-        grad_ck_imag_partial[event_idx * n_wave + lane] = dQ_ap_real[event_idx] * cv.y + dQ_ap_imag[event_idx] * cv.x;
+        grad_ck_real_partial[event_idx * n_wave + lane] = inv4 * (dQ_ap_real[event_idx] * cv.x - dQ_ap_imag[event_idx] * cv.y);
+        grad_ck_imag_partial[event_idx * n_wave + lane] = inv4 * (dQ_ap_real[event_idx] * cv.y + dQ_ap_imag[event_idx] * cv.x);
 
         double2 cv1 = cached_amp[off_ev + 1 * n_base + lane];
-        grad_ck_real_partial[event_idx * n_wave + n_wave_half + lane] = dQ_am_real[event_idx] * cv1.x - dQ_am_imag[event_idx] * cv1.y;
-        grad_ck_imag_partial[event_idx * n_wave + n_wave_half + lane] = dQ_am_real[event_idx] * cv1.y + dQ_am_imag[event_idx] * cv1.x;
+        grad_ck_real_partial[event_idx * n_wave + n_wave_half + lane] = inv4 * (dQ_am_real[event_idx] * cv1.x - dQ_am_imag[event_idx] * cv1.y);
+        grad_ck_imag_partial[event_idx * n_wave + n_wave_half + lane] = inv4 * (dQ_am_real[event_idx] * cv1.y + dQ_am_imag[event_idx] * cv1.x);
     }
 }
 
@@ -2128,13 +2130,13 @@ void cuda_compute_v3(void* vctx, void* vdh,
             SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
             #undef SC
 
-            // CK gradient expansion + ÷4
+            // CK gradient expansion (backward_mv already ÷4 per perm)
             {
                 int nb2 = nw / 8, hw2 = nw / 2;
                 for (int b = nb2 - 1; b >= 0; b--)
                     for (int cp = 0; cp < 2; cp++) {
                         int o = cp * hw2 + b;
-                        double vr = 0.25 * ogck_r[o], vi = 0.25 * ogck_i[o];
+                        double vr = ogck_r[o], vi = ogck_i[o];
                         for (int p = 3; p >= 0; p--) {
                             int w = cp * hw2 + p * nb2 + b;
                             ogck_r[w] = vr; ogck_i[w] = vi;
@@ -2179,19 +2181,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
             SC(grad_poq_rho_partial,4); SC(grad_pop_phi_partial,5);
             #undef SC
 
-            // CK gradient expansion
-            if (use_norm != 0) {
-                int nb2 = nw / 8, hw2 = nw / 2;
-                for (int b = nb2 - 1; b >= 0; b--)
-                    for (int cp = 0; cp < 2; cp++) {
-                        int o = cp * hw2 + b;
-                        double vr = 0.25 * ogck_r[o], vi = 0.25 * ogck_i[o];
-                        for (int p = 3; p >= 0; p--) {
-                            int w = cp * hw2 + p * nb2 + b;
-                            ogck_r[w] = vr; ogck_i[w] = vi;
-                        }
-                    }
-            }
+            // CK gradient already per-slot from gradient_kernel — no expansion needed
         }
 
     }  // end batch loop
