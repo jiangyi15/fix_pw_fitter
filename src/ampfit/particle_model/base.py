@@ -34,7 +34,6 @@ class BaseModel:
         get_defaults() -> dict[str, float]  (all physical defaults)
         get_gamma_count() -> int            (default 1)
         get_gamma_name() -> list[str]       (default [`{name}_width`])
-        get_gamma_defaults() -> list        (default [width from kwargs])
     """
 
     def __init__(self, name, **kwargs):
@@ -59,13 +58,6 @@ class BaseModel:
 
     def get_gamma_name(self):
         return [f"{self.name}_width"]
-
-    def get_gamma_defaults(self):
-        """Default values for each gamma/width parameter.
-
-        Returns list of floats matching get_gamma_name() length.
-        """
-        return [float(self.kwargs.get("width", 0.1))]
 
     def register_parent(self, particle):
         """Store the Particle that owns this model (for decay tree access)."""

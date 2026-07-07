@@ -121,9 +121,6 @@ class OneModel(BaseModel):
     def get_defaults(self):
         return {}
 
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 1.0))]
-
     def gamma(self, m):
         m0 = self.kwargs["mass"]
         g0 = self.kwargs.get("width", 1.0)
@@ -155,9 +152,6 @@ class FlatteCModel(BaseModel):
     def get_gamma_name(self):
         return [f"{self.name}_g{i}" for i in range(self.get_gamma_count())]
 
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get(f"g_{i}", 0.1)) for i in range(self.get_gamma_count())]
-
     def gamma(self, m):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
 
@@ -172,23 +166,15 @@ class GSRhoModel(BaseModel):
         return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
                 f"{self.name}_width": float(self.kwargs.get("width", 0.149))}
 
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 0.149))]
-
     def gamma(self, m):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
 
-
-# ── Bugg lineshape (sigma/f0(500)) ──────────────────────────────
 
 # ── Bugg lineshape ──────────────────────────────────────────────
 
 @register_model("Bugg")
 class BuggModel(BaseModel):
     """Bugg parametrisation (placeholder — see ``bugg_model.py`` for real impl)."""
-
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 0.1))]
 
     def gamma(self, m):
         return [np.ones_like(m) + 0j] * self.get_gamma_count()
@@ -224,9 +210,6 @@ class WidthLinearNPYModel(BaseModel):
             file: /path/to/width_table.npy
             width_scale: True   # optional: normalise Im(Pi(m₀)) to 1
     """
-
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 0.1))]
 
     def gamma(self, m):
         data = np.load(self.kwargs["file"])

@@ -82,14 +82,14 @@ def _reduced_spec(n_ck, name):
 
     Names::
 
-        {name}_re_00, {name}_re_01, {name}_im_01, …
+        {name}_re_0_0, {name}_re_0_1, {name}_im_0_1, …
     """
     names = []
     for a in range(n_ck):
-        names.append(f"{name}_re_{a}{a}")
+        names.append(f"{name}_re_{a}_{a}")
         for b in range(a + 1, n_ck):
-            names.append(f"{name}_re_{a}{b}")
-            names.append(f"{name}_im_{a}{b}")
+            names.append(f"{name}_re_{a}_{b}")
+            names.append(f"{name}_im_{a}_{b}")
     return names
 
 
@@ -377,9 +377,6 @@ class CKMatrixModelV2(BaseModel):
     def get_gamma_name(self):
         return list(self._g_names)
 
-    def get_gamma_defaults(self):
-        return list(self._g_defaults)
-
     def gamma(self, m):
         """Gamma functions: M_ab(m)/M_00(m₀) for each reduced channel."""
         return _gamma_functions(m, self.x_table, self.M_table,
@@ -431,8 +428,7 @@ class CKMatrixModelV2(BaseModel):
             g0_vals = [float(r * scale) for r in raw_ref]
         else:
             gamma_names = self.get_gamma_name()
-            defaults = self.get_gamma_defaults()
-            g0_vals = [_p(gamma_names[i], defaults[i])
+            g0_vals = [_p(gamma_names[i], self._g_defaults[i])
                        for i in range(self.get_gamma_count())]
 
         # Read total width from params or kwargs

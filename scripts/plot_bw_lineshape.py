@@ -23,8 +23,10 @@ def main():
         description="Plot BW lineshapes Im(D)/|D|²")
     ap.add_argument("config")
     ap.add_argument("results_json", nargs="?", default=None)
-    ap.add_argument("--mass-lo", type=float, default=0.2)
-    ap.add_argument("--mass-hi", type=float, default=5.2)
+    ap.add_argument("--mass-lo", type=float, default=None,
+                    help="Lower mass limit (default: 2*m_pi ≈ 0.28)")
+    ap.add_argument("--mass-hi", type=float, default=None,
+                    help="Upper mass limit (default: m_B - m_pi ≈ 5.14)")
     ap.add_argument("--n-points", type=int, default=2000)
     ap.add_argument("-o", "--output", default="bw_lineshape.pdf")
     ap.add_argument("--backend", default="numpy")
@@ -36,16 +38,21 @@ def main():
 
     f = Fitter(args.config, backend=args.backend)
 
-    resolved = None
     if args.results_json:
         cp = os.path.splitext(args.results_json)[0] + "_constraints.json"
         if os.path.exists(cp):
             f.load_constraints(cp)
         r = f.load_results(args.results_json)
-        if r.x is not None and len(r.x) > 0:
-            _, resolved, _, _ = f._build_params(r.x)
+        x = r.x
+    else:
+        x = f.initial_values(seed=42)
+    _, resolved, _, _ = f._build_params(x)
 
-    m_grid = np.linspace(args.mass_lo, args.mass_hi, args.n_points)
+    m_pi = 0.13957
+    m_B = 5.279
+    mass_lo = args.mass_lo if args.mass_lo is not None else 2 * m_pi
+    mass_hi = args.mass_hi if args.mass_hi is not None else m_B - m_pi
+    m_grid = np.linspace(mass_lo, mass_hi, args.n_points)
 
     seen = set()
     resonances = []
@@ -57,34 +64,21 @@ def main():
                 continue
             seen.add(mid)
             name = decay.core.name
-            gamma_fn = getattr(model, "gamma", None)
-            if gamma_fn is None:
-                continue
-            kw = getattr(model, "kwargs", {})
+            gamma_fn = model.gamma
 
             # Mass
             mass_key = f"{name}_mass"
-            m0 = float(resolved[mass_key]) if (resolved and mass_key in resolved) else float(kw.get("mass", 0.775))
+            m0 = float(resolved[mass_key])
 
-            # Gamma parameter names and their values
-            gamma_names = list(model.get_gamma_name()) if hasattr(model, "get_gamma_name") else []
-            gamma_defaults = list(model.get_gamma_defaults()) if hasattr(model, "get_gamma_defaults") else []
-            g0_vals = []
-            for i, gn in enumerate(gamma_names):
-                if resolved and gn in resolved:
-                    g0_vals.append(float(resolved[gn]))
-                elif i < len(gamma_defaults):
-                    g0_vals.append(float(gamma_defaults[i]))
-                else:
-                    g0_vals.append(1.0)
+            # Gamma parameter values
+            gamma_names = list(model.get_gamma_name())
+            g0_vals = [float(resolved[gn]) for gn in gamma_names]
 
-            # Width from fit (used only for display, not for normalization)
-            width_key = f"{name}_width"
-            w0 = float(resolved[width_key]) if (resolved and width_key in resolved) else float(kw.get("width", 0.1))
 
             resonances.append({
-                "name": name, "m0": m0, "width": w0,
+                "name": name, "m0": m0,
                 "gamma_fn": gamma_fn,
+                "gamma_names": gamma_names,
                 "g0_vals": g0_vals,
             })
 
@@ -96,48 +90,96 @@ def main():
         sys.exit(1)
 
     n = len(resonances)
-    n_cols = min(4, n)
-    n_rows = (n + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows),
-                             squeeze=False)
+    fig, axes = plt.subplots(n, 2, figsize=(10, 3.5 * n), squeeze=False)
+    fig.subplots_adjust(hspace=0.35)
 
     for idx, res in enumerate(resonances):
-        row, col = divmod(idx, n_cols)
-        ax = axes[row, col]
+        ax_ls = axes[idx, 0]
+        ax_ar = axes[idx, 1]
 
-        m0, w0 = res["m0"], res["width"]
+        m0 = res["m0"]
         g0_vals = res["g0_vals"]
         gamma_vals = np.asarray(res["gamma_fn"](m_grid), dtype=complex)
 
-        # Running width Γ(m) = Σ gᵢ · γᵢ(m)
-        if gamma_vals.ndim > 1:
-            Gamma_m = np.zeros_like(m_grid, dtype=float)
+        # Complex running width Γ(m) = Σ gᵢ · γᵢ(m)
+        Gamma = np.zeros_like(m_grid, dtype=complex)
+        for i in range(min(len(g0_vals), gamma_vals.shape[0])):
+            Gamma += g0_vals[i] * gamma_vals[i]
+
+        # D = (m₀² - m²) - i·m₀·Γ
+        D = (m0**2 - m_grid**2) - 1j * m0 * Gamma
+        invD = 1.0 / D
+        lineshape = invD.imag  # Im(1/D) = BW absorptive part
+        invD_re, invD_im = invD.real, invD.imag
+
+        # ── Lineshape ─────────────────────────────────────────
+        ax_ls.plot(m_grid, lineshape, "b-", linewidth=1.5, label="total")
+        # Individual Re(Γᵢ) contributions (skip if only one component)
+        if len(g0_vals) > 1:
+            scale = m0 / np.abs(D)**2
+            # Group CK-matrix components: diag re_aa individually, sum off-diag re_ab and im_ab
+            diag = {}
+            off_re = None
+            off_im = None
+            others = {}
             for i in range(min(len(g0_vals), gamma_vals.shape[0])):
-                Gamma_m += g0_vals[i] * np.real(gamma_vals[i])
-        else:
-            Gamma_m = np.real(gamma_vals) * (g0_vals[0] if g0_vals else 1.0)
+                raw = g0_vals[i] * gamma_vals[i].real * scale
+                gn = res["gamma_names"][i]
+                if "_re_" in gn:
+                    idx = gn.split("_re_")[1]    # e.g. "0_0", "0_1"
+                    parts = idx.split("_")
+                    if len(parts) == 2 and parts[0] == parts[1]:
+                        diag[f"re_{parts[0]}"] = raw
+                    else:
+                        off_re = raw if off_re is None else off_re + raw
+                elif "_im_" in gn:
+                    off_im = raw if off_im is None else off_im + raw
+                else:
+                    label = gn.split("_", 1)[1] if "_" in gn else gn
+                    others[label] = raw
+            labels = []
+            for label, curve in {**diag, **others}.items():
+                ax_ls.plot(m_grid, curve, "--", linewidth=0.8, alpha=0.7, label=label)
+                labels.append(label)
+            if off_re is not None:
+                ax_ls.plot(m_grid, off_re, "--", linewidth=0.8, alpha=0.7, label="re_ab")
+                labels.append("re_ab")
+            if off_im is not None:
+                ax_ls.plot(m_grid, off_im, "--", linewidth=0.8, alpha=0.7, label="im_ab")
+                labels.append("im_ab")
+            total_chars = sum(len(l) for l in labels)
+            ax_ls.legend(fontsize=7, ncol=max(1, total_chars // 50 + 1))
+        ax_ls.axvline(m0, color="grey", linestyle=":", linewidth=0.8)
+        ax_ls.set_title(f"{res['name']}  (m₀={m0:.3f})", fontsize=9)
+        ax_ls.set_xlim(mass_lo, mass_hi)
+        ax_ls.set_ylabel(r"$m_0\,\mathrm{Re}\Gamma\,/\,|D|^2$")
+        ax_ls.set_xlabel(r"m (GeV)")
+        ax_ls.grid(True, alpha=0.3)
 
-        Gamma_m = np.maximum(Gamma_m, 0)
+        # ── Argand diagram (Im(1/D) vs Re(1/D)) ──────────────
+        # Colour-code by mass
+        colours = plt.cm.viridis((m_grid - m_grid[0]) / (m_grid[-1] - m_grid[0]))
+        ax_ar.scatter(invD_re, invD_im, c=colours, s=3, alpha=0.8)
+        ax_ar.plot(invD_re, invD_im, "b-", linewidth=0.5, alpha=0.5)
+        # Marker at m₀
+        idx_m0 = np.argmin(np.abs(m_grid - m0))
+        ax_ar.plot(invD_re[idx_m0], invD_im[idx_m0], "ko", markersize=4)
+        ax_ar.axhline(0, color="grey", linewidth=0.5)
+        ax_ar.axvline(0, color="grey", linewidth=0.5)
+        ax_ar.set_title("Argand  (1/D)", fontsize=9)
+        ax_ar.set_xlabel(r"Re(1/D)")
+        ax_ar.set_ylabel(r"Im(1/D)")
+        ax_ar.grid(True, alpha=0.3)
+        # Align y-axis range between lineshape and Argand
+        y_ls = ax_ls.get_ylim()
+        y_min = min(y_ls[0], np.min(invD_im))
+        y_max = max(y_ls[1], np.max(invD_im))
+        pad = (y_max - y_min) * 0.1
+        ax_ls.set_ylim(y_min - pad, y_max + pad)
+        ax_ar.set_ylim(y_min - pad, y_max + pad)
+        x_pad = max(np.abs(invD_re)) * 0.1
+        ax_ar.set_xlim(np.min(invD_re) - x_pad, np.max(invD_re) + x_pad)
 
-        # Im(D)/|D|² = m₀·Γ(m) / ((m₀²−m²)² + (m₀·Γ(m))²)
-        ReD = m0**2 - m_grid**2
-        ImD = m0 * Gamma_m
-        denom = ReD**2 + ImD**2
-        lineshape = np.divide(ImD, denom, where=denom > 1e-30, out=np.zeros_like(denom))
-
-        ax.plot(m_grid, lineshape, "b-", linewidth=1.5)
-        ax.axvline(m0, color="grey", linestyle=":", linewidth=0.8)
-        ax.set_title(f"{res['name']}  (m₀={m0:.3f}, Γ={w0:.3f})", fontsize=9)
-        ax.set_xlim(args.mass_lo, args.mass_hi)
-        ax.set_ylabel(r"Im(D)/|D|²")
-        ax.set_xlabel("m (GeV)")
-        ax.grid(True, alpha=0.3)
-
-    for idx in range(n, n_rows * n_cols):
-        row, col = divmod(idx, n_cols)
-        axes[row, col].set_visible(False)
-
-    plt.tight_layout()
     fig.savefig(args.output, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved {args.output}")

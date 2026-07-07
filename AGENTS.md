@@ -130,7 +130,7 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 2. **`LinearTransform`** (formerly `ScaleTransform`): `d[name] = factor * d[name] + bias`.  `ScaleTransform` is an alias.  `set_scale()` accepts `{name: factor}` or `{name: (factor, bias)}`.
 
-3. **`get_defaults()`** on particle models returns unified dict `{name_mass, name_width, ...}`.  `OneModel.get_defaults()` returns `{}` (mass/width fixed by transform).  CK matrix returns mass+width only (gamma names computed by transform).  `get_gamma_name()`/`get_gamma_defaults()` still exist for config_loader structural use.
+3. **`get_defaults()`** on particle models returns only parameters that need defaults (the ones the fitter optimises directly).  `OneModel.get_defaults()` returns `{}` (mass/width fixed by transform).  CK matrix returns `{name_mass}` only — width and ck are transform inputs, their defaults come from the model config internally.
 
 4. **`save_params()`** accepts either a `fit_result` object or a **flat `x` vector** directly:
    ```python

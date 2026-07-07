@@ -91,9 +91,6 @@ class BuggModel(BaseModel):
         return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.953)),
                 f"{self.name}_width": float(self.kwargs.get("width", 1.0))}
 
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 1.0))]
-
     def gamma(self, m):
         s = m ** 2
         # BUGG model uses a fixed sigma mass (M=0.953) regardless of config

@@ -81,9 +81,6 @@ class BWRModel(BaseModel):
         return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
                 f"{self.name}_width": float(self.kwargs.get("width", 0.1))}
 
-    def get_gamma_defaults(self):
-        return [float(self.kwargs.get("width", 0.1))]
-
     def gamma(self, m):
         M  = float(self.kwargs.get("M",  self.kwargs.get("mass",  0.775)))
         L  = int(self.kwargs.get("L", 0))

@@ -69,12 +69,6 @@ class FlatteCModel(BaseModel):
     def get_gamma_name(self):
         return [f"{self.name}_g{i}" for i in range(self.get_gamma_count())]
 
-    def get_gamma_defaults(self):
-        return [
-            float(self.kwargs.get(f"g_{i}", 0.1))
-            for i in range(self.get_gamma_count())
-        ]
-
     def gamma(self, m):
         mass_list = self.kwargs["mass_list"]
         out = []
