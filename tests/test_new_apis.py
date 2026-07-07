@@ -600,6 +600,55 @@ def test_ck_matrix_v2_ref_file(ck_matrix_test_data, tmp_path):
     bw = m.get_bw_params()
     assert "mass_bw" in bw and "width_bw" in bw
 
+def test_ck_matrix_v2_jacobian(ck_matrix_test_data):
+    """CK matrix v2: Jacobian d(gamma)/d(r) matches numerical (signed r)."""
+    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    import numpy as np
+    kw = _ck_model_kwargs(ck_matrix_test_data, {
+        "mass": 1.0, "width": 0.1,
+        "ck": [2.0, -1.5, 0.5, -0.3, -2.0, 1.2],  # include negative magnitudes
+    })
+    m = CKMatrixModelV2("test", **kw)
+    tr = m.make_mass_width_transform()
+
+    # Build input dict with signed r values (some negative)
+    d = {"test_width": 0.1}
+    for a in range(tr.n_ck):
+        d[tr.order_names[a]] = tr.ck_r0[a]
+        d[tr.order_names[a].rstrip("r") + "i"] = tr.ck_i0[a]
+
+    eps = 1e-6
+    max_rel = 0.0
+
+    for a in range(tr.n_ck):
+        name = tr.order_names[a]
+        r0 = tr.ck_r0[a]
+
+        # Numerical Jacobian by perturbing r_a
+        dp = dict(d); dp[name] = r0 + eps
+        dm = dict(d); dm[name] = r0 - eps
+        fwd_p = tr.forward(dp)
+        fwd_m = tr.forward(dm)
+
+        # Analytical Jacobian from backward with unit gradient for each gamma
+        for gi, gn in enumerate(tr.gamma_names):
+            grad_out = {g: 1.0 if g == gn else 0.0 for g in tr.gamma_names}
+            bw = tr.backward(grad_out, d)
+            ana = bw.get(name, 0.0)  # d(gamma_i)/d(r_a) = backprop with unit gradient
+
+            num = (fwd_p.get(gn, 0) - fwd_m.get(gn, 0)) / (2 * eps)
+            if abs(num) < 1e-15:
+                continue
+
+            rel = abs(ana - num) / max(abs(num), 1e-30)
+            if rel > max_rel:
+                max_rel = rel
+            assert rel < 0.02, (
+                f"Jacobian mismatch for {gn} w.r.t. {name}: "
+                f"ana={ana:.6e} num={num:.6e} rel={rel:.4e}")
+
+    assert max_rel < 0.02, f"Max Jacobian relative error: {max_rel:.4e}"
+
 
 if __name__ == "__main__":
     import pytest

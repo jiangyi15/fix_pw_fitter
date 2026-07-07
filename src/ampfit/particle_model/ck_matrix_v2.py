@@ -211,23 +211,23 @@ class _CKWidthTransform(Transform):
                         self._raw_idx_map.append((aa, bb, 'im'))
                         ri += 2
 
-            # Signed r values (from resolved, NOT |ck|)
-            # ck = r * exp(j*θ), so r = ck / exp(j*θ) = ck * conj(exp(j*θ))
-            # = (|r|*exp(j*θ_eff)) * exp(-j*θ) = |r| * exp(j*(θ_eff-θ))
-            # where θ is from d_in (the polar angle) and θ_eff = arg(ck)
-            ck_abs = np.abs(ck)
-            ck_ang = np.angle(ck)
-            # Read signed r from d_in (same as forward computation)
+            # Read signed r and theta from d_in (same as forward)
+            # ck_ang = np.angle(ck) is NOT correct for derivatives when r<0
+            # (it differs by π from the actual theta in d_in)
             r_signed = np.array([
                 d.get(self.order_names[a], self.ck_r0[a])
                 for a in range(n)
             ])
+            theta_vals = np.array([
+                d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                for a in range(n)
+            ])
 
             for a in range(n):
-                dN_dr = 0.0; dN_dt = 0.0  # dN/d(r_a), dN/d(theta_a)
-                A_r   = 0.0; A_t   = 0.0  # Σ grad · ∂raw/∂r, Σ grad · ∂raw/∂theta
-                ra = r_signed[a]           # SIGNED; NOT ck_abs[a]!
-                ta = ck_ang[a]
+                dN_dr = 0.0; dN_dt = 0.0
+                A_r   = 0.0; A_t   = 0.0
+                ra = r_signed[a]           # SIGNED r, NOT |r|
+                ta = theta_vals[a]         # Resolved theta, NOT np.angle(ck)!
 
                 for ri, (aa, bb, rtype) in enumerate(self._raw_idx_map):
                     g_out = grad_out.get(self.gamma_names[ri], 0.0)
@@ -238,7 +238,7 @@ class _CKWidthTransform(Transform):
                         dr = 2.0 * ra
                         dt = 0.0
                     elif aa == a and bb > a:
-                        rb = r_signed[bb]; tb = ck_ang[bb]
+                        rb = r_signed[bb]; tb = theta_vals[bb]
                         dth = ta - tb
                         if rtype == 're':
                             # 2·Re(c_a·c_b*) = 2·r_a·r_b·cos(dth)
@@ -249,7 +249,7 @@ class _CKWidthTransform(Transform):
                             dr = 2.0 * rb * np.sin(dth)
                             dt = 2.0 * ra * rb * np.cos(dth)
                     elif bb == a and aa < a:
-                        rb = r_signed[aa]; tb = ck_ang[aa]
+                        rb = r_signed[aa]; tb = theta_vals[aa]
                         dth = ta - tb
                         if rtype == 're':
                             # 2·Re(c_aa·c_a*) = 2·r_aa·r_a·cos(dth)
