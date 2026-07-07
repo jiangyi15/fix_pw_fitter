@@ -117,6 +117,13 @@ class PWGroupPlotter:
                 p_group, self.fitter._phsp_holder, norm=None)
             self._P_groups.append(Pg)
 
+        # Store zorder for plotting: smallest |weight| → highest zorder (on top)
+        pw = self.fitter._phsp_np["weight"]
+        pw_abs = np.array([float(np.sum(np.abs(pw * Pg))) for Pg in self._P_groups])
+        rank = np.argsort(np.argsort(pw_abs))  # 0 = smallest
+        n = len(rank)
+        self._zorders = [5 + (n - 1 - r) * 2 for r in rank]  # smallest → highest zorder
+
         purity = self.fitter._purity if self.fitter._purity is not None else 1.0
         target = float(np.sum(self.fitter._data_np["weight"])) * purity
         pw = self.fitter._phsp_np["weight"]
@@ -209,7 +216,8 @@ class PWGroupPlotter:
                  legend=False, output="plots/", ranges=None,
                  group_labels=None, colors=None,
                  data_weight_extra=None, phsp_weight_extra=None,
-                 smooth_sigma=None, unit="GeV", show_pull=False):
+                 smooth_sigma=None, unit="GeV", show_pull=False,
+                 fmt="png"):
         """Plot variable(s) using pre-computed weights.
 
         Args:
@@ -314,18 +322,19 @@ class PWGroupPlotter:
             # Total fit step (signal + bkg)
             ax.step(bin_c, tot, where='mid', color='grey', linewidth=2,
                     label='total fit' if legend and i == 0 else None)
-            # Partial wave groups (signal only) — smoothed if requested
-            for gy, c, lab in zip(gys, colors, glabels):
+            # Partial wave groups (signal only) — binned KDE: Σ wi·G(x−xi)
+            for gy, c, lab, zo in zip(gys, colors, glabels, self._zorders):
                 if smooth_sigma is not None and smooth_sigma > 0:
-                    gy_s = gaussian_filter1d(gy.astype(np.float64), smooth_sigma)
-                    from scipy.interpolate import CubicSpline
-                    cs = CubicSpline(bin_c, gy_s, bc_type='natural')
                     x_fine = np.linspace(xlo, xhi, n_bins * 10)
-                    ax.plot(x_fine, cs(x_fine), '-', color=c, linewidth=1.5,
-                            label=lab if legend and i == 0 else None)
+                    dx = bin_c[:, None] - x_fine[None, :]
+                    sigma = smooth_sigma * bin_width
+                    gy_fine = np.dot(gy, np.exp(-0.5 * (dx / sigma)**2))
+                    gy_fine *= bin_width / (np.sqrt(2 * np.pi) * sigma)
+                    ax.plot(x_fine, gy_fine, '-', color=c, linewidth=1.5,
+                            label=lab if legend and i == 0 else None, zorder=zo)
                 else:
-                    ax.plot(bin_c, gy, '-', color=c, linewidth=1.5,
-                            label=lab if legend and i == 0 else None)
+                    ax.step(bin_c, gy, where='mid', color=c, linewidth=1.5,
+                            label=lab if legend and i == 0 else None, zorder=zo)
 
             ax.grid(True, alpha=0.3)
             ax.set_xlim(xlo, xhi)
@@ -391,7 +400,7 @@ class PWGroupPlotter:
         if legend:
             fig.axes[0].legend(fontsize=7, ncol=2)
 
-        path = os.path.join(output, prefix + ".png")
+        path = os.path.join(output, prefix + "." + fmt)
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  saved {path}")
@@ -399,7 +408,8 @@ class PWGroupPlotter:
     def plot_asymmetry(self, varfun, labels, lo, hi,
                        n_bins, prefix, tag_data=None, tag_phsp=None,
                        output="plots/", ranges=None,
-                       data_weight_extra=None, phsp_weight_extra=None):
+                       data_weight_extra=None, phsp_weight_extra=None,
+                       fmt="png"):
         """Plot asymmetry ``(N(tag>0) - N(tag<0)) / (N(tag>0) + N(tag<0))``.
 
         When *tag_data* / *tag_phsp* are ``None`` (default), uses
@@ -413,6 +423,7 @@ class PWGroupPlotter:
             tag_data: array of tag values for data (default: frac - 0.5).
             tag_phsp: array of tag values for phsp (default: frac - 0.5).
         """
+
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_asymmetry()")
 
@@ -494,14 +505,15 @@ class PWGroupPlotter:
         axes.flatten()[0].legend(fontsize=7)
 
         plt.tight_layout()
-        path = os.path.join(output, prefix + ".png")
+        path = os.path.join(output, prefix + "." + fmt)
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  saved {path}")
 
     def plot_time_asymmetry(self, t_min=0, t_max=10, n_bins=20,
                             output="plots/", prefix="time_asym", params=None,
-                            data_weight_extra=None, phsp_weight_extra=None):
+                            data_weight_extra=None, phsp_weight_extra=None,
+                            fmt="png"):
         """Plot time-dependent asymmetry using exact theoretical formula.
 
         Data: binned time asymmetry ``(N(tag>0) - N(tag<0))/(N(tag>0) + N(tag<0))``.
@@ -615,16 +627,18 @@ class PWGroupPlotter:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
 
-        path = os.path.join(output, prefix + ".png")
+        path = os.path.join(output, prefix + "." + fmt)
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  saved {path}")
+
 
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
                           prefix, output="plots/",
                           data_weight_extra=None, phsp_weight_extra=None,
                           smooth_sigma=None, unit="GeV", scales=None,
-                          show_pull=False, legend=False):
+                          show_pull=False, legend=False,
+                          fmt="png"):
         """Plot stacked histogram from permutation-equivalent variables.
 
         All arrays returned by *varfun* are flattened together: weights
@@ -710,11 +724,12 @@ class PWGroupPlotter:
         def _smooth_group(arr):
             if smooth_sigma is None or smooth_sigma <= 0:
                 return arr, bin_c, False
-            sigma_bins = smooth_sigma
-            sm = gaussian_filter1d(arr.astype(np.float64), sigma_bins)
-            cs = CubicSpline(bin_c, sm, bc_type='natural')
             x_fine = np.linspace(lo, hi, n_bins * 10)
-            return cs(x_fine), x_fine, True
+            dx = bin_c[:, None] - x_fine[None, :]
+            sigma = smooth_sigma * bin_width
+            sm = np.dot(arr, np.exp(-0.5 * (dx / sigma)**2))
+            sm *= bin_width / (np.sqrt(2 * np.pi) * sigma)
+            return sm, x_fine, True
 
         n_ax = 2 if show_pull else 1
         if show_pull:
@@ -732,14 +747,14 @@ class PWGroupPlotter:
         ax.step(bin_c, tot, where='mid', color='grey', linewidth=2,
                 label='total fit')
         # PW groups — smooth if requested, else step
-        for gy, c, lab in zip(gys, gcolors, glabels):
+        for gy, c, lab, zo in zip(gys, gcolors, glabels, self._zorders):
             y_plot, x_plot, is_smooth = _smooth_group(gy)
             if is_smooth:
                 ax.plot(x_plot, np.maximum(y_plot, 0), '-', color=c, linewidth=1.5,
-                        label=lab)
+                        label=lab, zorder=zo)
             else:
                 ax.step(bin_c, gy, where='mid', color=c, linewidth=1.5,
-                        label=lab)
+                        label=lab, zorder=zo)
         ax.set_xlim(lo, hi)
         y_bottom = None if any(s < 0 for s in scl) else 0
         ax.set_ylim(y_bottom, None)
@@ -779,7 +794,7 @@ class PWGroupPlotter:
         ax.grid(True, alpha=0.3)
 
         # Save
-        path = os.path.join(output, prefix + ".png")
+        path = os.path.join(output, prefix + "." + fmt)
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"  saved {path}")

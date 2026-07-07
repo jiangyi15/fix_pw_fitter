@@ -85,7 +85,7 @@ def main():
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [0, 3, 6, 9]),
         "m(π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipi", output=args.output,
-        smooth_sigma=1.0, show_pull=True)
+        smooth_sigma=1.0, show_pull=True, legend=True)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [1, 4]),
         "m(π⁺π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipipip", output=args.output,
