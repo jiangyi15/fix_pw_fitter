@@ -2,12 +2,15 @@
 """
 Plot Breit-Wigner lineshapes Im(D)/|D|² where D = m₀² − m² − im₀Γ(m).
 
-Γ(m) is the running width from the particle model's gamma() method.
-Uses fitted mass/width and gamma parameters from a fit results file.
+Γ(m) = Σ gᵢ · γᵢ(m) uses the actual gamma parameter values from the fit
+(g0_phys entries), not just a simple width normalization.
+
+Each resonance gets its own subplot in a grid.
 
 Usage:
     python scripts/plot_bw_lineshape.py config_amp.yml -o bw_plot.pdf
     python scripts/plot_bw_lineshape.py config_amp.yml results.json -o bw_plot.pdf
+    python scripts/plot_bw_lineshape.py config_amp.yml --resonances rhoA f0(500)
 """
 
 import sys, os, argparse
@@ -33,7 +36,6 @@ def main():
 
     f = Fitter(args.config, backend=args.backend)
 
-    # Load fit results if provided
     resolved = None
     if args.results_json:
         cp = os.path.splitext(args.results_json)[0] + "_constraints.json"
@@ -45,7 +47,6 @@ def main():
 
     m_grid = np.linspace(args.mass_lo, args.mass_hi, args.n_points)
 
-    # Collect unique particle models
     seen = set()
     resonances = []
     for chain in f.config.full_decay.chains:
@@ -61,21 +62,30 @@ def main():
                 continue
             kw = getattr(model, "kwargs", {})
 
-            # Mass and width from resolved (fit result) or config defaults
+            # Mass
             mass_key = f"{name}_mass"
+            m0 = float(resolved[mass_key]) if (resolved and mass_key in resolved) else float(kw.get("mass", 0.775))
+
+            # Gamma parameter names and their values
+            gamma_names = list(model.get_gamma_name()) if hasattr(model, "get_gamma_name") else []
+            gamma_defaults = list(model.get_gamma_defaults()) if hasattr(model, "get_gamma_defaults") else []
+            g0_vals = []
+            for i, gn in enumerate(gamma_names):
+                if resolved and gn in resolved:
+                    g0_vals.append(float(resolved[gn]))
+                elif i < len(gamma_defaults):
+                    g0_vals.append(float(gamma_defaults[i]))
+                else:
+                    g0_vals.append(1.0)
+
+            # Width from fit (used only for display, not for normalization)
             width_key = f"{name}_width"
-            if resolved and mass_key in resolved:
-                m0 = float(resolved[mass_key])
-            else:
-                m0 = float(kw.get("mass", 0.775))
-            if resolved and width_key in resolved:
-                w0 = float(resolved[width_key])
-            else:
-                w0 = float(kw.get("width", 0.1))
+            w0 = float(resolved[width_key]) if (resolved and width_key in resolved) else float(kw.get("width", 0.1))
 
             resonances.append({
                 "name": name, "m0": m0, "width": w0,
-                "gamma_fn": gamma_fn, "model": model,
+                "gamma_fn": gamma_fn,
+                "g0_vals": g0_vals,
             })
 
     if args.resonances:
@@ -85,41 +95,47 @@ def main():
         print("No resonances found")
         sys.exit(1)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    n = len(resonances)
+    n_cols = min(4, n)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.5 * n_rows),
+                             squeeze=False)
 
-    for res in resonances:
+    for idx, res in enumerate(resonances):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+
         m0, w0 = res["m0"], res["width"]
+        g0_vals = res["g0_vals"]
         gamma_vals = np.asarray(res["gamma_fn"](m_grid), dtype=complex)
-        if gamma_vals.ndim > 1:
-            Gamma_m = np.sum(np.real(gamma_vals), axis=0)
-        else:
-            Gamma_m = np.real(gamma_vals)
 
-        # Normalize so that Γ(m₀) = w0
-        idx_m0 = np.argmin(np.abs(m_grid - m0))
-        Gamma_m0 = Gamma_m[idx_m0]
-        if Gamma_m0 > 0:
-            Gamma_m *= w0 / Gamma_m0
+        # Running width Γ(m) = Σ gᵢ · γᵢ(m)
+        if gamma_vals.ndim > 1:
+            Gamma_m = np.zeros_like(m_grid, dtype=float)
+            for i in range(min(len(g0_vals), gamma_vals.shape[0])):
+                Gamma_m += g0_vals[i] * np.real(gamma_vals[i])
+        else:
+            Gamma_m = np.real(gamma_vals) * (g0_vals[0] if g0_vals else 1.0)
+
+        Gamma_m = np.maximum(Gamma_m, 0)
 
         # Im(D)/|D|² = m₀·Γ(m) / ((m₀²−m²)² + (m₀·Γ(m))²)
         ReD = m0**2 - m_grid**2
-        ImD = m0 * np.maximum(Gamma_m, 0)
+        ImD = m0 * Gamma_m
         denom = ReD**2 + ImD**2
         lineshape = np.divide(ImD, denom, where=denom > 1e-30, out=np.zeros_like(denom))
 
-        integral = np.trapezoid(lineshape, m_grid)
-        normed = lineshape / integral if integral > 0 else lineshape
-
-        axes[0].plot(m_grid, normed, label=res["name"], linewidth=1.5)
-        axes[1].plot(m_grid, lineshape, label=res["name"], linewidth=1.5)
-
-    for ax in axes:
-        ax.set_xlabel("m (GeV)")
-        ax.legend(fontsize=6, ncol=2)
+        ax.plot(m_grid, lineshape, "b-", linewidth=1.5)
+        ax.axvline(m0, color="grey", linestyle=":", linewidth=0.8)
+        ax.set_title(f"{res['name']}  (m₀={m0:.3f}, Γ={w0:.3f})", fontsize=9)
         ax.set_xlim(args.mass_lo, args.mass_hi)
+        ax.set_ylabel(r"Im(D)/|D|²")
+        ax.set_xlabel("m (GeV)")
         ax.grid(True, alpha=0.3)
-    axes[0].set_ylabel(r"Im(D)/|D|² (normalized)")
-    axes[1].set_ylabel(r"Im(D)/|D|²")
+
+    for idx in range(n, n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row, col].set_visible(False)
 
     plt.tight_layout()
     fig.savefig(args.output, dpi=150, bbox_inches="tight")
