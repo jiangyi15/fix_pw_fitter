@@ -211,14 +211,22 @@ class _CKWidthTransform(Transform):
                         self._raw_idx_map.append((aa, bb, 'im'))
                         ri += 2
 
-            # Pre-compute polar components for all ck
-            ck_abs = np.abs(ck)    # r_a = |ck_a|
-            ck_ang = np.angle(ck)  # theta_a = arg(ck_a)
+            # Signed r values (from resolved, NOT |ck|)
+            # ck = r * exp(j*θ), so r = ck / exp(j*θ) = ck * conj(exp(j*θ))
+            # = (|r|*exp(j*θ_eff)) * exp(-j*θ) = |r| * exp(j*(θ_eff-θ))
+            # where θ is from d_in (the polar angle) and θ_eff = arg(ck)
+            ck_abs = np.abs(ck)
+            ck_ang = np.angle(ck)
+            # Read signed r from d_in (same as forward computation)
+            r_signed = np.array([
+                d.get(self.order_names[a], self.ck_r0[a])
+                for a in range(n)
+            ])
 
             for a in range(n):
                 dN_dr = 0.0; dN_dt = 0.0  # dN/d(r_a), dN/d(theta_a)
                 A_r   = 0.0; A_t   = 0.0  # Σ grad · ∂raw/∂r, Σ grad · ∂raw/∂theta
-                ra = ck_abs[a]
+                ra = r_signed[a]           # SIGNED; NOT ck_abs[a]!
                 ta = ck_ang[a]
 
                 for ri, (aa, bb, rtype) in enumerate(self._raw_idx_map):
@@ -226,30 +234,29 @@ class _CKWidthTransform(Transform):
                     gamma_val = gammas[ri]
 
                     if aa == bb and aa == a:
-                        # |c_a|² = r_a²
-                        dr = 2.0 * ra       # ∂/∂r_a
-                        dt = 0.0            # ∂/∂theta_a
+                        # |c_a|² = r_a²  →  d/d(r_a) = 2·r_a (signed!)
+                        dr = 2.0 * ra
+                        dt = 0.0
                     elif aa == a and bb > a:
-                        rb = ck_abs[bb]; tb = ck_ang[bb]
+                        rb = r_signed[bb]; tb = ck_ang[bb]
                         dth = ta - tb
                         if rtype == 're':
-                            # 2·Re(c_a·c_b*) = 2·ra·rb·cos(dth)
+                            # 2·Re(c_a·c_b*) = 2·r_a·r_b·cos(dth)
                             dr = 2.0 * rb * np.cos(dth)
                             dt = -2.0 * ra * rb * np.sin(dth)
                         else:
-                            # 2·Im(c_a·c_b*) = 2·ra·rb·sin(dth)
+                            # 2·Im(c_a·c_b*) = 2·r_a·r_b·sin(dth)
                             dr = 2.0 * rb * np.sin(dth)
                             dt = 2.0 * ra * rb * np.cos(dth)
                     elif bb == a and aa < a:
-                        # Here bb=a, so rb should be the OTHER component (aa)
-                        rb = ck_abs[aa]; tb = ck_ang[aa]
+                        rb = r_signed[aa]; tb = ck_ang[aa]
                         dth = ta - tb
                         if rtype == 're':
-                            # 2·Re(c_aa·c_a*) = 2·ra·rb·cos(dth)
+                            # 2·Re(c_aa·c_a*) = 2·r_aa·r_a·cos(dth)
                             dr = 2.0 * rb * np.cos(dth)
                             dt = -2.0 * ra * rb * np.sin(dth)
                         else:
-                            # 2·Im(c_aa·c_a*) = -2·ra·rb·sin(dth)
+                            # 2·Im(c_aa·c_a*) = -2·r_aa·r_a·sin(dth)
                             dr = -2.0 * rb * np.sin(dth)
                             dt = -2.0 * ra * rb * np.cos(dth)
                     else:
