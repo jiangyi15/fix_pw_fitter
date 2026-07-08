@@ -302,9 +302,13 @@ class Transform:
         are preserved from the input *d*.  Only ``input_names`` entries are
         passed to :meth:`forward` — transforms should not read values they
         didn't declare as inputs.
+
+        Stores ``self._last_input`` for :meth:`apply_backward` so subclasses
+        can read the exact pre-transform parameter values during backward.
         """
         saved = {k: v for k, v in d.items() if k not in self.output_names}
         inputs = {k: v for k, v in d.items() if k in self.input_names}
+        self._last_input = dict(inputs)
         result = self.forward(inputs)
         for k, v in saved.items():
             result[k] = v
@@ -333,6 +337,11 @@ class Transform:
     def apply_backward(self, grad_out, d_in=None):
         """Apply backward and merge into *grad_out*.
 
+        Uses ``self._last_input`` (stored by :meth:`apply_forward`) as the
+        ``d_in`` argument to :meth:`backward` — never the post-transform
+        resolved dict, guaranteeing correct gradients even when transforms
+        chain.
+
         Rules
         -----
         * Input **and** output: **replace** — the transform's backward
@@ -343,6 +352,7 @@ class Transform:
         * Output **only**: **remove** — derived quantities that should
           not be in the optimizer space.
         """
+        d_in = getattr(self, '_last_input', {})
         back = self.backward(grad_out, d_in=d_in)
         for name in self.input_names:
             if name in back:
@@ -674,7 +684,7 @@ class ConstraintManager:
         """
         grad = grad_resolved
         for tr in reversed(self.mass_width_transforms):
-            grad = tr.apply_backward(grad, d_in=resolved)
+            grad = tr.apply_backward(grad)
         for tr in reversed(self.scale_transforms):
             grad = tr.apply_backward(grad)
         grad = self.fixed_tr.chain_grad(grad, resolved)

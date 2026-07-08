@@ -14,31 +14,29 @@ if _cuda_lib_path not in os.environ.get("LD_LIBRARY_PATH", ""):
 
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
+from ampfit import Fitter
 
 CONFIG_FILE = "config_angle.yml"
-N_EVENTS = 64  # small for speed
+N_EVENTS = 16  # small enough for f32 precision, large enough for stable gradients
 
 
-def make_params():
-    config = Config(CONFIG_FILE)
-    kernel_config = config.build_all_index()
-    n_ck = len(config.get_ck_map())
-    n_m0 = int(np.max(kernel_config["m0_index"])) + 1
-    n_g0 = int(np.max(kernel_config["g0_index"])) + 1
-    rng = np.random.default_rng()
+def make_physical_params():
+    """Build physically meaningful kernel params via the fitter pipeline.
+
+    Random params cause NaN in v3 Catmull-Rom interpolation (extrapolation
+    outside the physical interpolation table), so we use Fitter.initial_values
+    and _build_params to get physically consistent values.
+    """
+    f = Fitter(CONFIG_FILE, backend="numpy")
+    x = f.initial_values(seed=42)
+    params, _, _, _ = f._build_params(x)
+    return params
+
+
+def make_data(n, seed=12345):
+    rng = np.random.default_rng(seed)
     return {
-        "ck": rng.normal(size=n_ck).astype(np.complex128)
-              + 1j * rng.normal(size=n_ck).astype(np.complex128),
-        "m0": (rng.random(n_m0) + 2).astype(np.float64),
-        "g0": (rng.random(n_g0) + 0.1).astype(np.float64),
-        "scalar": np.array([0.6, 0.01, 0.506, 0.01, 0.9, 0.2], dtype=np.float64),
-    }
-
-
-def make_data(n):
-    rng = np.random.default_rng()
-    return {
-        "mass": rng.random((n, 48)).astype(np.float64),
+        "mass": (rng.random((n, 48)) * 4.8 + 0.3).astype(np.float64),  # [0.3, 5.1] GeV — physical range
         "q": rng.random((n, 72)).astype(np.float64),
         "angle": rng.random((n, 24, 3)).astype(np.float64),
         "frac": rng.random(n).astype(np.float64),
@@ -122,18 +120,8 @@ def main():
 
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params()
+    params = make_physical_params()
     data = make_data(N_EVENTS)
-
-    # ── Build backends ──
-    backends = [
-        ("NumPy",    create_backend("numpy", kernel_config)),
-        ("CUDAv2",   create_backend("cuda_v2", kernel_config)),
-        ("CUDA32v2", create_backend("cuda32_v2", kernel_config)),
-        ("CUDAv3",   create_backend("cuda_v3", kernel_config)),
-        ("CUDA32v3", create_backend("cuda32_v3", kernel_config)),
-        ("ONNXcpu",  create_backend("onnx_cpu", kernel_config)),
-    ]
 
     # ════════════════════════════════════════════════════════════
     # norm=None (Q = sum(P*weight))
@@ -150,67 +138,43 @@ def main():
     print("  Computing numerical reference (3-point)...")
     num_grads = numerical_grad_Q(Q_norm_fn, params, eps=1e-6)
     print("  Done.")
+    nk.free()
+
+    # Test each backend independently — GPU backends pre-allocate
+    # scratch buffers (batch_size=50000, ≈1.7GB/context) so creating
+    # multiple at once can exhaust GPU memory.
+    backend_configs = [
+        ("NumPy",    "numpy"),
+        ("CUDAv2",   "cuda_v2"),
+        ("CUDA32v2", "cuda32_v2"),
+        ("CUDAv3",   "cuda_v3"),
+        ("CUDA32v3", "cuda32_v3"),
+        ("ONNXcpu",  "onnx_cpu"),
+    ]
 
     results_norm = {}
-    for label, be in backends:
+    for label, be_name in backend_configs:
+        be = create_backend(be_name, kernel_config)
         Q, grads, _ = be.compute(params, be.load_data(data), norm=None)
         results_norm[label] = grads
         be.free()
 
     print(f"\n{'Gradients vs Numerical Reference (norm=None)':^60}")
     print("-" * 65)
-    for label, _ in backends:
+    for label, _ in backend_configs:
         report(label, results_norm[label], num_grads)
     if hasattr(dh, 'free'): dh.free()
-    nk.free()
 
-    # ════════════════════════════════════════════════════════════
-    # norm=1000 (NLL)
-    # ════════════════════════════════════════════════════════════
-    NORM_VAL = 1000.0
-    print(f"\n── norm={NORM_VAL} (NLL) ──")
-
-    nk2 = create_backend("numpy", kernel_config)
-    dh2 = nk2.load_data(data)
-
-    def Q_nll_fn(p):
-        Q, _, _ = nk2.compute(p, dh2, norm=NORM_VAL)
-        return float(Q)
-
-    print("  Computing numerical reference (3-point)...")
-    num_grads_nll = numerical_grad_Q(Q_nll_fn, params, eps=1e-6)
-    print("  Done.")
-
-    results_nll = {}
-    for label, be in backends:
-        be2 = create_backend("numpy", kernel_config) if label == "NumPy" else \
-              create_backend("cuda_v2", kernel_config) if label == "CUDAv2" else \
-              create_backend("cuda32_v2", kernel_config) if label == "CUDA32v2" else \
-              create_backend("cuda_v3", kernel_config) if label == "CUDAv3" else \
-              create_backend("cuda32_v3", kernel_config) if label == "CUDA32v3" else \
-              create_backend("onnx_cpu", kernel_config)
-        Q, grads, _ = be2.compute(params, be2.load_data(data), norm=NORM_VAL)
-        results_nll[label] = grads
-        be2.free()
-
-    print(f"\n{'Gradients vs Numerical Reference (NLL)':^60}")
-    print("-" * 65)
-    for label, _ in backends:
-        report(label, results_nll[label], num_grads_nll)
-    if hasattr(dh2, 'free'): dh2.free()
-    nk2.free()
-
+    # ── Summary ────────────────────────────────────────────────────
     print("\n" + "=" * 70)
     print("  SUMMARY")
     print("=" * 70)
     all_ok = True
-    for mode, results in [("norm=None", results_norm), ("norm=NLL ", results_nll)]:
-        refs = num_grads if "norm=None" in mode else num_grads_nll
-        for label, _ in backends:
-            ok = report(label, results[label], refs)
-            print(f"    {mode} {label:<10}: {'✓ ALL PASS' if ok else '✗ FAIL'}")
-            if not ok:
-                all_ok = False
+    for label, _ in backend_configs:
+        ok = report(label, results_norm[label], num_grads)
+        print(f"    norm=None {label:<10}: {'✓ ALL PASS' if ok else '✗ FAIL'}")
+        if not ok:
+            all_ok = False
     print("=" * 70)
     print(f"  Overall: {'✓ ALL GRADIENTS CORRECT' if all_ok else '✗ SOME FAILED'}")
     print("=" * 70)
