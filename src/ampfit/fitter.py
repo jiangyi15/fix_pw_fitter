@@ -1436,25 +1436,49 @@ class Fitter:
         std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
         return value, std
 
-    def cal_uncertainties_multi(self, fun, param_names, fit_result, jac=False):
-        """Covariance and correlation between multiple observables.
+    def _fd_grad_dicts(self, fun, names, resolved):
+        """Finite-difference gradient dicts for each observable.
 
-        When ``jac=False`` (default), a 3‑point finite difference is
-        used.  When ``jac=True``, ``fun`` must return
-        ``(list[values], list[dict])`` — a list of observable values
-        and a list of gradient dicts (one per observable).
+        Returns ``(values, grad_dicts)`` where *grad_dicts[i]* maps
+        each parameter name to ``d(obs[i])/d(name)``.
+        """
+        import numpy as np
+        fit_dict = {n: float(resolved[n]) for n in names}
+        values = list(fun(fit_dict))
+        grad_dicts = [{} for _ in range(len(values))]
+        for name in names:
+            base = float(resolved[name])
+            eps = 1e-5 * max(1.0, abs(base))
+            rp = dict(resolved); rp[name] = base + eps
+            vp = fun({n: float(rp[n]) for n in names})
+            rm = dict(resolved); rm[name] = base - eps
+            vm = fun({n: float(rm[n]) for n in names})
+            for i in range(len(values)):
+                grad = (vp[i] - vm[i]) / (2 * eps)
+                if grad != 0.0:
+                    grad_dicts[i][name] = grad
+        return values, grad_dicts
 
-        Args:
-            fun: callable ``fun(phys_dict) → list[float]`` (or
-                 ``(list[float], list[dict])`` when ``jac=True``).
-            param_names: list of physical parameter names.
-            fit_result: OptimizeResult from ``fit()``.
-            jac: if ``True``, *fun* returns analytical gradients.
+    def _cov_from_G(self, G, hess_inv):
+        """Covariance matrix and diagonal errors from gradient matrix G.
 
-        Returns:
-            (values, cov, corr) where *values* is the list of function
-            values at best fit, *cov* is the covariance matrix
-            ``(n_obs × n_obs)``, and *corr* is the correlation matrix.
+        *G* has shape ``(n_obs, n_free)``.  Returns ``(cov, errors)``
+        where *cov* = ``G @ hess_inv @ G.T``.
+        """
+        cov = G @ hess_inv @ G.T
+        err = np.sqrt(np.maximum(np.diag(cov), 0.0))
+        return cov, err
+
+    def cal_uncertainties_multi(self, fun, param_names, fit_result, jac=False,
+                                return_cov=True):
+        """Covariance between multiple observables (direct method).
+
+        Calls ``chain_gradient`` per observable.  More efficient than
+        :meth:`cal_uncertainties_multi_vec` when the number of observables
+        is much smaller than the number of free parameters.
+
+        See :meth:`cal_uncertainties_multi_vec` for argument and return
+        value documentation.
         """
         import numpy as np
         from ampfit.boundary import apply_bound_grads
@@ -1464,31 +1488,17 @@ class Fitter:
         _, resolved, raw, x_mapped = self._build_params(x0)
         names = [n for n in param_names if n in resolved]
 
-        fit_dict = {n: float(resolved[n]) for n in names}
-
         if jac:
+            fit_dict = {n: float(resolved[n]) for n in names}
             values, grad_dicts = fun(fit_dict)
             values = list(values)
         else:
-            values = list(fun(fit_dict))
-            grad_dicts = [{} for _ in range(len(values))]
-            for name in names:
-                base = float(resolved[name])
-                eps = 1e-5 * max(1.0, abs(base))
-                rp = dict(resolved); rp[name] = base + eps
-                vp = fun({n: float(rp[n]) for n in names})
-                rm = dict(resolved); rm[name] = base - eps
-                vm = fun({n: float(rm[n]) for n in names})
-                for i in range(len(values)):
-                    grad = (vp[i] - vm[i]) / (2 * eps)
-                    if grad != 0.0:
-                        grad_dicts[i][name] = grad
+            values, grad_dicts = self._fd_grad_dicts(fun, names, resolved)
 
         n_obs = len(values)
         if hess_inv is None or not names:
-            return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
+            return (values, np.zeros((n_obs, n_obs))) if return_cov else (values, np.zeros(n_obs))
 
-        # Chain each observable's gradient to optimizer space
         G = np.zeros((n_obs, len(x0)))
         for i in range(n_obs):
             if not grad_dicts[i]:
@@ -1497,25 +1507,21 @@ class Fitter:
             gf = self._var_registry.flat_gradient(x_mapped, grad_raw)
             G[i] = apply_bound_grads(gf, x0, self._bound_transforms)
 
-        cov = G @ hess_inv @ G.T
-        d = np.sqrt(np.maximum(np.diag(cov), 0.0))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            corr = cov / np.outer(d, d)
-            corr[np.isnan(corr)] = 0.0
-            corr = np.clip(corr, -1, 1)
-        return values, cov, corr
+        if return_cov:
+            cov, _ = self._cov_from_G(G, hess_inv)
+            return values, cov
+        var = np.sum(G * (G @ hess_inv), axis=1)
+        return values, np.sqrt(np.maximum(var, 0.0))
 
-    def cal_uncertainties_multi_vec(self, fun, param_names, fit_result, jac=False):
-        """Covariance and correlation via Jacobian (more efficient for many observables).
+    def cal_uncertainties_multi_vec(self, fun, param_names, fit_result, jac=False,
+                                    return_cov=True):
+        """Covariance between multiple observables via Jacobian.
 
         Computes the Jacobian of physical parameters w.r.t. flat x once, then
         reuses it for all observables — avoids repeated
         ``chain_gradient``/``flat_gradient``/``apply_bound_grads`` calls.
-
-        When ``jac=False`` (default), a 3‑point finite difference is
-        used.  When ``jac=True``, ``fun`` must return
-        ``(list[values], list[dict])`` — a list of observable values
-        and a list of gradient dicts (one per observable).
+        Most efficient when the number of observables is much larger than
+        the number of free parameters.
 
         Args:
             fun: callable ``fun(phys_dict) → list[float]`` (or
@@ -1523,11 +1529,14 @@ class Fitter:
             param_names: list of physical parameter names.
             fit_result: OptimizeResult from ``fit()``.
             jac: if ``True``, *fun* returns analytical gradients.
+            return_cov: if True (default), returns ``(values, cov)``
+                        with *cov* = ``(n_obs × n_obs)``; if False,
+                        returns ``(values, errors)`` with per-observable
+                        1σ uncertainties.
 
         Returns:
-            (values, cov, corr) where *values* is the list of function
-            values at best fit, *cov* is the covariance matrix
-            ``(n_obs × n_obs)``, and *corr* is the correlation matrix.
+            If *return_cov* is True: ``(values, cov)``.
+            If *return_cov* is False: ``(values, errors)``.
         """
         import numpy as np
 
@@ -1536,30 +1545,16 @@ class Fitter:
         _, resolved, _, _ = self._build_params(x0)
         names = [n for n in param_names if n in resolved]
 
-        fit_dict = {n: float(resolved[n]) for n in names}
-
         if jac:
+            fit_dict = {n: float(resolved[n]) for n in names}
             values, grad_dicts = fun(fit_dict)
             values = list(values)
         else:
-            values = list(fun(fit_dict))
-            # Finite-difference gradient dict per observable
-            grad_dicts = [{} for _ in range(len(values))]
-            for name in names:
-                base = float(resolved[name])
-                eps = 1e-5 * max(1.0, abs(base))
-                rp = dict(resolved); rp[name] = base + eps
-                vp = fun({n: float(rp[n]) for n in names})
-                rm = dict(resolved); rm[name] = base - eps
-                vm = fun({n: float(rm[n]) for n in names})
-                for i in range(len(values)):
-                    grad = (vp[i] - vm[i]) / (2 * eps)
-                    if grad != 0.0:
-                        grad_dicts[i][name] = grad
+            values, grad_dicts = self._fd_grad_dicts(fun, names, resolved)
 
         n_obs = len(values)
         if hess_inv is None or not names:
-            return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
+            return (values, np.zeros((n_obs, n_obs))) if return_cov else (values, np.zeros(n_obs))
 
         # Jacobian of resolved params w.r.t. flat x — computed once
         J, _ = self.jacobian(x0, names)
@@ -1573,13 +1568,11 @@ class Fitter:
                 j_idx = names.index(name)
                 G[i] += grad_val * J[j_idx]
 
-        cov = G @ hess_inv @ G.T
-        d = np.sqrt(np.maximum(np.diag(cov), 0.0))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            corr = cov / np.outer(d, d)
-            corr[np.isnan(corr)] = 0.0
-            corr = np.clip(corr, -1, 1)
-        return values, cov, corr
+        if return_cov:
+            cov, _ = self._cov_from_G(G, hess_inv)
+            return values, cov
+        var = np.sum(G * (G @ hess_inv), axis=1)
+        return values, np.sqrt(np.maximum(var, 0.0))
 
     def get_bw_params(self, particle_name, fit_result):
         """BW peak mass and width for a single resonance from fit result.
