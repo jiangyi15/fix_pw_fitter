@@ -646,6 +646,41 @@ class Fitter:
                 grad_flat[idx] = 0.0
         return grad_flat
 
+    def jacobian(self, x, resolved_names):
+        """Jacobian of selected resolved variables w.r.t. flat x.
+
+        For each name in *resolved_names*, sets its backward seed to 1 and
+        runs the constraint pipeline backward to get d(name)/d(x_flat).
+
+        Returns
+        -------
+        J : ndarray, shape (len(resolved_names), len(x))
+            J[i, j] = d(resolved_names[i]) / d(x[j])
+        names : list of str
+            The subset of *resolved_names* that were found in the resolved dict.
+        """
+        from ampfit.boundary import apply_bound_grads
+
+        # Forward pass
+        _, resolved, raw, x_mapped = self._build_params(x)
+        n_cols = len(x)
+
+        rows = []
+        kept_names = []
+        for name in resolved_names:
+            if name not in resolved:
+                continue
+            kept_names.append(name)
+            grad_raw = self.cm.chain_gradient({name: 1.0}, resolved, raw)
+            grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
+            grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
+            rows.append(grad_flat)
+
+        if not rows:
+            return np.zeros((0, n_cols)), []
+
+        return np.stack(rows), kept_names
+
     def get_nll(self, x, m0=None, g0=None):
         """Compute NLL and gradient w.r.t. the flat variable vector.
 
@@ -1461,6 +1496,82 @@ class Fitter:
             grad_raw = self.cm.chain_gradient(grad_dicts[i], resolved, raw)
             gf = self._var_registry.flat_gradient(x_mapped, grad_raw)
             G[i] = apply_bound_grads(gf, x0, self._bound_transforms)
+
+        cov = G @ hess_inv @ G.T
+        d = np.sqrt(np.maximum(np.diag(cov), 0.0))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            corr = cov / np.outer(d, d)
+            corr[np.isnan(corr)] = 0.0
+            corr = np.clip(corr, -1, 1)
+        return values, cov, corr
+
+    def cal_uncertainties_multi_vec(self, fun, param_names, fit_result, jac=False):
+        """Covariance and correlation via Jacobian (more efficient for many observables).
+
+        Computes the Jacobian of physical parameters w.r.t. flat x once, then
+        reuses it for all observables — avoids repeated
+        ``chain_gradient``/``flat_gradient``/``apply_bound_grads`` calls.
+
+        When ``jac=False`` (default), a 3‑point finite difference is
+        used.  When ``jac=True``, ``fun`` must return
+        ``(list[values], list[dict])`` — a list of observable values
+        and a list of gradient dicts (one per observable).
+
+        Args:
+            fun: callable ``fun(phys_dict) → list[float]`` (or
+                 ``(list[float], list[dict])`` when ``jac=True``).
+            param_names: list of physical parameter names.
+            fit_result: OptimizeResult from ``fit()``.
+            jac: if ``True``, *fun* returns analytical gradients.
+
+        Returns:
+            (values, cov, corr) where *values* is the list of function
+            values at best fit, *cov* is the covariance matrix
+            ``(n_obs × n_obs)``, and *corr* is the correlation matrix.
+        """
+        import numpy as np
+
+        x0 = fit_result.x
+        hess_inv = getattr(fit_result, 'hess_inv', None)
+        _, resolved, _, _ = self._build_params(x0)
+        names = [n for n in param_names if n in resolved]
+
+        fit_dict = {n: float(resolved[n]) for n in names}
+
+        if jac:
+            values, grad_dicts = fun(fit_dict)
+            values = list(values)
+        else:
+            values = list(fun(fit_dict))
+            # Finite-difference gradient dict per observable
+            grad_dicts = [{} for _ in range(len(values))]
+            for name in names:
+                base = float(resolved[name])
+                eps = 1e-5 * max(1.0, abs(base))
+                rp = dict(resolved); rp[name] = base + eps
+                vp = fun({n: float(rp[n]) for n in names})
+                rm = dict(resolved); rm[name] = base - eps
+                vm = fun({n: float(rm[n]) for n in names})
+                for i in range(len(values)):
+                    grad = (vp[i] - vm[i]) / (2 * eps)
+                    if grad != 0.0:
+                        grad_dicts[i][name] = grad
+
+        n_obs = len(values)
+        if hess_inv is None or not names:
+            return values, np.zeros((n_obs, n_obs)), np.eye(n_obs)
+
+        # Jacobian of resolved params w.r.t. flat x — computed once
+        J, _ = self.jacobian(x0, names)
+
+        # G[i, :] = Σⱼ d(obsᵢ)/d(nameⱼ) · d(nameⱼ)/d(x)
+        G = np.zeros((n_obs, len(x0)))
+        for i in range(n_obs):
+            if not grad_dicts[i]:
+                continue
+            for name, grad_val in grad_dicts[i].items():
+                j_idx = names.index(name)
+                G[i] += grad_val * J[j_idx]
 
         cov = G @ hess_inv @ G.T
         d = np.sqrt(np.maximum(np.diag(cov), 0.0))
