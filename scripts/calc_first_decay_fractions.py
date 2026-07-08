@@ -131,6 +131,7 @@ def _compute_groups(f, stems, af):
 # ── Output: terminal ───────────────────────────────────────────────────────
 
 def _output_terminal(groups, vals, errs, af, split_ls):
+    """Terminal output."""
     print("\n" + "=" * 80)
     print("  Amplitude fractions by first decay")
     print("=" * 80)
@@ -168,15 +169,14 @@ def _output_terminal(groups, vals, errs, af, split_ls):
     return csv_rows
 
 
-# ── Output: LaTeX / PDF ────────────────────────────────────────────────────
-
-def _fmt(v, e):
-    if e is None:
-        return f"{v:.4f}"
-    return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
-
-
 def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path, compile_pdf=True):
+    """LaTeX/PDF output."""
+
+    def _fmt(v, e):
+        if e is None:
+            return f"{v:.4f}"
+        return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
+
     L = []
     L.append(r"\documentclass[11pt,border=2pt]{standalone}")
     L.append(r"\usepackage{booktabs}")
@@ -211,11 +211,6 @@ def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path, compi
     L.append(r"\bottomrule")
     L.append(r"\end{tabular}")
     L.append(r"\end{document}")
-
-    L.append(r"\bottomrule")
-    L.append(r"\end{tabular}")
-    L.append(r"\end{document}")
-
     tex = "\n".join(L)
 
     if output_path:

@@ -20,6 +20,8 @@ _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _SCRIPT_DIR)
 
 
+
+
 def _default_path(name):
     return os.path.join(_SCRIPT_DIR, name)
 
@@ -114,9 +116,8 @@ def _setup(args):
     return f
 
 
-def _output_terminal(groups, csv_rows, af, n_base, merge_cp):
-    """Terminal output."""
-
+def _output_terminal(stems, csv_rows, af, n_base, merge_cp):
+    """Terminal output. Denominator and numerator results are cached inside ``af``."""
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
@@ -129,7 +130,7 @@ def _output_terminal(groups, csv_rows, af, n_base, merge_cp):
     print("  Sub-decay ratios: Rx → Xπ / Rx → 3π")
     print("=" * 80)
 
-    for rx_label, subs in groups:
+    for rx_label, subs in stems:
         print(f"\n  ── {rx_label} ──")
         print(f"  {'Sub-channel':30s}  {'B0 ratio':>22s}  {'B0bar ratio':>22s}")
         print("  " + "-" * 75)
@@ -152,6 +153,7 @@ def _output_terminal(groups, csv_rows, af, n_base, merge_cp):
         for base_label, entries in sub_groups:
             for sub_label, pi_p_idx in entries:
                 ls_p, lsbar_p = split_ls([pi_p_idx])
+                # Denominator cached internally after first call
                 v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
                 v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
                 r0, s0 = v_b0[0], e_b0[0]
@@ -178,9 +180,8 @@ def _fmt(v, e):
     return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
 
 
-def _output_latex(groups, af, n_base, name_map, output_path, compile_pdf=True):
-    """LaTeX/PDF output."""
-
+def _output_latex(stems, af, n_base, name_map, output_path, compile_pdf=True, merge_cp=True):
+    """LaTeX/PDF output.  Results cached inside ``af`` from terminal run."""
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
@@ -200,25 +201,7 @@ def _output_latex(groups, af, n_base, name_map, output_path, compile_pdf=True):
     L.append(r"Resonance & Sub-channel & B$^{0}$ & $\overline{\rm B}{}^{0}$ \\")
     L.append(r"\midrule")
 
-    prev_base = None
-    for rx_label, subs in groups:
-        cur_base = rx_label
-        if prev_base is not None and cur_base != prev_base:
-            L.append(r"  \midrule")
-        prev_base = cur_base
-
-        pi_p_all = [idxs[0] for _, idxs in subs]
-        ls_p_total, lsbar_p_total = split_ls(pi_p_all)
-
-        sub_groups = []
-        for sub_label, idxs in subs:
-            base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
-            if sub_groups and sub_groups[-1][0] == base:
-                sub_groups[-1][1].append((sub_label, idxs[0]))
-            else:
-                sub_groups.append((base, [(sub_label, idxs[0])]))
-
-        n_subs = sum(len(e) + (1 if len(e) > 1 else 0) for _, e in sub_groups)  # rows + totals
+    for rx_label, subs in stems:
         rx_ltx = name_map.get(rx_label)
         if rx_ltx is None:
             for sfx in ("p", "m"):
@@ -231,31 +214,46 @@ def _output_latex(groups, af, n_base, name_map, output_path, compile_pdf=True):
         else:
             rx_ltx = rx_ltx.strip("$")
 
-        for j, (base_label, entries) in enumerate(sub_groups):
-            # Show each individual L value
+        if merge_cp:
+            pi_p_all = [idxs[0] for _, idxs in subs]
+            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+        else:
+            pi_p_all = [idx for _, idxs in subs for idx in idxs]
+            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+
+        sub_groups = []
+        for sub_label, idxs in subs:
+            base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
+            if sub_groups and sub_groups[-1][0] == base:
+                sub_groups[-1][1].append((sub_label, idxs[0] if merge_cp else idxs))
+            else:
+                sub_groups.append((base, [(sub_label, idxs[0] if merge_cp else idxs)]))
+
+        n_subs = sum(len(e) + (1 if len(e) > 1 else 0) for _, e in sub_groups)
+        first = True
+        for base_label, entries in sub_groups:
             for k, (sub_label, pi_p_idx) in enumerate(entries):
                 ls_p, lsbar_p = split_ls([pi_p_idx])
+                # Denominator and numerators cached from terminal run
                 v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
                 v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
                 r0, s0 = v_b0[0], e_b0[0]
                 r1, s1 = v_b1[0], e_b1[0]
-
-                if j == 0 and k == 0:
+                sub_ltx = _latex_name(sub_label, name_map)
+                if first:
                     span = f"\\multirow{{{n_subs}}}{{*}}{{$\\ {rx_ltx}$}}"
-                    sub_ltx = _latex_name(sub_label, name_map)
                     L.append(f"  {span} & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+                    first = False
                 else:
-                    sub_ltx = _latex_name(sub_label, name_map)
                     L.append(f"   & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
-            # Total for multi-L sub-channels
             if len(entries) > 1:
                 all_pi_p = [e[1] for e in entries]
                 ls_all, lsbar_all = split_ls(all_pi_p)
-                v_tot, e_tot = af.fractions([ls_all], denominator=ls_p_total)
-                v_tot1, e_tot1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
-                r0, s0 = v_tot[0], e_tot[0]
-                r1, s1 = v_tot1[0], e_tot1[0]
+                vt, et = af.fractions([ls_all], denominator=ls_p_total)
+                vt1, et1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
+                r0, s0 = vt[0], et[0]
+                r1, s1 = vt1[0], et1[0]
                 L.append(f"   & ${_latex_name(base_label, name_map)}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
     L.append(r"\bottomrule")
@@ -307,10 +305,9 @@ def main():
     stems = discover_sub_decays(f.config, name_map, merge_cp=not args.no_merge_cp)
     n_base = len(f.config.full_decay.get_partial_waves_params())
 
-    # ── Terminal output (always) ───────────────────────────────────
+    # ── Terminal output (populates ``af`` cache) ────────────────────
     csv_rows = []
-    _output_terminal(stems, csv_rows, af, n_base,
-                     merge_cp=not args.no_merge_cp)
+    _output_terminal(stems, csv_rows, af, n_base, merge_cp=not args.no_merge_cp)
 
     # ── CSV output ─────────────────────────────────────────────────
     if args.output:
@@ -324,10 +321,11 @@ def main():
                 w.writerow(row)
         print(f"\n  Saved CSV to {csv_path}")
 
-    # ── LaTeX + PDF output ─────────────────────────────────────────
+    # ── LaTeX + PDF output (reuses ``af`` cache from terminal) ──────
     if args.output:
         tex_path = args.output + ".tex"
-        _output_latex(stems, af, n_base, name_map, tex_path, compile_pdf=True)
+        _output_latex(stems, af, n_base, name_map, tex_path,
+                      compile_pdf=True, merge_cp=not args.no_merge_cp)
 
 
 if __name__ == "__main__":

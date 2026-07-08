@@ -38,6 +38,7 @@ class AmplitudeFractions:
         self._data = fitter._phsp_holder if data is None else data
         self._params, self._resolved, _, _ = fitter._build_params(fit_result.x)
         self._n_ck = len(self._params["ck"])
+        self._cache = {}  # mask_tuple -> (total, grad_dict)
 
     # ── internal helpers ──────────────────────────────────────────
 
@@ -50,13 +51,20 @@ class AmplitudeFractions:
                     ck[i] = 0.0j
         return ck
 
+    def _mask_key(self, mask):
+        """Hashable key for *mask* (``None`` = all ck)."""
+        return tuple(sorted(mask)) if mask is not None else None
+
     def _compute_total_and_grad(self, p, mask):
         """Run kernel with a given ck mask and return (total, grad_dict).
 
-        ``total = Σ weight·P``  (the ``norm=None`` forward sum).
-        ``grad_dict`` maps physical parameter name → d(total)/d(param).
-        Includes CK, m0, and g0 gradients.
+        Results are cached by mask so repeated calls with the same mask
+        (e.g. denominator shared across sub-channels) skip the backend.
         """
+        key = self._mask_key(mask)
+        if key is not None and key in self._cache:
+            return self._cache[key]
+
         p = dict(p)
         ck_masked = self._ck_masked(mask)
         p["ck"] = ck_masked
@@ -80,6 +88,9 @@ class AmplitudeFractions:
         # g0 gradients
         for i, name in enumerate(cfg.g0_phys_name):
             grad[name] = float(grads["g0"][i])
+
+        if key is not None:
+            self._cache[key] = (total, grad)
         return total, grad
 
     def _phys_to_params(self, p, phys_dict):
