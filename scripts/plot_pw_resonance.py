@@ -54,7 +54,7 @@ def get_groups(config):
         for d in chain.decays:
             outs = [o.name for o in d.outs]
             if "pip1" in outs and "pim1" in outs:
-                pipi_res = d.core.name
+                pipi_res = d.core.display
                 break
 
         ck_all = []
@@ -65,7 +65,7 @@ def get_groups(config):
         if d1_inner:
             groups_3pi[pipi_res].extend(ck_all)
         else:
-            label = f"{d1.core.name}+{d2.core.name}"
+            label = f"{d1.core.display}+{d2.core.display}"
             groups_d1d2[label].extend(ck_all)
         ck_start += n
 

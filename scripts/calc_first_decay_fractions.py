@@ -25,46 +25,39 @@ def _default_path(name):
     return os.path.join(_SCRIPT_DIR, name)
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
-from run_fit import build_constraints
 
 
-def _display_name(stem):
-    """Convert internal stem to human-readable first-decay label.
+def _make_label_fn(name_map):
+    """Create a display-label function from a name→display map.
 
-    Examples:
-      'rhoA.rhoB'    → 'ρρ'
-      'f0(980).rhoB' → 'f₀(980)ρ'
-      'a1(1260)p.pim2' → 'a₁(1260)⁺π⁻'
+    The returned function converts a dot-separated stem (e.g.
+    ``"rhoA.rhoB"``) to a human-readable label.
+
+    With ``latex=False`` (default) returns Unicode for terminal output.
+    With ``latex=True`` returns a full LaTeX string (with ``$``).
     """
-    nice = {
-        "rhoA": "ρ⁰", "rhoB": "ρ⁰",
-        "pip1": "π⁺", "pip2": "π⁺",
-        "pim1": "π⁻", "pim2": "π⁻",
-        "a1(1260)p": "a₁(1260)⁺", "a1(1260)m": "a₁(1260)⁻",
-        "a1(1640)p": "a₁(1640)⁺", "a1(1640)m": "a₁(1640)⁻",
-        "a2(1320)p": "a₂(1320)⁺", "a2(1320)m": "a₂(1320)⁻",
-        "pi1(1600)p": "π₁(1600)⁺", "pi1(1600)m": "π₁(1600)⁻",
-        "pi2(1670)p": "π₂(1670)⁺", "pi2(1670)m": "π₂(1670)⁻",
-        "pi1300p": "π(1300)⁺", "pi1300m": "π(1300)⁻",
-        "pi1600p": "π(1600)⁺", "pi1600m": "π(1600)⁻",
-        "f0(980)": "f₀(980)", "f0(500)": "f₀(500)",
-        "NR0": "NR",
-    }
     def _nice(p):
-        return nice.get(p, p)
+        return name_map.get(p, p).strip("$")
 
-    parts = stem.split(".")
-    if len(parts) == 2:
+    def label(stem, latex=False):
+        parts = stem.split(".")
+        if len(parts) != 2:
+            return stem
         r1, r2 = _nice(parts[0]), _nice(parts[1])
-        if r2 in ("π⁺", "π⁻"):
-            return f"B → {r1}{r2}"
-        if r1 in ("π⁺", "π⁻"):
-            return f"B → {r2}{r1}"
-        return f"B → {r1} {r2}"
-    return f"B → {stem}"
+        is_pion = {r"\pi^{+}", r"\pi^{-}", "π⁺", "π⁻"}
+        if r2 in is_pion:
+            body = f"{r1}{r2}"
+        elif r1 in is_pion:
+            body = f"{r2}{r1}"
+        else:
+            body = f"{r1}{r'\,' if latex else ' '}{r2}"
+        if latex:
+            return rf"$B\to {body}$"
+        return f"B → {body}"
+    return label
 
 
-def group_ck_stems(config):
+def group_ck_stems(config, label_fn):
     """Group base ck indices by their first-decay stem.
 
     Returns list of (stem, label, [base_ck_indices], [wave_labels], has_ls_waves).
@@ -81,8 +74,8 @@ def group_ck_stems(config):
         raw.setdefault(m.group(1), []).append((i, int(m.group(2))))
 
     result = []
-    for stem, entries in sorted(raw.items(), key=lambda x: _display_name(x[0])):
-        label = _display_name(stem)
+    for stem, entries in sorted(raw.items(), key=lambda x: label_fn(x[0])):
+        label = label_fn(stem)
         base_idxs = [e[0] for e in entries]
         ls_vals = sorted(set(e[1] for e in entries))
         has_ls = len(ls_vals) > 1
@@ -100,15 +93,12 @@ def group_ck_stems(config):
 def _setup_fitter(args):
     """Create and configure Fitter from command-line args."""
     f = Fitter(args.config, backend=args.backend)
-    constraints_path = os.path.splitext(args.fit_json)[0] + "_constraints.json"
-    if os.path.exists(constraints_path):
-        f.load_constraints(constraints_path)
-        print(f"  Loaded constraints from {constraints_path}")
+    cp = os.path.splitext(args.fit_json)[0] + "_constraints.json"
+    if os.path.exists(cp):
+        f.load_constraints(cp)
+        print(f"  Loaded constraints from {cp}")
     else:
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs)
-        f.set_same(sp)
-        f.set_scale(sc)
+        print(f"WARNING: no constraints file at {cp}")
     phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
     return f
@@ -180,41 +170,13 @@ def _output_terminal(groups, vals, errs, af, split_ls):
 
 # ── Output: LaTeX / PDF ────────────────────────────────────────────────────
 
-_LATEX_MAP = {
-    "rhoA": r"\rho^{0}", "rhoB": r"\rho^{0}",
-    "pip1": r"\pi^{+}", "pip2": r"\pi^{+}",
-    "pim1": r"\pi^{-}", "pim2": r"\pi^{-}",
-    "a1(1260)p": r"a_{1}(1260)^{+}", "a1(1260)m": r"a_{1}(1260)^{-}",
-    "a1(1640)p": r"a_{1}(1640)^{+}", "a1(1640)m": r"a_{1}(1640)^{-}",
-    "a2(1320)p": r"a_{2}(1320)^{+}", "a2(1320)m": r"a_{2}(1320)^{-}",
-    "pi1(1600)p": r"\pi_{1}(1600)^{+}", "pi1(1600)m": r"\pi_{1}(1600)^{-}",
-    "pi2(1670)p": r"\pi_{2}(1670)^{+}", "pi2(1670)m": r"\pi_{2}(1670)^{-}",
-    "pi1300p": r"\pi(1300)^{+}", "pi1300m": r"\pi(1300)^{-}",
-    "pi1600p": r"\pi(1600)^{+}", "pi1600m": r"\pi(1600)^{-}",
-    "f0(980)": r"f_{0}(980)", "f0(500)": r"f_{0}(500)",
-    "NR0": r"{\rm NR}",
-}
-
-def _latex_label(stem):
-    parts = stem.split(".")
-    if len(parts) != 2:
-        return stem
-    r1 = _LATEX_MAP.get(parts[0], parts[0])
-    r2 = _LATEX_MAP.get(parts[1], parts[1])
-    if r2 in (r"\pi^{+}", r"\pi^{-}"):
-        return r"$B\to " + r1 + r2 + r"$"
-    if r1 in (r"\pi^{+}", r"\pi^{-}"):
-        return r"$B\to " + r2 + r1 + r"$"
-    return r"$B\to " + r1 + r"\," + r2 + r"$"
-
-
 def _fmt(v, e):
     if e is None:
         return f"{v:.4f}"
     return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
 
 
-def _output_latex(groups, vals, errs, af, split_ls, output_path, compile_pdf):
+def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path, compile_pdf=True):
     L = []
     L.append(r"\documentclass[11pt,border=2pt]{standalone}")
     L.append(r"\usepackage{booktabs}")
@@ -228,7 +190,7 @@ def _output_latex(groups, vals, errs, af, split_ls, output_path, compile_pdf):
     for i, (stem, label_unicode, (ls, lsbar), waves, has_ls) in enumerate(groups):
         v0, v1 = vals[2*i], vals[2*i+1]
         e0, e1 = errs[2*i], errs[2*i+1]
-        ltx_label = _latex_label(stem)
+        ltx_label = label_fn(stem, latex=True)
 
         if has_ls:
             L.append(f"  {ltx_label} & ${_fmt(v0,e0)}$ & ${_fmt(v1,e1)}$ \\\\")
@@ -260,19 +222,13 @@ def _output_latex(groups, vals, errs, af, split_ls, output_path, compile_pdf):
         with open(output_path, "w") as f:
             f.write(tex)
         print(f"  Saved {output_path}")
-    else:
-        print(tex)
 
     if compile_pdf:
         outdir = os.path.dirname(output_path) if output_path else "/tmp"
-        texpath = output_path if output_path else "/tmp/fractions.tex"
-        if not output_path:
-            with open(texpath, "w") as f:
-                f.write(tex)
         r = subprocess.run(["pdflatex", "-interaction=nonstopmode",
-                            "-output-directory=" + outdir, texpath],
+                            "-output-directory=" + outdir, output_path],
                            capture_output=True, text=True, timeout=60)
-        pdfpath = os.path.splitext(texpath)[0] + ".pdf"
+        pdfpath = os.path.splitext(output_path)[0] + ".pdf"
         if os.path.exists(pdfpath):
             print(f"  PDF: {pdfpath}")
         else:
@@ -291,13 +247,8 @@ def main():
     ap.add_argument("--phsp", default=_default_path("data/phsp_arrays.npz"))
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default="cuda32_v3")
-    ap.add_argument("-o", "--output", help="CSV output path")
-    ap.add_argument("--latex", action="store_true",
-                    help="Output LaTeX table instead of terminal")
-    ap.add_argument("--latex-output", default=None,
-                    help="LaTeX .tex path (default: stdout)")
-    ap.add_argument("--pdf", action="store_true",
-                    help="Compile LaTeX to PDF (requires --latex-output)")
+    ap.add_argument("-o", "--output", default=None,
+                    help="Output prefix for CSV, LaTeX, and PDF (e.g. /path/to/prefix)")
     args = ap.parse_args()
 
     # ── Setup ──────────────────────────────────────────────────────
@@ -309,24 +260,31 @@ def main():
 
     af = AmplitudeFractions(f, fit_result)
 
-    stems = group_ck_stems(f.config)
+    name_map = f.config.name_display_map()
+    label_fn = _make_label_fn(name_map)
+
+    stems = group_ck_stems(f.config, label_fn)
     groups, vals, errs, split_ls, _ = _compute_groups(f, stems, af)
 
-    # ── Output ─────────────────────────────────────────────────────
-    if args.latex:
-        _output_latex(groups, vals, errs, af, split_ls,
-                      args.latex_output, args.pdf)
-    else:
-        csv_rows = _output_terminal(groups, vals, errs, af, split_ls)
+    # ── Terminal output (always) ───────────────────────────────────
+    csv_rows = _output_terminal(groups, vals, errs, af, split_ls)
 
-        if args.output:
-            with open(args.output, "w", newline="") as fout:
-                w = csv.writer(fout)
-                w.writerow(["FirstDecay", "B0_value", "B0_error",
-                            "B0bar_value", "B0bar_error"])
-                for row in csv_rows:
-                    w.writerow(row)
-            print(f"\n  Saved CSV to {args.output}")
+    # ── CSV output ─────────────────────────────────────────────────
+    if args.output:
+        csv_path = args.output + ".csv"
+        with open(csv_path, "w", newline="") as fout:
+            w = csv.writer(fout)
+            w.writerow(["FirstDecay", "B0_value", "B0_error",
+                        "B0bar_value", "B0bar_error"])
+            for row in csv_rows:
+                w.writerow(row)
+        print(f"\n  Saved CSV to {csv_path}")
+
+    # ── LaTeX + PDF output ─────────────────────────────────────────
+    if args.output:
+        tex_path = args.output + ".tex"
+        _output_latex(groups, vals, errs, af, split_ls, label_fn,
+                      tex_path, compile_pdf=True)
 
 
 if __name__ == "__main__":

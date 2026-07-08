@@ -51,6 +51,7 @@ def main():
     # ── Find the resonance model ─────────────────────────────────
     model = None
     res_name = None
+    res_disp = None
     for chain in f.config.full_decay.chains:
         for decay in chain.decays[1:]:
             m = decay.core._model
@@ -58,6 +59,7 @@ def main():
             if nm == args.resonance:
                 model = m
                 res_name = nm
+                res_disp = decay.core.display
                 break
         if model:
             break
@@ -129,7 +131,7 @@ def main():
     ax_im.legend(fontsize=10)
     ax_im.grid(True, alpha=0.3)
 
-    fig.suptitle(f"{res_name}  —  Re($1/D$) and Im($1/D$) with uncertainty band",
+    fig.suptitle(f"{res_disp}  —  Re($1/D$) and Im($1/D$) with uncertainty band",
                  fontsize=11)
     fig.subplots_adjust(hspace=0.08)
     fig.savefig(args.output, dpi=150, bbox_inches="tight")

@@ -19,7 +19,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 | CUDA f32 v3 | `cuda32_v3` | Faster, ~1e-7 precision. |
 | CUDA f64 v2 | `cuda_v2`, `cuda64_v2` | Linear interpolation. |
 | CUDA f32 v2 | `cuda32_v2` | Fastest raw kernel. |
-| NumPy | `numpy` | Reference f64. |
+| NumPy | `numpy` | Reference f64.  **Never use for production fits** — too slow. |
 | ONNX | `onnx_cpu` / `onnx_cuda` | In-memory graph, built with batch_size=1024. |
 
 `cuda` / `cuda64` alias to `cuda_v3`.  GPU `__del__` auto-frees memory — no manual `.free()` needed.

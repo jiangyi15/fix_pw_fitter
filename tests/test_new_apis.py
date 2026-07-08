@@ -650,6 +650,144 @@ def test_ck_matrix_v2_jacobian(ck_matrix_test_data):
     assert max_rel < 0.02, f"Max Jacobian relative error: {max_rel:.4e}"
 
 
+# ── Display name tests ─────────────────────────────────────────
+
+def test_particle_display_default():
+    """Particle gets LaTeX display from fmt_particle."""
+    from ampfit.config_loader import Particle
+    cases = [
+        ("a1(1260)p",  r"$a_1(1260)^+$"),
+        ("a1(1260)m",  r"$a_1(1260)^-$"),
+        ("f0(980)",    r"$f_0(980)$"),
+        ("rhoA",       r"$\rho$"),
+        ("rhoB",       r"$\rho$"),
+        ("rho_omega",  r"$\rho/\omega$"),
+        ("NR0",        r"$\text{NR}$"),
+    ]
+    for name, expected in cases:
+        p = Particle(name)
+        assert p.display == expected, f"{name}: got {p.display!r}, expected {expected!r}"
+
+
+def test_particle_display_custom():
+    """YAML ``display`` key is stored as-is (no forced $$)."""
+    from ampfit.config_loader import Particle
+    p = Particle("my_res", display=r"\mathrm{MyRes}")
+    assert p.display == r"\mathrm{MyRes}"
+
+
+def test_config_name_display_map():
+    """name_display_map covers all particles in decay chains."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    m = c.name_display_map()
+    assert isinstance(m, dict)
+    assert len(m) > 5
+    # Every chain particle is included
+    for chain in c.full_decay.chains:
+        for decay in chain.decays[1:]:
+            assert decay.core.name in m, f"{decay.core.name} missing from map"
+
+
+def test_config_display_decay():
+    """display_decay wraps particle names in LaTeX."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    for chain in c.full_decay.chains:
+        for decay in chain.decays[1:]:
+            d = c.display_decay(decay)
+            assert d.startswith("$") or "$" in d, f"decay display missing LaTeX: {d}"
+            assert r"\to" in d, f"decay display missing \\to: {d}"
+            break
+        break
+
+
+def test_config_display_g_ls():
+    """display_g_ls returns one LaTeX label per LS combination."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    for chain in c.full_decay.chains:
+        for decay in chain.decays[1:]:
+            labels = c.display_g_ls(decay)
+            n_ls = len(decay.get_ls_list())
+            assert len(labels) == n_ls, (
+                f"expected {n_ls} labels, got {len(labels)}")
+            for lab in labels:
+                assert lab.startswith("$g^{")
+            break
+        break
+
+
+def test_config_display_a_total():
+    """display_a_total returns a LaTeX string."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    for chain in c.full_decay.chains:
+        d = c.display_a_total(chain)
+        assert "$a_{\\mathrm{total}}" in d, f"unexpected a_total: {d}"
+        break
+
+
+def test_config_param_display_mass():
+    """param_display formats mass parameters."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    assert c.param_display("rhoA_mass") == r"$m_{\rho}$"
+    assert r"_mass" not in c.param_display("f0(980)_mass")
+
+
+def test_config_param_display_width():
+    """param_display formats width parameters."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    d = c.param_display("rhoA_width")
+    assert d.startswith(r"$\Gamma")
+    assert r"\rho" in d
+
+
+def test_config_param_display_g_ls():
+    """param_display formats g_ls magnitude and phase."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    # Find a g_ls name from the config
+    name_r = None
+    name_i = None
+    for chain in c.full_decay.chains:
+        for decay in chain.decays[1:]:
+            ds = str(decay).replace("+", ".")
+            for idx in range(len(decay.get_ls_list())):
+                name_r = f"{ds}_g_ls_{idx}r"
+                name_i = f"{ds}_g_ls_{idx}i"
+                break
+            break
+        break
+    if name_r:
+        dr = c.param_display(name_r)
+        assert dr.startswith("$|")
+        assert "g" in dr
+    if name_i:
+        di = c.param_display(name_i)
+        assert di.startswith(r"$\arg(")
+
+
+def test_config_param_display_scalar():
+    """param_display formats scalar names."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    assert c.param_display("gamma") == r"$\Gamma$"
+    assert c.param_display("delta_gamma") == r"$\Delta\Gamma$"
+    assert c.param_display("A_prod") == r"$A_{\mathrm{prod}}$"
+
+
+def test_config_param_display_unknown():
+    """param_display escapes underscores for unknown names."""
+    from ampfit.config_loader import Config
+    c = Config("config_angle.yml")
+    d = c.param_display("some_unknown_param")
+    assert r"\_" in d, f"underscore not escaped: {d}"
+    assert r"\mathrm" in d, f"missing \\mathrm: {d}"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

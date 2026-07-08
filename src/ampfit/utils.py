@@ -88,6 +88,14 @@ _PARTICLE_NAMES = {
     "rho(1450)":     r"\rho(1450)",
     "rhoA":          r"\rho",
     "rhoB":          r"\rho",
+    "rho_omega":     r"\rho/\omega",
+    "pip1":          r"\pi_{1}^{+}",
+    "pip2":          r"\pi_{2}^{+}",
+    "pim1":          r"\pi_{1}^{-}",
+    "pim2":          r"\pi_{2}^{-}",
+    "pi1300":        r"\pi(1300)",
+    "pi1600":        r"\pi(1600)",
+    "pi1800":        r"\pi(1800)",
 }
 
 

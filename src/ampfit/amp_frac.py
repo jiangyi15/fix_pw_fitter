@@ -180,7 +180,7 @@ class AmplitudeFractions:
 
         fun = fun_jac if jac else fun_3pt
 
-        vals, cov, corr = fitter.cal_uncertainties_multi(
+        vals, cov = fitter.cal_uncertainties_multi(
             fun, param_names, self.fit_result, jac=jac)
         errs = np.sqrt(np.diag(cov))
         return vals, errs

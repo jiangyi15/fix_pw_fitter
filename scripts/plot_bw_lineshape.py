@@ -64,6 +64,7 @@ def main():
                 continue
             seen.add(mid)
             name = decay.core.name
+            disp = decay.core.display
             gamma_fn = model.gamma
 
             # Mass
@@ -76,7 +77,7 @@ def main():
 
 
             resonances.append({
-                "name": name, "m0": m0,
+                "name": name, "disp": disp, "m0": m0,
                 "gamma_fn": gamma_fn,
                 "gamma_names": gamma_names,
                 "g0_vals": g0_vals,
@@ -150,7 +151,7 @@ def main():
             total_chars = sum(len(l) for l in labels)
             ax_ls.legend(fontsize=7, ncol=max(1, total_chars // 50 + 1))
         ax_ls.axvline(m0, color="grey", linestyle=":", linewidth=0.8)
-        ax_ls.set_title(f"{res['name']}  (m₀={m0:.3f})", fontsize=9)
+        ax_ls.set_title(f"{res['disp']}  (m₀={m0:.3f})", fontsize=9)
         ax_ls.set_xlim(mass_lo, mass_hi)
         ax_ls.set_ylabel(r"$m_0\,\mathrm{Re}\Gamma\,/\,|D|^2$")
         ax_ls.set_xlabel(r"m (GeV)")

@@ -20,19 +20,6 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
-from run_fit import build_constraints
-
-
-def _charge_stem(name):
-    """Strip trailing ``p``/``m`` charge suffix to merge charge-conjugate pairs.
-
-    ``a1(1260)`` is kept separate (different dynamics for p vs m).
-    """
-    if name.startswith("a1(1260)"):
-        return name
-    if len(name) > 1 and name[-1] in ("p", "m"):
-        return name[:-1]
-    return name
 
 
 def discover_groups(config):
@@ -63,7 +50,7 @@ def discover_groups(config):
         d2_child_inner = any(o.name in inner_set for o in d2.outs)
 
         if d1_child_inner:
-            res = _charge_stem(d1.core.name)
+            res = d1.core.name
             raw_3pi.setdefault(res, []).extend(range(start, end))
         elif not d1_child_inner and not d2_child_inner:
             r1 = d1.core.name
@@ -133,7 +120,8 @@ def main():
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit phsp events (faster testing)")
     ap.add_argument("--backend", default="cuda_v3", help="Compute backend")
-    ap.add_argument("-o", "--output", help="CSV output path")
+    ap.add_argument("-o", "--output", default=None,
+                    help="Output prefix for CSV and LaTeX (e.g. /path/to/prefix)")
     args = ap.parse_args()
 
     # ── Setup fitter ──────────────────────────────────────────────
@@ -144,11 +132,6 @@ def main():
     if os.path.exists(constraints_path):
         f.load_constraints(constraints_path)
         print(f"  Loaded constraints from {constraints_path}")
-    else:
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs)
-        f.set_same(sp)
-        f.set_scale(sc)
 
     phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
@@ -167,7 +150,7 @@ def main():
                               hess_inv=getattr(fit_result, 'hess_inv', None))
     af = AmplitudeFractions(f, fit_ns)
 
-    # ── Compute ───────────────────────────────────────────────────
+    # ── Compute (terminal output) ─────────────────────────────────
     rows_3pi = compute_section(af, groups_3pi,
                                "Resonance → 3π  (Rx → Ry+π, Ry → ππ)")
     if groups_B:
@@ -177,7 +160,8 @@ def main():
 
     # ── CSV output ────────────────────────────────────────────────
     if args.output:
-        with open(args.output, "w", newline="") as fout:
+        csv_path = args.output + ".csv"
+        with open(csv_path, "w", newline="") as fout:
             w = csv.writer(fout)
             w.writerow(["Category", "Label",
                         "B0_value", "B0_error",
@@ -186,7 +170,33 @@ def main():
                 w.writerow(["Rx→3π", *row])
             for row in rows_B:
                 w.writerow(["B→R1R2", *row])
-        print(f"\nSaved to {args.output}")
+        print(f"\nSaved CSV to {csv_path}")
+
+    # ── LaTeX output ──────────────────────────────────────────────
+    if args.output:
+        name_map = f.config.name_display_map()
+        sections = [("Resonance $\\to 3\\pi$", rows_3pi)]
+        if rows_B:
+            sections.append(("$B\\to R_1 R_2$", rows_B))
+        tex_path = args.output + ".tex"
+        with open(tex_path, "w") as f:
+            f.write(r"\begin{tabular}{lcc}" + "\n")
+            f.write(r"\hline" + "\n")
+            f.write(r"Label & $B^0$ & $\bar{B}^0$ \\" + "\n")
+            f.write(r"\hline" + "\n")
+            for title, rows in sections:
+                f.write(r"\multicolumn{3}{l}{\textbf{" + title + r"}} \\" + "\n")
+                for label, v0, e0, v1, e1 in rows:
+                    if "+" in label:
+                        parts = label.split("+")
+                        disp = "+".join(name_map.get(p, p).strip("$") for p in parts)
+                    else:
+                        disp = name_map.get(label, label).strip("$")
+                    f.write(f"  ${disp}$ & {v0:.6f} $\\pm$ {e0:.6f} "
+                            f"& {v1:.6f} $\\pm$ {e1:.6f} \\\\\n")
+            f.write(r"\hline" + "\n")
+            f.write(r"\end{tabular}" + "\n")
+        print(f"  Saved LaTeX to {tex_path}")
 
 
 if __name__ == "__main__":

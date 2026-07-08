@@ -19,6 +19,9 @@ class Particle:
         self._decays = []
         for k, v in kwargs.items():
             setattr(self, k, v)
+        if not hasattr(self, 'display'):
+            from ampfit.utils import fmt_particle
+            self.display = fmt_particle(name, full=True)
     def add_decay(self, decay):
         """Register a Decay in this particle if no identical decay exists."""
         out_names = tuple(o.name for o in decay.outs)
@@ -169,6 +172,7 @@ class Config:
         self.unique_fl = []
         self.unique_angle_basis = []
         self.n_interp_gamma = 2000  # gamma table interpolation points
+        self._param_display_map = None
 
     def get_topo_index(self, decay):
         topo_id = {}
@@ -594,6 +598,127 @@ class Config:
                     matching.update(range(start, end))
 
         return self._expand_to_blocks(matching, n_base)
+
+    # ── Display helpers ──────────────────────────────────────────
+
+    def name_display_map(self):
+        """Map particle config names to display names.
+
+        Returns a dict ``{config_name: display_name}``, where
+        *display_name* is the LaTeX-formatted string (with ``$``
+        delimiters) from :attr:`Particle.display`.
+
+        Values with the same display name merge naturally (e.g. both
+        ``rhoA`` and ``rhoB`` map to the same key).
+        """
+        seen = {}
+        for chain in self.full_decay.chains:
+            for decay in chain.decays:
+                p = decay.core
+                if p.name not in seen:
+                    seen[p.name] = p.display
+                for out in decay.outs:
+                    if out.name not in seen:
+                        seen[out.name] = out.display
+        return seen
+
+    def display_decay(self, decay):
+        """LaTeX display string for a decay: ``parent → child1 child2``.
+
+        Uses :attr:`Particle.display` for each particle name.
+        """
+        parent = decay.core.display
+        children = [o.display for o in decay.outs]
+        return rf"{parent} \to {children[0]}\,{children[1]}"
+
+    def display_chain(self, chain):
+        """LaTeX display string for an entire decay chain."""
+        parts = [self.display_decay(d) for d in chain.decays]
+        return r" \quad ".join(parts)
+
+    _L_LABEL = {0: "S", 1: "P", 2: "D", 3: "F", 4: "G", 5: "H"}
+
+    def display_g_ls(self, decay):
+        """Display names for each ``g_ls`` partial wave of a decay.
+
+        Returns a list of LaTeX strings, one per LS combination::
+
+            g^{{\\rho \\to \\pi\\pi}}_{{S}},  g^{{\\rho \\to \\pi\\pi}}_{{D}},  …
+        """
+        sup = self.display_decay(decay).replace("$", "")
+        ls_list = decay.get_ls_list()
+        return [rf"$g^{{{sup}}}_{{{self._L_LABEL.get(l, str(l))}}}$"
+                for l, s in ls_list]
+
+    def display_g_lsbar(self, decay):
+        """Display names for each ``\\bar{{g}}_{{ls}}`` partial wave."""
+        sup = self.display_decay(decay).replace("$", "")
+        ls_list = decay.get_ls_list()
+        return [rf"$\bar{{g}}^{{{sup}}}_{{{self._L_LABEL.get(l, str(l))}}}$"
+                for l, s in ls_list]
+
+    def display_a_total(self, chain):
+        """Display name for the total amplitude: ``a_{{\\mathrm{{total}}}}^{{decay[0]}}``."""
+        sup = self.display_decay(chain.decays[0]).replace("$", "") if chain.decays else ""
+        return rf"$a_{{\mathrm{{total}}}}^{{{sup}}}$"
+
+    def _build_param_display_map(self):
+        """Pre-build mapping of all config-known parameter names to LaTeX display strings."""
+        import re
+        n_map = self.name_display_map()
+
+        # Scalar names (fixed)
+        sc = {
+            'gamma':       r'$\Gamma$',
+            'delta_gamma': r'$\Delta\Gamma$',
+            'delta_m':     r'$\Delta m$',
+            'A_prod':      r'$A_{\mathrm{prod}}$',
+            'poqr':        r'$\mathrm{poq}_r$',
+            'poqi':        r'$\mathrm{poq}_i$',
+        }
+
+        # Particle mass / width
+        for pname, pdisp in n_map.items():
+            b = pdisp.strip("$")
+            sc[f"{pname}_mass"]  = rf"$m_{{{b}}}$"
+            sc[f"{pname}_width"] = rf"$\Gamma_{{{b}}}$"
+
+        # Decay-level g_ls and total
+        for chain in self.full_decay.chains:
+            cs = str(chain).replace("+", ".")
+            for decay in chain.decays:
+                ds = str(decay).replace("+", ".")
+                g_disps = self.display_g_ls(decay)
+                gb_disps = self.display_g_lsbar(decay)
+                for idx, gd in enumerate(g_disps):
+                    base = gd.strip("$")
+                    sc[f"{ds}_g_ls_{idx}r"] = rf"$|{base}|$"
+                    sc[f"{ds}_g_ls_{idx}i"] = rf"$\arg({base})$"
+                for idx, gd in enumerate(gb_disps):
+                    base = gd.strip("$")
+                    sc[f"{ds}_g_lsbar_{idx}r"] = rf"$|{base}|$"
+                    sc[f"{ds}_g_lsbar_{idx}i"] = rf"$\arg({base})$"
+            # total amplitude for each chain
+            base = self.display_a_total(chain).strip("$")
+            sc[f"{cs}_total_0r"] = rf"$|{base}|$"
+            sc[f"{cs}_total_0i"] = rf"$\arg({base})$"
+
+        return sc
+
+    def param_display(self, name):
+        """Map a parameter name to its LaTeX display string.
+
+        Uses a pre-built map covering mass, width, g_ls, g_lsbar, total,
+        and scalar parameters.  Falls back to ``$\\mathrm{{name}}$`` with
+        underscores escaped so ``_`` does not create unwanted subscripts.
+        """
+        if self._param_display_map is None:
+            self._param_display_map = self._build_param_display_map()
+        if name in self._param_display_map:
+            return self._param_display_map[name]
+        # Fallback: escape underscores for safe math-mode rendering
+        safe = name.replace("_", r"\_")
+        return rf"$\mathrm{{{safe}}}$"
 
 
 

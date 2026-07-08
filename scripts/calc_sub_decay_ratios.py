@@ -24,66 +24,23 @@ def _default_path(name):
     return os.path.join(_SCRIPT_DIR, name)
 
 
-def _cl_name(stem):
-    """Human-readable short resonance label."""
-    nice = {
-        "rhoA": "ρπ", "rhoB": "ρπ",
-        "f0(980)": "f₀(980)π", "f0(500)": "f₀(500)π",
-        "f2(1270)": "f₂(1270)π",
-        "pi1600": "π(1800)π",
-    }
-    return nice.get(stem, stem)
+def _cl_name(stem, name_map):
+    """Human-readable short resonance label (raw name for terminal)."""
+    return name_map.get(stem, stem).strip("$")
 
 
-def _latex_name(name):
-    """Convert Unicode label to LaTeX math mode, handling LS suffix and multi-particle labels."""
-    # Strip LS suffix (e.g. "f₂(1270)π L=1" → "f₂(1270)π")
+def _latex_name(name, name_map):
+    """Convert a name to LaTeX using the name map."""
     ls_part = ""
     if " L=" in name:
         base, ls = name.split(" L=", 1)
         ls_part = f" L={ls}"
     else:
         base = name
-
-    return _to_latex_name(base) + ls_part
-
-
-def _to_latex_name(name):
-    r"""Convert a particle/resonance name to LaTeX math content (without outer $)."""
-    cmds = {"pi": r"\pi", "rho": r"\rho", "sigma": r"\sigma",
-            "NR": r"{\rm NR}", "K": r"K",
-            "ρ": r"\rho", "π": r"\pi", "σ": r"\sigma"}
-
-    # Normalize Unicode subscript digits → ASCII
-    _sub = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
-    name = name.translate(_sub)
-
-    def _convert_atom(s):
-        charge = ""
-        if s.endswith("\u207a"): charge = "^{+}"; s = s[:-1]
-        elif s.endswith("\u207b"): charge = "^{-}"; s = s[:-1]
-        elif s not in cmds and s[-1:] in ("p", "m") and len(s) > 1:
-            charge = "^{+}" if s[-1] == "p" else "^{-}"
-            s = s[:-1]
-        m = re.match(r'^([a-zA-Z]+)(\d+)\((.+)\)$', s)
-        if m:
-            base, digit, paren = m.group(1), m.group(2), m.group(3)
-            cmd = cmds.get(base, base)
-            return f"{cmd}_{{{digit}}}({paren}){charge}"
-        m = re.match(r'^([a-zA-Z]+)(\d+)$', s)
-        if m:
-            cmd = cmds.get(m.group(1), m.group(1))
-            return f"{cmd}({m.group(2)}){charge}"
-        if s in cmds:
-            return f"{cmds[s]}{charge}"
-        return f"{s}{charge}"
-
-    parts = re.split(r'(π)', name)
-    converted = [_convert_atom(p) for p in parts if p]
-    return "".join(converted)
+    return name_map.get(base, base).strip("$") + ls_part
 
 
-def discover_sub_decays(config, merge_cp=False):
+def discover_sub_decays(config, name_map, merge_cp=False):
     """Group base ck indices by resonance → sub-decay channel."""
     pws = config.full_decay.get_partial_waves_params()
 
@@ -124,33 +81,34 @@ def discover_sub_decays(config, merge_cp=False):
         merged = OrderedDict()
         for rx_name, subs in chains.items():
             base = rx_name[:-1] if len(rx_name) > 1 and rx_name[-1] in "pm" else rx_name
+            if base not in merged:
+                merged[base] = (rx_name, OrderedDict())
             for ls_key, idxs in subs.items():
-                merged.setdefault(base, OrderedDict())
-                merged[base].setdefault(ls_key, []).extend(idxs)
-        chains = merged
+                merged[base][1].setdefault(ls_key, []).extend(idxs)
+        chains = OrderedDict()
+        for base, (full_name, subs) in merged.items():
+            chains[full_name] = subs
 
     result = []
-    for rx_name in sorted(chains, key=lambda x: _cl_name(x)):
+    for rx_name in sorted(chains, key=lambda x: _cl_name(x, name_map)):
         subs = []
         for (sub_name, (L, S)), idxs in sorted(chains[rx_name].items()):
             ls_counts = sum(1 for k in chains[rx_name] if k[0] == sub_name)
             wave_label = f" L={L}" if ls_counts > 1 else ""
-            subs.append((_cl_name(sub_name) + wave_label, sorted(set(idxs))))
-        result.append((_cl_name(rx_name), subs))
+            subs.append((_cl_name(sub_name, name_map) + wave_label, sorted(set(idxs))))
+        result.append((_cl_name(rx_name, name_map), subs))
     return result
 
 
 def _setup(args):
     from ampfit import Fitter
-    from run_fit import build_constraints
 
     f = Fitter(args.config, backend=args.backend)
     cp = os.path.splitext(args.fit_json)[0] + "_constraints.json"
     if os.path.exists(cp):
         f.load_constraints(cp)
     else:
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs); f.set_same(sp); f.set_scale(sc)
+        print(f"WARNING: no constraints file at {cp}")
     phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     f.set_phsp(phsp)
     return f
@@ -220,7 +178,7 @@ def _fmt(v, e):
     return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
 
 
-def _output_latex(groups, af, n_base, output_path, compile_pdf):
+def _output_latex(groups, af, n_base, name_map, output_path, compile_pdf=True):
     """LaTeX/PDF output."""
 
     def split_ls(idxs):
@@ -261,7 +219,17 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
                 sub_groups.append((base, [(sub_label, idxs[0])]))
 
         n_subs = sum(len(e) + (1 if len(e) > 1 else 0) for _, e in sub_groups)  # rows + totals
-        rx_ltx = _to_latex_name(rx_label)
+        rx_ltx = name_map.get(rx_label)
+        if rx_ltx is None:
+            for sfx in ("p", "m"):
+                key = rx_label + sfx
+                if key in name_map:
+                    rx_ltx = name_map[key]
+                    break
+        if rx_ltx is None:
+            rx_ltx = rx_label
+        else:
+            rx_ltx = rx_ltx.strip("$")
 
         for j, (base_label, entries) in enumerate(sub_groups):
             # Show each individual L value
@@ -274,10 +242,10 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
 
                 if j == 0 and k == 0:
                     span = f"\\multirow{{{n_subs}}}{{*}}{{$\\ {rx_ltx}$}}"
-                    sub_ltx = _latex_name(sub_label)
+                    sub_ltx = _latex_name(sub_label, name_map)
                     L.append(f"  {span} & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
                 else:
-                    sub_ltx = _latex_name(sub_label)
+                    sub_ltx = _latex_name(sub_label, name_map)
                     L.append(f"   & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
             # Total for multi-L sub-channels
@@ -288,7 +256,7 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
                 v_tot1, e_tot1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
                 r0, s0 = v_tot[0], e_tot[0]
                 r1, s1 = v_tot1[0], e_tot1[0]
-                L.append(f"   & ${_latex_name(base_label)}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
+                L.append(f"   & ${_latex_name(base_label, name_map)}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
     L.append(r"\bottomrule")
     L.append(r"\end{tabular}")
@@ -301,14 +269,10 @@ def _output_latex(groups, af, n_base, output_path, compile_pdf):
 
     if compile_pdf:
         outdir = os.path.dirname(output_path) if output_path else "/tmp"
-        texpath = output_path if output_path else "/tmp/sub_decay.tex"
-        if not output_path:
-            with open(texpath, "w") as f:
-                f.write(tex)
         r = subprocess.run(["pdflatex", "-interaction=nonstopmode",
-                            "-output-directory=" + outdir, texpath],
+                            "-output-directory=" + outdir, output_path],
                            capture_output=True, text=True, timeout=60)
-        pdfpath = os.path.splitext(texpath)[0] + ".pdf"
+        pdfpath = os.path.splitext(output_path)[0] + ".pdf"
         if os.path.exists(pdfpath):
             print(f"  PDF: {pdfpath}")
 
@@ -321,10 +285,8 @@ def main():
     ap.add_argument("--phsp", default=_default_path("data/phsp_noeff_sym_arrays.npz"))
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default="cuda32_v3")
-    ap.add_argument("-o", "--output", help="CSV output path")
-    ap.add_argument("--latex", action="store_true")
-    ap.add_argument("--latex-output", default=None)
-    ap.add_argument("--pdf", action="store_true")
+    ap.add_argument("-o", "--output", default=None,
+                    help="Output prefix for CSV, LaTeX, and PDF (e.g. /path/to/prefix)")
     ap.add_argument("--no-merge-cp", action="store_true",
                     help="Show charge-conjugate pairs separately")
     args = ap.parse_args()
@@ -340,24 +302,32 @@ def main():
 
     af = AmplitudeFractions(f, fit_result)
 
-    stems = discover_sub_decays(f.config, merge_cp=not args.no_merge_cp)
+    name_map = f.config.name_display_map()
+
+    stems = discover_sub_decays(f.config, name_map, merge_cp=not args.no_merge_cp)
     n_base = len(f.config.full_decay.get_partial_waves_params())
 
-    if args.latex:
-        _output_latex(stems, af, n_base, args.latex_output, args.pdf)
-    else:
-        csv_rows = []
-        _output_terminal(stems, csv_rows, af, n_base,
-                         merge_cp=not args.no_merge_cp)
-        if args.output:
-            with open(args.output, "w", newline="") as fout:
-                w = csv.writer(fout)
-                w.writerow(["Resonance", "SubChannel",
-                            "B0_ratio", "B0_ratio_err",
-                            "B0bar_ratio", "B0bar_ratio_err"])
-                for row in csv_rows:
-                    w.writerow(row)
-            print(f"\n  Saved CSV to {args.output}")
+    # ── Terminal output (always) ───────────────────────────────────
+    csv_rows = []
+    _output_terminal(stems, csv_rows, af, n_base,
+                     merge_cp=not args.no_merge_cp)
+
+    # ── CSV output ─────────────────────────────────────────────────
+    if args.output:
+        csv_path = args.output + ".csv"
+        with open(csv_path, "w", newline="") as fout:
+            w = csv.writer(fout)
+            w.writerow(["Resonance", "SubChannel",
+                        "B0_ratio", "B0_ratio_err",
+                        "B0bar_ratio", "B0bar_ratio_err"])
+            for row in csv_rows:
+                w.writerow(row)
+        print(f"\n  Saved CSV to {csv_path}")
+
+    # ── LaTeX + PDF output ─────────────────────────────────────────
+    if args.output:
+        tex_path = args.output + ".tex"
+        _output_latex(stems, af, n_base, name_map, tex_path, compile_pdf=True)
 
 
 if __name__ == "__main__":
