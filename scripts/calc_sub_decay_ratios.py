@@ -201,7 +201,11 @@ def _output_latex(stems, af, n_base, name_map, output_path, compile_pdf=True, me
     L.append(r"Resonance & Sub-channel & B$^{0}$ & $\overline{\rm B}{}^{0}$ \\")
     L.append(r"\midrule")
 
+    first_group = True
     for rx_label, subs in stems:
+        if not first_group:
+            L.append(r"  \midrule")
+        first_group = False
         rx_ltx = name_map.get(rx_label)
         if rx_ltx is None:
             for sfx in ("p", "m"):
