@@ -86,7 +86,43 @@ __device__ double interp_real_device(
         table[im1], table[base], table[base + 1], table[i2], t);
 }
 
-//=============================================================================
+// FP32 complex Catmull-Rom (CR depends only on mass + gamma_table, not params)
+__device__ void interp_complex_device_f32(
+    const float* __restrict__ table_real,
+    const float* __restrict__ table_imag,
+    int type_idx, double x,
+    double xmin, double xdelta, int n_bins,
+    float& out_real, float& out_imag
+) {
+    double diff = (x - xmin) / xdelta;
+    int xbin = max(0, min((int)floor(diff), n_bins - 2));
+    double t = max(0.0, min(diff - xbin, 1.0));
+    int base = type_idx * n_bins + xbin;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
+    out_real = (float)catmull_rom_1d(
+        table_real[im1], table_real[base], table_real[base + 1], table_real[i2], t);
+    out_imag = (float)catmull_rom_1d(
+        table_imag[im1], table_imag[base], table_imag[base + 1], table_imag[i2], t);
+}
+
+// FP32 real Catmull-Rom for FL factor
+__device__ float interp_real_device_f32(
+    const float* __restrict__ table,
+    int type_idx, double x,
+    double xmin, double xdelta, int n_bins
+) {
+    double diff = (x - xmin) / xdelta;
+    int xbin = max(0, min((int)floor(diff), n_bins - 2));
+    double t = max(0.0, min(diff - xbin, 1.0));
+    int base = type_idx * n_bins + xbin;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
+    return (float)catmull_rom_1d(
+        table[im1], table[base], table[base + 1], table[i2], t);
+}
 // KERNEL 1: g_bw computation (parallelized within each event)
 //=============================================================================
 // Each block handles one event.
@@ -100,8 +136,8 @@ __global__ void compute_g_bw_kernel(
     const int* __restrict__ g0_index,
     const int* __restrict__ g0_mass_index,
     const double* __restrict__ matrix_gamma,
-    const double* __restrict__ gamma_table_real,
-    const double* __restrict__ gamma_table_imag,
+    const float* __restrict__ gamma_table_real_f32,
+    const float* __restrict__ gamma_table_imag_f32,
     double gamma_min, double gamma_delta,
     int n_gamma_rows, int n_unique_bw, int n_mass, int gamma_table_bins,
     double* __restrict__ g_interp_real,
@@ -112,36 +148,38 @@ __global__ void compute_g_bw_kernel(
 ) {
     int event_idx = blockIdx.x;
     int tid = threadIdx.x;
-    int gamma_idx = tid;  // 1:1 thread→gamma_row
+    int gamma_idx = tid;
 
-    // Shared memory for g values (all gamma rows, dynamic size)
     extern __shared__ double s_g_dyn[];
     double* s_g_real = s_g_dyn;
     double* s_g_imag = s_g_dyn + n_gamma_rows;
 
-    // Phase 1: Each thread computes g for its assigned gamma row
+    // Phase 1: FP32 CR interpolation + FP64 g0 multiply
     if (gamma_idx < n_gamma_rows) {
         int g0_idx = g0_index[gamma_idx];
-        double g0_val = g0[g0_idx];
         double mass_val = mass[event_idx * n_mass + g0_mass_index[gamma_idx]];
 
-        complex g_interp = interp_complex_device(
-            gamma_table_real, gamma_table_imag,
+        // CR in FP32 (float tables + float interpolation)
+        float g32_r, g32_i;
+        interp_complex_device_f32(
+            gamma_table_real_f32, gamma_table_imag_f32,
             g0_idx, mass_val,
-            gamma_min, gamma_delta, gamma_table_bins
+            gamma_min, gamma_delta, gamma_table_bins,
+            g32_r, g32_i
         );
 
-        g_interp_real[event_idx * n_gamma_rows + gamma_idx] = g_interp.real();
-        g_interp_imag[event_idx * n_gamma_rows + gamma_idx] = g_interp.imag();
+        // Store g_interp as double for downstream
+        g_interp_real[event_idx * n_gamma_rows + gamma_idx] = (double)g32_r;
+        g_interp_imag[event_idx * n_gamma_rows + gamma_idx] = (double)g32_i;
 
-        complex g_val = g0_val * g_interp;
-        s_g_real[gamma_idx] = g_val.real();
-        s_g_imag[gamma_idx] = g_val.imag();
+        // g0 multiply in FP64
+        double g0_val = g0[g0_idx];
+        s_g_real[gamma_idx] = g0_val * (double)g32_r;
+        s_g_imag[gamma_idx] = g0_val * (double)g32_i;
     }
     __syncthreads();
 
-    // Phase 2: Matrix-vector multiply: g_bw[j] = sum_i g[i] * matrix_gamma[i, j]
-    // Each thread handles a contiguous block of unique_bw columns
+    // Phase 2: FP64 matrix multiply (unchanged, s_g in double)
     int cols_per_thread = (n_unique_bw + blockDim.x - 1) / blockDim.x;
     int col_start = tid * cols_per_thread;
     int col_end = min(col_start + cols_per_thread, n_unique_bw);
@@ -395,7 +433,7 @@ __global__ void compute_bw_amp_kernel(
     const int* __restrict__ fl_order,
     const double* __restrict__ g_bw_real,
     const double* __restrict__ g_bw_imag,
-    const double* __restrict__ fl_table,
+    const float* __restrict__ fl_table_f32,
     double fl_min, double fl_delta,
     int n_wave, int n_res, int n_decay, int n_unique_bw,
     int n_mass, int n_momentum, int fl_table_bins,
@@ -451,23 +489,23 @@ __global__ void compute_bw_amp_kernel(
     bw_p_real[event_idx * n_wave + wave_idx] = bw_p_r;
     bw_p_imag[event_idx * n_wave + wave_idx] = bw_p_i;
 
-    // FL factor
-    double fl_p = 1.0;
+    // FL factor (FP32, reads momentum from shared)
+    float fl_p = 1.0f;
     #pragma unroll
     for (int d = 0; d < n_decay; d++) {
         int fl_idx = fl_order[wave_idx * n_decay + d];
-        fl_p *= interp_real_device(fl_table, fl_type[fl_idx],
+        fl_p *= interp_real_device_f32(fl_table_f32, fl_type[fl_idx],
                    s_momentum[fl_q_index[fl_idx]],
                    fl_min, fl_delta, fl_table_bins);
     }
 
-    // common_amp = (1/bw_p) × fa × fl  (fa from compute_fa_kernel)
+    // common_amp = (1/bw_p) × fa × fl  (fl from FP32, cast to double)
     double far = fa_real[event_idx * n_wave + wave_idx];
     double fai = fa_imag[event_idx * n_wave + wave_idx];
     double nrm = bw_p_r * bw_p_r + bw_p_i * bw_p_i;
     double ir = bw_p_r / nrm, ii = -bw_p_i / nrm;
-    common_amp_factor_real[event_idx * n_wave + wave_idx] = (ir * far - ii * fai) * fl_p;
-    common_amp_factor_imag[event_idx * n_wave + wave_idx] = (ir * fai + ii * far) * fl_p;
+    common_amp_factor_real[event_idx * n_wave + wave_idx] = (ir * far - ii * fai) * (double)fl_p;
+    common_amp_factor_imag[event_idx * n_wave + wave_idx] = (ir * fai + ii * far) * (double)fl_p;
 }
 
 //=============================================================================
@@ -1050,6 +1088,14 @@ void* _up_dbl(const double* src, int n) {
     double* d; cudaMalloc(&d, n * sizeof(double));
     cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice); return d;
 }
+// Upload double[] as float[] on GPU
+float* _up_f32(const double* src, int n) {
+    float* d; cudaMalloc(&d, n * sizeof(float));
+    float* buf = (float*)malloc(n * sizeof(float));
+    for (int i = 0; i < n; i++) buf[i] = (float)src[i];
+    cudaMemcpy(d, buf, n * sizeof(float), cudaMemcpyHostToDevice);
+    free(buf); return d;
+}
 
 //=============================================================================
 // Host-callable launch functions
@@ -1100,9 +1146,12 @@ typedef struct {
     float* matrix_angle_real_f32;
     float* matrix_angle_imag_f32;
     const double* gamma_table_real; const double* gamma_table_imag;
+    float* gamma_table_real_f32;   // float copies for FP32 CR interpolation
+    float* gamma_table_imag_f32;
     double gamma_min; double gamma_delta; int gamma_table_bins;
     const double* matrix_gamma;
     const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+    float* fl_table_f32;
     // Dimensions
     int n_wave; int n_res; int n_decay; int n_unique_bw;
     int n_gamma_rows; int n_mass; int n_momentum;
@@ -1144,11 +1193,12 @@ cudaError_t cuda_get_device_name(char* name, int len) {
 }
 
 //── g_bw launch wrapper ────────────────────────────────────────────
+
 void launch_compute_g_bw(
     const double* mass, const double* g0,
     const int* g0_index, const int* g0_mass_index,
     const double* matrix_gamma,
-    const double* gamma_table_real, const double* gamma_table_imag,
+    const float* gamma_table_real_f32, const float* gamma_table_imag_f32,
     double gamma_min, double gamma_delta,
     int n_gamma_rows, int n_unique_bw, int n_mass, int gamma_table_bins,
     double* g_interp_real, double* g_interp_imag,
@@ -1156,10 +1206,10 @@ void launch_compute_g_bw(
     int n_events) {
 
     size_t shmem = 2 * n_gamma_rows * sizeof(double);
-    int gt = (n_gamma_rows < 256) ? 256 : n_gamma_rows;  // 1:1 thread→gamma_row
+    int gt = (n_gamma_rows < 256) ? 256 : n_gamma_rows;
     compute_g_bw_kernel<<<n_events, gt, shmem>>>(
         mass, g0, g0_index, g0_mass_index, matrix_gamma,
-        gamma_table_real, gamma_table_imag,
+        gamma_table_real_f32, gamma_table_imag_f32,
         gamma_min, gamma_delta,
         n_gamma_rows, n_unique_bw, n_mass, gamma_table_bins,
         g_interp_real, g_interp_imag,
@@ -1255,7 +1305,7 @@ void launch_compute_all(
     launch_compute_g_bw(
         data->mass, params->g0, ctx->g0_index, ctx->g0_mass_index,
         ctx->matrix_gamma,
-        ctx->gamma_table_real, ctx->gamma_table_imag,
+        ctx->gamma_table_real_f32, ctx->gamma_table_imag_f32,
         ctx->gamma_min, ctx->gamma_delta,
         ctx->n_gamma_rows, ctx->n_unique_bw, ctx->n_mass, ctx->gamma_table_bins,
         data->g_interp_real, data->g_interp_imag,
@@ -1280,7 +1330,7 @@ void launch_compute_all(
             data->mass, data->momentum,
             ctx->m0_index, ctx->fl_type, ctx->mass_index, ctx->fl_q_index,
             ctx->bw_order, ctx->fl_order,
-            data->g_bw_real, data->g_bw_imag, ctx->fl_table,
+            data->g_bw_real, data->g_bw_imag, ctx->fl_table_f32,
             ctx->fl_min, ctx->fl_delta,
             nw, ctx->n_res, ctx->n_decay, nu,
             ctx->n_mass, ctx->n_momentum, ctx->fl_table_bins, params->m0,
@@ -1390,12 +1440,13 @@ void* cuda_create_context(
     c->angle_b = (double*)_up_dbl(ab, nab);
     c->matrix_angle_real = (double*)_up_dbl(mar, nmar);
     c->matrix_angle_imag = (double*)_up_dbl(mai, nmai);
-    c->gamma_table_real = (double*)_up_dbl(gtr, ngtr);
-    c->gamma_table_imag = (double*)_up_dbl(gti, ngti);
+    c->gamma_table_real_f32 = (float*)_up_f32(gtr, ngtr);
+    c->gamma_table_imag_f32 = (float*)_up_f32(gti, ngti);
     c->gamma_min = gmin; c->gamma_delta = gdel; c->gamma_table_bins = gbins;
     c->matrix_gamma = (double*)_up_dbl(mg, nmg);
     c->fl_table = (double*)_up_dbl(ft, nft);
     c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
+    c->fl_table_f32 = (float*)_up_f32(ft, nft);
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom;
@@ -1508,6 +1559,9 @@ void cuda_free_context(void* vctx) {
     cudaFree((void*)c->matrix_angle_real); cudaFree((void*)c->matrix_angle_imag);
     cudaFree((void*)c->gamma_table_real); cudaFree((void*)c->gamma_table_imag);
     cudaFree((void*)c->matrix_gamma); cudaFree((void*)c->fl_table);
+    cudaFree((void*)c->matrix_angle_real_f32); cudaFree((void*)c->matrix_angle_imag_f32);
+    cudaFree((void*)c->gamma_table_real_f32); cudaFree((void*)c->gamma_table_imag_f32);
+    cudaFree((void*)c->fl_table_f32);
     free(c);
 }
 
@@ -1585,8 +1639,11 @@ void* cuda_create_context_v3(
     }
     c->gamma_table_real = (double*)_up_dbl(gtr, n14); c->gamma_table_imag = (double*)_up_dbl(gti, n15);
     c->gamma_min = gmin; c->gamma_delta = gdel; c->gamma_table_bins = gbins;
+    c->gamma_table_real_f32 = (float*)_up_f32(gtr, n14);
+    c->gamma_table_imag_f32 = (float*)_up_f32(gti, n15);
     c->matrix_gamma = (double*)_up_dbl(mg, n16);
     c->fl_table = (double*)_up_dbl(ft, n17); c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
+    c->fl_table_f32 = (float*)_up_f32(ft, n17);
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat; c->n_angle_comp = nac;
@@ -1638,6 +1695,8 @@ void cuda_free_context_v3(void* vctx) {
     F(angle_k); F(angle_b); F(matrix_angle_real); F(matrix_angle_imag);
     cudaFree((void*)c->matrix_angle_real_f32); cudaFree((void*)c->matrix_angle_imag_f32);
     F(gamma_table_real); F(gamma_table_imag); F(matrix_gamma); F(fl_table);
+    cudaFree((void*)c->gamma_table_real_f32); cudaFree((void*)c->gamma_table_imag_f32);
+    cudaFree((void*)c->fl_table_f32);
     #undef F
     // Free pre-allocated scratch
     if (c->scratch) {
@@ -1768,7 +1827,7 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
         launch_compute_g_bw(
             d.mass, gpu_g0, c->g0_index, c->g0_mass_index,
             c->matrix_gamma,
-            c->gamma_table_real, c->gamma_table_imag,
+            c->gamma_table_real_f32, c->gamma_table_imag_f32,
             c->gamma_min, c->gamma_delta,
             c->n_gamma_rows, c->n_unique_bw, c->n_mass, c->gamma_table_bins,
             d.g_interp_real, d.g_interp_imag,
