@@ -86,6 +86,23 @@ __device__ double interp_real_device(
         table[im1], table[base], table[base + 1], table[i2], t);
 }
 
+// FP32 real Catmull-Rom for FL factor
+__device__ float interp_real_device_f32(
+    const float* __restrict__ table,
+    int type_idx, double x,
+    double xmin, double xdelta, int n_bins
+) {
+    double diff = (x - xmin) / xdelta;
+    int xbin = max(0, min((int)floor(diff), n_bins - 2));
+    double t = max(0.0, min(diff - xbin, 1.0));
+    int base = type_idx * n_bins + xbin;
+    int end_ = (type_idx + 1) * n_bins - 1;
+    int im1 = base > type_idx * n_bins ? base - 1 : base;
+    int i2  = base + 2 <= end_ ? base + 2 : base + 1;
+    return (float)catmull_rom_1d(
+        table[im1], table[base], table[base + 1], table[i2], t);
+}
+
 //=============================================================================
 // KERNEL 1: g_bw computation (parallelized within each event)
 //=============================================================================
@@ -327,11 +344,11 @@ __global__ void gram_reduce_kernel_v3(
 }
 
 //=============================================================================
-// KERNEL 2a0: Angular factor (FA) — FP32 arithmetic, double storage
+// KERNEL 2a0: Angular factor (FA) — FP32 arithmetic + float storage
 //=============================================================================
-// Each block handles one event.  1:1 thread→wave.
-// ka_prod and dot product computed in FP32 (64× throughput vs FP64).
-// Result stored as double in fa_real/imag for downstream FP64 consumption.
+// ka_prod and dot product in FP32. Result stored as float in fa_fp32.
+// bw_amp reads fa_fp32 as float, keeps FL+combine in FP32, converts to
+// double only when writing common_amp_factor.
 //=============================================================================
 __global__ void compute_fa_kernel(
     const double* __restrict__ angle,
@@ -341,8 +358,8 @@ __global__ void compute_fa_kernel(
     const float* __restrict__ matrix_angle_real_f32,
     const float* __restrict__ matrix_angle_imag_f32,
     int n_wave, int n_angle_k, int n_angle_total, int n_angle_comp,
-    double* __restrict__ fa_real,
-    double* __restrict__ fa_imag,
+    float* __restrict__ fa_real_f32,
+    float* __restrict__ fa_imag_f32,
     int n_events
 ) {
     int event_idx = blockIdx.x;
@@ -373,8 +390,8 @@ __global__ void compute_fa_kernel(
         fr += ka * matrix_angle_real_f32[k_idx * n_wave + wave_idx];
         fi += ka * matrix_angle_imag_f32[k_idx * n_wave + wave_idx];
     }
-    fa_real[event_idx * n_wave + wave_idx] = (double)fr;
-    fa_imag[event_idx * n_wave + wave_idx] = (double)fi;
+    fa_real_f32[event_idx * n_wave + wave_idx] = fr;
+    fa_imag_f32[event_idx * n_wave + wave_idx] = fi;
 }
 
 //=============================================================================
@@ -395,13 +412,13 @@ __global__ void compute_bw_amp_kernel(
     const int* __restrict__ fl_order,
     const double* __restrict__ g_bw_real,
     const double* __restrict__ g_bw_imag,
-    const double* __restrict__ fl_table,
+    const float* __restrict__ fl_table_f32,
     double fl_min, double fl_delta,
     int n_wave, int n_res, int n_decay, int n_unique_bw,
     int n_mass, int n_momentum, int fl_table_bins,
     const double* __restrict__ m0,
-    const double* __restrict__ fa_real,
-    const double* __restrict__ fa_imag,
+    const float* __restrict__ fa_real_f32,
+    const float* __restrict__ fa_imag_f32,
     double* __restrict__ bw_p_real, double* __restrict__ bw_p_imag,
     double* __restrict__ common_amp_factor_real,
     double* __restrict__ common_amp_factor_imag,
@@ -451,23 +468,26 @@ __global__ void compute_bw_amp_kernel(
     bw_p_real[event_idx * n_wave + wave_idx] = bw_p_r;
     bw_p_imag[event_idx * n_wave + wave_idx] = bw_p_i;
 
-    // FL factor
-    double fl_p = 1.0;
+    // FL factor (FP32) × fa (FP32) together, convert to double only for 1/bw_p multiply
+    float fl_p = 1.0f;
     #pragma unroll
     for (int d = 0; d < n_decay; d++) {
         int fl_idx = fl_order[wave_idx * n_decay + d];
-        fl_p *= interp_real_device(fl_table, fl_type[fl_idx],
+        fl_p *= interp_real_device_f32(fl_table_f32, fl_type[fl_idx],
                    s_momentum[fl_q_index[fl_idx]],
                    fl_min, fl_delta, fl_table_bins);
     }
 
-    // common_amp = (1/bw_p) × fa × fl  (fa from compute_fa_kernel)
-    double far = fa_real[event_idx * n_wave + wave_idx];
-    double fai = fa_imag[event_idx * n_wave + wave_idx];
+    float far = fa_real_f32[event_idx * n_wave + wave_idx];
+    float fai = fa_imag_f32[event_idx * n_wave + wave_idx];
+    // fl * fa in FP32
+    float fl_far = fl_p * far;
+    float fl_fai = fl_p * fai;
+    // (1/bw_p) in double, multiply by float (fl*fa), result double
     double nrm = bw_p_r * bw_p_r + bw_p_i * bw_p_i;
     double ir = bw_p_r / nrm, ii = -bw_p_i / nrm;
-    common_amp_factor_real[event_idx * n_wave + wave_idx] = (ir * far - ii * fai) * fl_p;
-    common_amp_factor_imag[event_idx * n_wave + wave_idx] = (ir * fai + ii * far) * fl_p;
+    common_amp_factor_real[event_idx * n_wave + wave_idx] = ir * (double)fl_far - ii * (double)fl_fai;
+    common_amp_factor_imag[event_idx * n_wave + wave_idx] = ir * (double)fl_fai + ii * (double)fl_far;
 }
 
 //=============================================================================
@@ -856,7 +876,7 @@ __global__ void grad_g0_kernel(
     int tid = threadIdx.x;
     int block_sz = blockDim.x;
 
-    // Convert dQ_dbw_dom → dQ_dg_bw in-place (FP64, high precision needed)
+    // Convert dQ_dbw_dom → dQ_dg_bw in-place
     for (int bw_idx = tid; bw_idx < n_unique_bw; bw_idx += block_sz) {
         double m0_val = m0[m0_index[bw_idx]];
         double dr = dQ_dbw_dom_real[event_idx * n_unique_bw + bw_idx];
@@ -877,7 +897,6 @@ __global__ void grad_g0_kernel(
             sum_r += dr * mg;
             sum_i += di * mg;
         }
-        // Wirtinger: ∂Q/∂g0 = 2·Re(dQ_dg * g_interp)
         double gr = g_interp_real[event_idx * n_gamma_rows + gamma_idx];
         double gi = g_interp_imag[event_idx * n_gamma_rows + gamma_idx];
         grad_g0_partial[event_idx * n_gamma_rows + gamma_idx] =
@@ -1050,6 +1069,14 @@ void* _up_dbl(const double* src, int n) {
     double* d; cudaMalloc(&d, n * sizeof(double));
     cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice); return d;
 }
+// Upload double[] as float[] on GPU
+float* _up_f32(const double* src, int n) {
+    float* d; cudaMalloc(&d, n * sizeof(float));
+    float* buf = (float*)malloc(n * sizeof(float));
+    for (int i = 0; i < n; i++) buf[i] = (float)src[i];
+    cudaMemcpy(d, buf, n * sizeof(float), cudaMemcpyHostToDevice);
+    free(buf); return d;
+}
 
 //=============================================================================
 // Host-callable launch functions
@@ -1080,8 +1107,8 @@ typedef struct {
     double* grad_poq_rho_partial; double* grad_pop_phi_partial;
     // Split-kernel intermediate scratch
     double* ka_prod;             // [n_events * n_angle_k] — ka_prod per event
-    double* fa_real;             // [n_events * n_wave] — angular factor per wave
-    double* fa_imag;
+    float* fa_real_f32;          // [n_events * n_wave] — FA factor in FP32
+    float* fa_imag_f32;
     double* dQ_dbw_dom_real;     // [n_events * n_unique_bw] — partial grad intermediate
     double* dQ_dbw_dom_imag;     // [n_events * n_unique_bw]
     int n_events;
@@ -1103,6 +1130,7 @@ typedef struct {
     double gamma_min; double gamma_delta; int gamma_table_bins;
     const double* matrix_gamma;
     const double* fl_table; double fl_min; double fl_delta; int fl_table_bins;
+    float* fl_table_f32;  // float copy for FP32 FL interpolation
     // Dimensions
     int n_wave; int n_res; int n_decay; int n_unique_bw;
     int n_gamma_rows; int n_mass; int n_momentum;
@@ -1269,7 +1297,7 @@ void launch_compute_all(
             data->angle, ctx->angle_index, ctx->angle_k, ctx->angle_b,
             ctx->matrix_angle_real_f32, ctx->matrix_angle_imag_f32,
             nw, ctx->n_angle_k, ctx->n_angle_total, ctx->n_angle_comp,
-            data->fa_real, data->fa_imag, ne);
+            data->fa_real_f32, data->fa_imag_f32, ne);
     }
     cudaEventRecord(cc->pe[ip++], 0);
 
@@ -1280,11 +1308,11 @@ void launch_compute_all(
             data->mass, data->momentum,
             ctx->m0_index, ctx->fl_type, ctx->mass_index, ctx->fl_q_index,
             ctx->bw_order, ctx->fl_order,
-            data->g_bw_real, data->g_bw_imag, ctx->fl_table,
+            data->g_bw_real, data->g_bw_imag, ctx->fl_table_f32,
             ctx->fl_min, ctx->fl_delta,
             nw, ctx->n_res, ctx->n_decay, nu,
             ctx->n_mass, ctx->n_momentum, ctx->fl_table_bins, params->m0,
-            data->fa_real, data->fa_imag,
+            data->fa_real_f32, data->fa_imag_f32,
             data->bw_p_real, data->bw_p_imag,
             data->common_amp_factor_real, data->common_amp_factor_imag,
             data->bw_dom_real, data->bw_dom_imag, ne);
@@ -1396,6 +1424,7 @@ void* cuda_create_context(
     c->matrix_gamma = (double*)_up_dbl(mg, nmg);
     c->fl_table = (double*)_up_dbl(ft, nft);
     c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
+    c->fl_table_f32 = (float*)_up_f32(ft, nft);
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom;
@@ -1508,6 +1537,7 @@ void cuda_free_context(void* vctx) {
     cudaFree((void*)c->matrix_angle_real); cudaFree((void*)c->matrix_angle_imag);
     cudaFree((void*)c->gamma_table_real); cudaFree((void*)c->gamma_table_imag);
     cudaFree((void*)c->matrix_gamma); cudaFree((void*)c->fl_table);
+    cudaFree((void*)c->fl_table_f32);
     free(c);
 }
 
@@ -1587,6 +1617,7 @@ void* cuda_create_context_v3(
     c->gamma_min = gmin; c->gamma_delta = gdel; c->gamma_table_bins = gbins;
     c->matrix_gamma = (double*)_up_dbl(mg, n16);
     c->fl_table = (double*)_up_dbl(ft, n17); c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
+    c->fl_table_f32 = (float*)_up_f32(ft, n17);
     c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat; c->n_angle_comp = nac;
@@ -1613,8 +1644,12 @@ void* cuda_create_context_v3(
         S(grad_DeltaM_partial); S(grad_Ap_partial);
         S(grad_poq_rho_partial); S(grad_pop_phi_partial);
         // Split-kernel intermediates
+        // Split-kernel intermediates
         S2(ka_prod, nak_);
-        S2(fa_real, nw); S2(fa_imag, nw);
+        { int sz = bs * nw * sizeof(float);
+          cudaMalloc(&c->scratch->fa_real_f32, sz);
+          cudaMalloc(&c->scratch->fa_imag_f32, sz);
+        }
         S2(dQ_dbw_dom_real, nub); S2(dQ_dbw_dom_imag, nub);
         #undef S
         #undef S2
@@ -1638,6 +1673,7 @@ void cuda_free_context_v3(void* vctx) {
     F(angle_k); F(angle_b); F(matrix_angle_real); F(matrix_angle_imag);
     cudaFree((void*)c->matrix_angle_real_f32); cudaFree((void*)c->matrix_angle_imag_f32);
     F(gamma_table_real); F(gamma_table_imag); F(matrix_gamma); F(fl_table);
+    cudaFree((void*)c->fl_table_f32);
     #undef F
     // Free pre-allocated scratch
     if (c->scratch) {
@@ -1653,7 +1689,7 @@ void cuda_free_context_v3(void* vctx) {
         SF(grad_Gamma_partial); SF(grad_DeltaGamma_partial);
         SF(grad_DeltaM_partial); SF(grad_Ap_partial);
         SF(grad_poq_rho_partial); SF(grad_pop_phi_partial);
-        SF(ka_prod); SF(fa_real); SF(fa_imag); SF(dQ_dbw_dom_real); SF(dQ_dbw_dom_imag);
+        SF(ka_prod); cudaFree(c->scratch->fa_real_f32); cudaFree(c->scratch->fa_imag_f32); SF(dQ_dbw_dom_real); SF(dQ_dbw_dom_imag);
         #undef SF
         free(c->scratch);
     }
@@ -1858,7 +1894,10 @@ void cuda_compute_v3(void* vctx, void* vdh,
         S(grad_poq_rho_partial); S(grad_pop_phi_partial);
         // Split-kernel intermediates
         S2(ka_prod, c->n_angle_k);
-        S2(fa_real, nw); S2(fa_imag, nw);
+        { int sz = bs * nw * sizeof(float);
+          cudaMalloc(&s.fa_real_f32, sz);
+          cudaMalloc(&s.fa_imag_f32, sz);
+        }
         S2(dQ_dbw_dom_real, nu); S2(dQ_dbw_dom_imag, nu);
         #undef S
         #undef S2
@@ -1957,7 +1996,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
         F(grad_m0_partial); F(grad_g0_partial);
         F(grad_Gamma_partial); F(grad_DeltaGamma_partial); F(grad_DeltaM_partial);
         F(grad_Ap_partial);         F(grad_poq_rho_partial); F(grad_pop_phi_partial);
-        F(ka_prod); F(fa_real); F(fa_imag); F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
+        F(ka_prod); cudaFree(s.fa_real_f32); cudaFree(s.fa_imag_f32); F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
         #undef F
     }
     // Q_red_gpu is allocated in context, freed in cuda_free_context_v3
