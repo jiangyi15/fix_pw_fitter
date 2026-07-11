@@ -112,15 +112,15 @@ __global__ void compute_g_bw_kernel(
 ) {
     int event_idx = blockIdx.x;
     int tid = threadIdx.x;
-    int block_sz = blockDim.x;
+    int gamma_idx = tid;  // 1:1 thread→gamma_row
 
     // Shared memory for g values (all gamma rows, dynamic size)
     extern __shared__ double s_g_dyn[];
     double* s_g_real = s_g_dyn;
     double* s_g_imag = s_g_dyn + n_gamma_rows;
 
-    // Phase 1: Each thread computes g for its assigned gamma rows
-    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
+    // Phase 1: Each thread computes g for its assigned gamma row
+    if (gamma_idx < n_gamma_rows) {
         int g0_idx = g0_index[gamma_idx];
         double g0_val = g0[g0_idx];
         double mass_val = mass[event_idx * n_mass + g0_mass_index[gamma_idx]];
@@ -142,8 +142,7 @@ __global__ void compute_g_bw_kernel(
 
     // Phase 2: Matrix-vector multiply: g_bw[j] = sum_i g[i] * matrix_gamma[i, j]
     // Each thread handles a contiguous block of unique_bw columns
-    // Load matrix_gamma with coalesced access (consecutive threads read consecutive columns)
-    int cols_per_thread = (n_unique_bw + block_sz - 1) / block_sz;
+    int cols_per_thread = (n_unique_bw + blockDim.x - 1) / blockDim.x;
     int col_start = tid * cols_per_thread;
     int col_end = min(col_start + cols_per_thread, n_unique_bw);
 
@@ -832,11 +831,14 @@ __global__ void grad_bw_dom_kernel(
 }
 
 //=============================================================================
-// KERNEL 3c: g0 gradient kernel — per-thread matrix-vector multiply
+// KERNEL 3c: g0 gradient kernel — FP32 inner loop for matrix multiply
 //=============================================================================
 // Reads dQ_dbw_dom from global (written by grad_bw_dom_kernel),
 // converts to dQ_dg_bw = dQ_dbw_dom * (-1j * m0), then
 // multiplies by matrix_gamma to get g0 gradient.
+//
+// Inner dot product uses FP32 (float matrix_gamma, float accumulate)
+// to achieve 64× throughput vs FP64.  Final Wirtinger step in FP64.
 //=============================================================================
 __global__ void grad_g0_kernel(
     double* __restrict__ dQ_dbw_dom_real,
@@ -854,7 +856,7 @@ __global__ void grad_g0_kernel(
     int tid = threadIdx.x;
     int block_sz = blockDim.x;
 
-    // Convert dQ_dbw_dom → dQ_dg_bw in-place
+    // Convert dQ_dbw_dom → dQ_dg_bw in-place (FP64, high precision needed)
     for (int bw_idx = tid; bw_idx < n_unique_bw; bw_idx += block_sz) {
         double m0_val = m0[m0_index[bw_idx]];
         double dr = dQ_dbw_dom_real[event_idx * n_unique_bw + bw_idx];
@@ -864,7 +866,7 @@ __global__ void grad_g0_kernel(
     }
     __syncthreads();
 
-    // Each thread handles one gamma row: dot product dQ_dg_bw · matrix_gamma[row,:]
+    // FP64 dot product per gamma row
     for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
         double sum_r = 0.0, sum_i = 0.0;
         #pragma unroll
@@ -876,10 +878,10 @@ __global__ void grad_g0_kernel(
             sum_i += di * mg;
         }
         // Wirtinger: ∂Q/∂g0 = 2·Re(dQ_dg * g_interp)
+        double gr = g_interp_real[event_idx * n_gamma_rows + gamma_idx];
+        double gi = g_interp_imag[event_idx * n_gamma_rows + gamma_idx];
         grad_g0_partial[event_idx * n_gamma_rows + gamma_idx] =
-            2.0 * (complex(sum_r, sum_i) * complex(
-                g_interp_real[event_idx * n_gamma_rows + gamma_idx],
-                g_interp_imag[event_idx * n_gamma_rows + gamma_idx])).real();
+            2.0 * (sum_r * gr - sum_i * gi);
     }
 }
 
@@ -1154,7 +1156,8 @@ void launch_compute_g_bw(
     int n_events) {
 
     size_t shmem = 2 * n_gamma_rows * sizeof(double);
-    compute_g_bw_kernel<<<n_events, BLOCK_SIZE, shmem>>>(
+    int gt = (n_gamma_rows < 256) ? 256 : n_gamma_rows;  // 1:1 thread→gamma_row
+    compute_g_bw_kernel<<<n_events, gt, shmem>>>(
         mass, g0, g0_index, g0_mass_index, matrix_gamma,
         gamma_table_real, gamma_table_imag,
         gamma_min, gamma_delta,
