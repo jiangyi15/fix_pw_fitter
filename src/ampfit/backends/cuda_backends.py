@@ -74,3 +74,17 @@ class CUDABackendV3Cache(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit._cuda_v3_cache import CUDAKernelV3Cache as K
         return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_split")
+class CUDABackendV3Split(_CUDABackend):
+    """CUDA v3 split — split-kernel variant for lower register pressure.
+
+    Same Catmull-Rom physics as v3, but forward (compute_main) is split
+    into compute_bw_amp + amp_reduce_time, and backward (gradient) is
+    split into grad_ck + grad_bw_dom + grad_g0 + grad_scalar kernels.
+    Reduces register pressure from 56→48 (forward) and 80→48/40 (backward).
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit._cuda_v3_split import CUDAKernelV3Split as K
+        return K(kc, batch_size=bs)
