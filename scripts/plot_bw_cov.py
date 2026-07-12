@@ -22,6 +22,8 @@ def main():
     ap.add_argument("--scan", type=int, default=100,
                     help="Grid resolution for contour")
     ap.add_argument("-o", "--output", default=None, help="Save to file")
+    ap.add_argument("--ref", default=None,
+                    help="CSV with reference values: name,mass_mass,mass_err,width,width_err (MeV)")
     args = ap.parse_args()
 
     from ampfit import Fitter
@@ -41,15 +43,15 @@ def main():
         _nll = None
 
     bw = f.get_bw_params(args.particle, r)
-    m0, w0 = bw["mass_bw"], bw["width_bw"]
+    m0, w0 = bw["mass_bw"] * 1000, bw["width_bw"] * 1000
     cov = np.array([[bw["mass_bw_err"]**2, bw["mass_width_cov"]],
-                    [bw["mass_width_cov"], bw["width_bw_err"]**2]])
-    sig_m = bw["mass_bw_err"]
-    sig_w = bw["width_bw_err"]
-    rho = bw["mass_width_cov"] / (sig_m * sig_w) if sig_m > 0 and sig_w > 0 else 0.0
+                    [bw["mass_width_cov"], bw["width_bw_err"]**2]]) * 1e6
+    sig_m = bw["mass_bw_err"] * 1000
+    sig_w = bw["width_bw_err"] * 1000
+    rho = bw["mass_width_cov"] / (bw["mass_bw_err"] * bw["width_bw_err"]) if sig_m > 0 and sig_w > 0 else 0.0
 
-    m_str = fmt_meas(m0 * 1000, sig_m * 1000)
-    w_str = fmt_meas(w0 * 1000, sig_w * 1000)
+    m_str = fmt_meas(m0, sig_m)
+    w_str = fmt_meas(w0, sig_w)
     pname = fmt_particle(args.particle, full=False)
     print(f"  {pname}: m={m_str.strip('$')} MeV,  Γ={w_str.strip('$')} MeV,  ρ={rho:.4f}")
 
@@ -91,16 +93,36 @@ def main():
 
     # ── 1σ error bars at center ──────────────────────────────────
     if sig_m > 0 and sig_w > 0:
-        m_mev = fmt_meas(m0 * 1000, sig_m * 1000)
-        w_mev = fmt_meas(w0 * 1000, sig_w * 1000)
-        label = f'$m={m_mev.strip("$")}$ MeV  $\\Gamma={w_mev.strip("$")}$ MeV'
+        m_str = fmt_meas(m0, sig_m)
+        w_str = fmt_meas(w0, sig_w)
+        label = f'$m={m_str.strip("$")}$ MeV  $\\Gamma={w_str.strip("$")}$ MeV'
         if _nll is not None:
             label += f'\nNLL={_nll:.2f}'
         ax.errorbar(m0, w0, xerr=sig_m, yerr=sig_w,
                     fmt='k+', ms=8, capsize=3, lw=1.5, label=label)
 
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x*1000:.0f}'))
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x*1000:.0f}'))
+    # ── Reference values from CSV (MeV) ──
+    if args.ref is not None and os.path.exists(args.ref):
+        import csv
+        _ref_colors = ['r', 'b', 'g', 'orange', 'purple', 'c', 'm', 'y']
+        _ref_markers = ['D', 's', '^', 'v', 'o', 'p', 'h', '*']
+        with open(args.ref) as _rf:
+            for i, row in enumerate(csv.DictReader(_rf)):
+                r_name = row.get("name", "").strip()
+                r_m = float(row["mass"])
+                r_w = float(row["width"])
+                r_me = float(row.get("mass_err", 0))
+                r_we = float(row.get("width_err", 0))
+                r_fmt = rf'$m={fmt_meas(r_m, r_me).strip("$")}$'
+                r_fmt += rf'  $\Gamma={fmt_meas(r_w, r_we).strip("$")}$'
+                c = _ref_colors[i % len(_ref_colors)]
+                m = _ref_markers[i % len(_ref_markers)]
+                ax.errorbar(r_m, r_w, xerr=r_me, yerr=r_we,
+                            fmt=c + m, ms=5, capsize=3, lw=1.2,
+                            label=f'{r_name}: {r_fmt}')
+
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.0f}'))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.0f}'))
     ax.set_xlabel(rf"$m_{{\mathrm{{BW}}}}$ [${pname}$] (MeV)")
     ax.set_ylabel(rf"$\Gamma_{{\mathrm{{BW}}}}$ [${pname}$] (MeV)")
     ax.set_title(f"${pname}$ — BW covariance ($\\rho$={rho:.4f})")
