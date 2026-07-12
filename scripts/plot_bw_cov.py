@@ -22,8 +22,6 @@ def main():
     ap.add_argument("--scan", type=int, default=100,
                     help="Grid resolution for contour")
     ap.add_argument("-o", "--output", default=None, help="Save to file")
-    ap.add_argument("--ref", default=None,
-                    help="CSV with reference values: particle,mass,mass_err,width,width_err")
     args = ap.parse_args()
 
     from ampfit import Fitter
@@ -100,24 +98,6 @@ def main():
             label += f'\nNLL={_nll:.2f}'
         ax.errorbar(m0, w0, xerr=sig_m, yerr=sig_w,
                     fmt='k+', ms=8, capsize=3, lw=1.5, label=label)
-
-    # ── Reference values from CSV ─────────────────────────────────
-    if args.ref is not None and os.path.exists(args.ref):
-        import csv
-        with open(args.ref) as _rf:
-            reader = csv.DictReader(_rf)
-            for row in reader:
-                if row.get("particle", "").strip() == args.particle:
-                    r_m = float(row["mass"])
-                    r_w = float(row["width"])
-                    r_me = float(row.get("mass_err", 0))
-                    r_we = float(row.get("width_err", 0))
-                    r_fmt = f'$m={fmt_meas(r_m, r_me).strip("$")}$'
-                    r_fmt += f'  $\\Gamma={fmt_meas(r_w, r_we).strip("$")}$'
-                    ax.errorbar(r_m, r_w, xerr=r_me, yerr=r_we,
-                                fmt='rD', ms=5, capsize=3, lw=1.2,
-                                label=f'Reference: {r_fmt}')
-                    break
 
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x*1000:.0f}'))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x*1000:.0f}'))
