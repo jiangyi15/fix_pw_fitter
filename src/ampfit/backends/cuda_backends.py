@@ -81,10 +81,23 @@ class CUDABackendV3Split(_CUDABackend):
     """CUDA v3 split — split-kernel variant for lower register pressure.
 
     Same Catmull-Rom physics as v3, but forward (compute_main) is split
-    into compute_bw_amp + amp_reduce_time, and backward (gradient) is
+    into compute_fa + bw_amp + amp_reduce_time, and backward (gradient) is
     split into grad_ck + grad_bw_dom + grad_g0 + grad_scalar kernels.
     Reduces register pressure from 56→48 (forward) and 80→48/40 (backward).
     """
     def _make_kernel(self, kc, bs):
         from ampfit._cuda_v3_split import CUDAKernelV3Split as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_sparse")
+class CUDABackendV3Sparse(_CUDABackend):
+    """CUDA v3 sparse — sparse scatter/gather for matrix_gamma (99.5% sparse).
+
+    Same split-kernel + FP32 FA as v3_split, but the 288×216 matrix_gamma
+    matmul in g_bw and grad_g0 is replaced by scatter/gather via column-index
+    array — 0.5% of the original arithmetic.
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit._cuda_v3_sparse import CUDAKernelV3Sparse as K
         return K(kc, batch_size=bs)
