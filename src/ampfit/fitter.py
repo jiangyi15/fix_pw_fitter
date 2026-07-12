@@ -1624,7 +1624,7 @@ class Fitter:
         def bw_fun(d):
             bw = model.get_bw_params(d)
             return [bw["mass_bw"], bw["width_bw"]]
-        vals, cov, _ = self.cal_uncertainties_multi(bw_fun, param_names, fit_result)
+        vals, cov = self.cal_uncertainties_multi(bw_fun, param_names, fit_result)
 
         return {"mass_bw": vals[0], "width_bw": vals[1],
                 "mass_bw_err": float(np.sqrt(max(cov[0, 0], 0.0))),
