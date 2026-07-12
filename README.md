@@ -130,7 +130,6 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 | **NumPy f64** CPU | 6.1K | 8.2K | 6.3K | 4.5K | 1× |
 | **CUDA f64 v2** GPU | 72K | 114K | 176K | 188K | **42×** |
 | **CUDA f64 v3** GPU | 84K | 140K | 172K | 186K | **41×** |
-| **CUDA f64 v3_split** GPU | 104K | 220K | 267K | 322K | **72×** |
 | **CUDA f64 v3_sparse** GPU | **115K** | **363K** | **559K** | **715K** | **159×** |
 | **CUDA f32 v3** GPU | 138K | 349K | 504K | 625K | 139× |
 | **CUDA f32 v2** GPU | 140K | 370K | 691K | 801K | **178×** |
@@ -142,7 +141,6 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 | **NumPy f64** CPU | 163 ms | 1× |
 | **CUDA f64 v2** GPU | 7.4 ms | 22× |
 | **CUDA f64 v3** GPU | 6.1 ms | 27× |
-| **CUDA f64 v3_split** GPU | 3.7 ms | 44× |
 | **CUDA f64 v3_sparse** GPU | **1.8 ms** | **91×** |
 | **CUDA f32 v3** GPU | 2.1 ms | 78× |
 | **CUDA f32 v2** GPU | **1.5 ms** | **109×** |
@@ -154,7 +152,6 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
   - Sparse scatter/gather replaces 99.5%-sparse matrix_gamma matmul (62208 FMAs → 288 ops)
   - FP32 FA (angular factor) + float momentum/angle storage for bandwidth savings
   - Full FP64 precision for g0/m0/BW computation
-- **CUDA f64 v3_split** is the baseline split-kernel: 72× vs NumPy
 - **CUDA v3_sparse** outperforms **CUDA f32 v3** at large batch sizes (715K vs 625K eve/s at 10K)
 - Custom CUDA kernels outperform ONNX because they are purpose-built for this computation
 - ONNX model is built **in-memory** from kernel config — no pre-exported `.onnx` file needed
