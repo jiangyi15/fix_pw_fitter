@@ -129,7 +129,7 @@ __global__ void compute_g_bw_kernel(
 ) {
     int event_idx = blockIdx.x;
     int tid = threadIdx.x;
-    int gamma_idx = tid;  // 1:1 thread→gamma_row
+    int block_sz = blockDim.x;
 
     // Shared memory: [s_g_real (ng), s_g_imag (ng), s_gbw_r (nu), s_gbw_i (nu)]
     extern __shared__ double s_dyn_gbw[];
@@ -138,8 +138,15 @@ __global__ void compute_g_bw_kernel(
     double* s_gbw_r  = s_dyn_gbw + 2 * n_gamma_rows;
     double* s_gbw_i  = s_dyn_gbw + 2 * n_gamma_rows + n_unique_bw;
 
-    // Phase 1: Each thread computes g for its assigned gamma row
-    if (gamma_idx < n_gamma_rows) {
+    // Zero shared g_bw scratch
+    for (int i = tid; i < n_unique_bw; i += block_sz) {
+        s_gbw_r[i] = 0.0;
+        s_gbw_i[i] = 0.0;
+    }
+    __syncthreads();
+
+    // Phase 1: CR + g0 multiply (loop over gamma rows with stride)
+    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
         int g0_idx = g0_index[gamma_idx];
         double g0_val = g0[g0_idx];
         double mass_val = mass[event_idx * n_mass + g0_mass_index[gamma_idx]];
@@ -159,24 +166,16 @@ __global__ void compute_g_bw_kernel(
     }
     __syncthreads();
 
-    // Phase 2: Sparse scatter using gamma_col_idx
-    // Zero shared g_bw scratch
-    for (int i = tid; i < n_unique_bw; i += blockDim.x) {
-        s_gbw_r[i] = 0.0;
-        s_gbw_i[i] = 0.0;
-    }
-    __syncthreads();
-
-    // Each gamma row scatters its g value to the column given by gamma_col_idx
-    if (gamma_idx < n_gamma_rows) {
+    // Phase 2: Sparse scatter (each gamma row to its column)
+    for (int gamma_idx = tid; gamma_idx < n_gamma_rows; gamma_idx += block_sz) {
         int col = gamma_col_idx[gamma_idx];
         atomicAdd(&s_gbw_r[col], s_g_real[gamma_idx]);
         atomicAdd(&s_gbw_i[col], s_g_imag[gamma_idx]);
     }
     __syncthreads();
 
-    // Write accumulated g_bw to global memory
-    for (int c = tid; c < n_unique_bw; c += blockDim.x) {
+    // Write accumulated g_bw to global
+    for (int c = tid; c < n_unique_bw; c += block_sz) {
         g_bw_real[event_idx * n_unique_bw + c] = s_gbw_r[c];
         g_bw_imag[event_idx * n_unique_bw + c] = s_gbw_i[c];
     }
@@ -1186,7 +1185,7 @@ void launch_compute_g_bw(
     int n_events) {
 
     size_t shmem = (2 * n_gamma_rows + 2 * n_unique_bw) * sizeof(double);
-    int gt = (n_gamma_rows < 256) ? 256 : n_gamma_rows;
+    int gt = (n_gamma_rows < 256) ? 256 : (n_gamma_rows > 1024 ? 1024 : n_gamma_rows);
     double gamma_inv_delta = 1.0 / gamma_delta;
     compute_g_bw_kernel<<<n_events, gt, shmem>>>(
         mass, g0, g0_index, g0_mass_index, gamma_col_idx,
