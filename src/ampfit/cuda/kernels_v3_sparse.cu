@@ -86,13 +86,13 @@ __device__ double interp_real_device(
         table[im1], table[base], table[base + 1], table[i2], t);
 }
 
-// FP32 real Catmull-Rom for FL factor
+// FP32 real Catmull-Rom for FL factor (uses inv_delta = 1/delta to avoid division)
 __device__ float interp_real_device_f32(
     const float* __restrict__ table,
     int type_idx, double x,
-    double xmin, double xdelta, int n_bins
+    double xmin, double inv_delta, int n_bins
 ) {
-    double diff = (x - xmin) / xdelta;
+    double diff = (x - xmin) * inv_delta;
     int xbin = max(0, min((int)floor(diff), n_bins - 2));
     double t = max(0.0, min(diff - xbin, 1.0));
     int base = type_idx * n_bins + xbin;
