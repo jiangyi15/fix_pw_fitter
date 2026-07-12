@@ -174,16 +174,18 @@ class CUDAKernelV3Sparse:
     def compute(self, params, data_handle, norm=None, return_p=True):
         ck = params["ck"]
         nw = self.n_wave
-        nu_ = self.n_unique_bw
-        ng_ = self.n_gamma_rows
+        nu_ = self.n_unique_bw      # gradient buffer size
+        nm_ = self.n_m0_params      # m0 parameter array size
+        ng_ = self.n_gamma_rows      # gradient buffer size
+        gg_ = self.n_g0_params       # g0 parameter array size
         use_norm = 0 if norm is None else 1
         norm_val = norm if norm is not None else 0.0
 
         ck_r = np.real(ck).astype(np.float64)
         ck_i = np.imag(ck).astype(np.float64)
-        m0 = np.zeros(nu_, np.float64)
+        m0 = np.zeros(nm_, np.float64)
         m0[:len(params["m0"])] = np.asarray(params["m0"])
-        g0 = np.zeros(ng_, np.float64)
+        g0 = np.zeros(gg_, np.float64)
         g0[:len(params["g0"])] = np.asarray(params["g0"])
         G, DG, DM, Ap_, pr_, pp_ = params["scalar"]
 

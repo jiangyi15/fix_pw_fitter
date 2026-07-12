@@ -18,8 +18,10 @@ CONFIG_FILE = "config_angle.yml"
 def make_params(kernel_config, ck_map):
     """Build random params dict with correct shapes from the kernel config."""
     n_ck = len(ck_map)
-    n_m0 = len(kernel_config.get("m0_index", []))
-    n_g0 = len(kernel_config.get("g0_index", []))
+    idx = kernel_config.get("m0_index", [])
+    n_m0 = int(np.max(idx)) + 1 if len(idx) else 0
+    idx = kernel_config.get("g0_index", [])
+    n_g0 = int(np.max(idx)) + 1 if len(idx) else 0
     return {
         'ck': np.random.random(n_ck) + 1j * np.random.random(n_ck),
         'm0': np.random.random(n_m0) + 2,
