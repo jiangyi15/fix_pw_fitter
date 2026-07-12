@@ -6,12 +6,13 @@ import re
 def fmt_meas(v, e, pct=False):
     """Format ``v ± e`` with decimal places determined by error thresholds.
 
-    Error is first rounded to 3 significant figures, then the
-    threshold check determines the number of decimal places:
+    Error is first rounded to 3 significant figures.  The number of
+    decimal places is chosen so the error is shown to 2 significant
+    figures, using the position of the most significant digit:
 
-      0.000 ≤ |e₃| < 0.355 → 2 decimal places
-      0.355 ≤ |e₃| < 0.950 → 1 decimal place
-      0.950 ≤ |e₃|         → 0 decimal places
+      dp = max(0, 1 - floor(log10(|e₃|)))
+
+    where e₃ is the error rounded to 3 sig figs.
 
     Parameters
     ----------
@@ -36,18 +37,18 @@ def fmt_meas(v, e, pct=False):
             return f"${v:.1f}$\\%"
         return f"${v:.2f}$"
 
-    # Round error to 3 significant figures
+    # Scale error to [0,1) then apply threshold branches
     abs_e = abs(e)
     mag = int(np.floor(np.log10(abs_e)))
-    scaled = abs_e * 10 ** (-mag)          # in [1.0, 10.0)
-    e_3dig = round(scaled, 2) * 10 ** mag  # 3 sig figs
+    norm = abs_e * 10 ** (-mag - 1)      # in [0, 1): 2.3 → 0.23, 0.056 → 0.56
 
-    if e_3dig < 0.355:
-        dp = 2
-    elif e_3dig < 0.950:
-        dp = 1
-    else:
-        dp = 0
+    if norm < 0.355:       # first 2 digits < 36  → 2 sig figs
+        nd = 2
+    elif norm < 0.950:     # first 2 digits 36-95 → 1 sig fig
+        nd = 1
+    else:                  # first 2 digits ≥ 96   → 0 sig figs
+        nd = 0
+    dp = max(0, nd - mag - 1)
 
     e_r = round(e, dp)
     v_r = round(v, dp)
