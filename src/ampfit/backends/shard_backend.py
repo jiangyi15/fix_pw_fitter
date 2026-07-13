@@ -23,13 +23,20 @@ Usage::
         "n_workers": 2,
     }, kc)
 
-    # Per-worker device assignment:
+     # Per-worker device assignment:
     create_backend({
         "name": "shard",
         "backends": [
             {"name": "cuda_v3_sparse", "device": 0},
             {"name": "cuda_v3_sparse", "device": 1},
         ],
+    }, kc)
+
+    # Uneven split (e.g. CPU 1× slower → give it less data):
+    create_backend({
+        "name": "shard",
+        "backends": ["cpu_v3", "cuda_v3_sparse"],
+        "weights": [1, 3],     # CPU gets 25%, GPU gets 75%
     }, kc)
 """
 import os
@@ -85,14 +92,20 @@ class ShardBackend(ComputeBackend):
         Dict form supports ``"device"`` key for CUDA_VISIBLE_DEVICES.
     n_workers : int, optional
         Number of workers when *backends* is a single string (default 2).
+    weights : list of float, optional
+        Split ratio per worker.  Default equal.  E.g. ``[1, 3]`` gives
+        worker 1 one quarter and worker 2 three quarters of the data.
+        Useful when mixing fast (GPU) and slow (CPU) backends.
     """
 
-    def __init__(self, kernel_config, backends=None, n_workers=None):
+    def __init__(self, kernel_config, backends=None, n_workers=None,
+                 weights=None):
         self.kernel_config = kernel_config
         self._workers = []
         self._task_queues = []
         self._result_queues = []
         self._specs = []
+        self._weights = []
 
         if backends is None:
             backends = []
@@ -109,6 +122,15 @@ class ShardBackend(ComputeBackend):
                     self._specs.append((name, dev))
         self._n_workers = len(self._specs)
 
+        # Default: equal weights
+        if weights is not None:
+            if len(weights) != self._n_workers:
+                raise ValueError(
+                    f"len(weights)={len(weights)} != n_workers={self._n_workers}")
+            self._weights = list(weights)
+        else:
+            self._weights = [1.0] * self._n_workers
+
     # -- data lifecycle ------------------------------------------------
 
     def load_data(self, data_np):
@@ -117,11 +139,16 @@ class ShardBackend(ComputeBackend):
         if nw == 0:
             return ShardDataHandle(ne)
 
-        chunk_size = (ne + nw - 1) // nw
+        # Compute weighted split offsets
+        wsum = sum(self._weights)
+        frac = np.cumsum([0.0] + [w / wsum for w in self._weights])
+        frac[-1] = 1.0  # pin to exact end
+        offsets = (frac * ne).astype(np.intp)
+
         chunks = []
         for i in range(nw):
-            st = i * chunk_size
-            en = min(st + chunk_size, ne)
+            st = int(offsets[i])
+            en = int(offsets[i + 1])
             chunk = {k: (v[st:en] if isinstance(v, np.ndarray) else v)
                      for k, v in data_np.items()}
             chunks.append(chunk)
