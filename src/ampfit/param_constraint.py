@@ -5,8 +5,8 @@ Each stage is a small object with ``forward(input_dict)`` (transform)
 and ``backward(grad_dict)`` (gradient backpropagation):
 
     raw = registry.to_dict(x)
-    d   = name_res.forward(raw)       # alias → canonical (same)
-    d   = fixed_tr.forward(d)         # inject constant values
+    d   = fixed_tr.forward(raw)       # inject constant values
+    d   = name_res.forward(d)         # alias → canonical (same)
     for scale in scale_transforms:    # multiply by scale factors
         d = scale.forward(d)
     ck  = pc.build_ck(d)              # partial-wave amplitudes
@@ -14,8 +14,8 @@ and ``backward(grad_dict)`` (gradient backpropagation):
     grad = pc.backprop_grad(d, grad_ck)
     for scale in reversed(scale_transforms):
         grad = scale.backward(grad)
-    grad = fixed_tr.backward(grad, d)
-    grad = name_res.backward(grad, raw)
+    grad = name_res.backward(grad, d)
+    grad = fixed_tr.backward(grad, raw)
     flat = registry.flat_gradient(x, grad)
 """
 
@@ -641,17 +641,18 @@ class ConstraintManager:
     # ── forward pipeline ───────────────────────────────────────
 
     def resolve(self, raw_dict):
-        """Run the full constraint pipeline: same → fixed → scale → mass/width.
+        """Run the full constraint pipeline: fixed → same → scale → mass/width.
 
-        Fixed values are the physical param values; scale is a model factor
+        Fixed values are injected first so that ``same`` (alias→canonical)
+        propagates them to all group members.  Scale is a model factor
         that multiplies ALL params (even fixed ones), matching TFPWA convention
         where scale is applied at the amplitude product level.
 
         Mass/width transforms (from particle models with running widths) are
         applied last to build derived mass/width values from physical params.
         """
-        d = self.name_res.apply(raw_dict)
-        d = self.fixed_tr.apply(d)
+        d = self.fixed_tr.apply(raw_dict)
+        d = self.name_res.apply(d)
         for tr in self.scale_transforms:
             d = tr.apply_forward(d)
         for tr in self.mass_width_transforms:
@@ -659,24 +660,20 @@ class ConstraintManager:
         return d
 
     def inverse(self, resolved):
-        """Reverse of :meth:`resolve`: scale⁻¹ → fixed⁻¹ → same⁻¹.
-
-        Converts physical (post-constraint) values back to raw
-        (pre-constraint) values.  Used by ``values_from_dict``.
-        """
+        """Reverse of :meth:`resolve`: same⁻¹ → fixed⁻¹ → scale⁻¹."""
         d = resolved
         for tr in reversed(self.mass_width_transforms):
             d = tr.apply_inverse(d)
         for tr in reversed(self.scale_transforms):
             d = tr.apply_inverse(d)
-        d = self.fixed_tr.inverse(d)
         d = self.name_res.inverse(d)
+        d = self.fixed_tr.inverse(d)
         return d
 
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve` (mass/width → scale → fixed → same).
+        """Reverse of :meth:`resolve` (mass/width → scale → same → fixed).
 
         Uses :meth:`Transform.apply_backward` on each stage — only
         ``input_names`` are updated; output-only and unrelated gradients
@@ -687,8 +684,8 @@ class ConstraintManager:
             grad = tr.apply_backward(grad)
         for tr in reversed(self.scale_transforms):
             grad = tr.apply_backward(grad)
-        grad = self.fixed_tr.chain_grad(grad, resolved)
-        grad = self.name_res.chain_grad(grad, raw)
+        grad = self.name_res.chain_grad(grad, resolved)
+        grad = self.fixed_tr.chain_grad(grad, raw)
         return grad
 
     # ── rebuild ─────────────────────────────────────────────────
