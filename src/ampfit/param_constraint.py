@@ -241,7 +241,8 @@ class NameResolution:
             for alias, canon in self.map.items():
                 if canon == resolved and alias in grad_out:
                     g += grad_out[alias]
-            result[key] = g
+            if key == resolved:  # only keep canonical keys
+                result[key] = g
         return result
 
 
