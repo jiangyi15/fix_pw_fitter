@@ -36,13 +36,14 @@ params = {
 }
 
 backends = [
-    ("NumPy",     "numpy"),
-    ("CUDAv3",    "cuda_v3"),
-    ("CUDA32v3",  "cuda32_v3"),
-    ("CUDAv2",    "cuda_v2"),
-    ("CUDA32v2",  "cuda32_v2"),
-    ("ONNXcpu",   "onnx_cpu"),
-    ("ONNXcuda",  "onnx_cuda"),
+    ("NumPy",       "numpy"),
+    ("CPU(C+OMP)",  "cpu_v3"),
+    ("CUDAv3",      "cuda_v3"),
+    ("CUDA32v3",    "cuda32_v3"),
+    ("CUDAv2",      "cuda_v2"),
+    ("CUDA32v2",    "cuda32_v2"),
+    ("ONNXcpu",     "onnx_cpu"),
+    ("ONNXcuda",    "onnx_cuda"),
 ]
 
 print(f"{'n_events':>8}", end="")

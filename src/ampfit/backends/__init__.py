@@ -21,6 +21,7 @@ from . import numpy_backend        # noqa: F401 — register NumpyBackend
 from . import cuda_backends        # noqa: F401 — register CUDA backends
 from . import onnx_backend         # noqa: F401 — register ONNXBackend
 from . import integrated_backend   # noqa: F401 — register IntegratedBackend
+from . import cpu_backend          # noqa: F401 — register CPU backends
 
 
 __all__ = [

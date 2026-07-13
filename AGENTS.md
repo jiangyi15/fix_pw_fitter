@@ -16,6 +16,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 |---------|------|------|
 | **Integrated** | `{"name": "integrated", "base": "cuda_v3"}` | Gram matrix O(n²) norm + CUDAv3 base for data NLL. Default in `fit.sh`. Base defaults to `cuda_v3`. |
 | **v3 sparse** | `cuda_v3_sparse` | Split-kernel + sparse scatter/gather for matrix_gamma (99.5% sparse). FP32 FA + float momentum/angle. **3.8× faster than v3** (271→70 ms). FP64 for g0/m0/BW. |
+| **CPU (C+OMP)** | `cpu_v3`, `cpu64_v3` | Pure C + OpenMP + AVX2. Sparse scatter/gather. **6.3× faster than NumPy** (2459→391 ms at 10K). No GPU required. Auto-built via gcc. |
 | CUDA f64 v3 | `cuda_v3`, `cuda`, `cuda64` | Catmull-Rom (default standalone). |
 | CUDA f32 v3 | `cuda32_v3` | Faster, ~1e-7 precision. |
 | CUDA f64 v2 | `cuda_v2`, `cuda64_v2` | Linear interpolation. |
