@@ -63,8 +63,8 @@ def _worker_main(kernel_config, backend_spec, data_chunk,
     dh = be.load_data(data_chunk)
 
     for task in iter(task_queue.get, None):
-        params, norm = task
-        Q, grads, P = be.compute(params, dh, norm=norm)
+        params, norm, return_p = task
+        Q, grads, P = be.compute(params, dh, norm=norm, return_p=return_p)
         result_queue.put((Q, grads, P))
 
     be.free()
@@ -179,7 +179,7 @@ class ShardBackend(ComputeBackend):
             return 0.0, {}, None
 
         for tq in self._task_queues:
-            tq.put((params, norm))
+            tq.put((params, norm, return_p))
 
         Q_total = 0.0
         grads_total = None
