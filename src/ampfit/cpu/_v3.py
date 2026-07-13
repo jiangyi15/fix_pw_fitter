@@ -1,18 +1,16 @@
 """
-CUDA kernel v3 cache — Lazy-cached amplitudes for fast data NLL.
+CPU kernel v3 — Catmull-Rom interpolation backend in C + OpenMP.
 
-Extends the v3 kernel with per-data-handle lazy caching of the per-wave
-complex amplitude factor (common_amp).  On the first compute() call for
-a given data handle, the kernel runs the full forward pass and caches
-the reduced amplitude (112 values per event = 2 CP states × 56 base waves).
-Subsequent compute() calls use the cached amplitude directly, completely
-skipping BW propagator, angular factors, and form factor evaluation.
+Follows the same API as CUDAKernelV3 for drop-in replacement:
 
-Cache granularity: per data handle.  Once computed, the cache is valid
-for all subsequent calls — suitable for the cache backend where
-BW parameters (m0, g0) are fixed during the fit.
+    kernel = CPUKernelV3(config)
+    data = kernel.load_data(data_dict)
+    Q, grads, P = kernel.compute(params, data)
 
-Uses the same C function names as the v3 kernel (separate .so, no conflicts).
+Three C calls:
+    cpu_create_context_v3  — store config
+    cpu_load_data_v3       — per-dataset data handle
+    cpu_compute_v3         — forward + backward (OpenMP parallel)
 """
 
 import os
@@ -21,7 +19,10 @@ from cffi import FFI
 
 _ffi = FFI()
 _ffi.cdef("""
-void* cuda_create_context_v3(
+typedef struct { int placeholder; } CPUContext;
+typedef struct { int placeholder; } CPUData;
+
+CPUContext* cpu_create_context_v3(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -36,36 +37,31 @@ void* cuda_create_context_v3(
     int nw,int nr,int nd,int nub,int ngr,
     int nm,int nmom,int nak_,int nat,int nac,
     int n_m0p,int n_g0p,
-    int batch_size);
-void cuda_free_context_v3(void*);
-void* cuda_load_data_v3(void*,const double*,int,const double*,int,
-    const double*,int,const double*,const double*,const double*,
-    const double*,int);
-void cuda_free_data_v3(void*);
-void cuda_compute_v3(void*,void*,
+    const int* gamma_col_idx,int n_gamma_cols);
+void cpu_free_context_v3(CPUContext*);
+CPUData* cpu_load_data_v3(
+    const double* mass,int,const double* mom,int,
+    const double* ang,int,const double* frac,const double* time,
+    const double* weight,const double* bkg,int);
+void cpu_free_data_v3(CPUData*);
+void cpu_compute_v3(CPUContext*,CPUData*,
     const double*,const double*,const double*,const double*,
     double,double,double,double,double,double,double,int,
     double*,double*,double*,double*,double*,double*,double*);
-void cuda_gram_matrix_v3(void*,void*,
-    const double*,const double*,
-    double*,double*,double*,double*,double*,double*);
-void cuda_time_averages_v3(void*,void*,
-    double,double,double,double*);
-int cuda_get_device_count();
-int cuda_get_device_name(char*,int);
 """)
 
 
 def _load_lib():
-    """Load the v3 cache shared library, auto-building if source changed."""
-    from ampfit.cuda.build import ensure
-    ensure("kernels_v3_cache.cu", "libcuda_kernels_v3_cache.so")
+    """Load the CPU v3 shared library, auto-building if source changed."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    lib_path = os.path.join(script_dir, "cuda", "libcuda_kernels_v3_cache.so")
+    from ampfit.cpu.build import ensure
+    ensure("kernels_cpu_v3.c", "libcpu_kernels_v3.so")
+    lib_path = os.path.join(script_dir, "libcpu_kernels_v3.so")
     if not os.path.exists(lib_path):
         raise RuntimeError(
-            f"v3 cache CUDA library not found at {lib_path}. "
-            "Build with: nvcc -shared -fPIC -o <path> kernels_v3_cache.cu -lcudart"
+            f"CPU library not found at {lib_path}. "
+            "Build with: gcc -shared -fPIC -O3 -march=native "
+            "-ffast-math -fopenmp -lm -o <path> kernels_cpu_v3.c"
         )
     return _ffi.dlopen(lib_path)
 
@@ -75,7 +71,7 @@ def _load_lib():
 # ---------------------------------------------------------------------------
 
 class DataHandle:
-    """Python-side wrapper around a C DataHandle2 pointer."""
+    """Python-side wrapper around a CPUData pointer."""
 
     def __init__(self, ptr, lib, ne):
         self.ptr = ptr
@@ -85,7 +81,7 @@ class DataHandle:
 
     def free(self):
         if self.ptr is not None:
-            self._lib.cuda_free_data_v3(self.ptr)
+            self._lib.cpu_free_data_v3(self.ptr)
             self.ptr = None
             self._keep.clear()
 
@@ -93,32 +89,22 @@ class DataHandle:
         self.free()
 
 
-class CUDAKernelV3Cache:
-    """High-level v3 cache CUDA kernel with lazy amplitude caching.
+class CPUKernelV3:
+    """High-level v3 CPU kernel (Catmull-Rom interpolation, OpenMP parallel).
 
     Usage::
 
-        kernel = CUDAKernelV3Cache(config)
+        kernel = CPUKernelV3(config)
         data = kernel.load_data(data_dict)
-        Q, grads, P = kernel.compute(params, data)   # first call caches
-        Q2, grads2, P2 = kernel.compute(params, data) # uses cache (fast)
+        Q, grads, P = kernel.compute(params, data)
 
-    Compatible return format with v3 kernel for drop-in replacement.
-    Also provides ``compute_gram()`` for Gram matrix pre-integration.
+    Compatible return format with CUDAKernelV3.
     """
 
-    def __init__(self, config, batch_size=50000):
+    def __init__(self, config, batch_size=50000, lib_path=None):
         # ---- load library ----
         self._lib = _load_lib()
-
-        # ---- device info ----
-        n_dev = self._lib.cuda_get_device_count()
-        if n_dev > 0:
-            name_buf = _ffi.new("char[256]")
-            self._lib.cuda_get_device_name(name_buf, 256)
-            print(f"✓ v3 cache GPU: {_ffi.string(name_buf).decode()}")
-        else:
-            raise RuntimeError("No CUDA devices found")
+        print("✓ CPU v3 kernel (C + OpenMP + AVX2)")
 
         # ---- config dimensions ----
         c = config
@@ -138,9 +124,8 @@ class CUDAKernelV3Cache:
         self.n_angle_comp = c["angle_k"].shape[-1]
         self.n_m0_params = int(np.max(c["m0_index"])) + 1
         self.n_g0_params = int(np.max(c["g0_index"])) + 1
-        self.n_cache = self.n_wave // 4  # 112 = 2 CP × 56 base waves
 
-        # CFFI buffer keepalive (must stay alive for duration of context)
+        # CFFI buffer keepalive
         self._ka = []
 
         def _db(a):
@@ -158,8 +143,12 @@ class CUDAKernelV3Cache:
         ma = c["matrix_angle"]
         gt = c["gamma_table"]
 
-        # ---- create GPU context ----
-        self._ctx = self._lib.cuda_create_context_v3(
+        # Sparse gamma column index (same as cuda_v3_sparse)
+        mg = c["matrix_gamma"]
+        gamma_col_idx = np.argmax(mg, axis=1).astype(np.int32)
+
+        # ---- create CPU context ----
+        self._ctx = self._lib.cpu_create_context_v3(
             _ib(c["m0_index"]), len(c["m0_index"]),
             _ib(c["g0_index"]), len(c["g0_index"]),
             _ib(c["g0_mass_index"]), len(c["g0_mass_index"]),
@@ -186,18 +175,18 @@ class CUDAKernelV3Cache:
             self.n_mass, self.n_momentum,
             self.n_angle_k, self.n_angle_total, self.n_angle_comp,
             self.n_m0_params, self.n_g0_params,
-            batch_size,
+            _ib(gamma_col_idx), len(gamma_col_idx),
         )
 
     # -- data lifecycle ------------------------------------------------
 
     def load_data(self, data):
-        """Upload a dataset to GPU.
+        """Wrap a dataset for CPU compute (zero-copy from numpy arrays).
 
         Args:
             data: dict with keys 'mass', 'q', 'angle', 'frac', 'time',
-                  'weight', 'bkg_raw'.  Arrays are reshaped to flat
-                  (N, n_features) before upload.
+                  'weight', 'bkg_raw'.
+
         Returns:
             DataHandle (opaque pointer, pass to compute()).
         """
@@ -214,10 +203,10 @@ class CUDAKernelV3Cache:
         mom = data["q"].reshape(ne, -1)
         ang = data["angle"].reshape(ne, -1)
         nang = self.n_angle_total
+
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
-        dh = DataHandle(self._lib.cuda_load_data_v3(
-            self._ctx,
+        dh = DataHandle(self._lib.cpu_load_data_v3(
             _db(mass), mass.shape[1],
             _db(mom), mom.shape[1],
             _db(ang), nang,
@@ -233,17 +222,11 @@ class CUDAKernelV3Cache:
     # -- compute -------------------------------------------------------
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        """Compute forward + backward pass with lazy amplitude caching.
-
-        On the first call for a *data_handle*, runs the full forward pass
-        and caches the per-wave complex amplitude.  Subsequent calls use
-        the cache (much faster, no BW/angular/FF eval).
+        """Compute forward + backward pass.
 
         Args:
-            params: dict with keys 'ck' (complex, shape=(n_wave,)),
-                    'm0' (float, shape=(n_unique_bw,)),
-                    'g0' (float, shape=(n_gamma_rows,)),
-                    'scalar' (list: Gamma, DGamma, DM, Ap, pr, pp).
+            params: dict with keys 'ck' (complex), 'm0' (float),
+                    'g0' (float), 'scalar' (list).
             data_handle: DataHandle from load_data().
             norm: optional float normalization factor.
         Returns:
@@ -263,7 +246,6 @@ class CUDAKernelV3Cache:
         ck_r = np.real(ck).astype(np.float64)
         ck_i = np.imag(ck).astype(np.float64)
 
-        # Pad m0/g0 to the sizes expected by the C kernel
         m0 = np.zeros(self.n_m0_params, np.float64)
         m0[:len(params["m0"])] = np.asarray(params["m0"])
         g0 = np.zeros(self.n_g0_params, np.float64)
@@ -275,8 +257,8 @@ class CUDAKernelV3Cache:
         oP = np.zeros(data_handle.ne, np.float64)
         ogck_r = np.zeros(nw, np.float64)
         ogck_i = np.zeros(nw, np.float64)
-        ogm0 = np.zeros(nu_, np.float64)
-        ogg0 = np.zeros(ng_, np.float64)
+        ogm0 = np.zeros(nu_, np.float64)    # per-unique-bw (scattered later)
+        ogg0 = np.zeros(ng_, np.float64)    # per-gamma-row (scattered later)
         ogsc = np.zeros(6, np.float64)
 
         ka = []
@@ -286,7 +268,7 @@ class CUDAKernelV3Cache:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_compute_v3(
+        self._lib.cpu_compute_v3(
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i),
             _db(m0), _db(g0),
@@ -297,7 +279,7 @@ class CUDAKernelV3Cache:
             _db(ogsc),
         )
 
-        # Reduce gradients from (n_unique_bw,) -> (n_m0_params,)
+        # Scatter gradients from (n_unique_bw,) -> (n_m0_params,)
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]
         grad_m0 = np.zeros(self.n_m0_params, np.float64)
@@ -316,86 +298,12 @@ class CUDAKernelV3Cache:
 
         return oQ[0], grads, oP
 
-    # -- gram matrix (phsp pre-integration) -----------------------------------
-
-    def compute_gram(self, phsp_handle, m0, g0):
-        """Compute reduced Gram matrices from phsp data on GPU (v3).
-
-        Same interface as :meth:`CUDAKernelV3.compute_gram`.
-        """
-        ng2 = self.n_wave // 8
-        sz = ng2 * ng2
-
-        oMpp_r = np.zeros(sz, np.float64)
-        oMpp_i = np.zeros(sz, np.float64)
-        oMmm_r = np.zeros(sz, np.float64)
-        oMmm_i = np.zeros(sz, np.float64)
-        oMpm_r = np.zeros(sz, np.float64)
-        oMpm_i = np.zeros(sz, np.float64)
-
-        m0_arr = np.zeros(self.n_unique_bw, np.float64)
-        m0_arr[:len(m0)] = np.asarray(m0)
-        g0_arr = np.zeros(self.n_gamma_rows, np.float64)
-        g0_arr[:len(g0)] = np.asarray(g0)
-
-        ka = []
-        def _db(a):
-            arr = np.ascontiguousarray(a, np.float64)
-            buf = _ffi.from_buffer(arr)
-            ka.append(buf)
-            return _ffi.cast("double*", buf)
-
-        self._lib.cuda_gram_matrix_v3(
-            self._ctx, phsp_handle.ptr,
-            _db(m0_arr), _db(g0_arr),
-            _db(oMpp_r), _db(oMpp_i),
-            _db(oMmm_r), _db(oMmm_i),
-            _db(oMpm_r), _db(oMpm_i),
-        )
-
-        Mpp = oMpp_r.reshape(ng2, ng2) + 1j * oMpp_i.reshape(ng2, ng2)
-        Mmm = oMmm_r.reshape(ng2, ng2) + 1j * oMmm_i.reshape(ng2, ng2)
-        Mpm = oMpm_r.reshape(ng2, ng2) + 1j * oMpm_i.reshape(ng2, ng2)
-
-        return Mpp, Mmm, Mpm
-
-    # -- time averages (GPU-accelerated) -------------------------------
-
-    def compute_time_averages(self, phsp_handle, scalar):
-        """Compute time averages on GPU, returns 11 scalar averages.
-
-        Args:
-            phsp_handle: DataHandle from load_data().
-            scalar: [Gamma, Delta_Gamma, Delta_m, A_prod, poqr, poqi].
-
-        Returns:
-            (gp2_avg, gm2_avg, gpgm_avg,
-             icht, ict, isht, ist,
-             idcht, idct, idsht, idst)
-        """
-        G, DG, DM = scalar[0], scalar[1], scalar[2]
-        out = np.zeros(12, np.float64)
-        ka = []
-        def _db(a):
-            arr = np.ascontiguousarray(a, np.float64)
-            buf = _ffi.from_buffer(arr)
-            ka.append(buf)
-            return _ffi.cast("double*", buf)
-
-        self._lib.cuda_time_averages_v3(
-            self._ctx, phsp_handle.ptr,
-            G, DG, DM, _db(out))
-
-        return (out[0], out[1], complex(out[2], out[3]),
-                out[4], out[5], out[6], out[7],
-                out[8], out[9], out[10], out[11])
-
     # -- cleanup -------------------------------------------------------
 
     def free(self):
-        """Free GPU context (config arrays + scratch)."""
+        """Free CPU context."""
         if self._ctx is not None:
-            self._lib.cuda_free_context_v3(self._ctx)
+            self._lib.cpu_free_context_v3(self._ctx)
             self._ctx = None
         self._ka.clear()
 

@@ -168,7 +168,7 @@ All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher 
 The lowest level. Pure number crunching with no knowledge of constraints, normalization, or data management.
 
 ```python
-class CUDAKernelV3:        # _cuda_v3.py
+class CUDAKernelV3:        # cuda/_v3.py
     def __init__(self, config)           # config dict from build_all_index()
     def load_data(self, data) → Handle  # upload to GPU
     def compute(self, params, handle, norm=None) → (Q, grads, P)

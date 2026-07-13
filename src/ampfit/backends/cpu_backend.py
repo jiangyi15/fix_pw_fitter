@@ -14,7 +14,7 @@ class CPUBackendV3(ComputeBackend):
     Register as ``"cpu_v3"`` or ``"cpu64_v3"``.
     """
     def __init__(self, kernel_config, batch_size=50000):
-        from ampfit._cpu_v3 import CPUKernelV3 as K
+        from ampfit.cpu._v3 import CPUKernelV3 as K
         self.kernel = K(kernel_config, batch_size=batch_size)
 
     def load_data(self, data_np):

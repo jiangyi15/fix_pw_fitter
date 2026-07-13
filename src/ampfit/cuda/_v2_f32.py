@@ -1,18 +1,11 @@
 """
-CUDA kernel v3 — float32 version with Catmull-Rom interpolation backend.
+CUDA kernel v2 — float32 version with clean C-level batch API backend.
 
-Based on v2_f32, but uses Catmull-Rom (cubic Hermite) interpolation for the
-gamma table (complex) and FL table (real) instead of linear interpolation.
-All other logic is identical to v2_f32.
-
-GPU memory managed in C (cudaMalloc/cudaFree inside kernels_v3_f32.cu).
+All GPU memory is managed in C (cudaMalloc/cudaFree inside kernels_v2_f32.cu).
 Python only handles: config → context, data upload, compute dispatch,
 gradient reduction (n_unique_bw→n_m0, n_gamma_rows→n_g0).
 
-Three C calls:
-    cuda_create_context_v3_f32  — one-time config + scratch allocation
-    cuda_load_data_v3_f32        — per-dataset data upload
-    cuda_compute_v3_f32          — forward + backward + reductions in one call
+Based on _cuda_v2.py but uses float32 for 2-4× faster computation.
 """
 
 import os
@@ -21,7 +14,7 @@ from cffi import FFI
 
 _ffi = FFI()
 _ffi.cdef("""
-void* cuda_create_context_v3_f32(
+void* cuda_create_context_v2_f32(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -37,16 +30,16 @@ void* cuda_create_context_v3_f32(
     int nm,int nmom,int nak_,int nat,int nac,
     int n_m0p,int n_g0p,
     int batch_size);
-void cuda_free_context_v3_f32(void*);
-void* cuda_load_data_v3_f32(void*,const float*,int,const float*,int,
+void cuda_free_context_v2_f32(void*);
+void* cuda_load_data_v2_f32(void*,const float*,int,const float*,int,
     const float*,int,const float*,const float*,const float*,
     const float*,int);
-void cuda_free_data_v3_f32(void*);
-void cuda_compute_v3_f32(void*,void*,
+void cuda_free_data_v2_f32(void*);
+void cuda_compute_v2_f32(void*,void*,
     const float*,const float*,const float*,const float*,
     float,float,float,float,float,float,float,int,
     double*,double*,float*,float*,float*,float*,float*);
-void cuda_gram_matrix_v3_f32(void*,void*,
+void cuda_gram_matrix_v2_f32(void*,void*,
     const float*,const float*,
     double*,double*,double*,double*,double*,double*);
 int cuda_get_device_count();
@@ -55,15 +48,15 @@ int cuda_get_device_name(char*,int);
 
 
 def _load_lib():
-    """Load the v3 float32 shared library, auto-building if source changed."""
+    """Load the v2 float32 shared library, auto-building if source changed."""
     from ampfit.cuda.build import ensure
-    ensure("kernels_v3_f32.cu", "libcuda_kernels_v3_f32.so")
+    ensure("kernels_v2_f32.cu", "libcuda_kernels_v2_f32.so")
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    lib_path = os.path.join(script_dir, "cuda", "libcuda_kernels_v3_f32.so")
+    lib_path = os.path.join(script_dir, "libcuda_kernels_v2_f32.so")
     if not os.path.exists(lib_path):
         raise RuntimeError(
-            f"v3 float32 CUDA library not found at {lib_path}. "
-            "Build with: nvcc -shared --compiler-options '-fPIC' -arch=sm_86 -o <path> kernels_v3_f32.cu -lcudart"
+            f"v2 float32 CUDA library not found at {lib_path}. "
+            "Build with: nvcc -shared -fPIC -arch=sm_86 -o <path> kernels_v2_f32.cu -lcudart -lm"
         )
     return _ffi.dlopen(lib_path)
 
@@ -73,7 +66,7 @@ def _load_lib():
 # ---------------------------------------------------------------------------
 
 class DataHandleF32:
-    """Python-side wrapper around a C DataHandle pointer (float32)."""
+    """Python-side wrapper around a C DataHandle2 pointer (float32)."""
 
     def __init__(self, ptr, lib, ne):
         self.ptr = ptr
@@ -83,7 +76,7 @@ class DataHandleF32:
 
     def free(self):
         if self.ptr is not None:
-            self._lib.cuda_free_data_v3_f32(self.ptr)
+            self._lib.cuda_free_data_v2_f32(self.ptr)
             self.ptr = None
             self._keep.clear()
 
@@ -91,16 +84,16 @@ class DataHandleF32:
         self.free()
 
 
-class CUDAKernelV3F32:
-    """High-level v3 float32 CUDA kernel backend (Catmull-Rom interpolation).
+class CUDAKernelV2F32:
+    """High-level v2 float32 CUDA kernel backend.
 
     Usage::
 
-        kernel = CUDAKernelV3F32(config)
+        kernel = CUDAKernelV2F32(config)
         data = kernel.load_data(data_dict)
         Q, grads, P = kernel.compute(params, data)
 
-    Compatible return format with v2 CUDAKernelV2 for drop-in replacement.
+    Compatible return format with original CUDAKernel for drop-in replacement.
     """
 
     def __init__(self, config, batch_size=50000, lib_path=None):
@@ -112,7 +105,7 @@ class CUDAKernelV3F32:
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")
             self._lib.cuda_get_device_name(name_buf, 256)
-            print(f"✓ v3 f32 GPU: {_ffi.string(name_buf).decode()}")
+            print(f"✓ v2 f32 GPU: {_ffi.string(name_buf).decode()}")
         else:
             raise RuntimeError("No CUDA devices found")
 
@@ -154,7 +147,7 @@ class CUDAKernelV3F32:
         gt = c["gamma_table"]
 
         # ---- create GPU context ----
-        self._ctx = self._lib.cuda_create_context_v3_f32(
+        self._ctx = self._lib.cuda_create_context_v2_f32(
             _ib(c["m0_index"]), len(c["m0_index"]),
             _ib(c["g0_index"]), len(c["g0_index"]),
             _ib(c["g0_mass_index"]), len(c["g0_mass_index"]),
@@ -217,7 +210,7 @@ class CUDAKernelV3F32:
         # Accept 'bkg' or 'bkg_raw' (Fitter uses 'bkg')
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
-        dh = DataHandleF32(self._lib.cuda_load_data_v3_f32(
+        dh = DataHandleF32(self._lib.cuda_load_data_v2_f32(
             self._ctx,
             _fb(mass), mass.shape[1],
             _fb(mom), mom.shape[1],
@@ -284,13 +277,13 @@ class CUDAKernelV3F32:
             ka.append(buf)
             return _ffi.cast("float*", buf)
 
-        # For double output buffers: use float64 numpy array and a raw pointer
+        # For double output buffers
         oP_buf = _ffi.from_buffer(np.ascontiguousarray(oP))
         ka.append(oP_buf)
 
         ne = data_handle.ne
 
-        self._lib.cuda_compute_v3_f32(
+        self._lib.cuda_compute_v2_f32(
             self._ctx, data_handle.ptr,
             _fb(ck_r), _fb(ck_i),
             _fb(m0), _fb(g0),
@@ -324,10 +317,18 @@ class CUDAKernelV3F32:
     # -- gram matrix (phsp pre-integration) -----------------------------------
 
     def compute_gram(self, phsp_handle, m0, g0):
-        """Compute reduced Gram matrices from phsp data on GPU (v3 f32).
+        """Compute reduced Gram matrices from phsp data on GPU (float32).
 
-        Same interface as :meth:`CUDAKernelV2F32.compute_gram`.
-        Uses Catmull-Rom interpolation for exact numpy match.
+        Same as :meth:`CUDAKernelV2.compute_gram` but uses float32
+        internally.  Returns float64 Gram matrices.
+
+        Args:
+            phsp_handle: DataHandleF32 from load_data(phsp_dict).
+            m0: 1-D float64 array of BW masses.
+            g0: 1-D float64 array of BW widths.
+
+        Returns:
+            ``(Mpp, Mmm, Mpm)`` — each ``(ng, ng)`` complex128.
         """
         ng2 = self.n_wave // 8
         sz = ng2 * ng2
@@ -339,6 +340,7 @@ class CUDAKernelV3F32:
         oMpm_r = np.zeros(sz, np.float64)
         oMpm_i = np.zeros(sz, np.float64)
 
+        # Pad m0/g0 to expected sizes
         m0_arr = np.zeros(self.n_unique_bw, np.float32)
         m0_arr[:len(m0)] = np.asarray(m0, np.float32)
         g0_arr = np.zeros(self.n_gamma_rows, np.float32)
@@ -351,7 +353,7 @@ class CUDAKernelV3F32:
             ka.append(buf)
             return _ffi.cast("float*", buf)
 
-        self._lib.cuda_gram_matrix_v3_f32(
+        self._lib.cuda_gram_matrix_v2_f32(
             self._ctx, phsp_handle.ptr,
             _fb(m0_arr), _fb(g0_arr),
             _ffi.cast("double*", _ffi.from_buffer(oMpp_r)),
@@ -373,7 +375,7 @@ class CUDAKernelV3F32:
     def free(self):
         """Free GPU context (config arrays + scratch)."""
         if self._ctx is not None:
-            self._lib.cuda_free_context_v3_f32(self._ctx)
+            self._lib.cuda_free_context_v2_f32(self._ctx)
             self._ctx = None
         self._ka.clear()
 

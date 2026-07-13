@@ -26,7 +26,7 @@ class _CUDABackend(ComputeBackend):
 @register_backend("cuda64_v2")
 class CUDABackendV2(_CUDABackend):
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v2 import CUDAKernelV2 as K
+        from ampfit.cuda._v2 import CUDAKernelV2 as K
         return K(kc, batch_size=bs)
 
 
@@ -34,7 +34,7 @@ class CUDABackendV2(_CUDABackend):
 class CUDABackendV2F32(_CUDABackend):
     dtype = np.float32
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v2_f32 import CUDAKernelV2F32 as K
+        from ampfit.cuda._v2_f32 import CUDAKernelV2F32 as K
         return K(kc, batch_size=bs)
 
 
@@ -44,7 +44,7 @@ class CUDABackendV2F32(_CUDABackend):
 @register_backend("cuda64_v3")
 class CUDABackendV3(_CUDABackend):
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v3 import CUDAKernelV3 as K
+        from ampfit.cuda._v3 import CUDAKernelV3 as K
         return K(kc, batch_size=bs)
 
 
@@ -52,14 +52,14 @@ class CUDABackendV3(_CUDABackend):
 class CUDABackendV3F32(_CUDABackend):
     dtype = np.float32
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v3_f32 import CUDAKernelV3F32 as K
+        from ampfit.cuda._v3_f32 import CUDAKernelV3F32 as K
         return K(kc, batch_size=bs)
 
 
 @register_backend("cuda_mixed_v3")
 class CUDABackendV3Mixed(_CUDABackend):
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v3_mixed import CUDAKernelV3Mixed as K
+        from ampfit.cuda._v3_mixed import CUDAKernelV3Mixed as K
         return K(kc, batch_size=bs)
 
 
@@ -72,7 +72,7 @@ class CUDABackendV3Cache(_CUDABackend):
     calls skip BW/angular/FF evaluation.
     """
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v3_cache import CUDAKernelV3Cache as K
+        from ampfit.cuda._v3_cache import CUDAKernelV3Cache as K
         return K(kc, batch_size=bs)
 
 
@@ -85,5 +85,5 @@ class CUDABackendV3Sparse(_CUDABackend):
     array — 0.5% of the original arithmetic.
     """
     def _make_kernel(self, kc, bs):
-        from ampfit._cuda_v3_sparse import CUDAKernelV3Sparse as K
+        from ampfit.cuda._v3_sparse import CUDAKernelV3Sparse as K
         return K(kc, batch_size=bs)
