@@ -23,7 +23,10 @@ def main():
                     help="Grid resolution for contour")
     ap.add_argument("-o", "--output", default=None, help="Save to file")
     ap.add_argument("--ref", default=None,
-                    help="CSV with reference values: name,mass_mass,mass_err,width,width_err (MeV)")
+                    help="CSV with reference values (MeV). "
+                         "Symmetric: name,mass,mass_err,width,width_err. "
+                         "Asymmetric: name,mass,mass_err_lo,mass_err_hi,"
+                         "width,width_err_lo,width_err_hi")
     ap.add_argument("--format", default="png",
                     help="Output format: png, pdf, svg (default: png)")
     args = ap.parse_args()
@@ -79,6 +82,8 @@ def main():
     all_y_w = [sig_w]
 
     # ── Reference values from CSV (MeV) ──
+    # Supports both symmetric (mass_err, width_err) and
+    # asymmetric (mass_err_lo, mass_err_hi, width_err_lo, width_err_hi) formats.
     if args.ref is not None and os.path.exists(args.ref):
         import csv
         _ref_colors = ['r', 'b', 'g', 'orange', 'purple', 'c', 'm', 'y']
@@ -86,18 +91,46 @@ def main():
         with open(args.ref) as _rf:
             for i, row in enumerate(csv.DictReader(_rf)):
                 r_name = row.get("name", "").strip()
-                r_m = float(row["mass"])
-                r_w = float(row["width"])
-                r_me = float(row.get("mass_err", 0))
-                r_we = float(row.get("width_err", 0))
-                all_x.append(r_m)
-                all_y.append(r_w)
-                all_x_w.append(r_me)
-                all_y_w.append(r_we)
+                r_m = float(row["mass"]) if row.get("mass", "").strip() else None
+                r_w = float(row["width"]) if row.get("width", "").strip() else None
+                if r_m is None and r_w is None:
+                    continue
+                # Asymmetric or symmetric mass errors
+                melo = row.get("mass_err_lo", "").strip()
+                mehi = row.get("mass_err_hi", "").strip()
+                if melo and mehi:
+                    r_me = (float(melo), float(mehi))
+                else:
+                    r_me = float(row.get("mass_err", 0)) if row.get("mass_err", "").strip() else 0
+                # Asymmetric or symmetric width errors
+                welo = row.get("width_err_lo", "").strip()
+                wehi = row.get("width_err_hi", "").strip()
+                if welo and wehi:
+                    r_we = (float(welo), float(wehi))
+                else:
+                    r_we = float(row.get("width_err", 0)) if row.get("width_err", "").strip() else 0
+                # Max error for axis limits
+                r_me_max = max(r_me) if isinstance(r_me, tuple) else float(r_me) if r_me else 0
+                r_we_max = max(r_we) if isinstance(r_we, tuple) else float(r_we) if r_we else 0
+                if r_m is not None:
+                    all_x.append(r_m); all_x_w.append(r_me_max)
+                if r_w is not None:
+                    all_y.append(r_w); all_y_w.append(r_we_max)
                 c = _ref_colors[i % len(_ref_colors)]
                 m = _ref_markers[i % len(_ref_markers)]
-                ax.errorbar(r_m, r_w, xerr=r_me, yerr=r_we,
-                            fmt=c + m, ms=5, capsize=3, lw=1.2, label=r_name)
+                # Format errors for matplotlib (handle asymmetric (lo,hi) tuples)
+                def _fmt_err(e):
+                    if e is None:
+                        return None
+                    if isinstance(e, tuple):
+                        return np.array(e).reshape(2, 1)
+                    return e
+                ax.errorbar(r_m if r_m else 0, r_w if r_w else 0,
+                            xerr=_fmt_err(r_me) if r_m else None,
+                            yerr=_fmt_err(r_we) if r_w else None,
+                            fmt='none', color=c, marker=m, ms=5,
+                            capsize=3, lw=1.2, label=r_name,
+                            markeredgecolor=c, markerfacecolor=c)
 
     # Set axis limits including all points
     all_x = np.array(all_x)
