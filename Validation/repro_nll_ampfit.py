@@ -59,6 +59,7 @@ def main():
         diff = nll - ref_nll
 
         print(f"{backend:<15s} {norm:>12.4f} {nll:>15.6f} {diff:>+11.4f}")
+        fitter.free()
 
     if not args.backend:
         print()
