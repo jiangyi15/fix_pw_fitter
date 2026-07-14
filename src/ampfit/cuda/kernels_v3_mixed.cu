@@ -273,11 +273,10 @@ __global__ void gram_common_kernel_v3_mixed(
     __syncthreads();
 
     if (tid < ng) {
-        float sw = sqrtf(weight[event_idx]);
-        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid] * sw;
-        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid] * sw;
-        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid] * sw;
-        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid] * sw;
+        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid];
+        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid];
+        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid];
+        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid];
     }
 }
 
@@ -287,6 +286,7 @@ __global__ void gram_common_kernel_v3_mixed(
 __global__ void gram_reduce_kernel_v3_mixed(
     const float* __restrict__ A0_real, const float* __restrict__ A0_imag,
     const float* __restrict__ A1_real, const float* __restrict__ A1_imag,
+    const float* __restrict__ weight,
     int n_events, int ng,
     float* __restrict__ Mpp_r, float* __restrict__ Mpp_i,
     float* __restrict__ Mmm_r, float* __restrict__ Mmm_i,
@@ -301,19 +301,20 @@ __global__ void gram_reduce_kernel_v3_mixed(
     float sum_pm_r = 0.0f, sum_pm_i = 0.0f;
 
     for (int e = 0; e < n_events; e++) {
+        float w = weight[e];
         int base = e * ng;
         float a0ri = A0_real[base + gi], a0ii = A0_imag[base + gi];
         float a0rj = A0_real[base + gj], a0ij = A0_imag[base + gj];
-        sum_pp_r += a0ri * a0rj + a0ii * a0ij;
-        sum_pp_i += a0ri * a0ij - a0ii * a0rj;
+        sum_pp_r += w * (a0ri * a0rj + a0ii * a0ij);
+        sum_pp_i += w * (a0ri * a0ij - a0ii * a0rj);
 
         float a1ri = A1_real[base + gi], a1ii = A1_imag[base + gi];
         float a1rj = A1_real[base + gj], a1ij = A1_imag[base + gj];
-        sum_mm_r += a1ri * a1rj + a1ii * a1ij;
-        sum_mm_i += a1ri * a1ij - a1ii * a1rj;
+        sum_mm_r += w * (a1ri * a1rj + a1ii * a1ij);
+        sum_mm_i += w * (a1ri * a1ij - a1ii * a1rj);
 
-        sum_pm_r += a0ri * a1rj + a0ii * a1ij;
-        sum_pm_i += a0ri * a1ij - a0ii * a1rj;
+        sum_pm_r += w * (a0ri * a1rj + a0ii * a1ij);
+        sum_pm_i += w * (a0ri * a1ij - a0ii * a1rj);
     }
 
     Mpp_r[gi * ng + gj] = sum_pp_r;
@@ -1165,6 +1166,7 @@ void launch_gram_common_v3_mixed(
 void launch_gram_reduce_v3_mixed(
     const float* A0_real, const float* A0_imag,
     const float* A1_real, const float* A1_imag,
+    const float* weight,
     int n_events, int ng,
     float* Mpp_r, float* Mpp_i,
     float* Mmm_r, float* Mmm_i,
@@ -1172,7 +1174,7 @@ void launch_gram_reduce_v3_mixed(
 
     dim3 grid(ng, ng);
     gram_reduce_kernel_v3_mixed<<<grid, 1>>>(
-        A0_real, A0_imag, A1_real, A1_imag,
+        A0_real, A0_imag, A1_real, A1_imag, weight,
         n_events, ng,
         Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
 }
@@ -1489,7 +1491,7 @@ void cuda_gram_matrix_v3_mixed(void* vctx, void* vdh,
         CUDA_CHECK(cudaGetLastError());
 
         launch_gram_reduce_v3_mixed(
-            A0r, A0i, A1r, A1i, nb, ng2,
+            A0r, A0i, A1r, A1i, d.weight, nb, ng2,
             Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
         CUDA_CHECK(cudaGetLastError());
 
