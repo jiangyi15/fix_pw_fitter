@@ -1311,17 +1311,13 @@ class Fitter:
         # Scale params
         scale = dict(self._scale_params)
 
-        # Bounds: name → {"low": a, "high": b}  (de-duplicated by value)
+        # Bounds: name → {"low": a, "high": b}  (de-duplicated by name)
         bt = self._bound_transforms
         bounds = {}
-        seen = {}
         for i, name in enumerate(flat_names):
-            if i in bt:
+            if i in bt and name not in bounds:
                 t = bt[i]
-                key = (t.a, t.b)
-                if key not in seen:
-                    seen[key] = name
-                    bounds[name] = {"low": t.a, "high": t.b}
+                bounds[name] = {"low": t.a, "high": t.b}
 
         out = {"fixed": fixed, "same": same, "scale": scale, "bounds": bounds}
         with open(filepath, "w") as f:
