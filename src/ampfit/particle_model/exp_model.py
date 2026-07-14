@@ -3,18 +3,18 @@ Experimental exponential lineshape with CR k-interpolation.
 
 The BW amplitude is parametrised as::
 
-    A(m) = 1 / (m\u2080\u00b2 \u2212 m\u00b2 \u2212 i\u00b7m\u2080\u00b7\u03a3 g_a(k)\u00b7\u0393_a(m))
-         = exp(-k\u00b7(m\u00b2 - m\u2080\u00b2))
+    A(m) = 1 / (m_0^2 - m^2 - i*m_0*Sigma g_a(k)*Gamma_a(m))
+         = exp(-k*(m^2 - m_0^2))
 
-    g_a(k_b) = \u03b4_{a,b}   (Kronecker delta at k-grid points)
+    g_a(k_b) = delta_{a,b}   (Kronecker delta at k-grid points)
 
-Each :math:`\u0393_a(m) = (m\u2080\u00b2 \u2212 m\u00b2 \u2212 \exp(k_a\u00b7(m\u00b2 - m\u2080\u00b2)))/(i\u00b7m\u2080)`
-gives the **exact** amplitude ``\exp(-k_a\u00b7(m\u00b2 - m\u2080\u00b2))`` at ``k = k_a``.
+Each :math:`Gamma_a(m) = (m_0^2 - m^2 - \exp(k_a*(m^2 - m_0^2)))/(i*m_0)`
+gives the **exact** amplitude ``\exp(-k_a*(m^2 - m_0^2))`` at ``k = k_a``.
 
 Between grid points, the Catmull-Rom weights ``g_a(k)`` smoothly
 blend the *N* pre-computed gamma-table rows::
 
-    \u03a3_a g_a(k)\u00b7\u0393_a(m) \u2248 \u0393_k(m)
+    Sigma_a g_a(k)*Gamma_a(m) ~ Gamma_k(m)
 
 The fit parameter *k* selects the CR weights via ``_ExpTransform``.
 
@@ -39,7 +39,7 @@ def _cr_basis(t):
 
     Returns (w_{-1}, w_0, w_1, w_2) where::
 
-        f(t) = w_{-1}\u00b7p_{-1} + w_0\u00b7p_0 + w_1\u00b7p_1 + w_2\u00b7p_2
+        f(t) = w_{-1}*p_{-1} + w_0*p_0 + w_1*p_1 + w_2*p_2
     """
     t2 = t * t
     t3 = t2 * t
@@ -59,13 +59,13 @@ def _cr_basis_deriv(t):
 
 
 def _gamma_exp(m, k, m0, g0=1.0):
-    r"""Exact gamma for A(m) = exp(-k\u00b7m\u00b2).
+    r"""Exact gamma for A(m) = exp(-k*m^2).
 
-    A(m) = 1/(m\u2080\u00b2 \u2212 m\u00b2 \u2212 i\u00b7m\u2080\u00b7g\u2080\u00b7\u03b3) = exp(-k\u00b7m\u00b2)
+    A(m) = 1/(m_0^2 - m^2 - i*m_0*g_0*gamma) = exp(-k*m^2)
 
-    A(m) = exp(-k\u00b7(m\u00b2 - m\u2080\u00b2))  (peaks at 1 when m = m\u2080)
+    A(m) = exp(-k*(m^2 - m_0^2))  (peaks at 1 when m = m_0)
 
-    \u03b3(m) = (m\u2080\u00b2 \u2212 m\u00b2 \u2212 exp(k\u00b7(m\u00b2 - m\u2080\u00b2))) / (i\u00b7m\u2080\u00b7g\u2080)
+    gamma(m) = (m_0^2 - m^2 - exp(k*(m^2 - m_0^2))) / (i*m_0*g_0)
     """
     return (m0 ** 2 - m ** 2 - np.exp(k * (m ** 2 - m0 ** 2))) / (1j * m0 * g0)
 
@@ -76,7 +76,7 @@ class _ExpTransform(Transform):
     The *N* output ``g_a(k)`` are the Catmull-Rom basis weights that
     select/blend the pre-computed gamma-table rows::
 
-        g_a(k_b) = \u03b4_{a,b}    (exact at k-grid points)
+        g_a(k_b) = delta_{a,b}    (exact at k-grid points)
 
     Parameters
     ----------
@@ -177,12 +177,12 @@ class ExpModel(BaseModel):
     """Exponential lineshape with CR-interpolated k.
 
     The gamma table has *N* rows, one per k-grid point.  Each row
-    ``a`` gives the exact ``\u0393_a(m)`` for ``A(m) = exp(-k_a\u00b7m\u00b2)``.
+    ``a`` gives the exact ``Gamma_a(m)`` for ``A(m) = exp(-k_a*m^2)``.
     The fit parameter *k* selects CR weights that blend these rows.
 
     Parameters (from YAML config):
-        mass        \u2014 nominal mass (m\u2080, default 0.775)
-        width       \u2014 reference g\u2080 (default 1.0)
+        mass        \u2014 nominal mass (m_0, default 0.775)
+        width       \u2014 reference g_0 (default 1.0)
         k           \u2014 initial/default k value (default 1.0)
         k_range     \u2014 [k_min, k_max] (default [0.1, 5.0])
         n_interp    \u2014 CR interpolation points (default 50)
@@ -220,11 +220,11 @@ class ExpModel(BaseModel):
         )
 
     def gamma(self, m):
-        r"""Pre-computed \u0393_a(m) for each k-grid point.
+        r"""Pre-computed Gamma_a(m) for each k-grid point.
 
-        Each row gives the exact gamma for ``A(m) = exp(-k_a\u00b7m\u00b2)``::
+        Each row gives the exact gamma for ``A(m) = exp(-k_a*m^2)``::
 
-            \u0393_a(m) = (m\u2080\u00b2 \u2212 m\u00b2 \u2212 exp(k_a\u00b7m\u00b2)) / (i\u00b7m\u2080\u00b7g\u2080)
+            Gamma_a(m) = (m_0^2 - m^2 - exp(k_a*m^2)) / (i*m_0*g_0)
         """
         n_k  = int(self.kwargs.get("n_interp", 50))
         k_min = float(self.kwargs.get("k_min", 0.1))
