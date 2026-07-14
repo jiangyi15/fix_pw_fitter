@@ -204,7 +204,6 @@ class IntegratedBackend(ComputeBackend):
 
         # ── NumPy fallback (batched) ───────────────────────────────
         w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
-        sw = np.sqrt(np.maximum(w, 0.0))
         bs = 500
         n_batches = (n_events + bs - 1) // bs
         import sys, time as _time
@@ -219,11 +218,11 @@ class IntegratedBackend(ComputeBackend):
                      if isinstance(v, np.ndarray)}
             ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
             # Project onto groups: sum 4 blocks of ng → (batch, ng)
-            A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
-            A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1) * sw[b_start:b_end, np.newaxis]
-            Mpp += A0.T.conj() @ A0
-            Mmm += A1.T.conj() @ A1
-            Mpm += A0.T.conj() @ A1
+            A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
+            A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+            Mpp += (A0 * w[b_start:b_end, None]).T.conj() @ A0
+            Mmm += (A1 * w[b_start:b_end, None]).T.conj() @ A1
+            Mpm += (A0 * w[b_start:b_end, None]).T.conj() @ A1
             _elapsed = _time.time() - _t0
             _eta = _elapsed / (b_idx + 1) * (n_batches - b_idx - 1)
             sys.stdout.write(
@@ -264,14 +263,11 @@ class IntegratedBackend(ComputeBackend):
             self.mass = data_np.get("mass")
             self.q = data_np.get("q")
             self.angle = data_np.get("angle")
-            w = np.asarray(
+            self.weight = np.asarray(
                 data_np.get("weight", np.ones(n)), dtype=np.float64)
-            # For Gram matrices: use sqrt(|w|) ∗ sign(w) to handle
-            # negative weights (e.g. sWeights).  The sign is absorbed
-            # into the outer product: M = Σ sign(w)·(√|w|·A)†·(√|w|·A)
-            self.weight = w                     # original (for data NLL)
-            self._sw = np.sqrt(np.abs(w))       # √|w|  for Gram
-            self._wsign = np.sign(w)            # sign(w) for Gram
+            # Gram matrices use weight directly: M = Σ w · A† · A
+            # (no sqrt needed — handles negative weights natively)
+            self._wgram = self.weight.copy()
             self.frac = np.asarray(
                 data_np.get("frac", np.ones(n) * 0.5), dtype=np.float64)
             self.time = np.asarray(
@@ -299,18 +295,17 @@ class IntegratedBackend(ComputeBackend):
         ng = nk.n_wave // 8
         n = nk.n_wave // 2
         if self._gram_compute is not None:
-            # Gram kernel uses sqrt(weight) — protect against negative
-            # weights by uploading a temporary copy with abs(weight).
+            # GPU gram kernel now uses weight directly (no sqrt).
+            # Upload original weight (signed) for correct signed-gram.
             safe = {k: getattr(bundle, k) for k in ("mass", "q", "angle",
                       "frac", "time", "bkg")}
-            safe["weight"] = np.abs(bundle.weight)
+            safe["weight"] = bundle.weight  # pass through, negative OK
             safe_h = self.base.load_data(safe)
             Mpp, Mmm, Mpm = self._gram_compute(safe_h, m0, g0)
             safe_h.free()
         else:
             ne = bundle.n_events
-            sw = bundle._sw           # √|w|
-            wsign = bundle._wsign     # sign(w)
+            w = bundle._wgram
             A0 = np.empty((ne, ng), dtype=complex)
             A1 = np.empty((ne, ng), dtype=complex)
             for b_start in range(0, ne, 500):
@@ -318,16 +313,12 @@ class IntegratedBackend(ComputeBackend):
                 batch = {k: getattr(bundle, k)[b_start:b_end]
                          for k in ("mass", "q", "angle")}
                 ba = nk._compute_common_amp_factor(batch, m0=m0, g0=g0)
-                A0[b_start:b_end] = (ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
-                                     * sw[b_start:b_end, None])
-                A1[b_start:b_end] = (ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
-                                     * sw[b_start:b_end, None])
-            # M = Σ sign(w) · (√|w|·A)† · (√|w|·A)
-            A0s = A0 * wsign[:, None]
-            A1s = A1 * wsign[:, None]
-            Mpp = A0s.T.conj() @ A0
-            Mmm = A1s.T.conj() @ A1
-            Mpm = A0s.T.conj() @ A1
+                A0[b_start:b_end] = ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
+                A1[b_start:b_end] = ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+            # M = Σ w · A† · A  (native support for negative weights)
+            Mpp = (A0 * w[:, None]).T.conj() @ A0
+            Mmm = (A1 * w[:, None]).T.conj() @ A1
+            Mpm = (A0 * w[:, None]).T.conj() @ A1
         bundle.Mpp = (Mpp + Mpp.conj().T) / 2
         bundle.Mmm = (Mmm + Mmm.conj().T) / 2
         bundle.Mpm = Mpm
