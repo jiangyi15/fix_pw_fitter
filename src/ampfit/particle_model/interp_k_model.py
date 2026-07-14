@@ -142,7 +142,17 @@ class KToCRWeightsTransform(Transform):
 
         Finds ``k`` by locating the index of the maximum weight
         and estimating the intra-bin fraction from the CR pattern.
+
+        If the input parameter ``k`` is already present in *d*
+        (e.g. when loading from ``values_from_dict``), it is
+        returned directly — avoids reconstructing k from missing
+        weight values.
         """
+        if self.k_name in d:
+            mass = float(d.get(self.mass_name, self.mass_fixed))
+            return {self.k_name: float(d[self.k_name]),
+                    self.mass_name: mass}
+
         target = np.array([float(d.get(n, 0.0)) for n in self.g0_names])
         peak = int(np.argmax(target))
 
