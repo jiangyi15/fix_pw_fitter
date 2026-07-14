@@ -23,9 +23,7 @@ def main():
                     help="Grid resolution for contour")
     ap.add_argument("-o", "--output", default=None, help="Save to file")
     ap.add_argument("--ref", default=None,
-                    help="CSV with reference values (MeV). Columns: "
-                         "name,mass,mass_err,width,width_err (symmetric) or "
-                         "name,mass,mass_err_lo,mass_err_hi,width,width_err_lo,width_err_hi (asymmetric)")
+                    help="CSV with reference values: name,mass_mass,mass_err,width,width_err (MeV)")
     ap.add_argument("--format", default="png",
                     help="Output format: png, pdf, svg (default: png)")
     args = ap.parse_args()
@@ -88,36 +86,18 @@ def main():
         with open(args.ref) as _rf:
             for i, row in enumerate(csv.DictReader(_rf)):
                 r_name = row.get("name", "").strip()
-                r_m = float(row["mass"]) if row.get("mass", "").strip() else None
-                r_w = float(row["width"]) if row.get("width", "").strip() else None
-                if r_m is None and r_w is None:
-                    continue
-                # Asymmetric or symmetric errors
-                def _read_err(col, col_lo, col_hi):
-                    lo = row.get(col_lo, None)
-                    hi = row.get(col_hi, None)
-                    if lo is not None and hi is not None:
-                        return (float(lo), float(hi))
-                    v = row.get(col, "").strip()
-                    return float(v) if v else 0
-                r_me = _read_err("mass_err", "mass_err_lo", "mass_err_hi")
-                r_we = _read_err("width_err", "width_err_lo", "width_err_hi")
-                # Use max error for axis limit calculation
-                r_me_max = max(r_me) if isinstance(r_me, tuple) else r_me
-                r_we_max = max(r_we) if isinstance(r_we, tuple) else r_we
-                if r_m is not None:
-                    all_x.append(r_m); all_x_w.append(r_me_max)
-                if r_w is not None:
-                    all_y.append(r_w); all_y_w.append(r_we_max)
+                r_m = float(row["mass"])
+                r_w = float(row["width"])
+                r_me = float(row.get("mass_err", 0))
+                r_we = float(row.get("width_err", 0))
+                all_x.append(r_m)
+                all_y.append(r_w)
+                all_x_w.append(r_me)
+                all_y_w.append(r_we)
                 c = _ref_colors[i % len(_ref_colors)]
                 m = _ref_markers[i % len(_ref_markers)]
-                # Use separate color/marker args to support named colors
-                ax.errorbar(r_m if r_m else 0, r_w if r_w else 0,
-                            xerr=r_me if r_m else None,
-                            yerr=r_we if r_w else None,
-                            fmt='none', color=c, marker=m, ms=5,
-                            capsize=3, lw=1.2, label=r_name,
-                            markeredgecolor=c, markerfacecolor=c)
+                ax.errorbar(r_m, r_w, xerr=r_me, yerr=r_we,
+                            fmt=c + m, ms=5, capsize=3, lw=1.2, label=r_name)
 
     # Set axis limits including all points
     all_x = np.array(all_x)
