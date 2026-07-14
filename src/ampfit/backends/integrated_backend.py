@@ -41,11 +41,13 @@ class IntegratedBackend(ComputeBackend):
         Spatial integrals for the latest call (user‑accessible).
     """
 
-    def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True):
+    def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True,
+                 cache_file=None):
         from ampfit.numpy_kernel import NumpyKernel
         self.kernel = NumpyKernel(kernel_config)
         self._kernel_config = kernel_config
         self.strict_gram = strict_gram
+        self._cache_file = cache_file
 
         # ── Base backend for data NLL ─────────────────────────────
         if isinstance(base, ComputeBackend):
@@ -84,6 +86,10 @@ class IntegratedBackend(ComputeBackend):
         self._cache_st = None
         self._ta_key = None
         self._ta_result = None
+
+    def set_cache_file(self, path):
+        """Set the Gram matrix cache file path (may be None to disable)."""
+        self._cache_file = path
 
     # ═══════════════════════════════════════════════════════════════
     #  Phsp pre‑integration
@@ -284,12 +290,50 @@ class IntegratedBackend(ComputeBackend):
                 self.handle.free()
             self.Mpp = self.Mmm = self.Mpm = None
 
+    def _try_load_gram_cache(self, bundle, m0, g0):
+        """Load Gram matrices from cache file if m0/g0 match."""
+        if self._cache_file is None:
+            return False
+        try:
+            data = np.load(self._cache_file)
+            if (np.array_equal(data["m0"], m0) and
+                np.array_equal(data["g0"], g0)):
+                bundle.Mpp = data["Mpp"]
+                bundle.Mmm = data["Mmm"]
+                bundle.Mpm = data["Mpm"]
+                bundle.m0 = m0.copy()
+                bundle.g0 = g0.copy()
+                return True
+        except (FileNotFoundError, IOError, KeyError, OSError, ValueError):
+            pass
+        return False
+
+    def _save_gram_cache(self, bundle, m0, g0):
+        """Save Gram matrices to cache file."""
+        if self._cache_file is None:
+            return
+        if bundle.Mpp is None:
+            return
+        try:
+            np.savez(self._cache_file,
+                     m0=m0, g0=g0,
+                     Mpp=bundle.Mpp, Mmm=bundle.Mmm, Mpm=bundle.Mpm)
+        except (IOError, OSError) as e:
+            import warnings
+            warnings.warn(f"IntegratedBackend: failed to save Gram cache to "
+                          f"{self._cache_file}: {e}")
+
     def ensure_gram(self, bundle, m0, g0):
         """Build Gram matrices on *bundle* for *m0*, *g0* if not cached."""
         if bundle.Mpp is not None:
             if (np.array_equal(m0, bundle.m0) and
                 np.array_equal(g0, bundle.g0)):
                 return
+
+        # Try loading from cache file first
+        if self._try_load_gram_cache(bundle, m0, g0):
+            return
+
         from ampfit.numpy_kernel import NumpyKernel
         nk = NumpyKernel(self._kernel_config)
         ng = nk.n_wave // 8
@@ -324,6 +368,9 @@ class IntegratedBackend(ComputeBackend):
         bundle.Mpm = Mpm
         bundle.m0 = m0.copy()
         bundle.g0 = g0.copy()
+
+        # Save to cache for future runs
+        self._save_gram_cache(bundle, m0, g0)
 
     def load_data(self, data_np):
         """Load data.  Returns a :class:`_PhspBundle` holding the GPU handle
