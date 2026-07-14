@@ -71,37 +71,45 @@ def main():
                 print(f'  [!] {pname} ({charge}): {e}', file=sys.stderr)
                 continue
 
-            for prop in p.masses():
+            def extract(prop, store, label_prefix):
+                """Extract best value or fallback to individual measurements."""
                 bs = prop.best_summary()
-                if bs is None or bs.value is None:
-                    continue
-                err_hi = bs.error_positive or 0
-                err_lo = bs.error_negative or err_hi
-                if err_hi <= 0:
-                    continue
-                # Strip PDG particle name prefix from description
-                # e.g. "a_1(1640) MASS" → "MASS" (file is already a1_1640.csv)
+                if bs is None:
+                    return
+                # Strip particle name prefix from description
                 prefix = p.name.rstrip('0+*^').strip()
                 label = prop.description
                 if label.startswith(prefix):
                     label = label[len(prefix):].strip()
-                if label not in mass_map:
-                    mass_map[label] = (bs.value, err_hi, err_lo)
+                label = label.strip()
+                if not label:
+                    return
 
+                val, err_hi, err_lo = None, None, None
+
+                if bs.value is not None:
+                    # Single best value with errors
+                    err_hi = bs.error_positive or 0
+                    err_lo = bs.error_negative or err_hi
+                    if err_hi > 0:
+                        val = bs.value
+                else:
+                    # Range value like "200 TO 600" → use midpoint ± half-range
+                    vt = (bs.value_text or '').upper()
+                    import re
+                    m = re.match(r'([\d.]+)\s*(?:TO|–|-)\s*([\d.]+)', vt)
+                    if m:
+                        lo, hi = float(m.group(1)), float(m.group(2))
+                        val = (lo + hi) / 2.0
+                        err_hi = err_lo = (hi - lo) / 2.0
+
+                if val is not None and err_hi and err_hi > 0 and label not in store:
+                    store[label] = (val, err_hi, err_lo or err_hi)
+
+            for prop in p.masses():
+                extract(prop, mass_map, 'MASS')
             for prop in p.widths():
-                bs = prop.best_summary()
-                if bs is None or bs.value is None:
-                    continue
-                err_hi = bs.error_positive or 0
-                err_lo = bs.error_negative or err_hi
-                if err_hi <= 0:
-                    continue
-                prefix = p.name.rstrip('0+*^').strip()
-                label = prop.description
-                if label.startswith(prefix):
-                    label = label[len(prefix):].strip()
-                if label not in width_map:
-                    width_map[label] = (bs.value, err_hi, err_lo)
+                extract(prop, width_map, 'WIDTH')
 
         # Combine mass/width entries with matching descriptions
         # e.g. "a_2(1320) MASS" + "a_2(1320) WIDTH" → single row
