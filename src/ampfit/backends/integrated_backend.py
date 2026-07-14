@@ -44,6 +44,7 @@ class IntegratedBackend(ComputeBackend):
     def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True):
         from ampfit.numpy_kernel import NumpyKernel
         self.kernel = NumpyKernel(kernel_config)
+        self._kernel_config = kernel_config
         self.strict_gram = strict_gram
 
         # ── Base backend for data NLL ─────────────────────────────
@@ -55,10 +56,6 @@ class IntegratedBackend(ComputeBackend):
 
         # ── Reduced Gram matrices (from 4-group structure: n_wave//8 groups)
         self._ng = self.kernel.n_wave // 8
-        self._Mpp_r = None
-        self._Mmm_r = None
-        self._Mpm_r = None
-        self._gram_m0 = self._gram_g0 = None
         self._groups_B0 = [list(range(k, self.kernel.n_wave // 2, self._ng))
                            for k in range(self._ng)]
         self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
@@ -70,14 +67,6 @@ class IntegratedBackend(ComputeBackend):
         # Otherwise fall back to the numpy batched path.
         base_kernel = getattr(self.base, "kernel", None)
         self._gram_compute = getattr(base_kernel, "compute_gram", None)
-
-        # Raw phsp arrays stored by prepare_phsp_batched
-        self._phsp_data = None
-
-        # Time/frac/weight arrays (for per‑NLL time averages)
-        self._phsp_weights = None
-        self._phsp_frac = None
-        self._phsp_time = None
 
         # User‑accessible integral values
         self.int_Ap2 = None
@@ -107,24 +96,20 @@ class IntegratedBackend(ComputeBackend):
         eH = np.exp(-1j * t * (+Dm/2 - 1j * (Gam - DG/2) / 2))
         return (eL + eH) / 2, (eL - eH) / 2
 
-    def _compute_time_averages(self, scalar):
-        """Compute time averages via GPU if available, else CPU."""
+    def _compute_time_averages(self, scalar, pb):
+        """Compute time averages via GPU if available, else CPU.
+        *pb* is the :class:`_PhspBundle` containing the phsp data."""
         base_kernel = getattr(self.base, "kernel", None)
         gpu_ta = getattr(base_kernel, "compute_time_averages", None)
-        if gpu_ta is not None and self._phsp_handle is not None:
-            return gpu_ta(self._phsp_handle, scalar)
-        return self._time_averages_cpu(scalar)[:11]
+        if gpu_ta is not None:
+            return gpu_ta(pb.handle, scalar)
+        return self._time_averages_cpu(scalar, pb)[:11]
 
-    def _time_averages_cpu(self, scalar):
-        """Time integrals with per-array caching keyed by scalar params.
-
-        Caches each 1.85M-element trig/exp array independently so that
-        changing only Gamma recomputes only expt (~8ms) instead of all
-        5 arrays (~73ms). Final scalar results cached by full key.
-        """
+    def _time_averages_cpu(self, scalar, pb):
+        """Time integrals with per-array caching keyed by scalar params."""
         Gam, DG, Dm = scalar[0], scalar[1], scalar[2]
-        t = self._phsp_time
-        w = self._phsp_weights
+        t = pb.time
+        w = pb.weight
         ws = np.sum(w)
 
         # Per-array cache (recompute only changed params)
@@ -176,30 +161,6 @@ class IntegratedBackend(ComputeBackend):
                            expt, cht, sht, ct, st, t, w, ws)
         self._ta_key = key
         return self._ta_result
-
-    def _ensure_gram(self, params, phsp_handle=None):
-        """Build reduced Gram matrices from stored phsp data if needed."""
-        if self._phsp_data is None:
-            raise RuntimeError("IntegratedBackend: phsp not loaded. "
-                               "Call prepare_phsp_batched() first.")
-        if self._Mpp_r is None:
-            m0 = np.asarray(params["m0"])
-            g0 = np.asarray(params["g0"])
-            phsp = {**self._phsp_data, "weight": self._phsp_weights,
-                    "frac": self._phsp_frac, "time": self._phsp_time}
-            self._load_phsp_matrices(phsp, m0, g0, phsp_handle=phsp_handle)
-            self._gram_m0 = m0.copy()
-            self._gram_g0 = g0.copy()
-        else:
-            m0_ok = np.array_equal(params["m0"], self._gram_m0)
-            g0_ok = np.array_equal(params["g0"], self._gram_g0)
-            if not (m0_ok and g0_ok):
-                msg = ("IntegratedBackend: m0/g0 changed after Gram matrix was built. "
-                       "m0/g0 must be fixed when using the integrated backend.")
-                if self.strict_gram:
-                    raise RuntimeError(msg)
-                import warnings
-                warnings.warn(msg)
 
     def _load_phsp_matrices(self, phsp, m0, g0, phsp_handle=None):
         """Compute ng×ng reduced Gram matrices directly (no full matrix).
@@ -293,22 +254,81 @@ class IntegratedBackend(ComputeBackend):
     #  ComputeBackend interface
     # ═══════════════════════════════════════════════════════════════
 
-    def load_data(self, data_np):
-        """Load data; on first call (phsp) also store arrays for Gram matrices."""
-        h = self.base.load_data(data_np)
-        if self._phsp_data is None:
+    class _PhspBundle:
+        """Wrapper bundling a GPU data handle with the numpy arrays needed for
+        Gram matrices and time averages.  Returned by :meth:`load_data`."""
+        def __init__(self, handle, data_np):
+            self.handle = handle
             n = data_np["mass"].shape[0]
-            self.phsp_n = n
-            self._phsp_weights = np.asarray(
+            self.n_events = n
+            self.mass = data_np.get("mass")
+            self.q = data_np.get("q")
+            self.angle = data_np.get("angle")
+            self.weight = np.asarray(
                 data_np.get("weight", np.ones(n)), dtype=np.float64)
-            self._phsp_frac = np.asarray(
-                data_np.get("frac", np.ones(n)), dtype=np.float64)
-            self._phsp_time = np.asarray(
+            self.frac = np.asarray(
+                data_np.get("frac", np.ones(n) * 0.5), dtype=np.float64)
+            self.time = np.asarray(
                 data_np.get("time", np.zeros(n)), dtype=np.float64)
-            self._phsp_data = {k: np.asarray(data_np[k])
-                               for k in ("mass", "q", "angle") if k in data_np}
-            self._phsp_handle = h  # cache for Gram reuse
-        return h
+            self.bkg = np.asarray(
+                data_np.get("bkg_raw",
+                            data_np.get("bkg", np.zeros(n))), dtype=np.float64)
+            # Gram matrices (lazily built by IntegratedBackend.ensure_gram)
+            self.m0 = self.g0 = None
+            self.Mpp = self.Mmm = self.Mpm = None
+
+        def free(self):
+            if hasattr(self.handle, 'free'):
+                self.handle.free()
+            self.Mpp = self.Mmm = self.Mpm = None
+
+    def ensure_gram(self, bundle, m0, g0):
+        """Build Gram matrices on *bundle* for *m0*, *g0* if not cached."""
+        if bundle.Mpp is not None:
+            if (np.array_equal(m0, bundle.m0) and
+                np.array_equal(g0, bundle.g0)):
+                return
+        from ampfit.numpy_kernel import NumpyKernel
+        nk = NumpyKernel(self._kernel_config)
+        ng = nk.n_wave // 8
+        n = nk.n_wave // 2
+        if self._gram_compute is not None:
+            Mpp, Mmm, Mpm = self._gram_compute(bundle.handle, m0, g0)
+        else:
+            ne = bundle.n_events
+            sw = np.sqrt(bundle.weight)
+            A0_all = np.empty((ne, ng), dtype=complex)
+            A1_all = np.empty((ne, ng), dtype=complex)
+            for b_start in range(0, ne, 500):
+                b_end = min(b_start + 500, ne)
+                batch = {k: getattr(bundle, k)[b_start:b_end]
+                         for k in ("mass", "q", "angle")}
+                ba = nk._compute_common_amp_factor(batch, m0=m0, g0=g0)
+                A0_all[b_start:b_end] = (ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
+                                         * sw[b_start:b_end, None])
+                A1_all[b_start:b_end] = (ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+                                         * sw[b_start:b_end, None])
+            Mpp = A0_all.T.conj() @ A0_all
+            Mmm = A1_all.T.conj() @ A1_all
+            Mpm = A0_all.T.conj() @ A1_all
+        bundle.Mpp = (Mpp + Mpp.conj().T) / 2
+        bundle.Mmm = (Mmm + Mmm.conj().T) / 2
+        bundle.Mpm = Mpm
+        bundle.m0 = m0.copy()
+        bundle.g0 = g0.copy()
+
+    def load_data(self, data_np):
+        """Load data.  Returns a :class:`_PhspBundle` holding the GPU handle
+        together with the raw numpy arrays.
+
+        The Fitter calls this twice — once for phsp (via *set_phsp*)
+        and once for data (via *set_data*).  Both return a bundle; the
+        :meth:`compute` method uses the bundle from the *phsp* call for
+        Gram‑matrix normalisation and the bundle from the *data* call for
+        negative log‑likelihood computation.
+        """
+        h = self.base.load_data(data_np)
+        return self._PhspBundle(h, data_np)
 
     def compute(self, params, data_handle, norm=None, return_p=True):
         """Forward / backward pass.
@@ -319,19 +339,23 @@ class IntegratedBackend(ComputeBackend):
 
         m0/g0 gradients are always zero (fixed at Gram pre‑computation).
         """
+        pb = data_handle  # always a _PhspBundle from load_data
+        dh = pb.handle
+
         if norm is not None or return_p:
-            Q, grads, P = self.base.compute(params, data_handle, norm=norm,
+            Q, grads, P = self.base.compute(params, dh, norm=norm,
                                             return_p=return_p)
             grads["m0"] = np.zeros_like(grads["m0"])
             grads["g0"] = np.zeros_like(grads["g0"])
             return Q, grads, P
 
         # ── Fast norm from pre‑integrated Gram matrices ──────────
-        self._ensure_gram(params, phsp_handle=data_handle)
+        if pb is None:
+            raise RuntimeError("IntegratedBackend: phsp not loaded.")
 
-        if self._Mpp_r is None:
-            raise RuntimeError("IntegratedBackend: phsp not loaded. "
-                               "Call prepare_phsp_batched() first.")
+        m0 = np.asarray(params["m0"])
+        g0 = np.asarray(params["g0"])
+        self.ensure_gram(pb, m0, g0)
 
         ck = np.asarray(params["ck"], dtype=complex)
         n = len(ck) // 2
@@ -344,9 +368,9 @@ class IntegratedBackend(ComputeBackend):
         # ── Spatial integrals (reduced 56×56) ─────────────────────
         g_B0 = np.array([ck_B0[grp[0]] for grp in self._groups_B0])
         g_B1 = np.array([ck_B0bar[grp[0]] for grp in self._groups_B0bar])
-        I_pp = g_B0.conj() @ self._Mpp_r @ g_B0
-        I_mm = g_B1.conj() @ self._Mmm_r @ g_B1
-        I_pm = g_B0.conj() @ self._Mpm_r @ g_B1
+        I_pp = g_B0.conj() @ pb.Mpp @ g_B0
+        I_mm = g_B1.conj() @ pb.Mmm @ g_B1
+        I_pm = g_B0.conj() @ pb.Mpm @ g_B1
 
         self.int_Ap2 = float(I_pp.real)
         self.int_Am2 = float(I_mm.real)
@@ -355,10 +379,10 @@ class IntegratedBackend(ComputeBackend):
         # Time averages via unified method (GPU if available, else CPU)
         (gp2_avg, gm2_avg, gpgm_avg,
          icht, ict, isht, ist,
-         idcht, idct, idsht, idst) = self._compute_time_averages(params["scalar"])
+         idcht, idct, idsht, idst) = self._compute_time_averages(params["scalar"], pb)
 
         # Combine
-        frac_avg = float(np.sum(self._phsp_weights * self._phsp_frac))
+        frac_avg = float(np.sum(pb.weight * pb.frac))
         omf = 1.0 - frac_avg
         A_co = frac_avg * (1.0 - A_prod)
         B_co = omf * (1.0 + A_prod)
@@ -380,10 +404,10 @@ class IntegratedBackend(ComputeBackend):
         grad_ck = np.empty_like(ck, dtype=complex)
         g_B0 = np.array([ck_B0[grp[0]] for grp in self._groups_B0])
         g_B1 = np.array([ck_B0bar[grp[0]] for grp in self._groups_B0bar])
-        grad_B0_red = (C_pp * (self._Mpp_r @ g_B0)
-                       + z_total * (self._Mpm_r @ g_B1)).conj()
-        grad_B1_red = (C_mm * (self._Mmm_r @ g_B1)).conj() \
-                      + z_total * (self._Mpm_r.T @ g_B0.conj())
+        grad_B0_red = (C_pp * (pb.Mpp @ g_B0)
+                       + z_total * (pb.Mpm @ g_B1)).conj()
+        grad_B1_red = (C_mm * (pb.Mmm @ g_B1)).conj() \
+                      + z_total * (pb.Mpm.T @ g_B0.conj())
         for gi, grp in enumerate(self._groups_B0):
             w = 1.0 / len(grp)
             for idx in grp:
@@ -429,22 +453,17 @@ class IntegratedBackend(ComputeBackend):
 
         grads = {"ck": grad_ck, "m0": _z_m0, "g0": _z_g0,
                  "scalar": scalar_grads, "norm": None}
-        P = None if not return_p else np.zeros(self.phsp_n)
+        P = None if not return_p else np.zeros(pb.n_events if pb else 0)
 
         return float(norm_val.real if hasattr(norm_val, 'real')
                      else norm_val), grads, P
 
     def free(self):
         """Release all resources (matrices + base backend + time avg cache)."""
-        self._Mpp_r = self._Mmm_r = self._Mpm_r = None
-        self._gram_m0 = self._gram_g0 = None
-        self._phsp_data = None
-        self._phsp_weights = self._phsp_frac = self._phsp_time = None
         self._cached_Gam = self._cached_DG = self._cached_Dm = None
         self._cache_expt = self._cache_cht = self._cache_sht = None
         self._cache_ct = self._cache_st = None
         self._ta_key = self._ta_result = None
-        self.phsp_n = 0
         try:
             self.base.free()
         except Exception:
