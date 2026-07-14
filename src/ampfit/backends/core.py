@@ -49,15 +49,9 @@ def eval_backend_spec(spec, kernel_config):
 
     cls = ALL_BACKENDS[name]
 
-    # Recursively resolve any kwargs that are themselves backend specs
-    resolved = {}
-    for k, v in spec.items():
-        if isinstance(v, (str, dict)):
-            resolved[k] = eval_backend_spec(v, kernel_config)
-        else:
-            resolved[k] = v
-
-    return cls(kernel_config, **resolved)
+    # Pass all kwargs through directly — backend constructors that
+    # need nested backends (e.g. ``base``) call create_backend themselves.
+    return cls(kernel_config, **spec)
 
 
 def create_backend(spec, kernel_config, **kwargs):
