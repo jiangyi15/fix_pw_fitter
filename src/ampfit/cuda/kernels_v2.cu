@@ -254,11 +254,10 @@ __global__ void gram_common_kernel(
 
     // ── Phase 4: write group sums to global A0/A1 ───────────────────
     if (tid < ng) {
-        double sw = sqrt(weight[event_idx]);
-        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid] * sw;
-        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid] * sw;
-        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid] * sw;
-        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid] * sw;
+        A0_real[event_idx * ng + tid] = s_grp[0 * ng + tid];
+        A0_imag[event_idx * ng + tid] = s_grp[1 * ng + tid];
+        A1_real[event_idx * ng + tid] = s_grp[2 * ng + tid];
+        A1_imag[event_idx * ng + tid] = s_grp[3 * ng + tid];
     }
 }
 
@@ -272,6 +271,7 @@ __global__ void gram_common_kernel(
 __global__ void gram_reduce_kernel(
     const double* __restrict__ A0_real, const double* __restrict__ A0_imag,
     const double* __restrict__ A1_real, const double* __restrict__ A1_imag,
+    const double* __restrict__ weight,
     int n_events, int ng,
     double* __restrict__ Mpp_r, double* __restrict__ Mpp_i,
     double* __restrict__ Mmm_r, double* __restrict__ Mmm_i,
@@ -286,20 +286,20 @@ __global__ void gram_reduce_kernel(
     double sum_pm_r = 0.0, sum_pm_i = 0.0;
 
     for (int e = 0; e < n_events; e++) {
+        double w = weight[e];
         int base = e * ng;
-        // conj(A0[gi]) * A0[gj]
         double a0ri = A0_real[base + gi], a0ii = A0_imag[base + gi];
         double a0rj = A0_real[base + gj], a0ij = A0_imag[base + gj];
-        sum_pp_r += a0ri * a0rj + a0ii * a0ij;  // conj(a)*b = (ar-ai*i)*(br+bi*i) = ar*br+ai*bi + (ar*bi-ai*br)*i
-        sum_pp_i += a0ri * a0ij - a0ii * a0rj;
+        sum_pp_r += w * (a0ri * a0rj + a0ii * a0ij);
+        sum_pp_i += w * (a0ri * a0ij - a0ii * a0rj);
 
         double a1ri = A1_real[base + gi], a1ii = A1_imag[base + gi];
         double a1rj = A1_real[base + gj], a1ij = A1_imag[base + gj];
-        sum_mm_r += a1ri * a1rj + a1ii * a1ij;
-        sum_mm_i += a1ri * a1ij - a1ii * a1rj;
+        sum_mm_r += w * (a1ri * a1rj + a1ii * a1ij);
+        sum_mm_i += w * (a1ri * a1ij - a1ii * a1rj);
 
-        sum_pm_r += a0ri * a1rj + a0ii * a1ij;
-        sum_pm_i += a0ri * a1ij - a0ii * a1rj;
+        sum_pm_r += w * (a0ri * a1rj + a0ii * a1ij);
+        sum_pm_i += w * (a0ri * a1ij - a0ii * a1rj);
     }
 
     Mpp_r[gi * ng + gj] = sum_pp_r;
@@ -1125,6 +1125,7 @@ void launch_gram_common(
 void launch_gram_reduce(
     const double* A0_real, const double* A0_imag,
     const double* A1_real, const double* A1_imag,
+    const double* weight,
     int n_events, int ng,
     double* Mpp_r, double* Mpp_i,
     double* Mmm_r, double* Mmm_i,
@@ -1132,7 +1133,7 @@ void launch_gram_reduce(
 
     dim3 grid(ng, ng);
     gram_reduce_kernel<<<grid, 1>>>(
-        A0_real, A0_imag, A1_real, A1_imag,
+        A0_real, A0_imag, A1_real, A1_imag, weight,
         n_events, ng,
         Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
 }
@@ -1606,7 +1607,7 @@ void cuda_gram_matrix_v2(void* vctx, void* vdh,
 
         // Kernel 2b: reduce A0/A1 → Gram matrix for this batch
         launch_gram_reduce(
-            A0r, A0i, A1r, A1i, nb, ng2,
+            A0r, A0i, A1r, A1i, d.weight, nb, ng2,
             Mpp_r, Mpp_i, Mmm_r, Mmm_i, Mpm_r, Mpm_i);
         CUDA_CHECK(cudaGetLastError());
 
