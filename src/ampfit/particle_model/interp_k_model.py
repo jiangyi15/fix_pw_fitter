@@ -138,16 +138,37 @@ class KToCRWeightsTransform(Transform):
         return {self.k_name: dk}
 
     def inverse(self, d):
-        target = float(d.get(self.g0_names[0], 0.0))
-        lo, hi = self.k_min, self.k_max
-        for _ in range(25):
-            mid = (lo + hi) / 2.0
-            g0, _, _, _, _ = self._weights(mid)
-            if g0[0] > target:
-                lo = mid
-            else:
-                hi = mid
-        return {self.k_name: (lo + hi) / 2.0,
+        """Approximate inverse via peak-weight position.
+
+        Finds ``k`` by locating the index of the maximum weight
+        and estimating the intra-bin fraction from the CR pattern.
+        """
+        target = np.array([float(d.get(n, 0.0)) for n in self.g0_names])
+        peak = int(np.argmax(target))
+
+        if peak <= 0:
+            k0 = self.k_min
+        elif peak >= self.n_k - 1:
+            k0 = self.k_max
+        else:
+            # Refine within bin [peak-1, peak+1] via ternary search
+            lo = self.k_min + max(peak - 1, 0) * self._delta_k
+            hi = self.k_min + min(peak + 2, self.n_k - 1) * self._delta_k
+
+            def mse(k):
+                g0, _, _, _, _ = self._weights(k)
+                return float(np.sum((g0 - target) ** 2))
+
+            for _ in range(20):
+                m1 = (lo * 2 + hi) / 3.0
+                m2 = (lo + hi * 2) / 3.0
+                if mse(m1) < mse(m2):
+                    hi = m2
+                else:
+                    lo = m1
+            k0 = (lo + hi) / 2.0
+
+        return {self.k_name: k0,
                 self.mass_name: self.mass_fixed}
 
 
