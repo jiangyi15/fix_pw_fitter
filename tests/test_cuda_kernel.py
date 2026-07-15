@@ -8,6 +8,7 @@ raw ``CUDAKernel`` import.
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+import gc
 import numpy as np
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
@@ -15,7 +16,11 @@ from ampfit.backends import create_backend
 CONFIG_FILE = "config_angle.yml"
 
 
-def make_params(kernel_config, ck_map):
+def _rng():
+    return np.random.default_rng(SEED)
+
+
+def make_params(rng, kernel_config, ck_map):
     """Build random params dict with correct shapes from the kernel config."""
     n_ck = len(ck_map)
     idx = kernel_config.get("m0_index", [])
@@ -23,39 +28,49 @@ def make_params(kernel_config, ck_map):
     idx = kernel_config.get("g0_index", [])
     n_g0 = int(np.max(idx)) + 1 if len(idx) else 0
     return {
-        'ck': np.random.random(n_ck) + 1j * np.random.random(n_ck),
-        'm0': np.random.random(n_m0) + 2,
-        'g0': np.random.random(n_g0) + 0.1,
+        'ck': rng.random(n_ck) + 1j * rng.random(n_ck),
+        'm0': rng.random(n_m0) + 2,
+        'g0': rng.random(n_g0) + 0.1,
         'scalar': [0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
     }
 
 
-def make_data(n_events):
+def make_data(rng, n_events):
     return {
-        'mass': np.random.uniform(2, 3, (n_events, 48)),
-        'q': np.random.random((n_events, 72)),
-        'angle': np.random.random((n_events, 24, 3)),
-        'frac': np.random.random((n_events,)),
-        'time': np.random.random((n_events,)),
-        'bkg': np.random.random((n_events,)) * 0.01,
+        'mass': rng.uniform(2, 3, (n_events, 48)),
+        'q': rng.random((n_events, 72)),
+        'angle': rng.random((n_events, 24, 3)),
+        'frac': rng.random((n_events,)),
+        'time': rng.random((n_events,)),
+        'bkg': rng.random((n_events,)) * 0.01,
         'weight': np.ones((n_events,)),
     }
 
 
+BATCH_SIZE = 2000  # GPU batch limit for limited-memory GPUs
+SEED = 42          # fixed seed for reproducible params+data
+
+
+def _backend_spec(name):
+    """Backend spec with reduced batch size."""
+    return {"name": name, "batch_size": BATCH_SIZE}
+
+
 def test_backend_vs_numpy(backend_name="cuda_v3"):
     """Compare Q, P, and gradients between a GPU backend and NumPy."""
+    rng = _rng()
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config, config.get_ck_map())
+    params = make_params(rng, kernel_config, config.get_ck_map())
 
     # NumPy reference
     np_backend = create_backend("numpy", kernel_config)
-    data = make_data(100)
+    data = make_data(rng, 50)
     np_handle = np_backend.load_data(data)
     Q_np, grads_np, P_np = np_backend.compute(params, np_handle)
 
     # Target backend (CUDA)
-    target = create_backend(backend_name, kernel_config)
+    target = create_backend(_backend_spec(backend_name), kernel_config)
     target_handle = target.load_data(data)
     Q_cu, grads_cu, P_cu = target.compute(params, target_handle)
     target_handle.free()
@@ -69,17 +84,19 @@ def test_backend_vs_numpy(backend_name="cuda_v3"):
     print(f"✓ {backend_name} vs NumPy: Q={Q_np:.6f}, max|grad_err|={max(
         np.max(np.abs(grads_np[k] - grads_cu[k])) for k in ('ck', 'm0', 'g0')
     ):.2e}")
+    target.free()
 
 
 def test_multi_dataset(backend_name="cuda_v3"):
     """Verify different data → different Q, same data → same Q."""
+    rng = _rng()
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config, config.get_ck_map())
+    params = make_params(rng, kernel_config, config.get_ck_map())
+    backend = create_backend(_backend_spec(backend_name), kernel_config)
 
-    backend = create_backend(backend_name, kernel_config)
-    dh1 = backend.load_data(make_data(50))
-    dh2 = backend.load_data(make_data(50))
+    dh1 = backend.load_data(make_data(rng, 50))
+    dh2 = backend.load_data(make_data(rng, 50))
 
     Q1, _, _ = backend.compute(params, dh1)
     Q2, _, _ = backend.compute(params, dh2)
@@ -90,18 +107,20 @@ def test_multi_dataset(backend_name="cuda_v3"):
 
     dh1.free()
     dh2.free()
+    backend.free()
     print(f"✓ {backend_name} multi-dataset: consistent")
 
 
 def test_with_norm(backend_name="cuda_v3"):
     """Compute NLL with norm — should give finite values."""
+    rng = _rng()
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
-    params = make_params(kernel_config, config.get_ck_map())
+    params = make_params(rng, kernel_config, config.get_ck_map())
 
-    backend = create_backend(backend_name, kernel_config)
-    data = make_data(50)
-    phsp = make_data(100)
+    backend = create_backend(_backend_spec(backend_name), kernel_config)
+    data = make_data(rng, 50)
+    phsp = make_data(rng, 100)
     phsp['bkg'] = np.zeros(100)
 
     dh = backend.load_data(data)
@@ -116,6 +135,7 @@ def test_with_norm(backend_name="cuda_v3"):
 
     dh.free()
     ph.free()
+    backend.free()
     print(f"✓ {backend_name} norm: NLL={nll:.6f}")
 
 

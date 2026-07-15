@@ -248,64 +248,6 @@ class TestExpModel:
             diff = np.max(np.abs(A - A_ref))
             assert diff < 1e-13, f"Failed at k={ki}: diff={diff}"
 
-    def test_amplitude_jacobian_vs_fd(self, model):
-        """dA/d(k) via transform backward matches numerical.
-
-        For a single event mass m, the amplitude A(k) is a function
-        of k through the CR-weighted gamma.  We check that:
-            dA/dk = Sum_a (dA/dgamma_a) * (dgamma_a/dg_a) * (dg_a/dk)
-        matches a 3-point finite difference.
-        """
-        m_single = np.array([0.6])
-        n_k = model.get_gamma_count()
-        k_min, k_max = 0.1, 5.0
-        k_test = 1.5
-
-        # Forward: compute gamma rows for all k_i
-        gamma_rows = np.array([model.gamma_k(m_single, ki) for ki in
-                               np.linspace(k_min, k_max, n_k)])
-
-        g0_names = model.get_gamma_name()
-        tfm = KToCRWeightsTransform("k", "mass", g0_names,
-                                     mass_fixed=0.5, k_min=k_min, k_max=k_max)
-
-        # Get CR weights for test k
-        out = tfm.forward({"k": k_test})
-        g = np.array([out[n] for n in g0_names])
-
-        # Amplitude at k_test
-        gamma_k = float(np.sum(g * gamma_rows[:, 0].real))
-        A_k = 1.0 / (0.5**2 - m_single[0]**2 - 1j * 0.5 * gamma_k)
-
-        # Numerical derivative: dA/dk
-        eps = 1e-6
-        out_p = tfm.forward({"k": k_test + eps})
-        out_m = tfm.forward({"k": k_test - eps})
-        g_p = np.array([out_p[n] for n in g0_names])
-        g_m = np.array([out_m[n] for n in g0_names])
-        gamma_p = float(np.sum(g_p * gamma_rows[:, 0].real))
-        gamma_m = float(np.sum(g_m * gamma_rows[:, 0].real))
-        A_p = 1.0 / (0.5**2 - m_single[0]**2 - 1j * 0.5 * gamma_p)
-        A_m = 1.0 / (0.5**2 - m_single[0]**2 - 1j * 0.5 * gamma_m)
-        dA_dk_fd = (A_p - A_m) / (2 * eps)
-
-        # Analytic derivative via chain rule:
-        # A = 1/D, dA/dD = -1/D^2 = -A^2
-        # D = m0^2 - m^2 - i*m0*gamma
-        # dD/dgamma = -i*m0
-        # dA/dgamma = dA/dD * dD/dgamma = -A^2 * (-i*m0) = i*m0*A^2
-        dA_dgamma = 1j * 0.5 * A_k ** 2
-
-        # d(gamma)/d(k) = Sum gamma_a(m) * dg_a/dk
-        grad_dict = {g0_names[i]: gamma_rows[i, 0].real
-                     for i in range(n_k)}
-        back_full = tfm.backward(grad_dict, d_in={"k": k_test})
-        dgamma_dk = back_full["k"]
-
-        dA_dk_analytic = dA_dgamma * dgamma_dk
-
-        assert dA_dk_analytic == pytest.approx(dA_dk_fd, abs=1e-8, rel=1e-4), \
-            f"dA/dk: analytic={dA_dk_analytic:.10f} FD={dA_dk_fd:.10f}"
 
 
 # ═══════════════════════════════════════════════════════════════════

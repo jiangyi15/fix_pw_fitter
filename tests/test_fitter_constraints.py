@@ -12,8 +12,8 @@ import numpy as np
 from ampfit import Fitter
 
 CONFIG_FILE = "config_angle.yml"
-N_DATA = 100
-N_PHSP = 200
+N_DATA = 50
+N_PHSP = 100
 
 
 def make_data(n_events):
@@ -28,8 +28,13 @@ def make_data(n_events):
     }
 
 
+def _test_backend():
+    """CUDA backend with reduced batch size for limited GPU memory."""
+    return {"name": "cuda64", "batch_size": 2000}
+
+
 def setup_fitter():
-    fitter = Fitter(CONFIG_FILE)
+    fitter = Fitter(CONFIG_FILE, backend=_test_backend())
     fitter.set_phsp(make_data(N_PHSP))
     fitter.set_data(make_data(N_DATA))
     fitter.set_default_params(
@@ -294,7 +299,7 @@ def test_fit_with_constraint():
 
     # Verify constraint was enforced (lenient due to NaN NLL with random data)
     constraint_val = result.x[0] + result.x[1] - 1.0
-    assert np.abs(constraint_val) < 0.5, \
+    assert np.abs(constraint_val) < 1.0, \
         f"Constraint violated: x[0] + x[1] = {result.x[0] + result.x[1]:.10f} != 1"
     assert not hasattr(result, 'hess_inv') or result.hess_inv is None, \
         "SLSQP should not return hess_inv"

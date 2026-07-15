@@ -20,7 +20,7 @@ import onnxruntime as ort
 
 # Build ONNX model from config (matches how onnx_backend.py does it).
 CONFIG_FILE = "config_angle.yml"
-BATCH_SIZE = 1024
+BATCH_SIZE = 512
 
 import warnings
 from ampfit.config_loader import Config
