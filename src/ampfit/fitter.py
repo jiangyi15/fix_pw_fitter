@@ -950,7 +950,7 @@ class Fitter:
     # Plotting
     # ------------------------------------------------------------------
     def plot(self, result=None, x=None, params=None, prefix="plots/",
-             n_bins=50, cols=4, figsize=(15, 10), show=False):
+             n_bins=50, cols=4, figsize=(15, 10), show=False, format=None):
         """Plot data vs phsp distributions, saving figures to a directory.
         
         For each variable, shows two histograms:
@@ -1064,7 +1064,7 @@ class Fitter:
 
         def _save_figure(fig, name):
             path = os.path.join(prefix, name)
-            fig.savefig(path, dpi=150, bbox_inches='tight')
+            fig.savefig(path, dpi=150, bbox_inches='tight', format=format)
             plt.close(fig)
             print(f"  saved {path}")
 
