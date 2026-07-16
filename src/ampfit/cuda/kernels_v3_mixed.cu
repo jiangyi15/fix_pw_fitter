@@ -1250,12 +1250,12 @@ void launch_compute_all(
 
 // ── Upload helpers (plain C) ──
 static void* _up_int(const int* src, int n) {
-    int* d; cudaMalloc(&d, n * sizeof(int));
-    cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
+    int* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice)); return d;
 }
 static void* _up_flt(const float* src, int n) {
-    float* d; cudaMalloc(&d, n * sizeof(float));
-    cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
+    float* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice)); return d;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1307,53 +1307,53 @@ void* cuda_create_context_v3_mixed(
         int bs = c->batch_size;
         c->scratch = (ComputeData*)calloc(1, sizeof(ComputeData));
         // Float buffers (bulk compute)
-        cudaMalloc(&c->scratch->g_interp_real, bs * ngr * sizeof(float));
-        cudaMalloc(&c->scratch->g_interp_imag, bs * ngr * sizeof(float));
-        cudaMalloc(&c->scratch->g_bw_real, bs * nub * sizeof(float));
-        cudaMalloc(&c->scratch->g_bw_imag, bs * nub * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&c->scratch->g_interp_real, bs * ngr * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->g_interp_imag, bs * ngr * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->g_bw_real, bs * nub * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->g_bw_imag, bs * nub * sizeof(float)));
         // Double output buffers
-        cudaMalloc(&c->scratch->Q_out, bs * sizeof(double));
-        cudaMalloc(&c->scratch->P_out, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&c->scratch->Q_out, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->P_out, bs * sizeof(double)));
         // Float amplitude buffers
-        cudaMalloc(&c->scratch->pap_real, bs * sizeof(float));
-        cudaMalloc(&c->scratch->pap_imag, bs * sizeof(float));
-        cudaMalloc(&c->scratch->pam_real, bs * sizeof(float));
-        cudaMalloc(&c->scratch->pam_imag, bs * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&c->scratch->pap_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->pap_imag, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->pam_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->pam_imag, bs * sizeof(float)));
         // Double time-evolution buffers
-        cudaMalloc(&c->scratch->gp_real, bs * sizeof(double));
-        cudaMalloc(&c->scratch->gp_imag, bs * sizeof(double));
-        cudaMalloc(&c->scratch->gm_real, bs * sizeof(double));
-        cudaMalloc(&c->scratch->gm_imag, bs * sizeof(double));
-        cudaMalloc(&c->scratch->poq_real, bs * sizeof(double));
-        cudaMalloc(&c->scratch->poq_imag, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&c->scratch->gp_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->gp_imag, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->gm_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->gm_imag, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->poq_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->poq_imag, bs * sizeof(double)));
         // Float intermediate buffers
-        cudaMalloc(&c->scratch->bw_p_real, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->bw_p_imag, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->common_amp_factor_real, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->common_amp_factor_imag, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->ap_real, bs * sizeof(float));
-        cudaMalloc(&c->scratch->ap_imag, bs * sizeof(float));
-        cudaMalloc(&c->scratch->am_real, bs * sizeof(float));
-        cudaMalloc(&c->scratch->am_imag, bs * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&c->scratch->bw_p_real, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->bw_p_imag, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->common_amp_factor_real, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->common_amp_factor_imag, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->ap_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->ap_imag, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->am_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->am_imag, bs * sizeof(float)));
         // Double dQ_dP
-        cudaMalloc(&c->scratch->dQ_dP, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&c->scratch->dQ_dP, bs * sizeof(double)));
         // Float bw_dom
-        cudaMalloc(&c->scratch->bw_dom_real, bs * nub * sizeof(float));
-        cudaMalloc(&c->scratch->bw_dom_imag, bs * nub * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&c->scratch->bw_dom_real, bs * nub * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->bw_dom_imag, bs * nub * sizeof(float)));
         // Float ck/m0/g0 gradient buffers
-        cudaMalloc(&c->scratch->grad_ck_real_partial, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->grad_ck_imag_partial, bs * nw * sizeof(float));
-        cudaMalloc(&c->scratch->grad_m0_partial, bs * nub * sizeof(float));
-        cudaMalloc(&c->scratch->grad_g0_partial, bs * ngr * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_ck_real_partial, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_ck_imag_partial, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_m0_partial, bs * nub * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_g0_partial, bs * ngr * sizeof(float)));
         // Double scalar gradient buffers
-        cudaMalloc(&c->scratch->grad_Gamma_partial, bs * sizeof(double));
-        cudaMalloc(&c->scratch->grad_DeltaGamma_partial, bs * sizeof(double));
-        cudaMalloc(&c->scratch->grad_DeltaM_partial, bs * sizeof(double));
-        cudaMalloc(&c->scratch->grad_Ap_partial, bs * sizeof(double));
-        cudaMalloc(&c->scratch->grad_poq_rho_partial, bs * sizeof(double));
-        cudaMalloc(&c->scratch->grad_pop_phi_partial, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_Gamma_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_DeltaGamma_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_DeltaM_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_Ap_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_poq_rho_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->grad_pop_phi_partial, bs * sizeof(double)));
 
-        cudaMalloc(&c->Q_red_gpu, 4);
+        CUDA_CHECK(cudaMalloc(&c->Q_red_gpu, 4));
     } else {
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
@@ -1438,22 +1438,22 @@ void cuda_gram_matrix_v3_mixed(void* vctx, void* vdh,
         s = *c->scratch;
     } else {
         memset(&s, 0, sizeof(ComputeData));
-        cudaMalloc(&s.g_interp_real, bs * ng * sizeof(float));
-        cudaMalloc(&s.g_interp_imag, bs * ng * sizeof(float));
-        cudaMalloc(&s.g_bw_real, bs * nu * sizeof(float));
-        cudaMalloc(&s.g_bw_imag, bs * nu * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&s.g_interp_real, bs * ng * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_interp_imag, bs * ng * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_bw_real, bs * nu * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_bw_imag, bs * nu * sizeof(float)));
     }
 
     float *A0r, *A0i, *A1r, *A1i;
     size_t a_sz = (size_t)bs * ng2 * sizeof(float);
-    cudaMalloc(&A0r, a_sz); cudaMalloc(&A0i, a_sz);
-    cudaMalloc(&A1r, a_sz); cudaMalloc(&A1i, a_sz);
+    CUDA_CHECK(cudaMalloc(&A0r, a_sz)); CUDA_CHECK(cudaMalloc(&A0i, a_sz));
+    CUDA_CHECK(cudaMalloc(&A1r, a_sz)); CUDA_CHECK(cudaMalloc(&A1i, a_sz));
 
     size_t g_sz = (size_t)ng2 * ng2 * sizeof(float);
     float *Mpp_r, *Mpp_i, *Mmm_r, *Mmm_i, *Mpm_r, *Mpm_i;
-    cudaMalloc(&Mpp_r, g_sz); cudaMalloc(&Mpp_i, g_sz);
-    cudaMalloc(&Mmm_r, g_sz); cudaMalloc(&Mmm_i, g_sz);
-    cudaMalloc(&Mpm_r, g_sz); cudaMalloc(&Mpm_i, g_sz);
+    CUDA_CHECK(cudaMalloc(&Mpp_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpp_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mmm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mmm_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mpm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpm_i, g_sz));
 
     memset(oMpp_r, 0, g_sz * 2); memset(oMpp_i, 0, g_sz * 2);
     memset(oMmm_r, 0, g_sz * 2); memset(oMmm_i, 0, g_sz * 2);
@@ -1563,49 +1563,49 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
     } else {
         memset(&s, 0, sizeof(ComputeData));
         // Float buffers (bulk compute)
-        cudaMalloc(&s.g_interp_real, bs * ng * sizeof(float));
-        cudaMalloc(&s.g_interp_imag, bs * ng * sizeof(float));
-        cudaMalloc(&s.g_bw_real, bs * nu * sizeof(float));
-        cudaMalloc(&s.g_bw_imag, bs * nu * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&s.g_interp_real, bs * ng * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_interp_imag, bs * ng * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_bw_real, bs * nu * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.g_bw_imag, bs * nu * sizeof(float)));
         // Double output buffers
-        cudaMalloc(&s.Q_out, bs * sizeof(double));
-        cudaMalloc(&s.P_out, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&s.Q_out, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.P_out, bs * sizeof(double)));
         // Float amplitude buffers
-        cudaMalloc(&s.pap_real, bs * sizeof(float));
-        cudaMalloc(&s.pap_imag, bs * sizeof(float));
-        cudaMalloc(&s.pam_real, bs * sizeof(float));
-        cudaMalloc(&s.pam_imag, bs * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&s.pap_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.pap_imag, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.pam_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.pam_imag, bs * sizeof(float)));
         // Double time-evolution buffers
-        cudaMalloc(&s.gp_real, bs * sizeof(double));
-        cudaMalloc(&s.gp_imag, bs * sizeof(double));
-        cudaMalloc(&s.gm_real, bs * sizeof(double));
-        cudaMalloc(&s.gm_imag, bs * sizeof(double));
-        cudaMalloc(&s.poq_real, bs * sizeof(double));
-        cudaMalloc(&s.poq_imag, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&s.gp_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.gp_imag, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.gm_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.gm_imag, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.poq_real, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.poq_imag, bs * sizeof(double)));
         // Float intermediate buffers
-        cudaMalloc(&s.bw_p_real, bs * nw * sizeof(float));
-        cudaMalloc(&s.bw_p_imag, bs * nw * sizeof(float));
-        cudaMalloc(&s.common_amp_factor_real, bs * nw * sizeof(float));
-        cudaMalloc(&s.common_amp_factor_imag, bs * nw * sizeof(float));
-        cudaMalloc(&s.ap_real, bs * sizeof(float));
-        cudaMalloc(&s.ap_imag, bs * sizeof(float));
-        cudaMalloc(&s.am_real, bs * sizeof(float));
-        cudaMalloc(&s.am_imag, bs * sizeof(float));
-        cudaMalloc(&s.dQ_dP, bs * sizeof(double));
-        cudaMalloc(&s.bw_dom_real, bs * nu * sizeof(float));
-        cudaMalloc(&s.bw_dom_imag, bs * nu * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&s.bw_p_real, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.bw_p_imag, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.common_amp_factor_real, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.common_amp_factor_imag, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.ap_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.ap_imag, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.am_real, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.am_imag, bs * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.dQ_dP, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.bw_dom_real, bs * nu * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.bw_dom_imag, bs * nu * sizeof(float)));
         // Float gradient buffers
-        cudaMalloc(&s.grad_ck_real_partial, bs * nw * sizeof(float));
-        cudaMalloc(&s.grad_ck_imag_partial, bs * nw * sizeof(float));
-        cudaMalloc(&s.grad_m0_partial, bs * nu * sizeof(float));
-        cudaMalloc(&s.grad_g0_partial, bs * ng * sizeof(float));
+        CUDA_CHECK(cudaMalloc(&s.grad_ck_real_partial, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.grad_ck_imag_partial, bs * nw * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.grad_m0_partial, bs * nu * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&s.grad_g0_partial, bs * ng * sizeof(float)));
         // Double scalar gradient buffers
-        cudaMalloc(&s.grad_Gamma_partial, bs * sizeof(double));
-        cudaMalloc(&s.grad_DeltaGamma_partial, bs * sizeof(double));
-        cudaMalloc(&s.grad_DeltaM_partial, bs * sizeof(double));
-        cudaMalloc(&s.grad_Ap_partial, bs * sizeof(double));
-        cudaMalloc(&s.grad_poq_rho_partial, bs * sizeof(double));
-        cudaMalloc(&s.grad_pop_phi_partial, bs * sizeof(double));
+        CUDA_CHECK(cudaMalloc(&s.grad_Gamma_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.grad_DeltaGamma_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.grad_DeltaM_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.grad_Ap_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.grad_poq_rho_partial, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.grad_pop_phi_partial, bs * sizeof(double)));
     }
 
     *oQ = 0.0; memset(oP, 0, ne * sizeof(double));

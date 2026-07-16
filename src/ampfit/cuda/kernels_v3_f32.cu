@@ -1225,16 +1225,16 @@ void launch_compute_all(
 
 // ── Upload helpers (plain C) ──
 static void* _up_int(const int* src, int n) {
-    int* d; cudaMalloc(&d, n * sizeof(int));
-    cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
+    int* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice)); return d;
 }
 static void* _up_dbl(const float* src, int n) {
-    float* d; cudaMalloc(&d, n * sizeof(float));
-    cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
+    float* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice)); return d;
 }
 static void* _up_flt(const float* src, int n) {
-    float* d; cudaMalloc(&d, n * sizeof(float));
-    cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice); return d;
+    float* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(float), cudaMemcpyHostToDevice)); return d;
 }
 
 // ── High-level void* API ──
@@ -1297,11 +1297,11 @@ void* cuda_load_data(void* vctx, const float* mass, const float* mom,
     d->n_events = ne;
     // Allocate scratch inside data handle (one-time)
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-#define S(f) cudaMalloc(&d->f, ne * sizeof(float))
-#define S2(f,n) cudaMalloc(&d->f, ne * (n) * sizeof(float))
+#define S(f) CUDA_CHECK(cudaMalloc(&d->f, ne * sizeof(float)))
+#define S2(f,n) CUDA_CHECK(cudaMalloc(&d->f, ne * (n) * sizeof(float)))
     S2(g_interp_real, ng); S2(g_interp_imag, ng);
     S2(g_bw_real, nu); S2(g_bw_imag, nu);
-    cudaMalloc(&d->Q_out, ne * sizeof(double)); cudaMalloc(&d->P_out, ne * sizeof(double));
+    CUDA_CHECK(cudaMalloc(&d->Q_out, ne * sizeof(double))); CUDA_CHECK(cudaMalloc(&d->P_out, ne * sizeof(double)));
     S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
     S(gp_real); S(gp_imag); S(gm_real); S(gm_imag);
     S(poq_real); S(poq_imag);
@@ -1464,11 +1464,11 @@ void* cuda_create_context_v3_f32(
     if (c->batch_size > 0) {
         int bs = c->batch_size;
         c->scratch = (ComputeData*)calloc(1, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&c->scratch->f, bs * sizeof(float))
-        #define S2(f,n) cudaMalloc(&c->scratch->f, bs * (n) * sizeof(float))
+        #define S(f) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * sizeof(float)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * (n) * sizeof(float)))
         S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
         S2(g_bw_real, nub); S2(g_bw_imag, nub);
-        cudaMalloc(&c->scratch->Q_out, bs * sizeof(double)); cudaMalloc(&c->scratch->P_out, bs * sizeof(double)); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        CUDA_CHECK(cudaMalloc(&c->scratch->Q_out, bs * sizeof(double))); CUDA_CHECK(cudaMalloc(&c->scratch->P_out, bs * sizeof(double))); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
         S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
         S2(bw_p_real, nw); S2(bw_p_imag, nw);
         S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
@@ -1481,7 +1481,7 @@ void* cuda_create_context_v3_f32(
         S(grad_poq_rho_partial); S(grad_pop_phi_partial);
         #undef S
         #undef S2
-        cudaMalloc(&c->Q_red_gpu, 4);
+        CUDA_CHECK(cudaMalloc(&c->Q_red_gpu, 4));
     } else {
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
@@ -1564,8 +1564,8 @@ void cuda_gram_matrix_v3_f32(void* vctx, void* vdh,
         s = *c->scratch;
     } else {
         memset(&s, 0, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&s.f, bs * sizeof(float))
-        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(float))
+        #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(float)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(float)))
         S2(g_interp_real,ng); S2(g_interp_imag,ng);
         S2(g_bw_real,nu); S2(g_bw_imag,nu);
         #undef S
@@ -1574,14 +1574,14 @@ void cuda_gram_matrix_v3_f32(void* vctx, void* vdh,
 
     float *A0r, *A0i, *A1r, *A1i;
     size_t a_sz = (size_t)bs * ng2 * sizeof(float);
-    cudaMalloc(&A0r, a_sz); cudaMalloc(&A0i, a_sz);
-    cudaMalloc(&A1r, a_sz); cudaMalloc(&A1i, a_sz);
+    CUDA_CHECK(cudaMalloc(&A0r, a_sz)); CUDA_CHECK(cudaMalloc(&A0i, a_sz));
+    CUDA_CHECK(cudaMalloc(&A1r, a_sz)); CUDA_CHECK(cudaMalloc(&A1i, a_sz));
 
     size_t g_sz = (size_t)ng2 * ng2 * sizeof(float);
     float *Mpp_r, *Mpp_i, *Mmm_r, *Mmm_i, *Mpm_r, *Mpm_i;
-    cudaMalloc(&Mpp_r, g_sz); cudaMalloc(&Mpp_i, g_sz);
-    cudaMalloc(&Mmm_r, g_sz); cudaMalloc(&Mmm_i, g_sz);
-    cudaMalloc(&Mpm_r, g_sz); cudaMalloc(&Mpm_i, g_sz);
+    CUDA_CHECK(cudaMalloc(&Mpp_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpp_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mmm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mmm_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mpm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpm_i, g_sz));
 
     memset(oMpp_r, 0, g_sz * 2); memset(oMpp_i, 0, g_sz * 2);
     memset(oMmm_r, 0, g_sz * 2); memset(oMmm_i, 0, g_sz * 2);
@@ -1681,11 +1681,11 @@ void cuda_compute_v3_f32(void* vctx, void* vdh,
         s = *c->scratch;
     } else {
         memset(&s, 0, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&s.f, bs * sizeof(float))
-        #define S2(f,n) cudaMalloc(&s.f, bs * (n) * sizeof(float))
+        #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(float)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(float)))
         S2(g_interp_real,ng); S2(g_interp_imag,ng);
         S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        cudaMalloc(&s.Q_out, bs * sizeof(double)); cudaMalloc(&s.P_out, bs * sizeof(double)); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        CUDA_CHECK(cudaMalloc(&s.Q_out, bs * sizeof(double))); CUDA_CHECK(cudaMalloc(&s.P_out, bs * sizeof(double))); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
         S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
         S2(bw_p_real,nw); S2(bw_p_imag,nw);
         S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);

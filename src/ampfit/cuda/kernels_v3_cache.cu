@@ -1553,12 +1553,12 @@ void launch_compute_all(
 
 // ── Upload helpers (plain C) ──
 static void* _up_int(const int* src, int n) {
-    int* d; cudaMalloc(&d, n * sizeof(int));
-    cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice); return d;
+    int* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(int), cudaMemcpyHostToDevice)); return d;
 }
 static void* _up_dbl(const double* src, int n) {
-    double* d; cudaMalloc(&d, n * sizeof(double));
-    cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice); return d;
+    double* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d, src, n * sizeof(double), cudaMemcpyHostToDevice)); return d;
 }
 
 // ── High-level void* API ──
@@ -1621,8 +1621,8 @@ void* cuda_load_data(void* vctx, const double* mass, const double* mom,
     d->n_events = ne;
     // Allocate scratch inside data handle (one-time)
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-#define S(f) cudaMalloc(&d->f, ne * sizeof(double))
-#define S2(f,n) cudaMalloc(&d->f, ne * (n) * sizeof(double))
+#define S(f) CUDA_CHECK(cudaMalloc(&d->f, ne * sizeof(double)))
+#define S2(f,n) CUDA_CHECK(cudaMalloc(&d->f, ne * (n) * sizeof(double)))
     S2(g_interp_real, ng); S2(g_interp_imag, ng);
     S2(g_bw_real, nu); S2(g_bw_imag, nu);
     S(Q_out); S(P_out);
@@ -1791,8 +1791,8 @@ void* cuda_create_context_v3(
     if (c->batch_size > 0) {
         int bs = c->batch_size;
         c->scratch = (ComputeData*)calloc(1, sizeof(ComputeData));
-        #define S(f) cudaMalloc(&c->scratch->f, bs * sizeof(double))
-        #define S2(f,n) cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double))
+        #define S(f) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * sizeof(double)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double)))
         S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
         S2(g_bw_real, nub); S2(g_bw_imag, nub);
         S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
@@ -1809,7 +1809,7 @@ void* cuda_create_context_v3(
         S(grad_poq_rho_partial); S(grad_pop_phi_partial);
         #undef S
         #undef S2
-        cudaMalloc(&c->Q_red_gpu, 8);
+        CUDA_CHECK(cudaMalloc(&c->Q_red_gpu, 8));
     } else {
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
@@ -1908,14 +1908,14 @@ void cuda_gram_matrix_v3(void* vctx, void* vdh,
 
     double *A0r, *A0i, *A1r, *A1i;
     size_t a_sz = (size_t)bs * ng2 * sizeof(double);
-    cudaMalloc(&A0r, a_sz); cudaMalloc(&A0i, a_sz);
-    cudaMalloc(&A1r, a_sz); cudaMalloc(&A1i, a_sz);
+    CUDA_CHECK(cudaMalloc(&A0r, a_sz)); CUDA_CHECK(cudaMalloc(&A0i, a_sz));
+    CUDA_CHECK(cudaMalloc(&A1r, a_sz)); CUDA_CHECK(cudaMalloc(&A1i, a_sz));
 
     size_t g_sz = (size_t)ng2 * ng2 * sizeof(double);
     double *Mpp_r, *Mpp_i, *Mmm_r, *Mmm_i, *Mpm_r, *Mpm_i;
-    cudaMalloc(&Mpp_r, g_sz); cudaMalloc(&Mpp_i, g_sz);
-    cudaMalloc(&Mmm_r, g_sz); cudaMalloc(&Mmm_i, g_sz);
-    cudaMalloc(&Mpm_r, g_sz); cudaMalloc(&Mpm_i, g_sz);
+    CUDA_CHECK(cudaMalloc(&Mpp_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpp_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mmm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mmm_i, g_sz));
+    CUDA_CHECK(cudaMalloc(&Mpm_r, g_sz)); CUDA_CHECK(cudaMalloc(&Mpm_i, g_sz));
 
     memset(oMpp_r, 0, g_sz); memset(oMpp_i, 0, g_sz);
     memset(oMmm_r, 0, g_sz); memset(oMmm_i, 0, g_sz);
@@ -1988,14 +1988,14 @@ void cuda_time_averages_v3(void* vctx, void* vdh,
 
     // Allocate partial sums buffer: ne * 9 doubles
     double* partial;
-    cudaMalloc(&partial, ne * 9 * sizeof(double));
+    CUDA_CHECK(cudaMalloc(&partial, ne * 9 * sizeof(double)));
 
     // Launch partial sum kernel (1 thread/event)
     launch_time_avg_partial(h->t, h->w, Gamma, DG, Dm, partial, ne);
 
     // Reduce 9 features over all events
     double* reduced;
-    cudaMalloc(&reduced, 9 * sizeof(double));
+    CUDA_CHECK(cudaMalloc(&reduced, 9 * sizeof(double)));
     launch_reduce_sum_features(partial, reduced, ne, 9);
     cudaDeviceSynchronize();
 
@@ -2055,7 +2055,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
     // Allocate cache buffers lazily (only for data NLL, use_norm == 1)
     int want_cache = (use_norm != 0) && (n_cache > 0);
     if (want_cache && h->cached_amp == NULL) {
-        cudaMalloc(&h->cached_amp, ne * n_cache * sizeof(double2));
+        CUDA_CHECK(cudaMalloc(&h->cached_amp, ne * n_cache * sizeof(double2)));
     }
 
     // Use context-allocated scratch (pre-allocated in cuda_create_context_v3)
