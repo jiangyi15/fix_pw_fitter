@@ -182,8 +182,9 @@ def main():
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed")
     parser.add_argument("--output", default=None,
-                        help="Output directory (default: auto from constraint name)")
-
+                        help="Output dir (default: ./fit_constrained/)")
+    parser.add_argument("--format", default="png",
+                        help="Image format for the NLL progress plot (default: png)")
     parser.add_argument("--debug", action="store_true",
                         help="Use 1K data / 10K phsp")
     args = parser.parse_args()
@@ -358,7 +359,8 @@ def main():
             plt.title(f"Constrained fit: {args.constraint} = {args.target}")
             plt.ylim(best_nll - 0.5, best_nll + 50)
             plt.tight_layout()
-            plt.savefig(os.path.join(args.output, "nll_progress.png"))
+            plt.savefig(os.path.join(args.output, f"nll_progress.{args.format}"),
+                        format=args.format, dpi=150, bbox_inches="tight")
             plt.close()
         except ImportError:
             pass
