@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default="cuda_v3")
     ap.add_argument("-o", "--output", default="plots/")
+    ap.add_argument("--format", default="png",
+                    help="Image format (default: png)")
     ap.add_argument("--n-bins", type=int, default=20,
                     help="Number of time bins")
     args = ap.parse_args()
@@ -64,7 +66,8 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
     plotter.plot_time_asymmetry(t_min=0, t_max=10, n_bins=args.n_bins,
-                                output=args.output, prefix="time_asym")
+                                output=args.output, prefix="time_asym",
+                                fmt=args.format)
 
 
 if __name__ == "__main__":

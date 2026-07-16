@@ -24,7 +24,11 @@ def main():
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default="cuda_v3")
     ap.add_argument("-o", "--output", default="plots/")
+    ap.add_argument("--format", default="png",
+                    help="Image format (default: png)")
     args = ap.parse_args()
+
+    out_fmt = args.format
 
     f = Fitter(args.config, backend=args.backend)
     cp = os.path.splitext(args.fit_json)[0] + "_constraints.json"
@@ -55,7 +59,7 @@ def main():
     plotter.plot_var(
         lambda x: [x["mass"][:, i] for i in range(nm)],
         [f"mass[{i}]" for i in range(nm)],
-         0.2, 5.2, 0.05, "mass", output=args.output, smooth_sigma=1.0)
+         0.2, 5.2, 0.05, "mass", output=args.output, fmt=out_fmt, smooth_sigma=1.0)
 
     # Angles
     def angle_var(x):
@@ -69,11 +73,11 @@ def main():
     ar = [(-np.pi, np.pi), (-1, 1), (-1, 1)] * 3
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
     plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
-                     ranges=ar, output=args.output, unit="")
+                     ranges=ar, output=args.output, fmt=out_fmt, unit="")
 
     # Time
     plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 0.2, "time",
-                     output=args.output, unit="ps", legend=True, show_pull=True)
+                     output=args.output, fmt=out_fmt, unit="ps", legend=True, show_pull=True)
 
     # ── Stacked permutation plots (hardcoded unique indices) ────
     # ch0 start=0: [0,3,6,9] → 4 unique ππ (rhoA/f0)
@@ -84,15 +88,15 @@ def main():
 
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [0, 3, 6, 9]),
-        "m(π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipi", output=args.output,
+        "m(π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipi", output=args.output, fmt=out_fmt,
         smooth_sigma=1.0, show_pull=True, legend=True)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [1, 4]),
-        "m(π⁺π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipipip", output=args.output,
+        "m(π⁺π⁺π⁻)", 0.2, 5.2, 0.05, "m_pipipip", output=args.output, fmt=out_fmt,
         smooth_sigma=1.0, show_pull=True)
     plotter.plot_stacked_perm(
         lambda x: _mass_idx(x, [2, 8]),
-        "m(π⁺π⁻π⁻)", 0.2, 5.2, 0.05, "m_pipipim", output=args.output,
+        "m(π⁺π⁻π⁻)", 0.2, 5.2, 0.05, "m_pipipim", output=args.output, fmt=out_fmt,
         smooth_sigma=1.0, show_pull=True)
 
     # Sorted ππ: groups [0,9] and [3,6], each sorted within, then by group min
@@ -124,7 +128,7 @@ def main():
             lambda x, idx=i: [_sorted_pipi(x)[idx]],
             [_xlabels[i]], lo, hi, bw,
             f"m_pipi_sorted_{['pp1_min','pp1_max','pp2_min','pp2_max'][i]}",
-            output=args.output, smooth_sigma=1.0, legend=(i == 0), show_pull=True)
+            output=args.output, fmt=out_fmt, smooth_sigma=1.0, legend=(i == 0), show_pull=True)
 
     # Sorted pipipip and pipipim (2 perms each, sorted within)
     def _sorted_pair(x, idx_a, idx_b):
@@ -142,7 +146,7 @@ def main():
             plotter.plot_var(
                 lambda x, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
                 [label_j], rj[0], rj[1], 0.05,
-                f"{prefix}_{['min','max'][j]}", output=args.output,
+                f"{prefix}_{['min','max'][j]}", output=args.output, fmt=out_fmt,
                 smooth_sigma=1.0, show_pull=True)
 
     # Difference (y-axis): pipipip - pipipim at same x values
@@ -153,7 +157,7 @@ def main():
     plotter.plot_stacked_perm(
         diff_pipipi,
         r"$m(3\pi)$",
-        0.2, 5.2, 0.05, "m_pipipi_diff", output=args.output,
+        0.2, 5.2, 0.05, "m_pipipi_diff", output=args.output, fmt=out_fmt,
         scales=[1, 1, -1, -1], smooth_sigma=1.0, show_pull=True)
 
 

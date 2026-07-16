@@ -184,7 +184,7 @@ def main():
     parser.add_argument("--output", default=None,
                         help="Output dir (default: ./fit_constrained/)")
     parser.add_argument("--format", default="png",
-                        help="Image format for the NLL progress plot (default: png)")
+                        help="Image format for NLL progress plot (default: png)")
     parser.add_argument("--debug", action="store_true",
                         help="Use 1K data / 10K phsp")
     args = parser.parse_args()

@@ -183,7 +183,7 @@ def main():
         x_pad = max(np.abs(invD_re)) * 0.1
         ax_ar.set_xlim(np.min(invD_re) - x_pad, np.max(invD_re) + x_pad)
 
-    fig.savefig(args.output, dpi=150, bbox_inches="tight", format=args.format)
+    fig.savefig(args.output, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved {args.output}")
 

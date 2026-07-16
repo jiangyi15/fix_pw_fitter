@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--backend", default="cuda_v3", help="Compute backend")
     ap.add_argument("-o", "--output", default="plots/",
                     help="Output directory for plots (default: plots/)")
+    ap.add_argument("--format", default=None,
+                    help="Image format (png, pdf, …). Inferred from filename if omitted.")
     ap.add_argument("--show", action="store_true", help="Call plt.show()")
     ap.add_argument("--n-bins", type=int, default=50, help="Number of bins")
     args = ap.parse_args()
@@ -63,7 +65,8 @@ def main():
     print(f"  NLL at fit result: {nll:.4f}")
 
     # ── Plot ──────────────────────────────────────────────────────
-    f.plot(result=x0, prefix=args.output, n_bins=args.n_bins, show=args.show)
+    f.plot(result=x0, prefix=args.output, n_bins=args.n_bins, show=args.show,
+           format=args.format)
     print(f"  Plots saved to {args.output}/")
 
 

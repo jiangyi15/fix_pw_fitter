@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--n-points", type=int, default=500,
                     help="Number of mass points (default 500)")
     ap.add_argument("-o", "--output", default="bw_lineshape_uncert.pdf")
+    ap.add_argument("--format", default=None,
+                    help="Image format (e.g. png, pdf, svg). Inferred from --output extension if omitted.")
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
@@ -134,7 +136,7 @@ def main():
     fig.suptitle(f"{res_disp}  —  Re($1/D$) and Im($1/D$) with uncertainty band",
                  fontsize=11)
     fig.subplots_adjust(hspace=0.08)
-    fig.savefig(args.output, dpi=150, bbox_inches="tight")
+    fig.savefig(args.output, dpi=150, bbox_inches="tight", format=args.format)
     plt.close(fig)
     print(f"  saved {args.output}")
 
