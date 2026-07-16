@@ -29,6 +29,8 @@ def main():
                     help="Upper mass limit (default: m_B - m_pi ≈ 5.14)")
     ap.add_argument("--n-points", type=int, default=2000)
     ap.add_argument("-o", "--output", default="bw_lineshape.pdf")
+    ap.add_argument("--format", default=None,
+                    help="Image format (png, pdf, svg, …). Inferred from --output extension if omitted.")
     ap.add_argument("--backend", default="numpy")
     ap.add_argument("--resonances", nargs="*", default=None)
     args = ap.parse_args()
@@ -181,7 +183,7 @@ def main():
         x_pad = max(np.abs(invD_re)) * 0.1
         ax_ar.set_xlim(np.min(invD_re) - x_pad, np.max(invD_re) + x_pad)
 
-    fig.savefig(args.output, dpi=150, bbox_inches="tight")
+    fig.savefig(args.output, dpi=150, bbox_inches="tight", format=args.format)
     plt.close(fig)
     print(f"  saved {args.output}")
 
