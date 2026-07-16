@@ -362,14 +362,14 @@ def test_speedup():
     f_cpu.evaluate(c)
 
     t0 = time.perf_counter()
-    for _ in range(5):
+    for _ in range(200):
         f_cpu.evaluate(c)
-    t_cpu = (time.perf_counter() - t0) / 5
+    t_cpu = (time.perf_counter() - t0) / 200
 
     t0 = time.perf_counter()
-    for _ in range(5):
+    for _ in range(200):
         f_gpu.evaluate(c)
-    t_gpu = (time.perf_counter() - t0) / 5
+    t_gpu = (time.perf_counter() - t0) / 200
 
     speedup = t_cpu / t_gpu
     print(f"  CPU: {t_cpu*1000:.1f} ms  GPU: {t_gpu*1000:.1f} ms  "
