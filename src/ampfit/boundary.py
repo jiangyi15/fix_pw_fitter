@@ -70,6 +70,10 @@ class BoundTransform:
         """
         return np.abs(self.grad(x)) * error
 
+    def to_dict(self):
+        """Serialize to JSON-compatible dict."""
+        return {"low": self.a, "high": self.b}
+
 
 # Commonly used bounds for time-dependent amplitude parameters
 TIME_PARAM_BOUNDS = {
@@ -168,6 +172,16 @@ class Boundary:
             return bv, bt.trans_err(val, err)
         return bv
 
+    def apply_dict(self, d):
+        """Apply forward bounds to all values in dict *d* (in-place).
+
+        Only touches names that exist in *d* — silently skips others.
+        """
+        for name, bt in self._tfm.items():
+            if name in d:
+                d[name] = bt(d[name])
+        return d
+
     # ── gradient ──────────────────────────────────────────────────
 
     def correct_gradient(self, grad_flat, x_flat, flat_names, raw_dict):
@@ -202,8 +216,8 @@ class Boundary:
     # ── serialise ─────────────────────────────────────────────────
 
     def to_dict(self):
-        """Return {name: BoundTransform}."""
-        return dict(self._tfm)
+        """Return {name: {"low": a, "high": b}} for JSON save."""
+        return {name: bt.to_dict() for name, bt in self._tfm.items()}
 
     # ── introspection ─────────────────────────────────────────────
 

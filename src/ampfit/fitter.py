@@ -379,11 +379,11 @@ class Fitter:
         names = self._var_registry.flat_names
         defaults = self.defaults
         x = np.empty(len(names))
+        phys = {name: float(defaults[name]) for name in names if name in defaults}
+        raw = self.cm.inverse(phys)
         for i, name in enumerate(names):
-            if name in defaults:
-                val = float(defaults[name])
-                val = self.cm.bounds.inverse(name, val)
-                x[i] = val
+            if name in raw:
+                x[i] = float(raw[name])
             else:
                 x[i] = rng.uniform(-0.01, 0.01)
         return x
@@ -413,14 +413,7 @@ class Fitter:
             raw = self.cm.inverse(phys)
             for i, name in enumerate(names):
                 if name in raw:
-                    val = float(raw[name])
-                    val = self.cm.bounds.inverse(name, val)
-                    x[i] = val
-
-        return x
-
-    @property
-    def var_registry(self):
+                    x[i] = float(raw[name])
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
         _ = self.pc  # trigger lazy build
         return self._var_registry
@@ -584,9 +577,6 @@ class Fitter:
         x = np.asarray(x, dtype=float).ravel()
         raw = self._var_registry.to_dict(x)
 
-        # Apply bounds by name via Boundary object
-        self.cm.bounds.apply(raw)
-
         resolved = self.cm.resolve(raw)
         ck = self.cm.pc.build_ck(resolved)
 
@@ -627,13 +617,8 @@ class Fitter:
                 if i < len(arr):
                     grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
 
-        # Chain back through constraints
-        grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
-        grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-
-        # Apply bound gradient correction by name
-        grad_flat = self.cm.bounds.correct_gradient(
-            grad_flat, x, self._var_registry.flat_names, raw)
+        grad_flat = self.cm.full_gradient(
+            grad_dict, resolved, raw, x, self._var_registry.flat_names)
 
         # Zero fixed slots
         for slot_name in self._fixed_slots:
@@ -666,11 +651,8 @@ class Fitter:
             if name not in resolved:
                 continue
             kept_names.append(name)
-            grad_raw = self.cm.chain_gradient({name: 1.0}, resolved, raw)
-            grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-            # Bound gradient correction by name
-            grad_flat = self.cm.bounds.correct_gradient(
-                grad_flat, x, self._var_registry.flat_names, raw)
+            grad_flat = self.cm.full_gradient(
+                {name: 1.0}, resolved, raw, x, self._var_registry.flat_names)
             rows.append(grad_flat)
 
         if not rows:
@@ -855,13 +837,11 @@ class Fitter:
         errors = {}
 
         for i, name in enumerate(names):
-            val = x_best[i]
-            err = raw_errors[i]
+            values[name] = x_best[i]
+            errors[name] = raw_errors[i]
 
-            if return_bounded:
-                val, err = self.cm.bounds.apply_from_unbounded(name, val, err)
-            values[name] = val
-            errors[name] = err
+        if return_bounded:
+            self.cm.apply_bound_dict(values, errors)
 
         return values, errors
 
@@ -1286,27 +1266,7 @@ class Fitter:
             filepath: output JSON path.
         """
         import json
-        from collections import defaultdict
-        flat_names = self._var_registry.flat_names
-
-        # Fixed slots
-        fixed = dict(self._fixed_slots)
-
-        # Same-param groups: reconstruct from alias→canon dict
-        alias_map = self._same_params  # {alias: canon}
-        canon_groups = defaultdict(list)
-        for alias, canon in alias_map.items():
-            canon_groups[canon].append(alias)
-        same = [[canon] + sorted(aliases) for canon, aliases in canon_groups.items()]
-
-        # Scale params
-        scale = dict(self._scale_params)
-
-        # Bounds
-        bounds = {name: {"low": bt.a, "high": bt.b}
-                   for name, bt in self.cm.bounds.to_dict().items()}
-
-        out = {"fixed": fixed, "same": same, "scale": scale, "bounds": bounds}
+        out = self.cm.to_dict()
         with open(filepath, "w") as f:
             json.dump(out, f, indent=2)
         print(f"✓ Saved constraints to {filepath}")
@@ -1369,10 +1329,8 @@ class Fitter:
 
         if not grad_dict:
             return None
-        grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
-        grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-        return self.cm.bounds.correct_gradient(
-            grad_flat, x0, self._var_registry.flat_names, raw)
+        return self.cm.full_gradient(
+            grad_dict, resolved, raw, x0, self._var_registry.flat_names)
 
     def cal_uncertainties(self, fun, param_names, fit_result, jac=False):
         """Propagate fit uncertainties to a function of physical parameters.
@@ -1485,10 +1443,8 @@ class Fitter:
         for i in range(n_obs):
             if not grad_dicts[i]:
                 continue
-            grad_raw = self.cm.chain_gradient(grad_dicts[i], resolved, raw)
-            gf = self._var_registry.flat_gradient(x_mapped, grad_raw)
-            G[i] = self.cm.bounds.correct_gradient(
-                gf, x0, self._var_registry.flat_names, {})
+            G[i] = self.cm.full_gradient(
+                grad_dicts[i], resolved, raw, x0, self._var_registry.flat_names)
 
         if return_cov:
             cov, _ = self._cov_from_G(G, hess_inv)

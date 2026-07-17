@@ -623,17 +623,14 @@ class ConstraintManager:
     # ── forward pipeline ───────────────────────────────────────
 
     def resolve(self, raw_dict):
-        """Run the full constraint pipeline: fixed → same → scale → mass/width.
-
-        Fixed values are injected first so that ``same`` (alias→canonical)
-        propagates them to all group members.  Scale is a model factor
-        that multiplies ALL params (even fixed ones), matching TFPWA convention
-        where scale is applied at the amplitude product level.
-
-        Mass/width transforms (from particle models with running widths) are
-        applied last to build derived mass/width values from physical params.
+        """Full forward pipeline: bounds → fixed → same → scale → mass/width.
+        
+        First applies bound transforms (unbounded → bounded), then
+        runs the standard constraint pipeline.
         """
-        d = self.fixed_tr.apply(raw_dict)
+        d = dict(raw_dict)
+        self.bounds.apply(d)                     # unbounded → bounded
+        d = self.fixed_tr.apply(d)
         d = self.name_res.apply(d)
         for tr in self.scale_transforms:
             d = tr.apply_forward(d)
@@ -642,7 +639,7 @@ class ConstraintManager:
         return d
 
     def inverse(self, resolved):
-        """Reverse of :meth:`resolve`: same⁻¹ → fixed⁻¹ → scale⁻¹."""
+        """Full inverse: mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹."""
         d = resolved
         for tr in reversed(self.mass_width_transforms):
             d = tr.apply_inverse(d)
@@ -650,7 +647,50 @@ class ConstraintManager:
             d = tr.apply_inverse(d)
         d = self.name_res.inverse(d)
         d = self.fixed_tr.inverse(d)
+        # Invert bounds: return unbounded values
+        for name in list(d):
+            d[name] = self.bounds.inverse(name, d[name])
         return d
+
+    def full_gradient(self, grad_resolved, resolved, raw, x, flat_names):
+        """Backprop through pipeline: chain_gradient → flat → bound correction.
+
+        Returns flat gradient w.r.t. unbounded optimizer variables.
+        """
+        grad_raw = self.chain_gradient(grad_resolved, resolved, raw)
+        grad_flat = self._var_registry.flat_gradient(x, grad_raw)
+        self.bounds.correct_gradient(grad_flat, x, flat_names, raw)
+        return grad_flat
+
+    def apply_bound_dict(self, d, errors=None):
+        """Apply forward bounds to dict *d* (in-place).
+
+        If *errors* dict given, propagates uncertainties through bounds.
+        """
+        self.bounds.apply_dict(d)
+        if errors is not None:
+            for name, bt in self.bounds.items():
+                if name in errors:
+                    errors[name] = bt.trans_err(d[name], errors[name])
+        return d
+
+    def to_dict(self):
+        """Serialize all constraints (fixed, same, scale, bounds) to dict.
+
+        Returns a JSON-compatible dict.
+        """
+        from collections import defaultdict
+        alias_map = self.same_params
+        canon_groups = defaultdict(list)
+        for alias, canon in alias_map.items():
+            canon_groups[canon].append(alias)
+        same = [[canon] + sorted(aliases) for canon, aliases in canon_groups.items()]
+        return {
+            "fixed": dict(self.fixed_slots),
+            "same": same,
+            "scale": dict(self.scale_params),
+            "bounds": self.bounds.to_dict(),
+        }
 
     # ── backward pipeline ──────────────────────────────────────
 
