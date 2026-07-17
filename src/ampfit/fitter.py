@@ -414,6 +414,11 @@ class Fitter:
             for i, name in enumerate(names):
                 if name in raw:
                     x[i] = float(raw[name])
+
+        return x
+
+    @property
+    def var_registry(self):
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
         _ = self.pc  # trigger lazy build
         return self._var_registry
@@ -810,7 +815,7 @@ class Fitter:
         Args:
             fit_result: OptimizeResult from fit() method.
             return_bounded: if True, transform values back through
-                            BoundTransform (physical space).
+                            bounds to physical space.
                             if False, return raw unbounded optimizer values.
             hess_inv: optional inverse Hessian. If None, tries
                       ``fit_result.hess_inv``.
@@ -821,7 +826,6 @@ class Fitter:
             errors_dict: 1-sigma uncertainties from Hessian diagonal
                          (empty dict if hess_inv unavailable).
         """
-        from ampfit.boundary import BoundTransform
 
         x_best = fit_result.x
         if hess_inv is None:

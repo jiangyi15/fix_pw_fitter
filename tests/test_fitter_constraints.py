@@ -34,6 +34,7 @@ def _test_backend():
 
 
 def setup_fitter():
+    np.random.seed(42)
     fitter = Fitter(CONFIG_FILE, backend=_test_backend())
     fitter.set_phsp(make_data(N_PHSP))
     fitter.set_data(make_data(N_DATA))
