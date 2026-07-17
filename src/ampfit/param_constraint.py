@@ -624,9 +624,8 @@ class ConstraintManager:
                 if n == name:
                     self.bounds[i] = bt
                     return
-            raise ValueError(
-                f"Unknown parameter '{name}'. "
-                f"Available: {self.var_registry.flat_names[:6]}...")
+            # Silently skip unknown names (makes load_constraints
+            # robust against stale/extraneous bounds in JSON).
 
     def unset_range(self, name):
         name = self.name_res.map.get(name, name)
