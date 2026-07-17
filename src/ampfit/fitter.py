@@ -192,12 +192,13 @@ class Fitter:
         return self.cm.scale_params
 
     @property
-    def _bound_transforms(self):
-        return self.cm.bound_transforms
-
-    @property
     def _alias_to_canon(self):
         return self.cm.alias_to_canon
+
+    @property
+    def _bound_transforms(self):
+        """Boundary collection (backward-compat access)."""
+        return self.cm.bound_transforms
 
     @property
     def var_registry(self):
@@ -386,9 +387,9 @@ class Fitter:
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                if i in self._bound_transforms:
-                    bt = self._bound_transforms[i]
-                    val = bt.inverse(val)
+                bnd_idx = self.cm.bounds.index_map(names)
+                if i in bnd_idx:
+                    val = bnd_idx[i].inverse(val)
                 x[i] = val
             else:
                 x[i] = rng.uniform(-0.01, 0.01)
@@ -420,9 +421,9 @@ class Fitter:
             for i, name in enumerate(names):
                 if name in raw:
                     val = float(raw[name])
-                    if i in self._bound_transforms:
-                        bt = self._bound_transforms[i]
-                        val = bt.inverse(val)
+                    bnd_idx = self.cm.bounds.index_map(names)
+                    if i in bnd_idx:
+                        val = bnd_idx[i].inverse(val)
                     x[i] = val
 
         return x
@@ -589,10 +590,12 @@ class Fitter:
 
         Returns ``(params, resolved, raw, x_mapped)``.
         """
-        from ampfit.boundary import apply_bounds
+        x = np.asarray(x, dtype=float).ravel()
+        raw = self._var_registry.to_dict(x)
 
-        x_mapped = apply_bounds(x, self._bound_transforms)
-        raw = self._var_registry.to_dict(x_mapped)
+        # Apply bounds by name via Boundary object
+        self.cm.bounds.apply(raw)
+
         resolved = self.cm.resolve(raw)
         ck = self.cm.pc.build_ck(resolved)
 
@@ -612,20 +615,19 @@ class Fitter:
                 scalar_arr[scalar_names.index(name)] = val
 
         params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
+        # Reconstruct bounded flat vector for backward-compat consumers
+        x_mapped = np.array([raw.get(name, x[i])
+                             for i, name in enumerate(self.cm.var_registry.flat_names)])
         return params, resolved, raw, x_mapped
 
     def _flat_gradient(self, total_grads, resolved, raw, x_mapped, x):
         """Full backward pipeline: kernel grads → flat gradient."""
-        from ampfit.boundary import apply_bound_grads
-
         scalar_names = SCALAR_NAMES
 
         # Per-name grads from ck combinatorics
         grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
 
         # Merge m0, g0, scalar gradients
-        # (extra names like standalone width params beyond the backend's
-        # array size are handled via the transform's backward gradient)
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
                                     ('scalar', scalar_names)]:
@@ -637,7 +639,10 @@ class Fitter:
         # Chain back through constraints
         grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
         grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-        grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
+
+        # Apply bound gradient correction by name
+        grad_flat = self.cm.bounds.correct_gradient(
+            grad_flat, x, self._var_registry.flat_names, raw)
 
         # Zero fixed slots
         for slot_name in self._fixed_slots:
@@ -659,7 +664,6 @@ class Fitter:
         names : list of str
             The subset of *resolved_names* that were found in the resolved dict.
         """
-        from ampfit.boundary import apply_bound_grads
 
         # Forward pass
         _, resolved, raw, x_mapped = self._build_params(x)
@@ -673,7 +677,9 @@ class Fitter:
             kept_names.append(name)
             grad_raw = self.cm.chain_gradient({name: 1.0}, resolved, raw)
             grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-            grad_flat = apply_bound_grads(grad_flat, x, self._bound_transforms)
+            # Bound gradient correction by name
+            grad_flat = self.cm.bounds.correct_gradient(
+                grad_flat, x, self._var_registry.flat_names, raw)
             rows.append(grad_flat)
 
         if not rows:
@@ -861,8 +867,9 @@ class Fitter:
             val = x_best[i]
             err = raw_errors[i]
 
-            if return_bounded and i in self._bound_transforms:
-                bt = self._bound_transforms[i]
+            bnd_idx = self.cm.bounds.index_map(self._var_registry.flat_names)
+            if return_bounded and i in bnd_idx:
+                bt = bnd_idx[i]
                 val_b = bt(val)
                 err_b = bt.trans_err(val, err)
                 values[name] = val_b
@@ -978,7 +985,6 @@ class Fitter:
         """
         import matplotlib.pyplot as plt
         import os
-        from ampfit.boundary import apply_bounds
 
         # Resolve the flat x vector
         if params is not None:
@@ -1311,13 +1317,8 @@ class Fitter:
         # Scale params
         scale = dict(self._scale_params)
 
-        # Bounds: name → {"low": a, "high": b}  (de-duplicated by name)
-        bt = self._bound_transforms
-        bounds = {}
-        for i, name in enumerate(flat_names):
-            if i in bt and name not in bounds:
-                t = bt[i]
-                bounds[name] = {"low": t.a, "high": t.b}
+        # Bounds
+        bounds = self.cm.bounds.to_dict()
 
         out = {"fixed": fixed, "same": same, "scale": scale, "bounds": bounds}
         with open(filepath, "w") as f:
@@ -1362,7 +1363,6 @@ class Fitter:
         Otherwise a 3-point finite difference is computed.
         """
         import numpy as np
-        from ampfit.boundary import apply_bound_grads
 
         names = [n for n in param_names if n in resolved]
         if not names:
@@ -1385,7 +1385,8 @@ class Fitter:
             return None
         grad_raw = self.cm.chain_gradient(grad_dict, resolved, raw)
         grad_flat = self._var_registry.flat_gradient(x_mapped, grad_raw)
-        return apply_bound_grads(grad_flat, x0, self._bound_transforms)
+        return self.cm.bounds.correct_gradient(
+            grad_flat, x0, self._var_registry.flat_names, raw)
 
     def cal_uncertainties(self, fun, param_names, fit_result, jac=False):
         """Propagate fit uncertainties to a function of physical parameters.
@@ -1477,7 +1478,6 @@ class Fitter:
         value documentation.
         """
         import numpy as np
-        from ampfit.boundary import apply_bound_grads
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
@@ -1501,7 +1501,8 @@ class Fitter:
                 continue
             grad_raw = self.cm.chain_gradient(grad_dicts[i], resolved, raw)
             gf = self._var_registry.flat_gradient(x_mapped, grad_raw)
-            G[i] = apply_bound_grads(gf, x0, self._bound_transforms)
+            G[i] = self.cm.bounds.correct_gradient(
+                gf, x0, self._var_registry.flat_names, {})
 
         if return_cov:
             cov, _ = self._cov_from_G(G, hess_inv)

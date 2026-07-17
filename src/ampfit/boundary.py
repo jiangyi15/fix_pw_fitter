@@ -2,19 +2,10 @@
 boundary — Variable bound transformations for optimization.
 
 Maps unbounded optimizer variables to bounded physical ranges using a
-smooth, bijective sin transform. Provides forward, inverse, gradient,
-and error propagation.
+smooth, bijective arctan transform.
 
-Usage:
-    b = BoundTransform(0.3, 0.8)
-    
-    x_unbounded = 0.0          # optimizer works in unbounded space
-    y_bounded   = b(x)         # 0.55  — maps to physical range
-    dy_dx       = b.grad(x)    # gradient for chain rule
-    x_back      = b.inv(y)     # invert back to unbounded
-    
-    # With error propagation:
-    err_on_y = b.trans_err(x, err_on_x)
+The :class:`Boundary` class bundles a collection of named BoundTransforms
+and provides dict-level apply / gradient-correction / save-load methods.
 """
 
 import numpy as np
@@ -57,6 +48,10 @@ class BoundTransform:
         c = np.pi / (self.b - self.a)
         return 1.0 / (1.0 + (x * c) ** 2)
 
+    def jacobian(self, x):
+        """Alias for grad (consistent naming)."""
+        return self.grad(x)
+
     def inverse(self, y):
         """Bounded y in (a, b) -> unbounded x. Exact inverse."""
         c = np.pi / (self.b - self.a)
@@ -95,64 +90,119 @@ TIME_PARAM_DEFAULTS = {
 }
 
 
-def build_bound_trans(free_params, bounds=None, n_ck_free_vars=None):
-    """Build a dict mapping variable indices to BoundTransform instances.
-    
-    Args:
-        free_params: list of free time parameter names (e.g. ["gamma"]).
-        bounds: dict of {name: [lo, hi]}, defaults to TIME_PARAM_BOUNDS.
-        n_ck_free_vars: number of free complex parameters (ck vars).
-                        If None, the index offset is inferred from the
-                        number of free params (zero ck vars).
-    
-    Returns:
-        dict of {index_in_flat_x: BoundTransform}
+# ── Boundary collection ────────────────────────────────────────────
+
+class Boundary:
+    """Collection of named BoundTransform instances.
+
+    Stores bounds by name (no existence checks at set time).
+    Provides dict-level apply / gradient-correction / save-load.
     """
-    if bounds is None:
-        bounds = TIME_PARAM_BOUNDS
-    if n_ck_free_vars is None:
-        n_ck_free_vars = 0
 
-    bound_trans = {}
-    offset = n_ck_free_vars * 2  # 2 real values per complex var
-    for k in free_params:
-        if k in bounds:
-            idx = offset + free_params.index(k)
-            bound_trans[idx] = BoundTransform(bounds[k][0], bounds[k][1])
-    return bound_trans
+    def __init__(self):
+        self._tfm = {}   # name → BoundTransform
 
+    # ── modify ────────────────────────────────────────────────────
 
-def apply_bounds(x, bound_trans):
-    """Transform x in-place: apply BoundTransform to specified indices.
-    
-    Args:
-        x: variable vector to transform (modified in place).
-        bound_trans: dict of {index: BoundTransform}.
-    
-    Returns:
-        new_x (modified copy).
-    """
-    x = x.copy()
-    for k, v in bound_trans.items():
-        x[k] = v(x[k])
-    return x
+    def set(self, name, lo, hi):
+        """Store a bound by name (no registry lookup)."""
+        self._tfm[name] = BoundTransform(lo, hi)
 
+    def unset(self, name):
+        """Remove a bound by name."""
+        self._tfm.pop(name, None)
 
-def apply_bound_grads(grad, x, bound_trans):
-    """Correct gradients for bound transforms (chain rule).
-    
-    The gradient from the NLL is w.r.t. the bounded variable y.
-    This converts it to w.r.t. the unbounded variable x.
-    
-    Args:
-        grad: gradient w.r.t. bounded variables.
-        x: unbounded variable values.
-        bound_trans: dict of {index: BoundTransform}.
-    
-    Returns:
-        grad_corrected (copy, modified at bound-transformed indices).
-    """
-    grad = grad.copy()
-    for k, v in bound_trans.items():
-        grad[k] = v.grad(x[k]) * grad[k]
-    return grad
+    def update(self, items):
+        """Bulk set from {name: (lo, hi)} or {name: {low, high}}."""
+        for name, spec in items.items():
+            lo = spec[0] if isinstance(spec, (list, tuple)) else spec["low"]
+            hi = spec[1] if isinstance(spec, (list, tuple)) else spec["high"]
+            self._tfm[name] = BoundTransform(lo, hi)
+
+    # ── apply ─────────────────────────────────────────────────────
+
+    def apply(self, d):
+        """Apply all bounds to a named dict *d* (in-place).
+
+        Only transforms names that exist in *d* — silently skips
+        names not present.
+        """
+        for name, bt in self._tfm.items():
+            if name in d:
+                d[name] = bt(d[name])
+        return d
+
+    # ── gradient ──────────────────────────────────────────────────
+
+    def correct_gradient(self, grad_flat, x_flat, flat_names, raw_dict):
+        """Apply the chain rule for bounded variables to *grad_flat*.
+
+        Parameters
+        ----------
+        grad_flat : ndarray
+            Gradient w.r.t. bounded variables (modified in-place).
+        x_flat : ndarray
+            Unbounded flat parameter vector.
+        flat_names : list of str
+            Names of parameters in the flat vector (same order as x_flat).
+        raw_dict : dict
+            Bounded named-parameter dict (returned by ``apply()``).
+            Used to get the bounded value for Jacobian evaluation.
+        """
+        for name, bt in self._tfm.items():
+            try:
+                si = flat_names.index(name)
+                # Use bounded value from raw_dict for Jacobian
+                val = raw_dict.get(name, x_flat[si])
+                jac = bt.jacobian(val)
+                # If multi-index (ck_slot), apply same jacobian to all
+                ei = si + 1
+                for idx in range(si, ei):
+                    grad_flat[idx] *= jac
+            except ValueError:
+                pass  # name not in flat vector
+        return grad_flat
+
+    # ── index map ─────────────────────────────────────────────────
+
+    def index_map(self, flat_names):
+        """Resolve names to flat indices (for backward-compat code)."""
+        imap = {}
+        for name, bt in self._tfm.items():
+            try:
+                si = flat_names.index(name)
+                imap[si] = bt
+            except ValueError:
+                pass
+        return imap
+
+    # ── serialise ─────────────────────────────────────────────────
+
+    def to_dict(self):
+        """Return {name: {low, high}} for JSON save."""
+        return {name: {"low": bt.a, "high": bt.b}
+                for name, bt in self._tfm.items()}
+
+    # ── introspection ─────────────────────────────────────────────
+
+    def __contains__(self, name):
+        return name in self._tfm
+
+    def __getitem__(self, name):
+        return self._tfm[name]
+
+    def __len__(self):
+        return len(self._tfm)
+
+    def __iter__(self):
+        return iter(self._tfm)
+
+    def items(self):
+        return self._tfm.items()
+
+    def keys(self):
+        return self._tfm.keys()
+
+    def values(self):
+        return self._tfm.values()
+

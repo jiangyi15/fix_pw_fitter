@@ -474,7 +474,7 @@ class FixedOverride:
 # ================================================================
 # Bound constraint helper (re-export)
 # ================================================================
-from ampfit.boundary import BoundTransform  # noqa: F401
+from ampfit.boundary import Boundary, BoundTransform  # noqa: F401
 
 
 # ================================================================
@@ -511,8 +511,9 @@ class ConstraintManager:
         self.mass_width_transforms = []  # list of Transform from particle models
         self.fixed_tr = FixedOverride()
 
-        # Bound transforms (flat-index → BoundTransform)
-        self.bounds = {}
+        # Bound transforms — stored by name in a Boundary collection.
+        # No registry resolution at set time; applied at the dict level.
+        self.bounds = Boundary()
 
         # Variable registry (rebuilt on constraint change)
         self._var_registry = None
@@ -531,6 +532,7 @@ class ConstraintManager:
 
     @property
     def bound_transforms(self):
+        """The :class:`~ampfit.boundary.Boundary` collection."""
         return self.bounds
 
     # Backward-compat property aliases
@@ -611,32 +613,12 @@ class ConstraintManager:
         self._rebuild()
 
     def set_range(self, name, lo, hi):
-        from ampfit.boundary import BoundTransform as _BT
-        bt = _BT(lo, hi)
-        # Resolve alias to canon (same-constraint)
-        name = self.name_res.map.get(name, name)
-        try:
-            si, ei = self.var_registry.flat_index(name)
-            for idx in range(si, ei):
-                self.bounds[idx] = bt
-        except KeyError:
-            for i, n in enumerate(self.var_registry.flat_names):
-                if n == name:
-                    self.bounds[i] = bt
-                    return
-            # Silently skip unknown names (makes load_constraints
-            # robust against stale/extraneous bounds in JSON).
+        self.bounds.set(name, lo, hi)
+        self._rebuild()
 
     def unset_range(self, name):
-        name = self.name_res.map.get(name, name)
-        try:
-            si, ei = self.var_registry.flat_index(name)
-            for idx in range(si, ei):
-                self.bounds.pop(idx, None)
-        except KeyError:
-            for i, n in enumerate(self.var_registry.flat_names):
-                if n == name:
-                    self.bounds.pop(i, None)
+        self.bounds.unset(name)
+        self._rebuild()
 
     # ── forward pipeline ───────────────────────────────────────
 
