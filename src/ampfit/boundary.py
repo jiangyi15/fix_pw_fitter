@@ -202,9 +202,8 @@ class Boundary:
     # ── serialise ─────────────────────────────────────────────────
 
     def to_dict(self):
-        """Return {name: {low, high}} for JSON save."""
-        return {name: {"low": bt.a, "high": bt.b}
-                for name, bt in self._tfm.items()}
+        """Return {name: BoundTransform}."""
+        return dict(self._tfm)
 
     # ── introspection ─────────────────────────────────────────────
 

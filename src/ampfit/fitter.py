@@ -1303,7 +1303,8 @@ class Fitter:
         scale = dict(self._scale_params)
 
         # Bounds
-        bounds = self.cm.bounds.to_dict()
+        bounds = {name: {"low": bt.a, "high": bt.b}
+                   for name, bt in self.cm.bounds.to_dict().items()}
 
         out = {"fixed": fixed, "same": same, "scale": scale, "bounds": bounds}
         with open(filepath, "w") as f:
