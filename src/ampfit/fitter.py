@@ -382,8 +382,7 @@ class Fitter:
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                if name in self.cm.bounds:
-                    val = self.cm.bounds[name].inverse(val)
+                val = self.cm.bounds.inverse(name, val)
                 x[i] = val
             else:
                 x[i] = rng.uniform(-0.01, 0.01)
@@ -415,8 +414,7 @@ class Fitter:
             for i, name in enumerate(names):
                 if name in raw:
                     val = float(raw[name])
-                    if name in self.cm.bounds:
-                        val = self.cm.bounds[name].inverse(val)
+                    val = self.cm.bounds.inverse(name, val)
                     x[i] = val
 
         return x
@@ -860,10 +858,8 @@ class Fitter:
             val = x_best[i]
             err = raw_errors[i]
 
-            if return_bounded and name in self.cm.bounds:
-                bt = self.cm.bounds[name]
-                val = bt(val)
-                err = bt.trans_err(val, err)
+            if return_bounded:
+                val, err = self.cm.bounds.apply_from_unbounded(name, val, err)
             values[name] = val
             errors[name] = err
 

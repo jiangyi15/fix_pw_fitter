@@ -132,6 +132,42 @@ class Boundary:
                 d[name] = bt(d[name])
         return d
 
+    def inverse(self, name, val):
+        """Invert bound for *name*: map bounded *val* → unbounded.
+
+        If *name* is not bounded, returns *val* unchanged.
+        """
+        bt = self._tfm.get(name)
+        return bt.inverse(val) if bt else val
+
+    def apply_from_unbounded(self, name, val, err=None):
+        """Apply forward bound and optionally propagate error.
+
+        Parameters
+        ----------
+        name : str
+            Parameter name.
+        val : float
+            Unbounded value to transform.
+        err : float or None
+            Error on unbounded value.  If None, only the value is returned.
+
+        Returns
+        -------
+        bounded_val : float
+            If *name* is bounded: bt(val).  Otherwise: val.
+        bounded_err : float or None
+            If *err* is given: propagated error.  Otherwise: None.
+            If *name* is not bounded, returns *err* unchanged.
+        """
+        bt = self._tfm.get(name)
+        if bt is None:
+            return (val, err) if err is not None else val
+        bv = bt(val)
+        if err is not None:
+            return bv, bt.trans_err(val, err)
+        return bv
+
     # ── gradient ──────────────────────────────────────────────────
 
     def correct_gradient(self, grad_flat, x_flat, flat_names, raw_dict):
