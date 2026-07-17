@@ -194,7 +194,7 @@ def test_set_range():
     fitter = setup_fitter()
     # Use a scalar time param that exists
     fitter.set_range("gamma", -0.3, 0.3)
-    assert len(fitter._bound_transforms) >= 1
+    assert "gamma" in fitter.cm.bounds
 
     x0 = fitter.initial_values(seed=42)
     nll, grad = fitter.get_nll(x0)
@@ -205,13 +205,10 @@ def test_unset_range():
     """unset_range removes a previously-set BoundTransform."""
     fitter = setup_fitter()
     fitter.set_range("gamma", -0.3, 0.3)
-    assert len(fitter._bound_transforms) >= 1
+    assert "gamma" in fitter.cm.bounds
 
     fitter.unset_range("gamma")
-    idxs_with_gamma = [i for i, n in enumerate(fitter._var_registry.flat_names)
-                       if n == "gamma"]
-    for i in idxs_with_gamma:
-        assert i not in fitter._bound_transforms
+    assert "gamma" not in fitter.cm.bounds
 
 
 # ── Cross-constraint interaction ───────────────────────────────────

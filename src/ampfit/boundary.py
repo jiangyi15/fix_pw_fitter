@@ -163,19 +163,6 @@ class Boundary:
                 pass  # name not in flat vector
         return grad_flat
 
-    # ── index map ─────────────────────────────────────────────────
-
-    def index_map(self, flat_names):
-        """Resolve names to flat indices (for backward-compat code)."""
-        imap = {}
-        for name, bt in self._tfm.items():
-            try:
-                si = flat_names.index(name)
-                imap[si] = bt
-            except ValueError:
-                pass
-        return imap
-
     # ── serialise ─────────────────────────────────────────────────
 
     def to_dict(self):

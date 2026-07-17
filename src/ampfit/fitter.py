@@ -196,11 +196,6 @@ class Fitter:
         return self.cm.alias_to_canon
 
     @property
-    def _bound_transforms(self):
-        """Boundary collection (backward-compat access)."""
-        return self.cm.bound_transforms
-
-    @property
     def var_registry(self):
         return self.cm.var_registry
 
@@ -387,9 +382,8 @@ class Fitter:
         for i, name in enumerate(names):
             if name in defaults:
                 val = float(defaults[name])
-                bnd_idx = self.cm.bounds.index_map(names)
-                if i in bnd_idx:
-                    val = bnd_idx[i].inverse(val)
+                if name in self.cm.bounds:
+                    val = self.cm.bounds[name].inverse(val)
                 x[i] = val
             else:
                 x[i] = rng.uniform(-0.01, 0.01)
@@ -421,9 +415,8 @@ class Fitter:
             for i, name in enumerate(names):
                 if name in raw:
                     val = float(raw[name])
-                    bnd_idx = self.cm.bounds.index_map(names)
-                    if i in bnd_idx:
-                        val = bnd_idx[i].inverse(val)
+                    if name in self.cm.bounds:
+                        val = self.cm.bounds[name].inverse(val)
                     x[i] = val
 
         return x
@@ -867,16 +860,12 @@ class Fitter:
             val = x_best[i]
             err = raw_errors[i]
 
-            bnd_idx = self.cm.bounds.index_map(self._var_registry.flat_names)
-            if return_bounded and i in bnd_idx:
-                bt = bnd_idx[i]
-                val_b = bt(val)
-                err_b = bt.trans_err(val, err)
-                values[name] = val_b
-                errors[name] = err_b
-            else:
-                values[name] = val
-                errors[name] = err
+            if return_bounded and name in self.cm.bounds:
+                bt = self.cm.bounds[name]
+                val = bt(val)
+                err = bt.trans_err(val, err)
+            values[name] = val
+            errors[name] = err
 
         return values, errors
 
