@@ -256,8 +256,15 @@ class Fitter:
         import os
         cfg_dir = os.path.dirname(os.path.abspath(
             self.config._config_path))
-        data_path = self.config.dic.get("data", {}).get("data_arr")
-        phsp_path = self.config.dic.get("data", {}).get("phsp_arr")
+
+        def _resolve(key):
+            val = self.config.dic.get("data", {}).get(key)
+            if isinstance(val, (list, tuple)):
+                val = val[0] if val else None
+            return os.path.join(cfg_dir, val) if val else None
+
+        data_path = _resolve("data_arr")
+        phsp_path = _resolve("phsp_arr")
         if not data_path or not phsp_path:
             raise ValueError(
                 "Config must have 'data.data_arr' and 'data.phsp_arr' "
@@ -688,7 +695,7 @@ class Fitter:
     # Optimization
     # ------------------------------------------------------------------
     def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
-            method='BFGS', disp=True, **kwargs):
+            method='BFGS', disp=True, options=None, **kwargs):
         """Minimize NLL using BFGS (default) or any scipy optimizer.
 
         BFGS provides the full Hessian inverse (result.hess_inv) for
@@ -709,6 +716,8 @@ class Fitter:
             callback: optional callback function(xk) called after each step.
             method: scipy.optimize.minimize method (default 'BFGS').
             disp: print convergence messages.
+            hess_inv0: initial inverse Hessian estimate (N×N) for BFGS warm-start.
+                       Speeds up convergence when a good estimate is available.
             **kwargs: passed to scipy.optimize.minimize.
 
         Returns:
@@ -761,6 +770,8 @@ class Fitter:
         opts = {k: v for k, v in opts.items() if v is not None}
         if method in ('L-BFGS-B', 'L-BFGS-B'):
             opts['ftol'] = ftol
+        if options:
+            opts.update(options)
         result = minimize(
             nll_and_grad, x0, jac=True,
             method=method,
