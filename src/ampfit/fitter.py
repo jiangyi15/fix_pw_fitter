@@ -416,6 +416,11 @@ class Fitter:
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
         return self.cm.var_registry
 
+    @property
+    def defaults(self):
+        """Physical default values for all params (read from cm)."""
+        return self.cm.defaults
+
     def free_param_names(self):
         """Slot-level names of all free variables. Length matches x0.
         

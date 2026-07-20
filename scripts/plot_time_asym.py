@@ -40,9 +40,9 @@ def main():
     else:
         fs, sp, sc = build_constraints(f.all_comb)
         for name in f.config.m0_phys_name:
-            fs[name] = float(f.defaults[name])
+            fs[name] = float(f.cm.defaults[name])
         for name in f.config.g0_phys_name:
-            fs[name] = float(f.defaults[name])
+            fs[name] = float(f.cm.defaults[name])
         fs['delta_gamma'] = 0
         fs['delta_m'] = 0.506
         fs['A_prod'] = 0
