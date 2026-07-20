@@ -228,7 +228,7 @@ __global__ void gram_common_kernel_v3_mixed(
     }
     __syncthreads();
 
-    if (tid < 4 * ng) s_grp[tid] = 0.0f;
+    for (int i = tid; i < 4 * ng; i += block_sz) s_grp[i] = 0.0f;
     __syncthreads();
 
     int waves_per_thread = (n_wave + block_sz - 1) / block_sz;

@@ -245,7 +245,7 @@ __global__ void gram_common_kernel_v3(
     __syncthreads();
 
     // ── Phase 2: initialise group sums ──────────────────────────────
-    if (tid < 4 * ng) s_grp[tid] = 0.0;
+    for (int i = tid; i < 4 * ng; i += block_sz) s_grp[i] = 0.0;
     __syncthreads();
 
     // ── Phase 3: compute common_amp per wave, accumulate into groups ─
