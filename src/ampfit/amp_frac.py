@@ -113,7 +113,7 @@ class AmplitudeFractions:
         cfg = self.fitter.config
         names = []
         # CK internal variable names (real/imag parts)
-        for n in self.fitter._var_registry._entries:
+        for n in self.fitter.cm.var_registry.flat_names:
             names.append(n)
         for n in cfg.m0_phys_name:
             if n in resolved:

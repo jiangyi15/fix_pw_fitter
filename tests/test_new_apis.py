@@ -200,9 +200,9 @@ def test_model_get_defaults_fixed_shape():
 
 
 def test_defaults_via_fitter():
-    """Fitter.defaults includes mass and width from models."""
+    """cm.defaults includes mass and width from models."""
     fitter = Fitter('config_amp.yml', backend='numpy')
-    defaults = fitter.defaults
+    defaults = fitter.cm.defaults
     # Check a known mass is present
     assert 'a1(1260)p_mass' in defaults
     assert 'a1(1260)p_width' in defaults
@@ -329,6 +329,122 @@ def test_cm_set_scale_then_free():
     assert 'x' in cm.scale_params
     cm.set_free('x')
     assert 'x' not in cm.scale_params
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5b. ConstraintManager resolve/flat_resolve stop_after
+# ═══════════════════════════════════════════════════════════════════
+
+def _make_cm_with_constraints():
+    """ConstraintManager with defaults, bounds, fixed, same, scale set up."""
+    cm = ConstraintManager(
+        all_comb=[('p0', 'p1')],
+        all_names=['x', 'y', 'z', 'w']
+    )
+    cm.set_defaults({'x': 10.0, 'y': 20.0, 'z': 30.0})
+    cm.set_range('x', -5, 5)
+    cm.set_fixed({'w': 99.0})
+    cm.set_same([('y', 'z')])      # z aliases to y
+    cm.set_scale({'y': (2.0, 1.0)})  # y → 2*y + 1
+    return cm
+
+
+def test_cm_resolve_stop_after_transforms_defaults_excluded():
+    """stop_after='transforms' returns pipeline output, no defaults."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='transforms')
+    assert 'x' in d
+    assert 'y' in d
+    assert 'z' in d  # aliased
+
+
+def test_cm_resolve_stop_after_bounds():
+    """stop_after='bounds' applies bounds but no further transforms."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 10.0, 'y': 2.0}, stop_after='bounds')
+    # x has range [-5, 5]; bounds smoothly maps unbounded → bounded
+    assert d['x'] > -5 and d['x'] < 5, f"x={d['x']} should be within [-5,5]"
+    assert d['y'] == 2.0  # no scale yet
+    assert 'z' not in d   # not in input, not aliased yet
+
+
+def test_cm_resolve_stop_after_fixed():
+    """stop_after='fixed' injects fixed values."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='fixed')
+    assert d['w'] == 99.0        # fixed injected
+    assert d['y'] == 2.0          # no scale yet
+    assert 'z' not in d           # not aliased yet
+
+
+def test_cm_resolve_stop_after_same():
+    """stop_after='same' resolves aliases."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='same')
+    assert d['z'] == d['y']       # z aliased to y
+    assert d['y'] == 2.0          # no scale yet
+
+
+def test_cm_resolve_stop_after_scale():
+    """stop_after='scale' applies scale but not mass_width."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='scale')
+    assert abs(d['y'] - 5.0) < 1e-12  # 2*2 + 1 = 5
+
+
+def test_cm_resolve_stop_after_transforms():
+    """stop_after='transforms' returns all transforms, no defaults."""
+    cm = _make_cm_with_constraints()
+    d = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='transforms')
+    assert 'x' in d
+    assert 'y' in d
+    assert 'z' in d           # aliased
+    assert 'w' in d           # fixed
+    # Should NOT have default-only params that weren't in input
+    # (there are none in this test — all names are either input or derived)
+
+
+def test_cm_resolve_full_includes_defaults():
+    """Full resolve merges defaults for params not in pipeline output."""
+    cm = _make_cm_with_constraints()
+    # 'x' is not in input, but should get default
+    d = cm.resolve({'y': 2.0})
+    assert d['x'] == 10.0   # from defaults
+    assert d['w'] == 99.0   # from fixed
+    # z is aliased from y at 'same' stage (before scale), so z != y after scale
+    assert d['z'] == 2.0
+    assert abs(d['y'] - 5.0) < 1e-12  # y scaled: 2*2 + 1 = 5
+
+
+def test_cm_flat_resolve_stop_after_transforms():
+    """flat_resolve with stop_after='transforms' via Fitter."""
+    from ampfit.fitter import Fitter
+    f = Fitter('config_angle.yml', backend='numpy')
+    x = f.initial_values(seed=42)
+    d = f.cm.flat_resolve(x, stop_after='transforms')
+    assert isinstance(d, dict)
+
+
+def test_cm_flat_resolve_stop_after_bounds():
+    """flat_resolve with stop_after='bounds'."""
+    from ampfit.fitter import Fitter
+    f = Fitter('config_angle.yml', backend='numpy')
+    x = f.initial_values(seed=42)
+    d = f.cm.flat_resolve(x, stop_after='bounds')
+    # Keys should be raw ck names, not yet resolved
+    assert any('_0r' in k or '_0i' in k for k in d)
+
+
+def test_cm_stop_after_roundtrip():
+    """resolve(stop_after=...) + defaults should match full resolve."""
+    cm = _make_cm_with_constraints()
+    full = cm.resolve({'x': 1.0, 'y': 2.0})
+    partial = cm.resolve({'x': 1.0, 'y': 2.0}, stop_after='transforms')
+    # Merge defaults manually
+    merged = dict(cm.defaults)
+    merged.update(partial)
+    for k in full:
+        assert abs(full[k] - merged[k]) < 1e-12, f"{k} mismatch"
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -45,7 +45,6 @@ def main():
 
     # ── Load fitter and get BW params ─────────────────────────────
     fitter = Fitter(args.config, backend=args.backend)
-    fitter.set_default_params()
     cp = os.path.splitext(args.fit_result)[0] + "_constraints.json"
     if os.path.exists(cp):
         fitter.load_constraints(cp)

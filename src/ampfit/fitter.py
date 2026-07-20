@@ -12,7 +12,15 @@ Usage:
     # Set datasets
     fitter.set_data(data_dict)
     fitter.set_phsp(phsp_dict)
-    fitter.set_default_params(m0=m0_arr, g0=g0_arr, scalar=scalar_list)
+    # Override defaults via cm directly (was set_default_params)
+    d = dict(fitter.cm.defaults)
+    for name, val in zip(fitter.config.m0_phys_name, m0_arr):
+        d[name] = float(val)
+    for name, val in zip(fitter.config.g0_phys_name, g0_arr):
+        d[name] = float(val)
+    for name, val in zip(SCALAR_NAMES, scalar_list):
+        d[name] = float(val)
+    fitter.cm.set_defaults(d)
     
     # Compute NLL (for optimizer)
     x = fitter.initial_values()          # initial guess in free variable space
@@ -24,7 +32,9 @@ Usage:
 
 import time
 import numpy as np
-from ampfit.param_constraint import SCALAR_NAMES
+from ampfit.param_constraint import ConstraintManager
+
+SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
 
 
 class Fitter:
@@ -88,8 +98,8 @@ class Fitter:
         self._phsp_scratch = None
         self._phsp_n = 0
 
-        # Default physical params (lazy-built unified dict)
-        self._defaults = None         # {name: physical_default, ...}
+        # Build default physical parameters and sync to cm
+        self._build_defaults()
 
         # Background / purity parameters (computed during set_phsp/set_data)
         self._purity = None           # purity fraction from config
@@ -174,10 +184,6 @@ class Fitter:
     def pc(self):
         """Lazily built :class:`ParameterConstraint` (via :attr:`cm`)."""
         return self.cm.pc
-
-    @property
-    def _var_registry(self):
-        return self.cm.var_registry
 
     @property
     def _fixed_slots(self):
@@ -363,7 +369,7 @@ class Fitter:
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
-        return self._var_registry.n_flat
+        return self.cm.var_registry.n_flat
 
     def initial_values(self, seed=None):
         """Random initial guess for all free variables.
@@ -371,29 +377,11 @@ class Fitter:
         Returns:
             array of shape (n_flat,) matching free_param_names() length.
         """
-        _ = self.pc  # ensure pc and var_registry are built
-        return self._var_registry.build_initial(seed=seed)
+        return self.cm.initial_values(seed=seed)
 
     def reinitial(self, seed=None):
-        """Deterministic flat vector using stored physical defaults.
-
-        Parameters with a config default (mass, width, scalar) use that
-        value exactly.  Parameters without defaults (ck coupling slots)
-        get a small random offset to break symmetry.
-        """
-        _ = self.pc
-        rng = np.random.RandomState(seed)
-        names = self._var_registry.flat_names
-        defaults = self.defaults
-        x = np.empty(len(names))
-        phys = {name: float(defaults[name]) for name in names if name in defaults}
-        raw = self.cm.inverse(phys)
-        for i, name in enumerate(names):
-            if name in raw:
-                x[i] = float(raw[name])
-            else:
-                x[i] = rng.uniform(-0.01, 0.01)
-        return x
+        """Alias for initial_values()."""
+        return self.cm.initial_values(seed=seed)
 
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
@@ -408,8 +396,7 @@ class Fitter:
         Returns:
             flat vector x suitable for get_nll() or fit().
         """
-        _ = self.pc
-        names = self._var_registry.flat_names
+        names = self.cm.var_registry.flat_names
         values = data.get("value", data) if isinstance(data, dict) else data
         # Start from deterministic defaults, then override with JSON
         x = self.reinitial()
@@ -427,8 +414,7 @@ class Fitter:
     @property
     def var_registry(self):
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
-        _ = self.pc  # trigger lazy build
-        return self._var_registry
+        return self.cm.var_registry
 
     def free_param_names(self):
         """Slot-level names of all free variables. Length matches x0.
@@ -440,48 +426,24 @@ class Fitter:
         """
         return self.cm.free_param_names()
 
-    @property
-    def defaults(self):
-        """Unified physical default values for all params (lazy-built)."""
-        if self._defaults is None:
-            d = {}
-            # Defaults from particle models (mass + gamma/width)
-            # Skip the top decay (B) — it has no fit parameters
-            seen = set()
-            for chain in self.config.full_decay.chains:
-                for decay in chain.decays[1:]:
-                    model = decay.core._model
-                    mid = id(model)
-                    if mid in seen:
-                        continue
-                    seen.add(mid)
-                    for k, v in model.get_defaults().items():
-                        d[k] = float(v)
-            # Scalar defaults
-            scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-                           "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
-            for name in SCALAR_NAMES:
-                d.setdefault(name, scalar_base.get(name, 0.0))
-            self._defaults = d
-        return self._defaults
-
-    @defaults.setter
-    def defaults(self, val):
-        self._defaults = dict(val) if val else {}
-
-    def set_default_params(self, m0=None, g0=None, scalar=None):
-        """Set default physical parameters (overrides config defaults)."""
-        if self._defaults is None:
-            _ = self.defaults  # trigger lazy build
-        if m0 is not None:
-            for name, val in zip(self.config.m0_phys_name, m0):
-                self._defaults[name] = float(val)
-        if g0 is not None:
-            for name, val in zip(self.config.g0_phys_name, g0):
-                self._defaults[name] = float(val)
-        if scalar is not None:
-            for name, val in zip(SCALAR_NAMES, scalar):
-                self._defaults[name] = float(val)
+    def _build_defaults(self):
+        """Build default physical params from particle models and sync to cm."""
+        d = {}
+        seen = set()
+        for chain in self.config.full_decay.chains:
+            for decay in chain.decays[1:]:
+                model = decay.core._model
+                mid = id(model)
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                for k, v in model.get_defaults().items():
+                    d[k] = float(v)
+        scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+                       "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
+        for name in SCALAR_NAMES:
+            d.setdefault(name, scalar_base.get(name, 0.0))
+        self.cm.set_defaults(d)
 
     def _check_data_loaded(self):
         """Raise if data or phsp not set."""
@@ -494,17 +456,6 @@ class Fitter:
     # ------------------------------------------------------------------
     # Compute
     # ------------------------------------------------------------------
-    def _build_base_params(self, ck, m0, g0, scalar):
-        """Build the params dict from components, using defaults for None."""
-        defaults = self.defaults
-        if m0 is None:
-            m0 = np.array([defaults.get(n, 0.0) for n in self.config.m0_phys_name])
-        if g0 is None:
-            g0 = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
-        if scalar is None:
-            scalar = [defaults.get(n, 0.0) for n in SCALAR_NAMES]
-        return {"ck": ck, "m0": m0, "g0": g0, "scalar": list(scalar)}
-
     def _compute_norm_derivative(self, norm, P, data):
         """Compute d(NLL)/d(norm) from kernel forward outputs.
         
@@ -590,35 +541,21 @@ class Fitter:
         resolved = self.cm.flat_resolve(x)
         ck = self.cm.pc.build_ck(resolved)
 
-        # Build m0, g0, scalar from defaults + resolved values
-        defaults = self.defaults
-        m0_arr = np.array([defaults.get(n, 0.0) for n in self.config.m0_phys_name])
-        g0_arr = np.array([defaults.get(n, 0.0) for n in self.config.g0_phys_name])
-        scalar_names = SCALAR_NAMES
-        scalar_arr = [defaults.get(n, 0.0) for n in scalar_names]
-
-        for name, val in resolved.items():
-            if name in self.config.m0_phys_name:
-                m0_arr[self.config.m0_phys_name.index(name)] = val
-            elif name in self.config.g0_phys_name:
-                g0_arr[self.config.g0_phys_name.index(name)] = val
-            elif name in scalar_names:
-                scalar_arr[scalar_names.index(name)] = val
-
-        params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
+        params = {"ck": ck,
+                  "m0": np.array([resolved[n] for n in self.config.m0_phys_name]),
+                  "g0": np.array([resolved[n] for n in self.config.g0_phys_name]),
+                  "scalar": np.array([resolved[n] for n in SCALAR_NAMES])}
         return params, resolved
 
     def _flat_gradient(self, total_grads, resolved, x):
         """Full backward pipeline: kernel grads → flat gradient."""
-        scalar_names = SCALAR_NAMES
-
         # Per-name grads from ck combinatorics
         grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
 
         # Merge m0, g0, scalar gradients
         for target, names_list in [('m0', self.config.m0_phys_name),
                                     ('g0', self.config.g0_phys_name),
-                                    ('scalar', scalar_names)]:
+                                    ('scalar', SCALAR_NAMES)]:
             arr = np.asarray(total_grads[target])
             for i, name in enumerate(names_list):
                 if i < len(arr):
@@ -628,8 +565,8 @@ class Fitter:
 
         # Zero fixed slots
         for slot_name in self._fixed_slots:
-            if slot_name in self._var_registry.flat_names:
-                idx = self._var_registry.flat_names.index(slot_name)
+            if slot_name in self.cm.var_registry.flat_names:
+                idx = self.cm.var_registry.flat_names.index(slot_name)
                 grad_flat[idx] = 0.0
         return grad_flat
 
@@ -836,10 +773,10 @@ class Fitter:
         if hess_inv is None:
             hess_inv = getattr(fit_result, 'hess_inv', None)
         if hess_inv is None:
-            names = self._var_registry.flat_names
+            names = self.cm.var_registry.flat_names
             values = {name: float(x_best[i]) for i, name in enumerate(names)}
             return values, {}
-        names = self._var_registry.flat_names
+        names = self.cm.var_registry.flat_names
         raw_errors = np.sqrt(np.diag(hess_inv))
 
         values = {}
@@ -1136,7 +1073,7 @@ class Fitter:
             success = bool(fit_result.success)
             message = str(fit_result.message)
 
-        flat_names = self._var_registry.flat_names
+        flat_names = self.cm.var_registry.flat_names
         # Resolved physical values (post-constraints)
         _, resolved = self._build_params(x)
 
@@ -1157,7 +1094,7 @@ class Fitter:
                 out["error"][name] = float(errors[name])
 
         # Add all defaults to value (including fixed params not in flat_names)
-        for name, val in self.defaults.items():
+        for name, val in self.cm.defaults.items():
             if name not in out["value"]:
                 out["value"][name] = float(val)
 

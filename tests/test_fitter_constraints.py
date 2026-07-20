@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 from ampfit import Fitter
+from ampfit.fitter import SCALAR_NAMES
 
 CONFIG_FILE = "config_angle.yml"
 N_DATA = 50
@@ -38,11 +39,17 @@ def setup_fitter():
     fitter = Fitter(CONFIG_FILE, backend=_test_backend())
     fitter.set_phsp(make_data(N_PHSP))
     fitter.set_data(make_data(N_DATA))
-    fitter.set_default_params(
-        m0=np.random.random(fitter.n_m0) + 2,
-        g0=np.random.random(fitter.n_g0) + 0.1,
-        scalar=[0.6, 0.01, 0.506, 0.01, 0.9, 0.2],
-    )
+    # Override defaults with random values (was fitter.set_default_params)
+    d = dict(fitter.cm.defaults)
+    for name, val in zip(fitter.config.m0_phys_name,
+                         np.random.random(fitter.n_m0) + 2):
+        d[name] = float(val)
+    for name, val in zip(fitter.config.g0_phys_name,
+                         np.random.random(fitter.n_g0) + 0.1):
+        d[name] = float(val)
+    for name, val in zip(SCALAR_NAMES, [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]):
+        d[name] = float(val)
+    fitter.cm.set_defaults(d)
     return fitter
 
 

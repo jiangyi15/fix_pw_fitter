@@ -482,9 +482,6 @@ from ampfit.boundary import Boundary, BoundTransform  # noqa: F401
 # ================================================================
 
 # Scalar parameter names (time evolution, production — not per-particle).
-# Defined at module level so external code (Fitter, backends) can
-# reference them without coupling to ConstraintManager internals.
-SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
 
 
 class ConstraintManager:
@@ -503,6 +500,9 @@ class ConstraintManager:
     def __init__(self, all_comb, all_names):
         self.all_comb = list(all_comb)
         self._all_names = list(all_names)
+
+        # Default values for complete resolved dict (set by Fitter)
+        self._defaults = {}
 
         # Pipeline stages (independent objects)
         self.pc = ParameterConstraint(all_comb)
@@ -525,6 +525,11 @@ class ConstraintManager:
     @property
     def var_registry(self):
         return self._var_registry
+
+    @property
+    def defaults(self):
+        """Read-only view of default parameter values."""
+        return dict(self._defaults)
 
     @property
     def alias_to_canon(self):
@@ -553,6 +558,7 @@ class ConstraintManager:
                 if n not in self.fixed_tr.values]
 
     def initial_values(self, seed=None):
+        """Flat vector with random values for all free variables."""
         return self.var_registry.build_initial(seed=seed)
 
     # ── modifiers ──────────────────────────────────────────────
@@ -622,29 +628,57 @@ class ConstraintManager:
 
     # ── forward pipeline ───────────────────────────────────────
 
+    def set_defaults(self, defaults):
+        """Set default parameter values for complete resolved dict."""
+        self._defaults = dict(defaults) if defaults else {}
+
     def from_flat(self, x):
         """First stage: flat array → raw dict (name→value, no constraints)."""
         return self._var_registry.to_dict(x)
 
-    def flat_resolve(self, x):
-        """Flat array → resolved dict (from_flat + resolve in one call)."""
-        return self.resolve(self.from_flat(x))
+    def flat_resolve(self, x, stop_after=None):
+        """Flat array → resolved dict, with defaults for completeness.
 
-    def resolve(self, raw_dict):
+        Args:
+            stop_after: ``'bounds'``, ``'fixed'``, ``'same'``, ``'scale'``,
+                       ``'transforms'``, or ``None`` for full pipeline.
+        """
+        return self.resolve(self.from_flat(x), stop_after=stop_after)
+
+    def resolve(self, raw_dict, stop_after=None):
         """Full forward pipeline: bounds → fixed → same → scale → mass/width.
         
         First applies bound transforms (unbounded → bounded), then
-        runs the standard constraint pipeline.
+        runs the standard constraint pipeline.  Returns a complete dict
+        with defaults for any parameters not produced by the pipeline.
+
+        Args:
+            stop_after: ``'bounds'``, ``'fixed'``, ``'same'``, ``'scale'``,
+                       ``'transforms'`` (all transforms but no defaults),
+                       or ``None`` for full pipeline.
         """
         d = dict(raw_dict)
         self.bounds.apply(d)                     # unbounded → bounded
+        if stop_after == 'bounds':
+            return d
         d = self.fixed_tr.apply(d)
+        if stop_after == 'fixed':
+            return d
         d = self.name_res.apply(d)
+        if stop_after == 'same':
+            return d
         for tr in self.scale_transforms:
             d = tr.apply_forward(d)
+        if stop_after == 'scale':
+            return d
         for tr in self.mass_width_transforms:
             d = tr.apply_forward(d)
-        return d
+        if stop_after == 'transforms':
+            return d
+        # Merge defaults at the end of the full pipeline
+        full = dict(self._defaults)
+        full.update(d)
+        return full
 
     def inverse(self, resolved):
         """Full inverse: mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹."""
