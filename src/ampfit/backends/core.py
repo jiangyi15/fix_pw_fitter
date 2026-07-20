@@ -67,6 +67,8 @@ def create_backend(spec, kernel_config, **kwargs):
     Returns:
         A :class:`ComputeBackend` instance.
     """
+    import gc
+    gc.collect()
     if isinstance(spec, dict) and kwargs:
         spec = {**spec, **kwargs}
     return eval_backend_spec(spec, kernel_config)
