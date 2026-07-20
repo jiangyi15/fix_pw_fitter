@@ -584,12 +584,10 @@ class Fitter:
     def _build_params(self, x):
         """Full forward pipeline: flat x → kernel params dict.
 
-        Returns ``(params, resolved, raw, x_mapped)``.
+        Returns ``(params, resolved)``.
         """
         x = np.asarray(x, dtype=float).ravel()
-        raw = self._var_registry.to_dict(x)
-
-        resolved = self.cm.resolve(raw)
+        resolved = self.cm.flat_resolve(x)
         ck = self.cm.pc.build_ck(resolved)
 
         # Build m0, g0, scalar from defaults + resolved values
@@ -608,12 +606,9 @@ class Fitter:
                 scalar_arr[scalar_names.index(name)] = val
 
         params = {"ck": ck, "m0": m0_arr, "g0": g0_arr, "scalar": scalar_arr}
-        # Reconstruct bounded flat vector for backward-compat consumers
-        x_mapped = np.array([raw.get(name, x[i])
-                             for i, name in enumerate(self.cm.var_registry.flat_names)])
-        return params, resolved, raw, x_mapped
+        return params, resolved
 
-    def _flat_gradient(self, total_grads, resolved, raw, x_mapped, x):
+    def _flat_gradient(self, total_grads, resolved, x):
         """Full backward pipeline: kernel grads → flat gradient."""
         scalar_names = SCALAR_NAMES
 
@@ -629,8 +624,7 @@ class Fitter:
                 if i < len(arr):
                     grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
 
-        grad_flat = self.cm.full_gradient(
-            grad_dict, resolved, raw, x, self._var_registry.flat_names)
+        grad_flat = self.cm.full_gradient(grad_dict, resolved, x)
 
         # Zero fixed slots
         for slot_name in self._fixed_slots:
@@ -654,7 +648,7 @@ class Fitter:
         """
 
         # Forward pass
-        _, resolved, raw, x_mapped = self._build_params(x)
+        _, resolved = self._build_params(x)
         n_cols = len(x)
 
         rows = []
@@ -664,7 +658,7 @@ class Fitter:
                 continue
             kept_names.append(name)
             grad_flat = self.cm.full_gradient(
-                {name: 1.0}, resolved, raw, x, self._var_registry.flat_names)
+                {name: 1.0}, resolved, x)
             rows.append(grad_flat)
 
         if not rows:
@@ -686,9 +680,9 @@ class Fitter:
             ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
         """
         self._last_xk = x.copy()
-        params, resolved, raw, x_mapped = self._build_params(x)
+        params, resolved = self._build_params(x)
         nll, total_grads = self.get_nll_raw(params)
-        grad_flat = self._flat_gradient(total_grads, resolved, raw, x_mapped, x)
+        grad_flat = self._flat_gradient(total_grads, resolved, x)
         return nll, grad_flat
 
     # ------------------------------------------------------------------
@@ -979,7 +973,7 @@ class Fitter:
         if x is None and params is None:
             raise ValueError("Provide result, x, or params.")
         if x is not None:
-            params, _, _, _ = self._build_params(x)
+            params, _ = self._build_params(x)
 
         # Compute norm and probabilities (handles batched phsp)
         norm, _ = self._compute_norm_batched(params)
@@ -1144,7 +1138,7 @@ class Fitter:
 
         flat_names = self._var_registry.flat_names
         # Resolved physical values (post-constraints)
-        _, resolved, _, _ = self._build_params(x)
+        _, resolved = self._build_params(x)
 
         # Errors from Hessian (transformed to physical space)
         if hess_inv is not None:
@@ -1316,7 +1310,7 @@ class Fitter:
         print(f"✓ Loaded constraints from {filepath}")
 
     # ------------------------------------------------------------------
-    def _grad_flat(self, fun, param_names, resolved, raw, x_mapped, x0, jac=False):
+    def _grad_flat(self, fun, param_names, resolved, x0, jac=False):
         """Compute optimizer-space gradient of *fun* w.r.t. *param_names*.
 
         When *jac* is ``True``, ``fun(phys_dict)`` must return
@@ -1345,7 +1339,7 @@ class Fitter:
         if not grad_dict:
             return None
         return self.cm.full_gradient(
-            grad_dict, resolved, raw, x0, self._var_registry.flat_names)
+            grad_dict, resolved, x0)
 
     def cal_uncertainties(self, fun, param_names, fit_result, jac=False):
         """Propagate fit uncertainties to a function of physical parameters.
@@ -1371,7 +1365,7 @@ class Fitter:
         """
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved, raw, x_mapped = self._build_params(x0)
+        _, resolved = self._build_params(x0)
 
         names = [n for n in param_names if n in resolved]
         if not names:
@@ -1386,7 +1380,7 @@ class Fitter:
         if hess_inv is None:
             return value, 0.0
 
-        gf = self._grad_flat(fun, param_names, resolved, raw, x_mapped, x0, jac=jac)
+        gf = self._grad_flat(fun, param_names, resolved, x0, jac=jac)
         if gf is None:
             return value, 0.0
         std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
@@ -1440,7 +1434,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved, raw, x_mapped = self._build_params(x0)
+        _, resolved = self._build_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:
@@ -1459,7 +1453,7 @@ class Fitter:
             if not grad_dicts[i]:
                 continue
             G[i] = self.cm.full_gradient(
-                grad_dicts[i], resolved, raw, x0, self._var_registry.flat_names)
+                grad_dicts[i], resolved, x0)
 
         if return_cov:
             cov, _ = self._cov_from_G(G, hess_inv)
@@ -1496,7 +1490,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved, _, _ = self._build_params(x0)
+        _, resolved = self._build_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:
@@ -1559,7 +1553,7 @@ class Fitter:
             raise ValueError(f"Particle '{particle_name}' not found in config")
 
         # --- 2. Collect parameter names and build fit dict ---
-        _, resolved, _, _ = self._build_params(fit_result.x)
+        _, resolved = self._build_params(fit_result.x)
         param_names = []
         mass_name = f"{particle_name}_mass"
         if mass_name in resolved:

@@ -36,7 +36,7 @@ print("\n=== Building kernel params ===")
 from ampfit.fitter import Fitter
 fitter = Fitter("config_angle.yml", backend="numpy")
 x0 = fitter.initial_values(seed=42)
-params, resolved, raw_p, x_mapped = fitter._build_params(x0)
+params, resolved = fitter._build_params(x0)
 print(f"  ck: {params['ck'].shape}, m0: {params['m0'].shape}, g0: {params['g0'].shape}")
 print(f"  scalar: {params['scalar']}")
 

@@ -55,7 +55,7 @@ def main():
     nll0 = fit_data.get("status", {}).get("NLL", float('nan'))
 
     # Best-fit BW values from resolved params (no Hessian needed)
-    _, resolved_best, _, _ = fitter._build_params(r.x)
+    _, resolved_best = fitter._build_params(r.x)
     model = None
     for chain in fitter.config.full_decay.chains:
         for decay in chain.decays[1:]:
@@ -120,7 +120,7 @@ def main():
         phys[width_name] = float(v2)
         # Convert to opt space and get resolved params
         x_pt = fitter.values_from_dict({"value": phys})
-        _, resolved, _, _ = fitter._build_params(x_pt)
+        _, resolved = fitter._build_params(x_pt)
         # Get BW params at this point
         bw_pt = model.get_bw_params(resolved)
         bw_list.append([bw_pt["mass_bw"], bw_pt["width_bw"]])

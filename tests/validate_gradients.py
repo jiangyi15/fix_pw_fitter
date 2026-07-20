@@ -29,7 +29,7 @@ def make_physical_params():
     """
     f = Fitter(CONFIG_FILE, backend="numpy")
     x = f.initial_values(seed=42)
-    params, _, _, _ = f._build_params(x)
+    params, _ = f._build_params(x)
     return params
 
 

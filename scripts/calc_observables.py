@@ -121,7 +121,7 @@ def main():
             print(f"  {name:8s} = {value:+.8f}   ({label}, no error)")
 
     # ── 4. Helicity amplitudes ─────────────────────────────────────
-    _, resolved, _, _ = fitter._build_params(x)
+    _, resolved = fitter._build_params(x)
     h = helicity_amplitudes(resolved, R=args.radius)
     a0, ap, am = h["a0"], h["aperp"], h["apara"]
     ab0, abp, abm = h["ab0"], h["aperpb"], h["aparab"]

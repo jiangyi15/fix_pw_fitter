@@ -622,6 +622,14 @@ class ConstraintManager:
 
     # ── forward pipeline ───────────────────────────────────────
 
+    def from_flat(self, x):
+        """First stage: flat array → raw dict (name→value, no constraints)."""
+        return self._var_registry.to_dict(x)
+
+    def flat_resolve(self, x):
+        """Flat array → resolved dict (from_flat + resolve in one call)."""
+        return self.resolve(self.from_flat(x))
+
     def resolve(self, raw_dict):
         """Full forward pipeline: bounds → fixed → same → scale → mass/width.
         
@@ -652,14 +660,15 @@ class ConstraintManager:
             d[name] = self.bounds.inverse(name, d[name])
         return d
 
-    def full_gradient(self, grad_resolved, resolved, raw, x, flat_names):
+    def full_gradient(self, grad_resolved, resolved, x):
         """Backprop through pipeline: chain_gradient → flat → bound correction.
 
         Returns flat gradient w.r.t. unbounded optimizer variables.
         """
+        raw = self.from_flat(x)
         grad_raw = self.chain_gradient(grad_resolved, resolved, raw)
         grad_flat = self._var_registry.flat_gradient(x, grad_raw)
-        self.bounds.correct_gradient(grad_flat, x, flat_names, raw)
+        self.bounds.correct_gradient(grad_flat, x, self._var_registry.flat_names, raw)
         return grad_flat
 
     def apply_bound_dict(self, d, errors=None):

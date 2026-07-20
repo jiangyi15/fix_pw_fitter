@@ -28,11 +28,11 @@ def kernel_config():
 def params():
     f = Fitter(CONFIG_FILE, backend="numpy")
     x = f.initial_values(seed=42)
-    _, _, _, _ = f._build_params(x)
+    _, resolved = f._build_params(x)
     # Rebuild with new fitter to avoid GPU context issues
     f2 = Fitter(CONFIG_FILE, backend="numpy")
     x2 = f2.initial_values(seed=42)
-    p, _, _, _ = f2._build_params(x2)
+    p, _ = f2._build_params(x2)
     return p
 
 
