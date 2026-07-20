@@ -50,6 +50,8 @@ def setup_fitter():
     for name, val in zip(SCALAR_NAMES, [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]):
         d[name] = float(val)
     fitter.cm.set_defaults(d)
+    # A_prod must stay in [-1, 1] so 1 ± A_prod ≥ 0 in probability formula
+    fitter.set_range('A_prod', -1, 1)
     return fitter
 
 

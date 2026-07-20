@@ -469,6 +469,8 @@ def _make_fitter():
             for k, v in data.items()}
     fitter.set_phsp(phsp)
     fitter.set_data(data)
+    # A_prod must stay in [-1, 1] so 1 ± A_prod ≥ 0 in probability formula
+    fitter.set_range('A_prod', -1, 1)
     return fitter
 
 

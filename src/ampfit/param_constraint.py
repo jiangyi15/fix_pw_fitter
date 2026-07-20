@@ -158,7 +158,7 @@ class VariableRegistry:
             np.random.seed(seed)
         x = np.empty(self.n_flat)
         for i in range(self.n_flat):
-            x[i] = np.random.uniform(-0.5, 0.5)
+            x[i] = np.random.uniform(-np.pi, np.pi)
         return x
 
     def build_initial_deterministic(self):

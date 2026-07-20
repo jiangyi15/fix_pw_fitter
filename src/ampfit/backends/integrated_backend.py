@@ -438,7 +438,7 @@ class IntegratedBackend(ComputeBackend):
 
         # Combine
         frac_avg = float(np.sum(pb.weight * pb.frac))
-        omf = 1.0 - frac_avg
+        omf = float(np.sum(pb.weight)) - frac_avg
         A_co = frac_avg * (1.0 - A_prod)
         B_co = omf * (1.0 + A_prod)
 
