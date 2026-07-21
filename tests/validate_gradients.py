@@ -25,11 +25,11 @@ def make_physical_params():
 
     Random params cause NaN in v3 Catmull-Rom interpolation (extrapolation
     outside the physical interpolation table), so we use Fitter.initial_values
-    and _build_params to get physically consistent values.
+    and build_params to get physically consistent values.
     """
     f = Fitter(CONFIG_FILE, backend="numpy")
     x = f.initial_values(seed=42)
-    params, _ = f._build_params(x)
+    params, _ = f.build_params(x)
     return params
 
 

@@ -48,7 +48,7 @@ def main():
         x = r.x
     else:
         x = f.initial_values(seed=42)
-    _, resolved = f._build_params(x)
+    _, resolved = f.build_params(x)
 
     m_pi = 0.13957
     m_B = 5.279

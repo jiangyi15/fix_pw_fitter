@@ -71,7 +71,7 @@ def build_observables_x(fitter, R=3.0):
     """
 
     def _resolve(xf):
-        _, resolved = fitter._build_params(xf)
+        _, resolved = fitter.build_params(xf)
         return helicity_amplitudes(resolved, R=R)
 
     # ── λ ratios  (|ā/a|) ──────────────────────────────────────────

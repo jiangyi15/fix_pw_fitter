@@ -36,7 +36,7 @@ class AmplitudeFractions:
         self.fitter = fitter
         self.fit_result = fit_result
         self._data = fitter._phsp_holder if data is None else data
-        self._params, self._resolved, _, _ = fitter._build_params(fit_result.x)
+        self._params, self._resolved = fitter.build_params(fit_result.x)
         self._n_ck = len(self._params["ck"])
         self._cache = {}  # mask_tuple -> (total, grad_dict)
 

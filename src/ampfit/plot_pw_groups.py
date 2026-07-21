@@ -100,7 +100,7 @@ class PWGroupPlotter:
         Call once before :meth:`plot_var`.  Results stay in memory for
         subsequent calls.
         """
-        params, _, _, _ = self.fitter._build_params(self.fit_result.x)
+        params, _ = self.fitter.build_params(self.fit_result.x)
 
         _, _, self._P_total = self.fitter.backend.compute(
             params, self.fitter._phsp_holder, norm=None)
@@ -163,7 +163,7 @@ class PWGroupPlotter:
         f = self.fitter
         # Save original phsp and reload at the end
         orig_phsp = dict(f._phsp_np)
-        params, _, _, _ = f._build_params(self.fit_result.x)
+        params, _ = f.build_params(self.fit_result.x)
 
         delta_m = float(params["scalar"][2])
 
@@ -545,7 +545,7 @@ class PWGroupPlotter:
 
         # ── Time parameters from the fit ──────────────────────────
         if params is None:
-            params, _, _, _ = f._build_params(self.fit_result.x)
+            params, _ = f.build_params(self.fit_result.x)
         sc = params["scalar"]
         gamma = float(sc[0])
         delta_gamma = float(sc[1])

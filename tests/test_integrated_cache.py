@@ -30,12 +30,12 @@ def params():
     # A_prod must stay in [-1, 1] so 1 ± A_prod ≥ 0 in probability formula
     f.set_range('A_prod', -1, 1)
     x = f.initial_values(seed=42)
-    _, resolved = f._build_params(x)
+    _, resolved = f.build_params(x)
     # Rebuild with new fitter to avoid GPU context issues
     f2 = Fitter(CONFIG_FILE, backend="numpy")
     f2.set_range('A_prod', -1, 1)
     x2 = f2.initial_values(seed=42)
-    p, _ = f2._build_params(x2)
+    p, _ = f2.build_params(x2)
     return p
 
 

@@ -537,7 +537,7 @@ class Fitter:
 
     # ── unified pipeline (forward + backward) ─────────────────────
 
-    def _build_params(self, x):
+    def build_params(self, x):
         """Full forward pipeline: flat x → kernel params dict.
 
         Returns ``(params, resolved)``.
@@ -590,7 +590,7 @@ class Fitter:
         """
 
         # Forward pass
-        _, resolved = self._build_params(x)
+        _, resolved = self.build_params(x)
         n_cols = len(x)
 
         rows = []
@@ -613,7 +613,7 @@ class Fitter:
 
         Pipeline::
 
-            x → _build_params → kernel → _flat_gradient → (nll, grad)
+            x → build_params → kernel → _flat_gradient → (nll, grad)
 
         Args:
             x: flat variable vector (length = ``free_param_names()``).
@@ -622,7 +622,7 @@ class Fitter:
             ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
         """
         self._last_xk = x.copy()
-        params, resolved = self._build_params(x)
+        params, resolved = self.build_params(x)
         nll, total_grads = self.get_nll_raw(params)
         grad_flat = self._flat_gradient(total_grads, resolved, x)
         return nll, grad_flat
@@ -915,7 +915,7 @@ class Fitter:
         if x is None and params is None:
             raise ValueError("Provide result, x, or params.")
         if x is not None:
-            params, _ = self._build_params(x)
+            params, _ = self.build_params(x)
 
         # Compute norm and probabilities (handles batched phsp)
         norm, _ = self._compute_norm_batched(params)
@@ -1080,7 +1080,7 @@ class Fitter:
 
         flat_names = self.cm.var_registry.flat_names
         # Resolved physical values (post-constraints)
-        _, resolved = self._build_params(x)
+        _, resolved = self.build_params(x)
 
         # Errors from Hessian (transformed to physical space)
         if hess_inv is not None:
@@ -1307,7 +1307,7 @@ class Fitter:
         """
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self._build_params(x0)
+        _, resolved = self.build_params(x0)
 
         names = [n for n in param_names if n in resolved]
         if not names:
@@ -1376,7 +1376,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self._build_params(x0)
+        _, resolved = self.build_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:
@@ -1432,7 +1432,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self._build_params(x0)
+        _, resolved = self.build_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:
@@ -1495,7 +1495,7 @@ class Fitter:
             raise ValueError(f"Particle '{particle_name}' not found in config")
 
         # --- 2. Collect parameter names and build fit dict ---
-        _, resolved = self._build_params(fit_result.x)
+        _, resolved = self.build_params(fit_result.x)
         param_names = []
         mass_name = f"{particle_name}_mass"
         if mass_name in resolved:

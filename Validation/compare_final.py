@@ -47,7 +47,7 @@ for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1),
 fitter.set_fixed(fs); fitter.set_same(sp); fitter.set_scale(sc)
 with open(REF_DIR + "pw_cfit5_td6_fix29/final_params_0.json") as f: idat = json.load(f)
 x0 = fitter.values_from_dict(idat)
-params, _, _, _ = fitter._build_params(x0)
+params, _ = fitter.build_params(x0)
 ck_amp = params["ck"]
 amp_map = config.get_ck_map()
 

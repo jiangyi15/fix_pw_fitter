@@ -92,7 +92,7 @@ def main():
                 ("acp", obs_cp_asym,   "CP asymmetry")]
 
     def _make_fn(obs_func):
-        return lambda xf: obs_func(fitter._build_params(xf)[1], R=args.radius)
+        return lambda xf: obs_func(fitter.build_params(xf)[1], R=args.radius)
 
     print("=" * 70)
     print(f"Observables from {args.results}")
@@ -121,7 +121,7 @@ def main():
             print(f"  {name:8s} = {value:+.8f}   ({label}, no error)")
 
     # ── 4. Helicity amplitudes ─────────────────────────────────────
-    _, resolved = fitter._build_params(x)
+    _, resolved = fitter.build_params(x)
     h = helicity_amplitudes(resolved, R=args.radius)
     a0, ap, am = h["a0"], h["aperp"], h["apara"]
     ab0, abp, abm = h["ab0"], h["aperpb"], h["aparab"]

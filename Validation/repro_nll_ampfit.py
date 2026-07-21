@@ -54,7 +54,7 @@ def main():
         setup(fitter)
         x0 = fitter.values_from_dict(fit_data)
 
-        norm, _ = fitter._compute_norm_batched(fitter._build_params(x0)[0])
+        norm, _ = fitter._compute_norm_batched(fitter.build_params(x0)[0])
         nll, grad = fitter.get_nll(x0)
         diff = nll - ref_nll
 

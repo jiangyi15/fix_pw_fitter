@@ -64,7 +64,7 @@ def build_constraint(fitter, obs_name, target, R=3.0):
     ``jac(x) = d(fun)/dx`` via finite differences.
 
     Args:
-        fitter: Fitter instance (needed for ``_build_params``).
+        fitter: Fitter instance (needed for ``build_params``).
         obs_name: observable name ('fL', 'phi', 'acp').
         target: target value (scalar).
         R: meson radius for BW barrier factors (GeV⁻¹).
@@ -79,7 +79,7 @@ def build_constraint(fitter, obs_name, target, R=3.0):
     obs_fn = _OBSERVABLES[obs_name][0]
 
     def fun(x):
-        _, resolved = fitter._build_params(x)
+        _, resolved = fitter.build_params(x)
         return obs_fn(resolved, R=R) - target
 
     def jac(x):
@@ -112,7 +112,7 @@ def build_multi_constraint(fitter, obs_targets, R=3.0):
         obs_list.append((_OBSERVABLES[obs_name][0], target))
 
     def fun(x):
-        _, resolved = fitter._build_params(x)
+        _, resolved = fitter.build_params(x)
         return np.array([fn(resolved, R=R) - t for fn, t in obs_list])
 
     def jac(x):

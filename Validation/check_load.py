@@ -140,7 +140,7 @@ for n in fitter.config.g0_phys_name: fs[n]=float(fitter.defaults[n])
 for n,v in [('delta_gamma',0),('delta_m',0.506),('A_prod',0),('poqr',1),('poqi',0)]: fs[n]=v
 fitter.set_fixed(fs);fitter.set_same(sp);fitter.set_scale(sc)
 x0=fitter.values_from_dict(pdat)
-params,_,_,_=fitter._build_params(x0)
+params, resolved = fitter.build_params(x0)
 ck_kernel = params["ck"]
 
 # The kernel's ck is for 56 wave types (not 112 combos)
