@@ -177,9 +177,6 @@ class PWGroupPlotter:
             phsp["frac"] = np.asarray(frac_array, dtype=np.float64)
             if phsp_weight_extra is not None:
                 phsp["weight"] = phsp["weight"] * np.asarray(phsp_weight_extra, dtype=np.float64)
-            # Free old GPU batched data before reloading (prevents corruption)
-            if hasattr(f.backend, 'free_phsp_batched'):
-                f.backend.free_phsp_batched()
             f.set_phsp(phsp)
             Q, _, _ = f.backend.compute(p, f._phsp_holder, norm=None)
             return float(Q)

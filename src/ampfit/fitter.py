@@ -363,9 +363,16 @@ class Fitter:
         n = phsp["mass"].shape[0]
         self._phsp_n = n
 
+        # Free old GPU data before loading new
+        if self._phsp_holder is not None:
+            if hasattr(self._phsp_holder, 'free'):
+                self._phsp_holder.free()
+            self._phsp_holder = None
+            self._phsp_scratch = None
+            import gc; gc.collect()
         # Backend handles batching internally; just load the data
-        self._phsp_scratch = self.backend.load_data(phsp)
-        self._phsp_holder = self._phsp_scratch
+        self._phsp_holder = self.backend.load_data(phsp)
+        self._phsp_scratch = self._phsp_holder
 
     def _n_flat_vars(self):
         """Total number of flat variables: ck vars + free time params."""
