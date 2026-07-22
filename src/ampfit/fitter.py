@@ -1296,13 +1296,14 @@ class Fitter:
         return res
 
     def save_constraints(self, filepath):
-        """Save all constraints (fixed, same, scale, bounds) to JSON.
+        """Save all constraints (fixed, same, scale, bounds, priors) to JSON.
 
         Args:
             filepath: output JSON path.
         """
         import json
         out = self.cm.to_dict()
+        out["priors"] = [p.to_dict() for p in self.priors]
         with open(filepath, "w") as f:
             json.dump(out, f, indent=2)
         print(f"✓ Saved constraints to {filepath}")
@@ -1310,11 +1311,12 @@ class Fitter:
     def load_constraints(self, filepath):
         """Load constraints from a JSON file saved by :meth:`save_constraints`.
 
-        Resets and re-applies all fixed/same/scale/bound settings.
+        Resets and re-applies all fixed/same/scale/bound settings and priors.
         Also normalises old-format bare keys (without ``r``/``i`` suffix)
         to full slot names for backward compatibility.
         """
         import json
+        from ampfit.param_constraint import prior_from_dict
         with open(filepath) as f:
             data = json.load(f)
 
@@ -1333,6 +1335,11 @@ class Fitter:
         # Re-apply bounds
         for name, spec in data.get("bounds", {}).items():
             self.set_range(name, spec["low"], spec["high"])
+
+        # Re-apply priors
+        self.priors.clear()
+        for pd in data.get("priors", []):
+            self.add_prior(prior_from_dict(pd))
 
         print(f"✓ Loaded constraints from {filepath}")
 

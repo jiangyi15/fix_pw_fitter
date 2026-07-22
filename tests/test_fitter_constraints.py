@@ -9,6 +9,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
+import pytest
 from ampfit import Fitter
 from ampfit.fitter import SCALAR_NAMES
 
@@ -444,6 +445,78 @@ def test_multiple_priors():
     nll, grad = fitter.get_nll(x)
     assert np.isfinite(nll)
     assert all(np.isfinite(grad))
+
+
+# ── Prior serialisation ──────────────────────────────────────────
+
+def test_gaussian_prior_to_dict():
+    """GaussianPrior.to_dict/from_dict round-trip."""
+    from ampfit.param_constraint import GaussianPrior, prior_from_dict
+
+    p = GaussianPrior(["a", "b"], mu=[1.0, 2.0], sigma=[0.1, 0.2])
+    d = p.to_dict()
+    assert d["type"] == "GaussianPrior"
+    assert d["input_names"] == ["a", "b"]
+
+    p2 = prior_from_dict(d)
+    resolved = {"a": 1.1, "b": 2.3}
+    assert abs(p2.fun(resolved) - p.fun(resolved)) < 1e-15
+    g1 = p.gradients(resolved)
+    g2 = p2.gradients(resolved)
+    for k in g1:
+        assert abs(g2[k] - g1[k]) < 1e-15
+
+
+def test_prior_round_trip_via_json():
+    """GaussianPrior survives JSON serialisation."""
+    import json
+    from ampfit.param_constraint import GaussianPrior, prior_from_dict
+
+    p = GaussianPrior("test_x", mu=0.5, sigma=0.2)
+    d = p.to_dict()
+    json_str = json.dumps(d)
+    p2 = prior_from_dict(json.loads(json_str))
+
+    resolved = {"test_x": 0.7}
+    assert abs(p2.fun(resolved) - p.fun(resolved)) < 1e-15
+
+
+def test_prior_save_load_constraints():
+    """Fitter.save_constraints / load_constraints round-trips priors."""
+    import json, tempfile
+    from ampfit.param_constraint import GaussianPrior
+
+    fitter = setup_fitter()
+    mass_name = fitter.config.m0_phys_name[0]
+    g0_name = fitter.config.g0_phys_name[0]
+    fitter.add_prior(GaussianPrior(mass_name, mu=1.3, sigma=0.1))
+    fitter.add_prior(GaussianPrior([mass_name, g0_name], mu=[1.3, 0.2], sigma=[0.1, 0.05]))
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        fname = f.name
+        fitter.save_constraints(fname)
+
+    # Load into a fresh fitter
+    fitter2 = setup_fitter()
+    fitter2.load_constraints(fname)
+
+    assert len(fitter2.priors) == 2
+    x = fitter.initial_values(seed=42)
+    nll1, grad1 = fitter.get_nll(x)
+    nll2, grad2 = fitter2.get_nll(x)
+    assert abs(nll2 - nll1) < 1e-12
+    assert np.allclose(grad2, grad1)
+
+    import os
+    os.unlink(fname)
+
+
+def test_prior_from_dict_unknown():
+    """prior_from_dict raises on unknown type."""
+    from ampfit.param_constraint import prior_from_dict
+    import pytest
+    with pytest.raises(ValueError, match="Unknown prior type"):
+        prior_from_dict({"type": "NonExistentPrior"})
 
 
 # ── run if called directly ────────────────────────────────────────

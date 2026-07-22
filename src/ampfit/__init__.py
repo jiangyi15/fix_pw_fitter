@@ -15,6 +15,7 @@ from .param_constraint import (
     VariableRegistry, ConstraintManager,
     Transform, BWParamsTransform,
     Prior, GaussianPrior,
+    prior_from_dict,
 )
 
 try:
@@ -38,6 +39,7 @@ __all__ = [
     "BWParamsTransform",
     "Prior",
     "GaussianPrior",
+    "prior_from_dict",
     "Fitter",
     "backends",
     "bw_form_factor",

@@ -501,6 +501,16 @@ class BWParamsTransform(Transform):
 # Prior — additive NLL penalty
 # ================================================================
 
+# Registry for prior deserialization
+_prior_registry = {}
+
+
+def _register_prior(cls):
+    """Register a Prior subclass for deserialization by ``prior_from_dict``."""
+    _prior_registry[cls.__name__] = cls
+    return cls
+
+
 class Prior:
     """Base class for additive NLL priors (penalties).
 
@@ -509,7 +519,8 @@ class Prior:
     ``input_names``.  Unlike :class:`Transform`, there is no
     ``inverse()`` — the penalty is just added to the loss.
 
-    Subclasses must implement :meth:`fun` and :meth:`gradients`.
+    Subclasses must implement :meth:`fun`, :meth:`gradients`, and
+    :meth:`to_dict` (for JSON serialisation).
     """
 
     input_names = []
@@ -522,7 +533,32 @@ class Prior:
         """Per-parameter gradients ``{name: value}``."""
         raise NotImplementedError
 
+    def to_dict(self):
+        """Serialize prior configuration to a JSON-compatible dict.
 
+        The dict must include a ``"type"`` key matching the class name
+        registered via :func:`_register_prior` (or the class ``__name__``).
+        """
+        raise NotImplementedError
+
+
+def prior_from_dict(d):
+    """Reconstruct a Prior from its ``to_dict()`` serialisation.
+
+    Args:
+        d: dict with ``"type"`` key (class name) and subclass-specific fields.
+
+    Returns:
+        A :class:`Prior` instance.
+    """
+    cls = _prior_registry.get(d["type"])
+    if cls is None:
+        raise ValueError(f"Unknown prior type '{d['type']}'. "
+                         f"Registered: {list(_prior_registry)}")
+    return cls.from_dict(d)
+
+
+@_register_prior
 class GaussianPrior(Prior):
     """Gaussian (quadratic) penalty on one or more parameters.
 
@@ -554,6 +590,18 @@ class GaussianPrior(Prior):
         dx = np.array([resolved[name] for name in self.input_names]) - self.mu
         return {name: float(dx[i] / self.sigma[i] ** 2)
                 for i, name in enumerate(self.input_names)}
+
+    def to_dict(self):
+        return {
+            "type": "GaussianPrior",
+            "input_names": list(self.input_names),
+            "mu": self.mu.tolist(),
+            "sigma": self.sigma.tolist(),
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["input_names"], mu=d["mu"], sigma=d["sigma"])
 
 
 # ================================================================
