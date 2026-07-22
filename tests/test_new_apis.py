@@ -265,7 +265,6 @@ def test_get_decay_ck_indices_multi_pair():
 def _make_cm():
     """Create a minimal ConstraintManager for unit tests."""
     cm = ConstraintManager(
-        all_comb=[('p0', 'p1')],
         all_names=['x', 'y', 'z']
     )
     return cm
@@ -338,7 +337,6 @@ def test_cm_set_scale_then_free():
 def _make_cm_with_constraints():
     """ConstraintManager with defaults, bounds, fixed, same, scale set up."""
     cm = ConstraintManager(
-        all_comb=[('p0', 'p1')],
         all_names=['x', 'y', 'z', 'w']
     )
     cm.set_defaults({'x': 10.0, 'y': 20.0, 'z': 30.0})

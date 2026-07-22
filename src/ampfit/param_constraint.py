@@ -682,8 +682,7 @@ from ampfit.boundary import Boundary, BoundTransform  # noqa: F401
 
 
 class ConstraintManager:
-    """Owns :class:`ParameterConstraint`, :class:`VariableRegistry`,
-    and the constraint pipeline stages (:class:`NameResolution`,
+    """Owns the constraint pipeline stages (:class:`NameResolution`,
     :class:`ScaleTransform`, :class:`FixedOverride`).
 
     Every ``set_*`` method updates the relevant stage and rebuilds
@@ -691,18 +690,16 @@ class ConstraintManager:
 
     Parameter names are passed as a flat ``all_names`` list — no
     type distinction (ck / m0 / g0 / scalar separation only exists
-    in :meth:`Fitter._build_params`).
+    in :class:`Fitter`).
     """
 
-    def __init__(self, all_comb, all_names):
-        self.all_comb = list(all_comb)
+    def __init__(self, all_names):
         self._all_names = list(all_names)
 
         # Default values for complete resolved dict (set by Fitter)
         self._defaults = {}
 
         # Pipeline stages (independent objects)
-        self.pc = ParameterConstraint(all_comb)
         self.name_res = NameResolution()
         self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.mass_width_transforms = []  # list of Transform from particle models

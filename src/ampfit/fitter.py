@@ -47,10 +47,16 @@ class BuildKernelParams:
     so the Fitter doesn't need to repeat this logic.
     """
 
-    def __init__(self, config, pc):
-        self._pc = pc  # ParameterConstraint (build_ck / backprop_grad)
+    def __init__(self, config, all_comb):
+        from ampfit.param_constraint import ParameterConstraint
+        self._pc = ParameterConstraint(all_comb)
         self._m0_names = list(config.m0_phys_name)
         self._g0_names = list(config.g0_phys_name)
+
+    @property
+    def pc(self):
+        """The :class:`~ampfit.param_constraint.ParameterConstraint` for CK."""
+        return self._pc
 
     def forward(self, resolved):
         """Resolved dict → kernel params dict."""
@@ -128,17 +134,19 @@ class Fitter:
 
         # Standalone constraint manager — flat name list, no type distinction.
         all_ck_bases = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
-        all_names = (sorted([n + 'r' for n in all_ck_bases] +
-                            [n + 'i' for n in all_ck_bases]) +
-                     list(self.config.m0_phys_name) +
-                     list(self.config.g0_phys_name) +
-                     list(SCALAR_NAMES))
-        self.cm = ConstraintManager(self.all_comb, all_names)
+        all_names = list(dict.fromkeys(
+            sorted([n + 'r' for n in all_ck_bases] +
+                   [n + 'i' for n in all_ck_bases]) +
+            list(self.config.m0_phys_name) +
+            list(self.config.g0_phys_name) +
+            list(SCALAR_NAMES)
+        ))
+        self.cm = ConstraintManager(all_names)
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
 
         # Kernel parameter builder (resolved ↔ kernel arrays)
-        self._kernel_builder = BuildKernelParams(self.config, self.cm.pc)
+        self._kernel_builder = BuildKernelParams(self.config, self.all_comb)
 
         # Prior penalties (additive NLL contributions)
         self.priors = []
@@ -248,8 +256,8 @@ class Fitter:
     # ------------------------------------------------------------------
     @property
     def pc(self):
-        """Lazily built :class:`ParameterConstraint` (via :attr:`cm`)."""
-        return self.cm.pc
+        """The :class:`~ampfit.param_constraint.ParameterConstraint` for CK combinatorics."""
+        return self._kernel_builder.pc
 
     @property
     def _fixed_slots(self):
