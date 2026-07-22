@@ -48,14 +48,14 @@ class BuildKernelParams:
     """
 
     def __init__(self, config, all_comb):
-        from ampfit.param_constraint import ParameterConstraint
-        self._pc = ParameterConstraint(all_comb)
+        from ampfit.param_constraint import CKProduct
+        self._pc = CKProduct(all_comb)
         self._m0_names = list(config.m0_phys_name)
         self._g0_names = list(config.g0_phys_name)
 
     @property
     def pc(self):
-        """The :class:`~ampfit.param_constraint.ParameterConstraint` for CK."""
+        """The :class:`~ampfit.param_constraint.CKProduct\` for CK."""
         return self._pc
 
     def forward(self, resolved):
@@ -256,7 +256,7 @@ class Fitter:
     # ------------------------------------------------------------------
     @property
     def pc(self):
-        """The :class:`~ampfit.param_constraint.ParameterConstraint` for CK combinatorics."""
+        """The :class:`~ampfit.param_constraint.CKProduct` for CK combinatorics."""
         return self._kernel_builder.pc
 
     @property

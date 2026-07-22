@@ -11,7 +11,7 @@ Provides a complete pipeline for partial wave amplitude analysis:
 from .config_loader import Config
 from .numpy_kernel import NumpyKernel
 from .param_constraint import (
-    ParameterConstraint, BoundTransform,
+    CKProduct, BoundTransform,
     VariableRegistry, ConstraintManager,
     Transform, BWParamsTransform,
     transform_from_dict,
@@ -32,7 +32,7 @@ __all__ = [
     "Config",
     "NumpyKernel",
     "CUDAKernel",
-    "ParameterConstraint",
+    "CKProduct",
     "BoundTransform",
     "VariableRegistry",
     "ConstraintManager",

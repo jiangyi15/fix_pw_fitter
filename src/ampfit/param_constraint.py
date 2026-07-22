@@ -22,7 +22,7 @@ and ``backward(grad_dict)`` (gradient backpropagation):
 import numpy as np
 
 
-class ParameterConstraint:
+class CKProduct:
     """Pure combinatorics: named values → partial-wave amplitudes (ck).
 
     ::
@@ -749,7 +749,8 @@ from ampfit.boundary import Boundary, BoundTransform  # noqa: F401
 
 class ConstraintManager:
     """Owns the constraint pipeline stages (:class:`NameResolution`,
-    :class:`ScaleTransform`, :class:`FixedOverride`).
+    :class:`ScaleTransform`, :class:`FixedOverride`).  Does **not**
+    own a :class:`CKProduct` — that lives in ``BuildKernelParams``.
 
     Every ``set_*`` method updates the relevant stage and rebuilds
     the registry — trivial for ~200 parameters.
@@ -1102,7 +1103,7 @@ if __name__ == "__main__":
     all_comb = config.get_ck_map()
     ck_names = sorted({p for comb in all_comb for p in comb if isinstance(p, str)})
 
-    pc = ParameterConstraint(all_comb)
+    pc = CKProduct(all_comb)
     name_res = NameResolution()
     fixed_tr = FixedOverride()
 
