@@ -499,7 +499,7 @@ class PWGroupPlotter:
         for i in range(n_var, n_rows * n_cols):
             axes.flatten()[i].set_visible(False)
 
-        axes.flatten()[0].legend(fontsize=7)
+        axes.flatten()[0].legend(fontsize=7, ncol=2)
 
         plt.tight_layout()
         path = os.path.join(output, prefix + "." + fmt)
@@ -787,7 +787,7 @@ class PWGroupPlotter:
         yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
         ax.set_ylabel(yl)
         if legend:
-            ax.legend(fontsize=9)
+            ax.legend(fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
 
         # Save
