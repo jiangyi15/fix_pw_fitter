@@ -261,6 +261,10 @@ class Transform:
     ── ``inverse(output_dict) → input_dict``  (optional — set
         ``has_inverse = False`` on subclasses that don't support it)
 
+    Subclasses that need save/load support should also implement
+    :meth:`to_dict` and :classmethod:`from_dict` and be registered
+    with :func:`_register_transform`.
+
     Parameters
     ----------
     input_names : list of str, optional
@@ -389,6 +393,45 @@ class Transform:
             result[k] = v
         return result
 
+    def to_dict(self):
+        """Serialize transform configuration to a JSON-compatible dict.
+
+        The dict must include a ``"type"`` key matching the name registered
+        via :func:`_register_transform`.
+
+        Raises :class:`NotImplementedError` if the transform does not
+        support serialisation.
+        """
+        raise NotImplementedError
+
+
+# Registry + dispatch for transform save/load
+_transform_registry = {}
+
+
+def _register_transform(cls):
+    """Register a Transform subclass for deserialisation by ``transform_from_dict``."""
+    _transform_registry[cls.__name__] = cls
+    return cls
+
+
+def transform_from_dict(d, **kwargs):
+    """Reconstruct a Transform from its ``to_dict()`` serialisation.
+
+    Args:
+        d: dict with ``"type"`` key and subclass-specific fields.
+        **kwargs: forwarded to ``cls.from_dict(d, **kwargs)``.
+                  Each transform type documents what kwargs it expects.
+
+    Returns:
+        A :class:`Transform` instance.
+    """
+    cls = _transform_registry.get(d["type"])
+    if cls is None:
+        raise ValueError(f"Unknown transform type '{d['type']}'. "
+                         f"Registered: {list(_transform_registry)}")
+    return cls.from_dict(d, **kwargs)
+
 
 # ================================================================
 # LinearTransform — scale + bias a single parameter
@@ -439,6 +482,7 @@ ScaleTransform = LinearTransform
 # BWParamsTransform — get_bw_params as a Transform
 # ================================================================
 
+@_register_transform
 class BWParamsTransform(Transform):
     """Transform: model parameters → Breit-Wigner mass and width.
 
@@ -495,6 +539,54 @@ class BWParamsTransform(Transform):
             dw_dx = (bw_p["width_bw"] - bw_m["width_bw"]) / (2 * eps)
             grads[name] = d_mass * dm_dx + d_width * dw_dx
         return grads
+
+    def to_dict(self):
+        """Serialize to a JSON-compatible dict.
+
+        The serialised form includes ``particle_name``, ``model_type``
+        (registered name), and ``model_kwargs`` (constructor kwargs)
+        so the model can be reconstructed standalone via
+        ``build_particle()``.
+        """
+        from ampfit.particle_model.base import ALL_MODELS
+        # Find the registered name for this model class
+        model_type = next((n for n, c in ALL_MODELS.items()
+                          if isinstance(self.model, c)),
+                         type(self.model).__name__)
+        # Only serialise JSON-safe kwargs (exclude numpy arrays etc.)
+        safe_kwargs = {k: v for k, v in self.model.kwargs.items()
+                       if isinstance(v, (str, int, float, bool, list, dict))}
+        return {"type": "BWParamsTransform",
+                "particle_name": self.model.name,
+                "model_type": model_type,
+                "model_kwargs": safe_kwargs}
+
+    @classmethod
+    def from_dict(cls, d, **kwargs):
+        """Reconstruct from *to_dict()* output.
+
+        Resolution order (first wins):
+        1. ``model`` keyword argument — direct model instance.
+        2. ``fitter`` keyword argument — calls ``fitter.get_particle_model()``.
+        3. Standalone — uses ``build_particle()`` from saved
+           ``model_type`` and ``model_kwargs``.
+
+        Args:
+            d: dict from ``to_dict()``.
+            **kwargs: may include ``model`` (instance) or ``fitter``.
+
+        Returns:
+            A new :class:`BWParamsTransform` instance.
+        """
+        model = kwargs.get("model")
+        if model is None and "fitter" in kwargs:
+            model = kwargs["fitter"].get_particle_model(d["particle_name"])
+        if model is None:
+            from ampfit.particle_model.base import build_particle
+            model = build_particle(d["particle_name"],
+                                   model=d["model_type"],
+                                   **d.get("model_kwargs", {}))
+        return cls(model)
 
 
 # ================================================================

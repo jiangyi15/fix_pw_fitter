@@ -519,6 +519,49 @@ def test_prior_from_dict_unknown():
         prior_from_dict({"type": "NonExistentPrior"})
 
 
+def test_transform_save_load_round_trip():
+    """BWParamsTransform survives save/load of constraints."""
+    import json, tempfile, os
+    from ampfit import BWParamsTransform, transform_from_dict
+
+    fitter = setup_fitter()
+    chain = fitter.config.full_decay.chains[0]
+    pname = chain.decays[1].core.name
+    model = fitter.get_particle_model(pname)
+
+    tr = BWParamsTransform(model)
+    fitter.cm.add_transform(tr)
+
+    # Save and re-load
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        fname = f.name
+        fitter.save_constraints(fname)
+
+    fitter2 = setup_fitter()
+    fitter2.load_constraints(fname)
+
+    # Check transform was restored
+    assert len(fitter2.cm.custom_transforms) == 1
+    tr2 = fitter2.cm.custom_transforms[0]
+    assert isinstance(tr2, BWParamsTransform)
+    assert tr2.model.name == pname
+
+    # NLL should match
+    x = fitter.initial_values(seed=42)
+    nll1, _ = fitter.get_nll(x)
+    nll2, _ = fitter2.get_nll(x)
+    assert abs(nll2 - nll1) < 1e-12
+
+    os.unlink(fname)
+
+
+def test_transform_from_dict_unknown():
+    """transform_from_dict raises on unknown type."""
+    from ampfit import transform_from_dict
+    with pytest.raises(ValueError, match="Unknown transform type"):
+        transform_from_dict({"type": "NonExistentTransform"})
+
+
 # ── run if called directly ────────────────────────────────────────
 
 if __name__ == "__main__":
