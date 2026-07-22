@@ -37,6 +37,56 @@ from ampfit.param_constraint import ConstraintManager
 SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
 
 
+class BuildKernelParams:
+    """Build kernel parameter arrays from a resolved dict and backprop gradients.
+
+    Forward:  ``resolved`` dict → ``{"ck": ..., "m0": ..., "g0": ..., "scalar": ...}``
+    Backward: ``total_grads`` (kernel grads) → per-resolved-name gradient dict.
+
+    Encapsulates the structural knowledge (CK combinatorics, m0/g0/scalar name lists)
+    so the Fitter doesn't need to repeat this logic.
+    """
+
+    def __init__(self, config, pc):
+        self._pc = pc  # ParameterConstraint (build_ck / backprop_grad)
+        self._m0_names = list(config.m0_phys_name)
+        self._g0_names = list(config.g0_phys_name)
+
+    def forward(self, resolved):
+        """Resolved dict → kernel params dict."""
+        ck = self._pc.build_ck(resolved)
+        m0 = np.array([resolved[n] for n in self._m0_names])
+        g0 = np.array([resolved[n] for n in self._g0_names])
+        scalar = np.array([resolved[n] for n in SCALAR_NAMES])
+        return {"ck": ck, "m0": m0, "g0": g0, "scalar": scalar}
+
+    def backward(self, total_grads, resolved):
+        """Kernel grads dict → per-resolved-name gradient dict.
+
+        Args:
+            total_grads: dict with keys ``ck``, ``m0``, ``g0``, ``scalar``.
+            resolved: resolved param dict (for Wirtinger backprop).
+
+        Returns:
+            ``{name: gradient}`` for every resolved parameter.
+        """
+        # CK Wirtinger backprop
+        grad_dict = self._pc.backprop_grad(resolved, total_grads["ck"])
+
+        # m0, g0, scalar → per-name (by position in name list)
+        for names_list, key in [
+            (self._m0_names, "m0"),
+            (self._g0_names, "g0"),
+            (SCALAR_NAMES, "scalar"),
+        ]:
+            arr = np.asarray(total_grads[key])
+            for i, name in enumerate(names_list):
+                if i < len(arr):
+                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
+
+        return grad_dict
+
+
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
@@ -86,6 +136,9 @@ class Fitter:
         self.cm = ConstraintManager(self.all_comb, all_names)
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
+
+        # Kernel parameter builder (resolved ↔ kernel arrays)
+        self._kernel_builder = BuildKernelParams(self.config, self.cm.pc)
 
         # Data holders (created by set_data / set_phsp)
         self._data_holder = None
@@ -551,28 +604,20 @@ class Fitter:
         """
         x = np.asarray(x, dtype=float).ravel()
         resolved = self.cm.flat_resolve(x)
-        ck = self.cm.pc.build_ck(resolved)
-
-        params = {"ck": ck,
-                  "m0": np.array([resolved[n] for n in self.config.m0_phys_name]),
-                  "g0": np.array([resolved[n] for n in self.config.g0_phys_name]),
-                  "scalar": np.array([resolved[n] for n in SCALAR_NAMES])}
+        params = self._kernel_builder.forward(resolved)
         return params, resolved
 
-    def _flat_gradient(self, total_grads, resolved, x):
-        """Full backward pipeline: kernel grads → flat gradient."""
-        # Per-name grads from ck combinatorics
-        grad_dict = self.cm.pc.backprop_grad(resolved, total_grads["ck"])
+    def _flat_gradient(self, grad_dict, resolved, x):
+        """Full backward pipeline: per-name grads → flat gradient.
 
-        # Merge m0, g0, scalar gradients
-        for target, names_list in [('m0', self.config.m0_phys_name),
-                                    ('g0', self.config.g0_phys_name),
-                                    ('scalar', SCALAR_NAMES)]:
-            arr = np.asarray(total_grads[target])
-            for i, name in enumerate(names_list):
-                if i < len(arr):
-                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
+        Args:
+            grad_dict: per-resolved-name gradient dict.
+            resolved: resolved param dict (for constraint backprop).
+            x: flat variable vector.
 
+        Returns:
+            Flat gradient array with the same shape as *x*.
+        """
         grad_flat = self.cm.full_gradient(grad_dict, resolved, x)
 
         # Zero fixed slots
@@ -631,7 +676,8 @@ class Fitter:
         self._last_xk = x.copy()
         params, resolved = self.build_params(x)
         nll, total_grads = self.get_nll_raw(params)
-        grad_flat = self._flat_gradient(total_grads, resolved, x)
+        grad_dict = self._kernel_builder.backward(total_grads, resolved)
+        grad_flat = self._flat_gradient(grad_dict, resolved, x)
         return nll, grad_flat
 
     # ------------------------------------------------------------------

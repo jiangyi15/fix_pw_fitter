@@ -72,22 +72,20 @@ class AmplitudeFractions:
         total = float(Q)
 
         cfg = self.fitter.config
-        grad = {}
-        # CK gradients: zero out entries disconnected by mask
-        grad_ck = grads["ck"].copy()
+        # Build per-resolved-name gradients via kernel builder
+        total_grads_mod = {
+            "ck": grads["ck"].copy(),
+            "m0": grads["m0"],
+            "g0": grads["g0"],
+            "scalar": grads["scalar"],
+        }
         if mask is not None:
             for i in range(self._n_ck):
                 if i not in mask:
-                    grad_ck[i] = 0.0j
-        slot_dict = {n: float(v) for n, v in self._resolved.items()}
-        ck_grads = self.fitter.cm.pc.backprop_grad(slot_dict, grad_ck)
-        grad.update(ck_grads)
-        # m0 gradients
-        for i, name in enumerate(cfg.m0_phys_name):
-            grad[name] = float(grads["m0"][i])
-        # g0 gradients
-        for i, name in enumerate(cfg.g0_phys_name):
-            grad[name] = float(grads["g0"][i])
+                    total_grads_mod["ck"][i] = 0.0j
+        grad = self.fitter._kernel_builder.backward(
+            total_grads_mod, self._resolved
+        )
 
         if key is not None:
             self._cache[key] = (total, grad)
