@@ -9,7 +9,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
-import pytest
 from ampfit import Fitter
 from ampfit.fitter import SCALAR_NAMES
 
@@ -445,74 +444,6 @@ def test_multiple_priors():
     nll, grad = fitter.get_nll(x)
     assert np.isfinite(nll)
     assert all(np.isfinite(grad))
-
-
-def test_bw_prior_basic():
-    """BWPrior produces finite NLL and gradients."""
-    from ampfit.param_constraint import BWPrior
-
-    fitter = setup_fitter()
-    chain = fitter.config.full_decay.chains[0]
-    model = chain.decays[1].core._model
-
-    prior = BWPrior(model, mass_mu=1.3, mass_sigma=0.010,
-                    width_mu=0.2, width_sigma=0.005)
-    fitter.add_prior(prior)
-
-    x = fitter.initial_values(seed=42)
-    nll, grad = fitter.get_nll(x)
-    assert np.isfinite(nll)
-    assert all(np.isfinite(grad))
-
-
-def test_bw_prior_fun():
-    """BWPrior.fun matches manual calculation."""
-    from ampfit.param_constraint import BWPrior
-
-    fitter = setup_fitter()
-    chain = fitter.config.full_decay.chains[0]
-    model = chain.decays[1].core._model
-
-    prior = BWPrior(model, mass_mu=1.3, mass_sigma=0.010)
-
-    x = fitter.initial_values(seed=42)
-    _, resolved = fitter.build_params(x)
-
-    val = prior.fun(resolved)
-    bw = model.get_bw_params(resolved)
-    expected = 0.5 * ((bw["mass_bw"] - 1.3) / 0.010) ** 2
-    assert abs(val - expected) < 1e-14
-
-
-def test_bw_prior_gradient_numerical():
-    """BWPrior gradient matches finite difference on full NLL."""
-    from ampfit.param_constraint import BWPrior
-
-    fitter = setup_fitter()
-    chain = fitter.config.full_decay.chains[0]
-    model = chain.decays[1].core._model
-
-    prior = BWPrior(model, mass_mu=1.3, mass_sigma=0.010)
-    fitter.add_prior(prior)
-
-    x = fitter.initial_values(seed=42)
-
-    mass_name = f"{model.name}_mass"
-    if mass_name in fitter.cm.var_registry.flat_names:
-        idx = fitter.cm.var_registry.flat_names.index(mass_name)
-    else:
-        pytest.skip("mass param not in flat_names")
-
-    eps = 1e-6
-    xp = x.copy(); xp[idx] += eps
-    xm = x.copy(); xm[idx] -= eps
-    nllp, _ = fitter.get_nll(xp)
-    nllm, _ = fitter.get_nll(xm)
-    num_grad = (nllp - nllm) / (2 * eps)
-
-    nll, grad = fitter.get_nll(x)
-    assert abs(grad[idx] - num_grad) < 1e-5, \
-        f"BWPrior gradient mismatch: ana={grad[idx]:.6e} num={num_grad:.6e}"
 
 
 # ── run if called directly ────────────────────────────────────────
