@@ -343,6 +343,109 @@ def test_gradients_nonzero():
             f"seed={seed}: {len(zero_grads)}/{len(grad)} zero gradient components"
 
 
+# ── Priors ─────────────────────────────────────────────────────────
+
+def test_gaussian_prior_basic():
+    """GaussianPrior produces correct fun and gradients."""
+    from ampfit.param_constraint import GaussianPrior
+
+    p = GaussianPrior("test_x", mu=1.0, sigma=0.5)
+    resolved = {"test_x": 1.3, "other": 99.0}
+
+    expected_fun = 0.5 * ((1.3 - 1.0) / 0.5) ** 2
+    assert abs(p.fun(resolved) - expected_fun) < 1e-15
+    assert abs(p.gradients(resolved)["test_x"] - (1.3 - 1.0) / 0.5 ** 2) < 1e-15
+    assert "other" not in p.gradients(resolved)
+
+
+def test_gaussian_prior_multiname():
+    """GaussianPrior with multiple names."""
+    from ampfit.param_constraint import GaussianPrior
+
+    p = GaussianPrior(["a", "b"], mu=[1.0, 2.0], sigma=[0.1, 0.2])
+    resolved = {"a": 1.1, "b": 2.3}
+
+    expected = 0.5 * ((0.1/0.1)**2 + (0.3/0.2)**2)
+    assert abs(p.fun(resolved) - expected) < 1e-14
+    g = p.gradients(resolved)
+    assert abs(g["a"] - 0.1/0.1**2) < 1e-14
+    assert abs(g["b"] - 0.3/0.2**2) < 1e-14
+
+
+def test_gaussian_prior_broadcast():
+    """Single mu/sigma broadcasts to all names."""
+    from ampfit.param_constraint import GaussianPrior
+
+    p = GaussianPrior(["a", "b", "c"], mu=0.0, sigma=1.0)
+    resolved = {"a": 0.5, "b": -0.3, "c": 1.2}
+    expected = 0.5 * (0.5**2 + (-0.3)**2 + 1.2**2)
+    assert abs(p.fun(resolved) - expected) < 1e-14
+
+
+def test_prior_added_to_nll():
+    """Fitter.get_nll includes prior NLL."""
+    from ampfit.param_constraint import GaussianPrior
+
+    fitter = setup_fitter()
+    x = fitter.initial_values(seed=42)
+    nll_before, grad_before = fitter.get_nll(x)
+
+    # Pin a mass param with very tight Gaussian
+    mass_name = fitter.config.m0_phys_name[0]
+    prior = GaussianPrior(mass_name, mu=fitter.cm.defaults.get(mass_name, 2.0), sigma=1e-6)
+    fitter.add_prior(prior)
+
+    nll_after, grad_after = fitter.get_nll(x)
+
+    # Prior should add ~0.5 (since x ≈ defaults)
+    assert nll_after > nll_before, "prior should increase NLL"
+    # Gradient should differ
+    assert not np.allclose(grad_before, grad_after)
+
+
+def test_prior_gradient_numerical():
+    """Prior gradient matches finite difference."""
+    from ampfit.param_constraint import GaussianPrior
+
+    fitter = setup_fitter()
+    mass_name = fitter.config.m0_phys_name[0]
+    prior = GaussianPrior(mass_name, mu=1.5, sigma=0.2)
+    fitter.add_prior(prior)
+
+    x = fitter.initial_values(seed=42)
+    idx = fitter.cm.var_registry.flat_names.index(mass_name)
+
+    # Numerical gradient of the prior alone
+    eps = 1e-6
+    xp = x.copy(); xp[idx] += eps
+    xm = x.copy(); xm[idx] -= eps
+    nllp, _ = fitter.get_nll(xp)
+    nllm, _ = fitter.get_nll(xm)
+    num_grad = (nllp - nllm) / (2 * eps)
+
+    nll, grad = fitter.get_nll(x)
+    assert abs(grad[idx] - num_grad) < 1e-5, \
+        f"prior gradient mismatch: ana={grad[idx]:.6e} num={num_grad:.6e}"
+
+
+def test_multiple_priors():
+    """Multiple priors accumulate correctly."""
+    from ampfit.param_constraint import GaussianPrior
+
+    fitter = setup_fitter()
+
+    mass_name = fitter.config.m0_phys_name[0]
+    g0_name = fitter.config.g0_phys_name[0]
+
+    fitter.add_prior(GaussianPrior(mass_name, mu=1.5, sigma=0.1))
+    fitter.add_prior(GaussianPrior(g0_name, mu=0.2, sigma=0.05))
+
+    x = fitter.initial_values(seed=42)
+    nll, grad = fitter.get_nll(x)
+    assert np.isfinite(nll)
+    assert all(np.isfinite(grad))
+
+
 # ── run if called directly ────────────────────────────────────────
 
 if __name__ == "__main__":

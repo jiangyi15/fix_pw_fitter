@@ -13,6 +13,7 @@ from .numpy_kernel import NumpyKernel
 from .param_constraint import (
     ParameterConstraint, BoundTransform,
     VariableRegistry, ConstraintManager,
+    Prior, GaussianPrior,
 )
 
 try:
@@ -32,6 +33,8 @@ __all__ = [
     "BoundTransform",
     "VariableRegistry",
     "ConstraintManager",
+    "Prior",
+    "GaussianPrior",
     "Fitter",
     "backends",
     "bw_form_factor",

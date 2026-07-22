@@ -140,6 +140,9 @@ class Fitter:
         # Kernel parameter builder (resolved ↔ kernel arrays)
         self._kernel_builder = BuildKernelParams(self.config, self.cm.pc)
 
+        # Prior penalties (additive NLL contributions)
+        self.priors = []
+
         # Data holders (created by set_data / set_phsp)
         self._data_holder = None
         self._phsp_holder = None
@@ -208,6 +211,16 @@ class Fitter:
                 if tfm is not None:
                     transforms.append(tfm)
         self.cm.set_mass_width_transforms(transforms)
+
+    def add_prior(self, prior):
+        """Add an NLL prior (penalty) to the fit.
+
+        Args:
+            prior: A :class:`~ampfit.param_constraint.Prior` instance.
+                   Its ``fun(resolved)`` and ``gradients(resolved)``
+                   are called during each ``get_nll()`` evaluation.
+        """
+        self.priors.append(prior)
 
     def set_free(self, name):
         """Unfix a previously fixed parameter so it becomes free again.
@@ -667,6 +680,10 @@ class Fitter:
 
             x → build_params → kernel → _flat_gradient → (nll, grad)
 
+        If :attr:`priors` is non-empty, each prior's ``fun(resolved)``
+        is added to the NLL and its ``gradients(resolved)`` are merged
+        into the gradient chain.
+
         Args:
             x: flat variable vector (length = ``free_param_names()``).
 
@@ -677,6 +694,13 @@ class Fitter:
         params, resolved = self.build_params(x)
         nll, total_grads = self.get_nll_raw(params)
         grad_dict = self._kernel_builder.backward(total_grads, resolved)
+
+        # Priors: additive NLL penalties + per-parameter gradients
+        for prior in self.priors:
+            nll += prior.fun(resolved)
+            for name, g in prior.gradients(resolved).items():
+                grad_dict[name] = grad_dict.get(name, 0.0) + g
+
         grad_flat = self._flat_gradient(grad_dict, resolved, x)
         return nll, grad_flat
 

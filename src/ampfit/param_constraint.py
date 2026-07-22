@@ -436,6 +436,65 @@ ScaleTransform = LinearTransform
 
 
 # ================================================================
+# Prior — additive NLL penalty
+# ================================================================
+
+class Prior:
+    """Base class for additive NLL priors (penalties).
+
+    A prior contributes a scalar to the NLL and provides per-parameter
+    gradients w.r.t. resolved parameter names, identified by
+    ``input_names``.  Unlike :class:`Transform`, there is no
+    ``inverse()`` — the penalty is just added to the loss.
+
+    Subclasses must implement :meth:`fun` and :meth:`gradients`.
+    """
+
+    input_names = []
+
+    def fun(self, resolved):
+        """Prior NLL contribution, scalar, from resolved parameter dict."""
+        raise NotImplementedError
+
+    def gradients(self, resolved):
+        """Per-parameter gradients ``{name: value}``."""
+        raise NotImplementedError
+
+
+class GaussianPrior(Prior):
+    """Gaussian (quadratic) penalty on one or more parameters.
+
+    Adds ``½ Σ ((xᵢ − μᵢ) / σᵢ)²`` to the NLL.
+
+    Parameters
+    ----------
+    input_names : str or list of str
+        Parameter name(s) in the resolved dict.
+    mu : float or array-like
+        Mean value(s).  Broadcast to match *input_names*.
+    sigma : float or array-like
+        Width(s).  Broadcast to match *input_names*.
+    """
+
+    def __init__(self, input_names, mu, sigma):
+        if isinstance(input_names, str):
+            input_names = [input_names]
+        self.input_names = list(input_names)
+        n = len(self.input_names)
+        self.mu = np.broadcast_to(np.atleast_1d(np.asarray(mu, float)), n).copy()
+        self.sigma = np.broadcast_to(np.atleast_1d(np.asarray(sigma, float)), n).copy()
+
+    def fun(self, resolved):
+        dx = np.array([resolved[name] for name in self.input_names]) - self.mu
+        return float(0.5 * np.sum((dx / self.sigma) ** 2))
+
+    def gradients(self, resolved):
+        dx = np.array([resolved[name] for name in self.input_names]) - self.mu
+        return {name: float(dx[i] / self.sigma[i] ** 2)
+                for i, name in enumerate(self.input_names)}
+
+
+# ================================================================
 # FixedOverride — inject constant parameter values
 # ================================================================
 
