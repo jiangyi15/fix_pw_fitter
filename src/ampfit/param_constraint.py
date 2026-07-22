@@ -436,6 +436,68 @@ ScaleTransform = LinearTransform
 
 
 # ================================================================
+# BWParamsTransform — get_bw_params as a Transform
+# ================================================================
+
+class BWParamsTransform(Transform):
+    """Transform: model parameters → Breit-Wigner mass and width.
+
+    ``forward`` reads the model's physical parameters (mass + gamma
+    couplings) from the resolved dict and writes
+    ``"{model.name}_mass_bw"`` and ``"{model.name}_width_bw"``.
+
+    ``backward`` propagates gradients from the BW names back to the
+    input parameters via centered finite differences through
+    ``model.get_bw_params()``.
+
+    ``has_inverse`` is ``False``.
+
+    Parameters
+    ----------
+    model : object
+        Particle model with ``get_bw_params(dict)``,
+        ``get_gamma_name()``, and a ``name`` attribute.
+    """
+
+    _has_inverse = False
+
+    def __init__(self, model):
+        self.model = model
+        in_names = [f"{model.name}_mass"] + list(model.get_gamma_name())
+        out_names = [f"{model.name}_mass_bw", f"{model.name}_width_bw"]
+        super().__init__(input_names=in_names, output_names=out_names)
+
+    def forward(self, d):
+        bw = self.model.get_bw_params(d)
+        return {self.output_names[0]: bw["mass_bw"],
+                self.output_names[1]: bw["width_bw"]}
+
+    def backward(self, grad_out, d_in=None):
+        resolved = dict(d_in) if d_in else {}
+        d_mass = grad_out.get(self.output_names[0], 0.0)
+        d_width = grad_out.get(self.output_names[1], 0.0)
+        if d_mass == 0.0 and d_width == 0.0:
+            return {name: 0.0 for name in self.input_names}
+
+        eps = 1e-6
+        bw0 = self.model.get_bw_params(resolved)
+        grads = {}
+        for name in self.input_names:
+            rp = dict(resolved)
+            rp[name] = resolved[name] + eps
+            bw_p = self.model.get_bw_params(rp)
+
+            rm = dict(resolved)
+            rm[name] = resolved[name] - eps
+            bw_m = self.model.get_bw_params(rm)
+
+            dm_dx = (bw_p["mass_bw"] - bw_m["mass_bw"]) / (2 * eps)
+            dw_dx = (bw_p["width_bw"] - bw_m["width_bw"]) / (2 * eps)
+            grads[name] = d_mass * dm_dx + d_width * dw_dx
+        return grads
+
+
+# ================================================================
 # Prior — additive NLL penalty
 # ================================================================
 
@@ -492,6 +554,82 @@ class GaussianPrior(Prior):
         dx = np.array([resolved[name] for name in self.input_names]) - self.mu
         return {name: float(dx[i] / self.sigma[i] ** 2)
                 for i, name in enumerate(self.input_names)}
+
+
+class BWPrior(Prior):
+    """Gaussian constraint on Breit-Wigner mass and/or width.
+
+    Penalizes deviation of the physical BW peak mass/width from target
+    values.  The BW parameters are computed from raw fit parameters
+    via the particle model's ``get_bw_params()`` method.
+
+    *input_names* are set to the mass name ``"{model.name}_mass"`` plus
+    the gamma coupling names from ``model.get_gamma_name()``.
+
+    Gradients use centered finite differences through ``get_bw_params``
+    — the cost of (2·N + 1) cheap root solves per evaluation is
+    negligible compared to the full kernel compute.
+
+    Parameters
+    ----------
+    model : object
+        Particle model instance with ``get_bw_params(dict)``,
+        ``get_gamma_name()``, and a ``name`` attribute.
+    mass_mu, mass_sigma : float, optional
+        Target Breit-Wigner mass (and width) for Gaussian penalty.
+    width_mu, width_sigma : float, optional
+        Target Breit-Wigner width (and width) for Gaussian penalty.
+    """
+
+    def __init__(self, model,
+                 mass_mu=None, mass_sigma=None,
+                 width_mu=None, width_sigma=None):
+        self.model = model
+        self.input_names = [f"{model.name}_mass"] + list(model.get_gamma_name())
+        self.mass_mu = mass_mu
+        self.mass_sigma = mass_sigma
+        self.width_mu = width_mu
+        self.width_sigma = width_sigma
+
+    def fun(self, resolved):
+        bw = self.model.get_bw_params(resolved)
+        val = 0.0
+        if self.mass_mu is not None:
+            dx = bw["mass_bw"] - self.mass_mu
+            val += 0.5 * (dx / self.mass_sigma) ** 2
+        if self.width_mu is not None:
+            dx = bw["width_bw"] - self.width_mu
+            val += 0.5 * (dx / self.width_sigma) ** 2
+        return val
+
+    def gradients(self, resolved):
+        eps = 1e-6
+        bw0 = self.model.get_bw_params(resolved)
+
+        dprior_dmass = 0.0
+        dprior_dwidth = 0.0
+        if self.mass_mu is not None:
+            dx = bw0["mass_bw"] - self.mass_mu
+            dprior_dmass = dx / self.mass_sigma ** 2
+        if self.width_mu is not None:
+            dx = bw0["width_bw"] - self.width_mu
+            dprior_dwidth = dx / self.width_sigma ** 2
+
+        grads = {}
+        for name in self.input_names:
+            rp = dict(resolved)
+            rp[name] = resolved[name] + eps
+            bw_p = self.model.get_bw_params(rp)
+
+            rm = dict(resolved)
+            rm[name] = resolved[name] - eps
+            bw_m = self.model.get_bw_params(rm)
+
+            dmass_dx = (bw_p["mass_bw"] - bw_m["mass_bw"]) / (2 * eps)
+            dwidth_dx = (bw_p["width_bw"] - bw_m["width_bw"]) / (2 * eps)
+            grads[name] = dprior_dmass * dmass_dx + dprior_dwidth * dwidth_dx
+
+        return grads
 
 
 # ================================================================
@@ -568,6 +706,7 @@ class ConstraintManager:
         self.name_res = NameResolution()
         self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.mass_width_transforms = []  # list of Transform from particle models
+        self.custom_transforms = []   # list of Transform (applied after mass/width)
         self.fixed_tr = FixedOverride()
 
         # Bound transforms — stored by name in a Boundary collection.
@@ -669,6 +808,22 @@ class ConstraintManager:
                         self._all_names.remove(name)
         self._rebuild()
 
+    def add_transform(self, tr):
+        """Register a custom Transform at the end of the resolve pipeline.
+
+        The transform is applied after mass/width transforms in
+        :meth:`resolve` and in reverse order in :meth:`chain_gradient`.
+        Output names are added to the variable registry.
+
+        Args:
+            tr: A :class:`Transform` instance.
+        """
+        self.custom_transforms.append(tr)
+        for name in tr.output_names:
+            if name not in self._all_names:
+                self._all_names.append(name)
+        self._rebuild()
+
     def set_free(self, name):
         self.fixed_tr.values.pop(name, None)
         # Remove from same groups
@@ -705,7 +860,7 @@ class ConstraintManager:
         return self.resolve(self.from_flat(x), stop_after=stop_after)
 
     def resolve(self, raw_dict, stop_after=None):
-        """Full forward pipeline: bounds → fixed → same → scale → mass/width.
+        """Full forward pipeline: bounds → fixed → same → scale → mass/width → custom.
         
         First applies bound transforms (unbounded → bounded), then
         runs the standard constraint pipeline.  Returns a complete dict
@@ -734,14 +889,20 @@ class ConstraintManager:
             d = tr.apply_forward(d)
         if stop_after == 'transforms':
             return d
+        for tr in self.custom_transforms:
+            d = tr.apply_forward(d)
+        if stop_after == 'custom':
+            return d
         # Merge defaults at the end of the full pipeline
         full = dict(self._defaults)
         full.update(d)
         return full
 
     def inverse(self, resolved):
-        """Full inverse: mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹."""
+        """Full inverse: custom⁻¹ → mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹."""
         d = resolved
+        for tr in reversed(self.custom_transforms):
+            d = tr.apply_inverse(d)
         for tr in reversed(self.mass_width_transforms):
             d = tr.apply_inverse(d)
         for tr in reversed(self.scale_transforms):
@@ -797,13 +958,15 @@ class ConstraintManager:
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve` (mass/width → scale → same → fixed).
+        """Reverse of :meth:`resolve` (custom → mass/width → scale → same → fixed).
 
         Uses :meth:`Transform.apply_backward` on each stage — only
         ``input_names`` are updated; output-only and unrelated gradients
         pass through unchanged.
         """
         grad = grad_resolved
+        for tr in reversed(self.custom_transforms):
+            grad = tr.apply_backward(grad)
         for tr in reversed(self.mass_width_transforms):
             grad = tr.apply_backward(grad)
         for tr in reversed(self.scale_transforms):

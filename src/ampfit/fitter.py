@@ -1541,6 +1541,24 @@ class Fitter:
         var = np.sum(G * (G @ hess_inv), axis=1)
         return values, np.sqrt(np.maximum(var, 0.0))
 
+    def get_particle_model(self, particle_name):
+        """Find a particle model by resonance name.
+
+        Args:
+            particle_name: resonance name from config, e.g. ``"a1(1260)p"``.
+
+        Returns:
+            The particle model instance.
+
+        Raises:
+            ValueError: if *particle_name* is not found.
+        """
+        for chain in self.config.full_decay.chains:
+            for decay in chain.decays[1:]:
+                if decay.core.name == particle_name:
+                    return decay.core._model
+        raise ValueError(f"Particle '{particle_name}' not found in config")
+
     def get_bw_params(self, particle_name, fit_result):
         """BW peak mass and width for a single resonance from fit result.
 
@@ -1560,16 +1578,7 @@ class Fitter:
         import numpy as np
 
         # --- 1. Find the particle model ---
-        model = None
-        for chain in self.config.full_decay.chains:
-            for decay in chain.decays[1:]:
-                if decay.core.name == particle_name:
-                    model = decay.core._model
-                    break
-            if model is not None:
-                break
-        if model is None:
-            raise ValueError(f"Particle '{particle_name}' not found in config")
+        model = self.get_particle_model(particle_name)
 
         # --- 2. Collect parameter names and build fit dict ---
         _, resolved = self.build_params(fit_result.x)
