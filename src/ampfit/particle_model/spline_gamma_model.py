@@ -1,16 +1,25 @@
 """
-B-spline running width model.
+B-spline running width model — interior basis functions only.
 
-Replaces the traditional Breit-Wigner running width with a sum over
-B-spline basis functions::
+Each B-spline basis function of order *p* spans ``p+1`` knot intervals.
+Basis functions near the boundaries have incomplete support and are
+absorbed into the nearest interior function.  Only **interior** basis
+functions (with full support) are fitted::
 
-    Γ(m) = Σ g_j · B_j(m)
+    n_free = n_knots - 2 * order
 
-    D(m) = m₀² - m² - i·m₀·Γ(m)
+    Γ(m) = Σ v_k · B_{k+order}(m)
 
-The mass m₀ is fixed to its config value (not fitted).  The spline
-coefficients g_j are the fitted parameters, giving flexible control
-over the lineshape without assuming a specific analytic form.
+For cubic (order=3), 7 knots → 1 free parameter, 9 knots → 3 free, etc.
+
+The denominator::
+
+    D(m) = m₀² − m² − i·m₀·Γ(m)
+
+Each real basis coefficient has an imaginary counterpart for the mass
+shift::
+
+    Γ(m) = Σ (re_k + i·im_k) · B_k(m)
 
 YAML usage::
 
@@ -18,8 +27,8 @@ YAML usage::
       sigma:
         mass: 0.5
         model: BSpline
-        knots: [0.3, 0.5, 0.7, 1.0, 1.5, 2.5, 5.0]
-        order: 3                  # cubic B-spline (default)
+        knots: [0.3, 0.5, 0.7, 1.0, 1.5, 2.5, 5.0]   # 7 knots, order 3 → 1 free
+        order: 3
 """
 
 import numpy as np
@@ -28,67 +37,43 @@ from ampfit.param_constraint import Transform
 
 
 # ═══════════════════════════════════════════════════════════════════
-# B-spline basis functions (Cox–de Boor recursion)
+# Clamped B-spline basis (Cox–de Boor)
 # ═══════════════════════════════════════════════════════════════════
 
-def bspline_basis(x, breakpoints, order=3):
-    """Evaluate all B-spline basis functions at points *x*.
+def bspline_basis_all(x, breakpoints, order=3):
+    """Full clamped B-spline basis, all functions.
 
-    Constructs a clamped B-spline (first and last knots repeated
-    ``order + 1`` times for proper boundary behaviour).
-
-    Uses the Cox–de Boor recursion formula.
-
-    Parameters
-    ----------
-    x : array-like
-        Evaluation points.
-    breakpoints : array-like
-        Interior breakpoints defining the spline segments.  For *k*
-        breakpoints and order *p*, the number of basis functions is
-        ``k + p - 1``.
-    order : int
-        Polynomial order (1=linear, 2=quadratic, 3=cubic).
-
-    Returns
-    -------
-    ndarray, shape (len(x), n_basis)
-        ``basis[i, j]`` = value of the j-th basis function at x[i].
+    Returns ``(basis_wide, n_all)`` where ``basis_wide`` has shape
+    ``(len(x), n_all)`` with all ``n_all = len(breakpoints) + order - 1``
+    basis functions (including edge functions with incomplete support).
     """
     x = np.asarray(x, dtype=float)
     bp = np.asarray(breakpoints, dtype=float)
 
-    # Clamped knot vector: repeat first/last breakpoint (order+1) times
+    # Clamped knot vector
     t0 = np.full(order + 1, bp[0])
     t1 = np.full(order + 1, bp[-1])
     knots = np.concatenate([t0, bp[1:-1], t1])
     n_knots = len(knots)
-    n_basis = n_knots - order - 1
+    n_all = n_knots - order - 1  # total basis functions
 
-    if n_basis <= 0:
+    if n_all <= 0:
         raise ValueError(
-            f"Need at least {order + 2} breakpoints for order {order}, "
-            f"got {len(bp)}")
-    # Also check min breakpoints for clamped spline
-    min_bp = order + 1
-    if len(bp) < min_bp:
-        raise ValueError(
-            f"Need at least {min_bp} breakpoints for order {order}, "
-            f"got {len(bp)}")
+            f"Need at least {order + 2} breakpoints for order {order}")
 
-    # Order 0 — handle right endpoint (x = knots[-1]) by snapping into last interval
+    # Order 0
     eps = 1e-12
     x_snap = np.where((x >= knots[-1]) & (x < knots[-1] + 10*eps),
                       knots[-1] - eps, x)
-    basis = np.zeros((len(x_snap), n_basis + order))
-    for i in range(n_basis + order):
+    basis = np.zeros((len(x_snap), n_all + order))
+    for i in range(n_all + order):
         if i + 1 < n_knots:
             mask = (x_snap >= knots[i]) & (x_snap < knots[i + 1])
             basis[mask, i] = 1.0
 
-    # Cox-de Boor recursion for orders 1..p
+    # Cox-de Boor recursion
     for p in range(1, order + 1):
-        for i in range(n_basis + order - p):
+        for i in range(n_all + order - p):
             denom_l = knots[i + p] - knots[i]
             left = np.zeros_like(x)
             if denom_l > 0:
@@ -101,18 +86,40 @@ def bspline_basis(x, breakpoints, order=3):
 
             basis[:, i] = left + right
 
-    return basis[:, :n_basis]
+    return basis[:, :n_all], n_all
+
+
+def bspline_basis_interior(x, breakpoints, order=3):
+    """Interior B-spline basis — ``n_free = max(0, n_knots - order - 1)``.
+
+    The full clamped B-spline has ``n_all = n_knots + order - 1``
+    functions.  We return only the interior ones (removing ``order``
+    from each edge).  The sum goes to zero at the boundaries — edge
+    functions are not fitted.
+
+    For odd *order*, basis functions peak at knot positions.
+    For even *order*, they peak **between** knots (bin centres).
+
+    Returns ``(basis, n_free)``.
+    """
+    basis_wide, n_all = bspline_basis_all(x, breakpoints, order)
+    n_free = max(0, n_all - 2 * order)  # = n_knots - order - 1
+
+    if n_free <= 0:
+        return np.zeros((len(np.asarray(x, dtype=float)), 0)), 0
+
+    # Select interior columns: [order, n_all - order)
+    return basis_wide[:, order:n_all - order].copy(), n_free
+
+    return basis, n_free
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Transform — fixes mass, gamma names pass through as free params
+# Transform — fixes mass, knot variables pass through as free params
 # ═══════════════════════════════════════════════════════════════════
 
 class _SplineMassFixTransform(Transform):
-    """Fixes mass to config value; gamma names are untouched free params.
-
-    ``input_names = []``, ``output_names = [mass_name]``.
-    """
+    """Fixes mass; knot variables are untouched free params."""
 
     _has_inverse = False
 
@@ -135,40 +142,29 @@ class _SplineMassFixTransform(Transform):
 
 @register_model("BSpline")
 class BSplineGammaModel(BaseModel):
-    """Running width parameterised by clamped B-spline basis functions.
+    """B-spline running width — interior basis functions only.
 
-    The mass m₀ is fixed to the config value.  The running width is a
-    complex sum over B-spline basis functions::
+    The running width is a sum over **interior** B-spline basis
+    functions::
 
-        Γ(m) = Σ_{k} (re_k + i·im_k) · B_k(m)
+        n_free = n_knots - 2 * order
 
-    where ``re_k`` and ``im_k`` are fitted coefficients and B_k(m) are
-    the clamped B-spline basis functions.  The denominator becomes::
+        Γ(m) = Σ (re_k + i·im_k) · B_k(m)
 
-        D(m) = m₀² − m² − i·m₀·Γ(m)
-             = (m₀² + m₀·Σ im_k·B_k(m)) − m² − i·m₀·Σ re_k·B_k(m)
-
-    The ``re_k`` coefficients control the running **width**, the
-    ``im_k`` coefficients control the running **mass shift**.
-
-    Each basis function produces **two** gamma components::
-        gamma_{2k}(m)   = B_k(m)      → scales with re_k
-        gamma_{2k+1}(m) = i · B_k(m)  → scales with im_k
+    Only basis functions with full support (spanning the interior)
+    are fitted.  Edge functions are absorbed into the nearest
+    interior function.
 
     Parameters (from YAML config):
-        mass        — fixed pole mass (not fitted)
-        knots       — list of breakpoint positions or path to .npy file.
-                      For order *p* and *k* breakpoints you get
-                      ``k + p - 1`` basis functions.
-        order       — spline order (default 3 = cubic)
-        g_{2k}      — initial value for re_k (default 0.1)
-        g_{2k+1}    — initial value for im_k (default 0.0)
+        mass      — fixed pole mass (not fitted)
+        knots     — list of breakpoint positions
+        order     — spline order (default 3 = cubic)
+        g_{2k}    — initial value for re_k (default 0.1)
+        g_{2k+1}  — initial value for im_k (default 0.0)
     """
 
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
-
-        # Breakpoints (user-provided knot positions)
         knots = kwargs.get("knots", None)
         if knots is None:
             raise ValueError(f"BSpline model '{name}': 'knots' is required")
@@ -178,50 +174,47 @@ class BSplineGammaModel(BaseModel):
             self.breakpoints = np.asarray(knots, dtype=float)
 
         self.order = int(kwargs.get("order", 3))
-        min_bp = self.order + 1
+        min_bp = self.order + 2
         if len(self.breakpoints) < min_bp:
             raise ValueError(
                 f"BSpline model '{name}': need at least {min_bp} breakpoints "
-                f"for order {self.order}, got {len(self.breakpoints)}")
-        self.n_basis = len(self.breakpoints) + self.order - 1
+                f"for order {self.order} (n_free = n_knots - order - 1)")
+        self.n_free = len(self.breakpoints) - self.order - 1
 
     # ── gamma interface ──────────────────────────────────────────
 
     def get_gamma_count(self):
-        """Two gamma components per basis function: B_k and i·B_k."""
-        return 2 * self.n_basis
+        return 2 * self.n_free
 
     def get_gamma_name(self):
         names = []
-        for i in range(self.n_basis):
+        for i in range(self.n_free):
             names.append(f"{self.name}_re_B_{i}")
             names.append(f"{self.name}_im_B_{i}")
         return names
 
     def gamma(self, m):
-        """Return gamma components: ``[B_0, i·B_0, B_1, i·B_1, ...]``.
+        """Return gamma components for interior basis functions.
 
-        The real-part components give the running **width**.
-        The imaginary-part components (pre-multiplied by ``i``) give
-        the running **mass shift** via the kernel's ``Σ g_j·gamma_j``.
+        ``[B_0, i·B_0, B_1, i·B_1, ...]`` where B_k are the interior
+        B-spline basis functions (with edge functions absorbed).
         """
-        basis = bspline_basis(m, self.breakpoints, self.order)
+        basis, _ = bspline_basis_interior(m, self.breakpoints, self.order)
         comps = []
-        for i in range(self.n_basis):
+        for i in range(basis.shape[1]):
             b = basis[:, i].astype(complex)
-            comps.append(b)       # B_k → width  (g0 = re_k)
-            comps.append(1j * b)  # i·B_k → mass shift (g0 = im_k)
+            comps.append(b)
+            comps.append(1j * b)
         return comps
 
     # ── default parameters ───────────────────────────────────────
 
     def get_defaults(self):
-        return {}  # mass is fixed by transform; gamma names are free variables
+        return {}
 
     # ── mass/width transform ─────────────────────────────────────
 
     def make_mass_width_transform(self):
-        """Fix mass to config value; gamma names are free params."""
         return _SplineMassFixTransform(
             f"{self.name}_mass",
             mass_default=float(self.kwargs.get("mass", 1.0)),
