@@ -47,7 +47,7 @@ class TestModel:
 
     def test_n_free_range(self):
         m = build_particle("test", model="BSpline", mass=1.0,
-                           x_range=[0, 5], n_points=8)
+                           x_range=[0, 5], n_free=8)
         assert m.n_free == 8
 
     def test_gamma_count(self):
@@ -83,7 +83,7 @@ class TestModel:
                 x = np.linspace(0, 6, 100)
             else:
                 m = build_particle("test", model="BSpline", mass=1.0,
-                                   x_range=[0, 6], n_points=3, order=3)
+                                   x_range=[0, 6], n_free=3, order=3)
                 x = np.linspace(0, 6, 100)
             g = m.gamma(x)
             for k in range(m.n_free):
@@ -110,7 +110,7 @@ class TestConstruction:
 
     def test_range(self):
         m = build_particle("test", model="BSpline", mass=0.5,
-                           x_range=[0, 5], n_points=8, order=3)
+                           x_range=[0, 5], n_free=8, order=3)
         assert m.n_free == 8
         assert len(m.breakpoints) == 12  # 8 + 3 + 1
 
