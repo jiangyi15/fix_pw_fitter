@@ -157,27 +157,47 @@ class BSplineGammaModel(BaseModel):
 
     Parameters (from YAML config):
         mass      — fixed pole mass (not fitted)
-        knots     — list of breakpoint positions
+        knots     — list of breakpoint positions (interior-only n_free = len - order - 1)
+        x_range   — [lo, hi] mass range for basis peaks (alternative to knots)
+        n_points  — number of interior basis functions (used with x_range)
         order     — spline order (default 3 = cubic)
         g_{2k}    — initial value for re_k (default 0.1)
         g_{2k+1}  — initial value for im_k (default 0.0)
+
+    Either ``knots`` or both ``x_range`` and ``n_points`` are required.
+    When using ``x_range`` + ``n_points``, breakpoints are placed so that
+    the ``n_points`` interior basis functions cover ``[lo, hi]``.  The
+    edge knots extend outside the range.
     """
 
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
-        knots = kwargs.get("knots", None)
-        if knots is None:
-            raise ValueError(f"BSpline model '{name}': 'knots' is required")
-        if isinstance(knots, str):
-            self.breakpoints = np.load(knots)
-        else:
-            self.breakpoints = np.asarray(knots, dtype=float)
-
         self.order = int(kwargs.get("order", 3))
-        min_bp = self.order + 2
-        if len(self.breakpoints) < min_bp:
+
+        knots = kwargs.get("knots", None)
+        x_range = kwargs.get("x_range", None)
+        n_points = kwargs.get("n_points", None)
+
+        if knots is not None:
+            if isinstance(knots, str):
+                self.breakpoints = np.load(knots)
+            else:
+                self.breakpoints = np.asarray(knots, dtype=float)
+        elif x_range is not None and n_points is not None:
+            lo, hi = float(x_range[0]), float(x_range[1])
+            n_pts = int(n_points)
+            n_knots = n_pts + self.order + 1
+            step = (hi - lo) / max(n_pts - 1, 1)
+            pad = (self.order + 1) / 2.0
+            self.breakpoints = np.linspace(lo - pad * step, hi + pad * step, n_knots)
+        else:
             raise ValueError(
-                f"BSpline model '{name}': need at least {min_bp} breakpoints "
+                f"BSpline model '{name}': provide either 'knots' or "
+                f"both 'x_range' and 'n_points'")
+
+        if len(self.breakpoints) < self.order + 2:
+            raise ValueError(
+                f"BSpline model '{name}': need at least {self.order + 2} breakpoints "
                 f"for order {self.order} (n_free = n_knots - order - 1)")
         self.n_free = len(self.breakpoints) - self.order - 1
 
@@ -194,11 +214,7 @@ class BSplineGammaModel(BaseModel):
         return names
 
     def gamma(self, m):
-        """Return gamma components for interior basis functions.
-
-        ``[B_0, i·B_0, B_1, i·B_1, ...]`` where B_k are the interior
-        B-spline basis functions (with edge functions absorbed).
-        """
+        """Return gamma components: ``[B_0, i·B_0, B_1, i·B_1, ...]``."""
         basis, _ = bspline_basis_interior(m, self.breakpoints, self.order)
         comps = []
         for i in range(basis.shape[1]):
