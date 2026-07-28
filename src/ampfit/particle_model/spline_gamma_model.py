@@ -69,10 +69,17 @@ def bspline_basis(x, breakpoints, order=3):
         raise ValueError(
             f"Need at least {order + 2} breakpoints for order {order}, "
             f"got {len(bp)}")
+    # Also check min breakpoints for clamped spline
+    min_bp = order + 1
+    if len(bp) < min_bp:
+        raise ValueError(
+            f"Need at least {min_bp} breakpoints for order {order}, "
+            f"got {len(bp)}")
 
-    # Order 0 — handle right endpoint by snapping x to last interval
+    # Order 0 — handle right endpoint (x = knots[-1]) by snapping into last interval
     eps = 1e-12
-    x_snap = np.where(x >= knots[-1], knots[-1] - eps, x)
+    x_snap = np.where((x >= knots[-1]) & (x < knots[-1] + 10*eps),
+                      knots[-1] - eps, x)
     basis = np.zeros((len(x_snap), n_basis + order))
     for i in range(n_basis + order):
         if i + 1 < n_knots:
@@ -102,19 +109,16 @@ def bspline_basis(x, breakpoints, order=3):
 # ═══════════════════════════════════════════════════════════════════
 
 class _SplineMassFixTransform(Transform):
-    """Fixes mass to config value; gamma names are free (pass-through).
+    """Fixes mass to config value; gamma names are untouched free params.
 
-    ``input_names`` = gamma names (fitted coefficients)
-    ``output_names`` = [mass_name] + gamma names (mass gets fixed value)
+    ``input_names = []``, ``output_names = [mass_name]``.
     """
 
     _has_inverse = False
 
-    def __init__(self, name, gamma_names, mass_default):
-        in_names = list(gamma_names)
-        out_names = [f"{name}_mass"] + list(gamma_names)
-        super().__init__(input_names=in_names, output_names=out_names)
-        self._fixed = {f"{name}_mass": float(mass_default)}
+    def __init__(self, mass_name, mass_default):
+        super().__init__(input_names=[], output_names=[mass_name])
+        self._fixed = {mass_name: float(mass_default)}
 
     def forward(self, d):
         result = dict(d)
@@ -122,7 +126,7 @@ class _SplineMassFixTransform(Transform):
         return result
 
     def backward(self, grad_out, d_in=None):
-        return {}  # gamma grads come from kernel via total_grads["g0"]
+        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -174,11 +178,12 @@ class BSplineGammaModel(BaseModel):
             self.breakpoints = np.asarray(knots, dtype=float)
 
         self.order = int(kwargs.get("order", 3))
-        self.n_basis = len(self.breakpoints) + self.order - 1
-        if self.n_basis <= 0:
+        min_bp = self.order + 1
+        if len(self.breakpoints) < min_bp:
             raise ValueError(
-                f"BSpline model '{name}': need at least {2 - self.order} "
-                f"breakpoints for order {self.order}")
+                f"BSpline model '{name}': need at least {min_bp} breakpoints "
+                f"for order {self.order}, got {len(self.breakpoints)}")
+        self.n_basis = len(self.breakpoints) + self.order - 1
 
     # ── gamma interface ──────────────────────────────────────────
 
@@ -211,18 +216,13 @@ class BSplineGammaModel(BaseModel):
     # ── default parameters ───────────────────────────────────────
 
     def get_defaults(self):
-        mass = float(self.kwargs.get("mass", 1.0))
-        defaults = {f"{self.name}_mass": mass}
-        for i in range(self.n_basis):
-            defaults[f"{self.name}_re_B_{i}"] = float(self.kwargs.get(f"g_{2*i}", 0.1))
-            defaults[f"{self.name}_im_B_{i}"] = float(self.kwargs.get(f"g_{2*i+1}", 0.0))
-        return defaults
+        return {}  # mass is fixed by transform; gamma names are free variables
 
     # ── mass/width transform ─────────────────────────────────────
 
     def make_mass_width_transform(self):
         """Fix mass to config value; gamma names are free params."""
         return _SplineMassFixTransform(
-            self.name, self.get_gamma_name(),
+            f"{self.name}_mass",
             mass_default=float(self.kwargs.get("mass", 1.0)),
         )
