@@ -134,13 +134,22 @@ class BSplineGammaModel(BaseModel):
     """Running width parameterised by clamped B-spline basis functions.
 
     The mass m₀ is fixed to the config value.  The running width is a
-    sum over B-spline basis functions::
+    complex sum over B-spline basis functions::
 
-        Γ(m) = Σ g_j · B_j(m)
+        Γ(m) = Σ_{k} (re_k + i·im_k) · B_k(m)
 
-    where g_j are the fitted coefficients (one per basis function) and
-    B_j(m) are the clamped B-spline basis functions defined by the list
-    of breakpoints.
+    where ``re_k`` and ``im_k`` are fitted coefficients and B_k(m) are
+    the clamped B-spline basis functions.  The denominator becomes::
+
+        D(m) = m₀² − m² − i·m₀·Γ(m)
+             = (m₀² + m₀·Σ im_k·B_k(m)) − m² − i·m₀·Σ re_k·B_k(m)
+
+    The ``re_k`` coefficients control the running **width**, the
+    ``im_k`` coefficients control the running **mass shift**.
+
+    Each basis function produces **two** gamma components::
+        gamma_{2k}(m)   = B_k(m)      → scales with re_k
+        gamma_{2k+1}(m) = i · B_k(m)  → scales with im_k
 
     Parameters (from YAML config):
         mass        — fixed pole mass (not fitted)
@@ -148,7 +157,8 @@ class BSplineGammaModel(BaseModel):
                       For order *p* and *k* breakpoints you get
                       ``k + p - 1`` basis functions.
         order       — spline order (default 3 = cubic)
-        g_{i}       — initial value for coefficient i (default 0.1)
+        g_{2k}      — initial value for re_k (default 0.1)
+        g_{2k+1}    — initial value for im_k (default 0.0)
     """
 
     def __init__(self, name, **kwargs):
@@ -173,28 +183,39 @@ class BSplineGammaModel(BaseModel):
     # ── gamma interface ──────────────────────────────────────────
 
     def get_gamma_count(self):
-        return self.n_basis
+        """Two gamma components per basis function: B_k and i·B_k."""
+        return 2 * self.n_basis
 
     def get_gamma_name(self):
-        return [f"{self.name}_B_{i}" for i in range(self.n_basis)]
+        names = []
+        for i in range(self.n_basis):
+            names.append(f"{self.name}_re_B_{i}")
+            names.append(f"{self.name}_im_B_{i}")
+        return names
 
     def gamma(self, m):
-        """Return one complex array per basis function.
+        """Return gamma components: ``[B_0, i·B_0, B_1, i·B_1, ...]``.
 
-        Each ``gamma_j(m) = B_j(m) + 0j`` (basis is real-valued).
-        The fitted g0 coefficients provide the complex scale via the
-        CK product's ``r·exp(i·θ)`` parameterisation.
+        The real-part components give the running **width**.
+        The imaginary-part components (pre-multiplied by ``i``) give
+        the running **mass shift** via the kernel's ``Σ g_j·gamma_j``.
         """
         basis = bspline_basis(m, self.breakpoints, self.order)
-        return [basis[:, i].astype(complex) for i in range(self.n_basis)]
+        comps = []
+        for i in range(self.n_basis):
+            b = basis[:, i].astype(complex)
+            comps.append(b)       # B_k → width  (g0 = re_k)
+            comps.append(1j * b)  # i·B_k → mass shift (g0 = im_k)
+        return comps
 
     # ── default parameters ───────────────────────────────────────
 
     def get_defaults(self):
         mass = float(self.kwargs.get("mass", 1.0))
         defaults = {f"{self.name}_mass": mass}
-        for i, name in enumerate(self.get_gamma_name()):
-            defaults[name] = float(self.kwargs.get(f"g_{i}", 0.1))
+        for i in range(self.n_basis):
+            defaults[f"{self.name}_re_B_{i}"] = float(self.kwargs.get(f"g_{2*i}", 0.1))
+            defaults[f"{self.name}_im_B_{i}"] = float(self.kwargs.get(f"g_{2*i+1}", 0.0))
         return defaults
 
     # ── mass/width transform ─────────────────────────────────────
