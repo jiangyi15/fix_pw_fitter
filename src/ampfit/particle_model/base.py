@@ -70,44 +70,58 @@ class BaseModel:
         """
         return [np.ones_like(m) + 0j]
 
-    def amplitude(self, m, params=None):
-        """Full amplitude A(m).
+    def amplitude_raw(self, m, params):
+        """Raw amplitude A(m) without applying any transform.
 
         Evaluates the BW denominator formula::
 
             A(m) = 1 / (m₀² - m² - i·m₀·Σ g_j·γ_j(m))
 
-        If the model has a mass/width transform (see
-        :meth:`make_mass_width_transform`), it is applied to *params*
-        first so fixed values are filled in.  This means
-        ``amplitude(m, {})`` works for models with transforms.
+        where ``m₀ = params[f\"{name}_mass\"]`` and ``g_j`` are read
+        from *params* using :meth:`get_gamma_name`.
 
         Args:
             m: mass array.
-            params: dict of parameter values (or ``None`` / ``{}`` for
-                    models with transforms).
+            params: dict of parameter names → values (must include
+                    ``{name}_mass`` and all gamma couplings).
 
         Returns:
             Complex amplitude A(m).
         """
         m_arr = np.asarray(m, dtype=float)
+        m0 = float(params.get(f"{self.name}_mass", 0.775))
+        g_list = self.gamma(m_arr)
+        total = 0.0
+        for name, g_val in zip(self.get_gamma_name(), g_list):
+            g0 = float(params.get(name, 0.0))
+            total += g0 * g_val
+        return 1.0 / (m0**2 - m_arr**2 - 1j * m0 * total)
+
+    def amplitude(self, m, params=None):
+        """Full amplitude A(m) with transform applied.
+
+        Applies :meth:`make_mass_width_transform` to *params* first,
+        so fixed values are filled in automatically.  ``amplitude(m, {})``
+        works for models with transforms.
+
+        For models without a transform, ``amplitude(m, params)`` is
+        equivalent to ``amplitude_raw(m, params)``.
+
+        Args:
+            m: mass array.
+            params: optional dict (``None`` / ``{}`` for defaults).
+
+        Returns:
+            Complex amplitude A(m).
+        """
         if params is None:
             params = {}
-
-        # Apply mass/width transform to resolve fixed values
         tr = self.make_mass_width_transform()
         if tr is not None:
             resolved = tr.apply_forward(dict(params))
         else:
             resolved = dict(params)
-
-        m0 = float(resolved.get(f"{self.name}_mass", 0.775))
-        g_list = self.gamma(m_arr)
-        total = 0.0
-        for name, g_val in zip(self.get_gamma_name(), g_list):
-            g0 = float(resolved.get(name, 0.0))
-            total += g0 * g_val
-        return 1.0 / (m0**2 - m_arr**2 - 1j * m0 * total)
+        return self.amplitude_raw(m, resolved)
 
     def make_mass_width_transform(self):
         """Create a Transform from physical parameters to real mass/width.
