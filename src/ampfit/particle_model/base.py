@@ -70,6 +70,45 @@ class BaseModel:
         """
         return [np.ones_like(m) + 0j]
 
+    def amplitude(self, m, params=None):
+        """Full amplitude A(m).
+
+        Evaluates the BW denominator formula::
+
+            A(m) = 1 / (m₀² - m² - i·m₀·Σ g_j·γ_j(m))
+
+        If the model has a mass/width transform (see
+        :meth:`make_mass_width_transform`), it is applied to *params*
+        first so fixed values are filled in.  This means
+        ``amplitude(m, {})`` works for models with transforms.
+
+        Args:
+            m: mass array.
+            params: dict of parameter values (or ``None`` / ``{}`` for
+                    models with transforms).
+
+        Returns:
+            Complex amplitude A(m).
+        """
+        m_arr = np.asarray(m, dtype=float)
+        if params is None:
+            params = {}
+
+        # Apply mass/width transform to resolve fixed values
+        tr = self.make_mass_width_transform()
+        if tr is not None:
+            resolved = tr.apply_forward(dict(params))
+        else:
+            resolved = dict(params)
+
+        m0 = float(resolved.get(f"{self.name}_mass", 0.775))
+        g_list = self.gamma(m_arr)
+        total = 0.0
+        for name, g_val in zip(self.get_gamma_name(), g_list):
+            g0 = float(resolved.get(name, 0.0))
+            total += g0 * g_val
+        return 1.0 / (m0**2 - m_arr**2 - 1j * m0 * total)
+
     def make_mass_width_transform(self):
         """Create a Transform from physical parameters to real mass/width.
 

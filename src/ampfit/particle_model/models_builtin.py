@@ -226,3 +226,26 @@ class WidthLinearNPYModel(BaseModel):
             g = g / np.imag(fm0)
 
         return [g]
+
+
+@register_model("GaussianBasis")
+class GaussianBasisModel(FixedShapeModel):
+    """Gaussian basis function for amplitude expansion.
+
+    Amplitude is a Gaussian centered at *mu* with width *sigma*::
+
+        A(m) = exp(-(m - μ)² / (2·σ²))
+
+    YAML::
+
+        particle:
+          gauss_0:
+            mu: 0.5
+            sigma: 0.2
+            model: GaussianBasis
+    """
+
+    def fixed_shape(self, m):
+        mu = float(self.kwargs.get("mu", 0.775))
+        sigma = float(self.kwargs.get("sigma", 0.1))
+        return np.exp(-((np.asarray(m) - mu) ** 2) / (2.0 * sigma ** 2))
