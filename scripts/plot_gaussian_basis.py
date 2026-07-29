@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """Plot GaussianBasis amplitude contributions from a fit.
 
-Shows each Gaussian basis function (scaled by its CK coefficient) and
-their total as a combined lineshape.
+Shows each Gaussian basis particle's CK-weighted amplitude and their
+total combined lineshape.
 
 Usage::
 
-    python scripts/plot_gaussian_basis.py /path/to/config_amp.yml /path/to/results.json -o gauss_basis.pdf
+    # All particles
+    python scripts/plot_gaussian_basis.py config.yml results.json -o plot.pdf
+
+    # Filter by particle name pattern
+    python scripts/plot_gaussian_basis.py config.yml results.json --pattern MI00
+    python scripts/plot_gaussian_basis.py config.yml results.json --pattern "MI0[12]"
+    python scripts/plot_gaussian_basis.py config.yml results.json --pattern "p$"
 """
 
-import sys, os, argparse
+import sys, os, re, argparse
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,6 +28,8 @@ def main():
     ap.add_argument("--mass-hi", type=float, default=5.14)
     ap.add_argument("--n-points", type=int, default=500)
     ap.add_argument("-o", "--output", default="gaussian_basis.pdf")
+    ap.add_argument("--pattern", default=None,
+                    help="Regex filter on particle name (e.g. 'MI00', 'p$', 'MI0[12]')")
     args = ap.parse_args()
 
     import matplotlib
@@ -30,7 +38,6 @@ def main():
     from ampfit import Fitter
 
     # ── Load ────────────────────────────────────────────────────
-    # Change to config directory so relative NPY paths resolve
     os.chdir(os.path.dirname(os.path.abspath(args.config)))
     f = Fitter(args.config, backend="numpy")
     cp = os.path.splitext(args.results_json)[0] + "_constraints.json"
@@ -41,68 +48,118 @@ def main():
 
     m_grid = np.linspace(args.mass_lo, args.mass_hi, args.n_points)
 
-    # ── Collect GaussianBasis particles ─────────────────────────
-    seen = set()
-    basis_list = []
+    # ── Build CK and collect per-particle amplitudes ────────────
+    seen_models = set()
+    particle_map = {}  # name → (model, mu, sigma)
     for chain in f.config.full_decay.chains:
         for decay in chain.decays[1:]:
             model = decay.core._model
             if type(model).__name__ != "GaussianBasisModel":
                 continue
             mid = id(model)
-            if mid in seen:
+            if mid in seen_models:
                 continue
-            seen.add(mid)
-
+            seen_models.add(mid)
             name = decay.core.name
-            # Amplitude = 1/D → Gaussian shape (no CK scaling)
-            A = model.amplitude_raw(m_grid, resolved)
-
             mu = float(model.kwargs.get("mu", 0.775))
             sigma = float(model.kwargs.get("sigma", 0.1))
-            disp = decay.core.display or name
+            particle_map[name] = (model, mu, sigma)
 
-            basis_list.append({
-                "name": name, "disp": disp,
-                "mu": mu, "sigma": sigma,
-                "A": A,
-            })
-            print(f"  {name}: μ={mu:.3f} σ={sigma:.3f}  |A(μ)|={abs(A[np.argmin(np.abs(m_grid-mu))]):.4f}")
-
-    if not basis_list:
-        print("No GaussianBasis particles found in config")
+    if not particle_map:
+        print("No GaussianBasis particles found")
         sys.exit(1)
 
-    # ── Plot basis functions ────────────────────────────────────
-    # Sort by mu for clean legend
-    basis_list.sort(key=lambda b: b["mu"])
-    colours = plt.cm.viridis(np.linspace(0, 1, len(basis_list)))
+    # Filter by pattern if given
+    if args.pattern:
+        filtered = {n: v for n, v in particle_map.items()
+                    if re.search(args.pattern, n)}
+        if not filtered:
+            print(f"Pattern '{args.pattern}' matched no particles. Available: {list(particle_map)}")
+            sys.exit(1)
+        print(f"Filtered {len(particle_map)} → {len(filtered)} particles by '{args.pattern}'")
+        particle_map = filtered
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    print(f"Found {len(particle_map)} GaussianBasis particles")
 
-    for b, c in zip(basis_list, colours):
-        ax1.plot(m_grid, b["A"].real, color=c, linewidth=0.8,
-                 label=f"μ={b['mu']:.2f}")
-        ax2.plot(m_grid, b["A"].imag, color=c, linewidth=0.8,
-                 label=f"μ={b['mu']:.2f}")
+    # Pre-compute amplitude_raw for each particle at all m_grid points
+    amp_raw = {}
+    for name, (model, mu, sigma) in particle_map.items():
+        amp_raw[name] = model.amplitude_raw(m_grid, resolved)
 
-    # Sum (unweighted — each CK=1)
-    total_re = sum(b["A"].real for b in basis_list)
-    total_im = sum(b["A"].imag for b in basis_list)
-    ax1.plot(m_grid, total_re, "k-", linewidth=2, label="Sum")
-    ax2.plot(m_grid, total_im, "k-", linewidth=2, label="Sum")
+    # Accumulate CK-weighted amplitude per particle
+    ck_arr = f.pc.build_ck(resolved)  # complex[448]
+    per_particle = {name: np.zeros(len(m_grid), dtype=complex)
+                    for name in particle_map}
 
-    for ax in [ax1, ax2]:
+    for i, comb in enumerate(f.all_comb):
+        for term in comb:
+            if isinstance(term, str):
+                for pname in particle_map:
+                    if term.startswith(pname):
+                        per_particle[pname] += amp_raw[pname] * ck_arr[i]
+                        break
+
+    # Group by CP variant (strip trailing 'p'/'m')
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for name in sorted(per_particle):
+        variant = name[-1]  # 'p' or 'm'
+        grouped[variant].append(name)
+
+    # ── Plot ────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(12, 9))
+    gs = fig.add_gridspec(2, 2, hspace=0.08, wspace=0.08)
+    ax_revm = fig.add_subplot(gs[0, 0])                # x=Re, y=m
+    ax_sq = fig.add_subplot(gs[0, 1])                   # x=m, y=|A|²
+    ax_ar = fig.add_subplot(gs[1, 0], sharex=ax_revm)   # Argand: share Re
+    ax_im = fig.add_subplot(gs[1, 1], sharex=ax_sq, sharey=ax_ar)  # share m + Im
+
+    # Plot each variant's total only (no individual particle lines)
+    for variant, names in grouped.items():
+        total_var = np.zeros(len(m_grid), dtype=complex)
+        for name in names:
+            A = per_particle[name]
+            total_var += A
+
+        ls = '-' if variant == 'p' else '--'
+        ax_revm.plot(total_var.real, m_grid, 'k' + ls, linewidth=2, label=f'Total ({variant})')
+        ax_sq.plot(m_grid, np.abs(total_var)**2, 'k' + ls, linewidth=2, label=f'Total ({variant})')
+        ax_im.plot(m_grid, total_var.imag, 'k' + ls, linewidth=2, label=f'Total ({variant})')
+        ax_ar.plot(total_var.real, total_var.imag, 'k' + ls, linewidth=1.5,
+                   label=f'Total ({variant})')
+
+    for ax in [ax_revm, ax_im, ax_sq]:
         ax.axhline(0, color="grey", linewidth=0.5)
-        ax.legend(fontsize=6, ncol=3)
+        ax.legend(fontsize=5, ncol=2)
         ax.grid(True, alpha=0.3)
 
-    ax1.set_ylabel("Re(amplitude)")
-    ax1.set_title("Gaussian basis functions (CK = 1 each)")
-    ax2.set_ylabel("Im(amplitude)")
-    ax2.set_xlabel("m (GeV)")
+    # Hide redundant tick labels on shared axes
+    ax_revm.tick_params(labelbottom=False)   # x shared with Argand
+    ax_sq.tick_params(labelbottom=False)     # x shared with bottom-right
+    ax_im.tick_params(labelleft=False)       # y shared with Argand
 
-    fig.tight_layout()
+    ax_revm.set_xlabel("Re(amplitude)")
+    ax_revm.set_ylabel("m (GeV)")
+    ax_sq.set_xlabel("m (GeV)")
+    ax_sq.set_ylabel("|amplitude|²")
+    ax_sq.yaxis.set_label_position("right")
+    ax_sq.tick_params(labelright=True, labelleft=False)
+    ax_im.set_xlabel("m (GeV)")
+    ax_im.set_ylabel("Im(amplitude)")
+
+    # Argand
+    ax_ar.axhline(0, color="grey", linewidth=0.5)
+    ax_ar.axvline(0, color="grey", linewidth=0.5)
+    ax_ar.legend(fontsize=7)
+    ax_ar.grid(True, alpha=0.3)
+    ax_ar.set_xlabel("Re(amplitude)")
+    ax_ar.set_ylabel("Im(amplitude)")
+
+    # Symmetric range for Argand; sharex/sharey align the rest
+    r = max(np.abs(ax_ar.get_xlim()).max(), np.abs(ax_ar.get_ylim()).max()) * 1.1
+    ax_ar.set_xlim(-r, r)
+    ax_ar.set_ylim(-r, r)
+
     fig.savefig(args.output, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved {args.output}")

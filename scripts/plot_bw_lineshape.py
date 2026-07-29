@@ -67,21 +67,22 @@ def main():
             seen.add(mid)
             name = decay.core.name
             disp = decay.core.display
+            gamma_fn = model.gamma
 
-            # Full amplitude + gamma components
-            invD = model.amplitude_raw(m_grid, resolved)
-            gamma_vals = np.asarray(model.gamma(m_grid), dtype=complex)
+            # Mass
+            mass_key = f"{name}_mass"
+            m0 = float(resolved[mass_key])
+
+            # Gamma parameter values
             gamma_names = list(model.get_gamma_name())
             g0_vals = [float(resolved[gn]) for gn in gamma_names]
 
+
             resonances.append({
-                "name": name, "disp": disp, 
-                "invD": invD,
-                "gamma_fn": model.gamma,
+                "name": name, "disp": disp, "m0": m0,
+                "gamma_fn": gamma_fn,
                 "gamma_names": gamma_names,
-                "gamma_vals": gamma_vals,
                 "g0_vals": g0_vals,
-                "m0": float(resolved[f"{name}_mass"]),
             })
 
     if args.resonances:
@@ -100,17 +101,23 @@ def main():
         ax_ar = axes[idx, 1]
 
         m0 = res["m0"]
-        invD = res["invD"]
-        invD_re, invD_im = invD.real, invD.imag
-        lineshape = invD_im  # Im(1/D) = BW absorptive part
-        gamma_names = res["gamma_names"]
-        gamma_vals = res["gamma_vals"]
         g0_vals = res["g0_vals"]
+        gamma_vals = np.asarray(res["gamma_fn"](m_grid), dtype=complex)
+
+        # Complex running width Γ(m) = Σ gᵢ · γᵢ(m)
+        Gamma = np.zeros_like(m_grid, dtype=complex)
+        for i in range(min(len(g0_vals), gamma_vals.shape[0])):
+            Gamma += g0_vals[i] * gamma_vals[i]
+
+        # D = (m₀² - m²) - i·m₀·Γ
+        D = (m0**2 - m_grid**2) - 1j * m0 * Gamma
+        invD = 1.0 / D
+        lineshape = invD.imag  # Im(1/D) = BW absorptive part
+        invD_re, invD_im = invD.real, invD.imag
 
         # ── Lineshape ─────────────────────────────────────────
         ax_ls.plot(m_grid, lineshape, "b-", linewidth=1.5, label="total")
         # Individual Re(Γᵢ) contributions (skip if only one component)
-        D = 1.0 / invD  # for per-component scale
         if len(g0_vals) > 1:
             scale = m0 / np.abs(D)**2
             # Group CK-matrix components: diag re_aa individually, sum off-diag re_ab and im_ab

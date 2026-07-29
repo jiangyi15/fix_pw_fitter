@@ -70,6 +70,10 @@ def main():
         print(f"Resonance '{args.resonance}' not found")
         sys.exit(1)
 
+    mass_key = f"{res_name}_mass"
+    gamma_names = list(model.get_gamma_name())
+    param_names = [mass_key] + gamma_names
+
     # ── Mass grid ────────────────────────────────────────────────
     m_pi = 0.13957
     m_B = 5.279
@@ -78,14 +82,22 @@ def main():
     m_grid = np.linspace(mass_lo, mass_hi, args.n_points)
 
     # ── Observable: Re(1/D) and Im(1/D) at all mass points ─────
-    param_names = [f"{res_name}_mass"] + list(model.get_gamma_name())
+    gamma_fn = model.gamma
 
     def lineshape_obs(phys):
-        invD = model.amplitude_raw(m_grid, phys)
-        out = np.empty(2 * len(m_grid))
+        m0 = float(phys[mass_key])
+        g0_vals = [float(phys[gn]) for gn in gamma_names]
+        gamma_vals = np.asarray(gamma_fn(m_grid), dtype=complex)
+        Gamma = np.zeros_like(m_grid, dtype=complex)
+        for i in range(min(len(g0_vals), gamma_vals.shape[0])):
+            Gamma += g0_vals[i] * gamma_vals[i]
+        D = (m0**2 - m_grid**2) - 1j * m0 * Gamma
+        invD = 1.0 / D
+        # Interleave Re and Im: [Re_0, Im_0, Re_1, Im_1, ...]
+        out = [0.0] * (2 * len(m_grid))
         out[0::2] = invD.real
         out[1::2] = invD.imag
-        return out.tolist()
+        return out
 
     print(f"  Computing Re(1/D) and Im(1/D) + uncertainties for {res_name} ({args.n_points} points)...")
     values, errors = f.cal_uncertainties_multi_vec(
