@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Plot GaussianBasis amplitude contributions from a fit.
+"""Plot FixedShape basis amplitude contributions (GaussianBasis / BSplineBasis).
 
-Shows each Gaussian basis particle's CK-weighted amplitude and their
-total combined lineshape.
+Shows each basis particle's CK-weighted amplitude and their total
+combined lineshape per CP variant.
 
 Usage::
 
@@ -51,10 +51,12 @@ def main():
     # ── Build CK and collect per-particle amplitudes ────────────
     seen_models = set()
     particle_map = {}  # name → (model, mu, sigma)
+    from ampfit.particle_model.models_builtin import GaussianBasisModel, BSplineBasisModel
+    basis_types = (GaussianBasisModel, BSplineBasisModel)
     for chain in f.config.full_decay.chains:
         for decay in chain.decays[1:]:
             model = decay.core._model
-            if type(model).__name__ != "GaussianBasisModel":
+            if not isinstance(model, basis_types):
                 continue
             mid = id(model)
             if mid in seen_models:
