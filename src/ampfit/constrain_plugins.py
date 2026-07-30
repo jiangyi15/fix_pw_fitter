@@ -223,20 +223,33 @@ def _handle_cp_symmetry(fitter, spec):
 
 @register_constrain("ck_redundancy", order=0)
 def _handle_ck_redundancy(fitter, spec):
-    """Fix CK scale redundancies.
+    """Fix CK scale redundancies by prefix context.
 
-    Fix all gamma reference terms (``_g_ls_0``, ``pole.0``, ``point_5``,
-    ``fix1``) to r=1, theta=0 — one per product group.
+    For each CK term ``[t0, t1, t2, ...]``, process positions in order.
+    At each position p > 0, if the prefix ``(t0, ..., t_{p-1})`` has been
+    seen before at this position, the term at ``p`` is a ratio parameter
+    (free).  Otherwise, fix the term as the reference for this context.
 
-    Also fix the first ``_total_0`` as the overall amplitude reference.
+    Concept: for CK products like ``(a+b)(c+d) → [a,b,c,d]``, fix the
+    first occurrence ``[a,c]`` (positions 1,2), then ``[a,d]`` and
+    ``[b,c]`` are ratios — only the differing position varies freely.
+
+    Also fixes the first ``_total_0`` as overall amplitude reference.
     """
+    seen_prefix = set()  # {(pos, prefix_tuple), ...}
     fixed = {}
     for comb in fitter.all_comb:
-        for term in comb:
-            if not isinstance(term, str):
+        for pos, term in enumerate(comb):
+            if not isinstance(term, str) or pos == 0:
                 continue
-            if any(term.endswith(s) for s in ("_g_ls_0", "pole.0", "point_5", "fix1")):
-                fixed[term + "r"] = 1.0
+            prefix = tuple(comb[:pos])
+            key = (pos, prefix)
+            if key in seen_prefix:
+                continue  # ratio term — leave free
+            seen_prefix.add(key)
+            r = term + "r"
+            if r not in fixed:
+                fixed[r] = 1.0
                 fixed[term + "i"] = 0.0
 
     # Also fix the first _total_0 as overall reference
