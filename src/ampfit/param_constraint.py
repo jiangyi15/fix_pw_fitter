@@ -207,7 +207,9 @@ class NameResolution:
 
     @property
     def input_names(self):
-        return list(dict.fromkeys(self.map.values()))
+        # Root canons: canons that are NOT themselves aliases
+        all_aliases = set(self.map.keys())
+        return list(set(self.map.values()) - all_aliases)
 
     @property
     def output_names(self):
@@ -1058,21 +1060,27 @@ class ConstraintManager:
     # ── rebuild ─────────────────────────────────────────────────
 
     def _rebuild(self):
-        # Collect all output names — param fully determined by some transform
-        outputs = set()
-        outputs.update(self.fixed_tr.output_names)
-        outputs.update(self.name_res.output_names)
-        for tr in self.mass_width_transforms:
-            outputs.update(tr.output_names)
-        for tr in self.custom_transforms:
-            outputs.update(tr.output_names)
-        # scale_transforms modify values in-place (same name in/out),
-        # they don't create new determined params — skip.
+        # Collect names that are genuinely produced by a transform
+        # (output where the name is NOT also an input of the same transform).
+        # In-place transforms (LinearTransform: same name in/out) are excluded.
+        produced = set()
+        for tr in self._all_transforms():
+            for name in tr.output_names:
+                if name not in tr.input_names:
+                    produced.add(name)
 
         self._var_registry = VariableRegistry()
         for name in self._all_names:
-            if name not in outputs:
+            if name not in produced:
                 self._var_registry.add(name)
+
+    def _all_transforms(self):
+        """Yield all constraint transforms in forward order."""
+        yield self.fixed_tr
+        yield self.name_res
+        yield from self.scale_transforms
+        yield from self.mass_width_transforms
+        yield from self.custom_transforms
 
 
 # ================================================================
