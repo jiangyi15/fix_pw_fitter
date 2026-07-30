@@ -412,6 +412,15 @@ particle:
         L: 0
 
 constrains:
+    # Auto-structural (run by default, no config needed):
+    #   ck_redundancy  (order=0) - fix CK refs by prefix
+    #   cp_symmetry    (order=1) - CP same+scale+free for g_ls
+    #   cp_symmetry_mass (order=2) - CP same for _mass/_width
+    #   mass_width_bounds (order=35) - auto bounds from config defaults
+
+    # Config-level constraints
+    prefix_same:
+        - [KMA, KMB, KMC, KM2]
     fix_var:
         "KMA_prod.2r": 0.0
         "KMA_prod.2i": 0.0
@@ -420,23 +429,10 @@ constrains:
         "KMA_prod.4r": 0.0
         "KMA_prod.4i": 0.0
     var_equal:
-        - [ "KMA_pole.0r", "KMB_pole.0r"]
-        - [ "KMA_pole.0i", "KMB_pole.0i"]
-        - [ "KMA_pole.1r", "KMB_pole.1r"]
-        - [ "KMA_pole.1i", "KMB_pole.1i"]
-        - [ "KMA_pole.2r", "KMB_pole.2r"]
-        - [ "KMA_pole.2i", "KMB_pole.2i"]
-        - [ "KMA_pole.3r", "KMB_pole.3r"]
-        - [ "KMA_pole.3i", "KMB_pole.3i"]
-        - [ "KMA_pole.4r", "KMB_pole.4r"]
-        - [ "KMA_pole.4i", "KMB_pole.4i"]
-        - [ "KMA_prod.0r", "KMB_prod.0r"]
-        - [ "KMA_prod.0i", "KMB_prod.0i"]
-        - [ "KMA_prod.1r", "KMB_prod.1r"]
-        - [ "KMA_prod.1i", "KMB_prod.1i"]
-        - [ "KMA_prod.2r", "KMB_prod.2r"]
-        - [ "KMA_prod.2i", "KMB_prod.2i"]
-        - [ "KMA_prod.3r", "KMB_prod.3r"]
-        - [ "KMA_prod.3i", "KMB_prod.3i"]
-        - [ "KMA_prod.4r", "KMB_prod.4r"]
-        - [ "KMA_prod.4i", "KMB_prod.4i"]
+        - [rhoA_mass, rhoB_mass]
+        - [rhoA_width, rhoB_width]
+        - [pi2(1670)p_width, pi2(1670)m_width]
+    var_range:
+        a1(1260)p_mass: [1.1, 1.32]
+        a1(1260)m_mass: [1.1, 1.32]
+        gamma: [-0.5, 0.5]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Real NLL computation using ampfit with constraints from pw_cfit5_td6_fix29.py.
+Real NLL computation using ampfit.
 
 Usage:
     python run_fit.py                      # Full fit with all data
@@ -14,92 +14,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampfit import Fitter
-
-
-def build_constraints(all_comb):
-    """Build fixed/same/scale constraints matching pw_cfit5_td6_fix29.py."""
-    all_params = set()
-    for comb in all_comb:
-        for p in comb:
-            if isinstance(p, str):
-                all_params.add(p)
-
-    fixed_slots = {}
-    same_params = []
-    scale_params = {}
-
-    # --- Fixed slots: '{name}r' / '{name}i' for complex, '{name}' for real ---
-    for p in sorted(all_params):
-        if p.endswith("g_ls_0"):
-            fixed_slots[p + 'r'] = 1.0
-            fixed_slots[p + 'i'] = 0.0
-        elif p.endswith("pole.0"):
-            fixed_slots[p + 'r'] = 1.0
-            fixed_slots[p + 'i'] = 0.0
-        elif p.endswith("point_5"):
-            fixed_slots[p + 'r'] = 1.0
-            fixed_slots[p + 'i'] = 0.0
-        elif p.endswith("fix1"):
-            fixed_slots[p + 'r'] = 1.0
-            fixed_slots[p + 'i'] = 0.0
-
-    # Fix B->rhoA.rhoB total (matching reference TFPWA)
-    fix_total = "B->rhoA.rhoBrhoA->pip1.pim1rhoB->pip2.pim2_total_0"
-    if fix_total in all_params:
-        fixed_slots[fix_total + 'r'] = 1.0
-        fixed_slots[fix_total + 'i'] = 0.0
-
-    # --- Same params and scales ---
-    for r1 in ["a1(1260)", "a1(1640)", "a2(1320)", "pi1300",
-               "pi1600", "a2(1700)", "pi2(1670)", "pi1(1600)"]:
-        name_ps, name_ms = [], []
-        fixed = True
-        for r2 in ["rhoA", "f0(500)", "f0(980)", "f2(1270)", "f0(1370)"]:
-            name_p = f"B->{r1}p.pim2{r1}p->{r2}.pip2{r2}->pip1.pim1_total_0"
-            name_m = f"B->{r1}m.pip2{r1}m->{r2}.pim2{r2}->pip1.pim1_total_0"
-            if name_p in all_params:
-                name_ps.append(name_p)
-                name_ms.append(name_m)
-            for idx in range(3):
-                key_m = f"{r1}m->{r2}.pim2_g_ls_{idx}"
-                if key_m in all_params:
-                    if fixed:
-                        fixed = False
-                    else:
-                        key_p = f"{r1}p->{r2}.pip2_g_ls_{idx}"
-                        if key_m + 'r' in fixed_slots:
-                            del fixed_slots[key_m + 'r']
-                            del fixed_slots[key_m + 'i']
-                        if key_p + 'r' in fixed_slots:
-                            del fixed_slots[key_p + 'r']
-                            del fixed_slots[key_p + 'i']
-                        same_params.append([key_m + 'r', key_p + 'r'])
-                        same_params.append([key_m + 'i', key_p + 'i'])
-                    if r2 == "rhoA":
-                        scale_params[key_m + 'r'] = -1
-        if name_ps and name_ms:
-            # Group all p's together, all m's together (canon = first)
-            same_params.append([n + 'r' for n in name_ps])
-            same_params.append([n + 'i' for n in name_ps])
-            same_params.append([n + 'r' for n in name_ms])
-            same_params.append([n + 'i' for n in name_ms])
-
-    # KMA/KMB symmetry
-    for i in range(3):
-        for j in ["pole", "prod"]:
-            ka = f"KMA_{j}.{i}"
-            kb = f"KMB_{j}.{i}"
-            if ka in all_params:
-                same_params.append([ka, kb])
-    for i in range(3, 5):
-        for j in ["pole", "prod"]:
-            for prefix in ["KMA", "KMB", "KMC", "KM2"]:
-                key = f"{prefix}_{j}.{i}"
-                if key in all_params:
-                    fixed_slots[key + 'r'] = 0.0
-                    fixed_slots[key + 'i'] = 0.0
-
-    return fixed_slots, same_params, scale_params
 
 
 def main():
@@ -139,71 +53,33 @@ def main():
         backend_spec = yaml.safe_load(backend_spec)
 
     fitter = Fitter(args.config, backend=backend_spec)
-    fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
-    # Optionally add mass/width fixes to the fixed slots
+
+    # All structural + config constraints via plugin system
+    fitter.apply_constrains()
+
+    # CLI: fix mass/width to defaults
     if args.fix_mass_width:
         for name, val in fitter.defaults.items():
             if 'g_ls' in name or 'total' in name:
                 continue
             if name in ('gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'):
                 continue
-            fixed_slots[name] = float(val)
+            if name not in fitter.free_param_names():
+                continue
+            fitter.set_fixed({name: float(val)})
 
-    # gamma is free (fitted time parameter) — do NOT fix to 0
-    fixed_slots["delta_gamma"] = 0.0
-    fixed_slots["delta_m"]= 0.506
-    fixed_slots["A_prod"] = 0.0
-    fixed_slots["poqr"] = 1.0
-    fixed_slots["poqi"] = 0.0
+    # KMA/KMB/KMC/KM2 for i>=3: fixed to 0
+    for prefix in ["KMA", "KMB", "KMC", "KM2"]:
+        for j in ["pole", "prod"]:
+            for i in range(3, 5):
+                key = f"{prefix}_{j}.{i}"
+                if key in fitter.cm._all_names:
+                    fitter.set_fixed({key + "r": 0.0, key + "i": 0.0})
 
-    for name in []: # "a1(1260)", "a2(1320)", "a2(1700)", "pi2(1670)", "pi1(1600)","a1(1640)", "pi1300", "pi1600"]: # "a1(1260)", "a1(1640)", "a2(1320)"]:
-        if f"{name}p_mass" in fixed_slots:
-            del fixed_slots[f"{name}p_mass"]
-        if f"{name}m_mass" in fixed_slots:
-            del fixed_slots[f"{name}m_mass"]
-        if f"{name}p_width" in fixed_slots:
-            del fixed_slots[f"{name}p_width"]
-        if f"{name}m_width" in fixed_slots:
-            del fixed_slots[f"{name}m_width"]
-        same_params.append([f"{name}p_mass",f"{name}m_mass"])
-        same_params.append([f"{name}p_width",f"{name}m_width"])
+    print(f"Fixed: {len(fitter.cm.fixed_slots)} slots, "
+          f"Same: {len(fitter.cm.same_params)} aliases, "
+          f"Scale: {len(fitter.cm.scale_params)} transforms")
 
-    fitter.set_fixed(fixed_slots)
-    fitter.set_same(same_params)
-    fitter.set_scale(scale_params)
-    # Share re_00 between charge-conjugate pairs (ck_matrix models)
-    for particle in ["pi2(1670)"]:
-        p_re00 = f"{particle}p_width"
-        m_re00 = f"{particle}m_width"
-        if p_re00 in fitter.free_param_names() and m_re00 in fitter.free_param_names():
-            fitter.set_same([[p_re00, m_re00]])
-    print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups, Scale: {len(scale_params)}")
-
-    # Set boundary ranges for masses and widths.
-    # Parameters are identified by having a resonance prefix
-    # and not being g_ls/total coupling params.
-    flat = set(fitter.cm.var_registry.flat_names)
-    _scalars = {'gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'}
-    mass_width_range = {}
-    for name, val in fitter.defaults.items():
-        if 'g_ls' in name or 'total' in name:
-            continue
-        if name in _scalars:
-            continue
-        if name not in flat:
-            continue
-        if name.endswith('_mass'):
-            mass_width_range[name] = [float(val) - 2, float(val) + 2]
-        else:
-            # width, gamma, Flatte g_i, etc.
-            lo = max(0.01, float(val) - 20)
-            hi = min(5.0, float(val) + 4.)
-            mass_width_range[name] = [lo, hi]
-    mass_width_range["a1(1260)p_mass"] = [1.1, 1.32]
-    mass_width_range["a1(1260)m_mass"] = [1.1, 1.32]
-    for k, v in mass_width_range.items():
-        if k not in fitter._fixed_slots:
-            fitter.set_range(k, *v)
     # ==================================================================
     # 2. Load data
     # ==================================================================
@@ -224,15 +100,13 @@ def main():
     t0 = time.time()
     fitter.set_phsp(phsp_np)
     phsp_gpu_time = time.time() - t0
-    print(f"  Phsp → GPU: {phsp_gpu_time:.2f}s")
+    print(f"  Phsp -> GPU: {phsp_gpu_time:.2f}s")
 
     t0 = time.time()
     fitter.set_data(data_np)
     data_gpu_time = time.time() - t0
-    print(f"  Data → GPU: {data_gpu_time:.2f}s")
+    print(f"  Data -> GPU: {data_gpu_time:.2f}s")
 
-    # m0 and g0 default values come from config.yml particle definitions
-    # (lazy-loaded by Fitter.defaults)
     n_free = len(fitter.free_param_names())
     print(f"  Free params: {n_free}")
 
@@ -253,11 +127,12 @@ def main():
         x0 = fitter.initial_values(seed=None)
     print(f"x0 shape: {x0.shape}")
 
-    # Print initial parameters
+    # Print initial parameters (physical values after transforms)
     names = fitter.free_param_names()
+    phy_val = fitter.cm.flat_resolve(x0, stop_after="bounds")
     print(f"\n  Initial parameters:")
     for name, val in zip(names, x0):
-        print(f"    {name:50s} = {val:+.6f}")
+        print(f"    {name:50s} = {phy_val.get(name):+.6f}  (x={val:+.6f})")
     print()
 
     t0 = time.time()
@@ -311,7 +186,7 @@ def main():
                 print(f"  Checkpoint saved to {save_path}")
                 print(f"  Resume with: --init {save_path}")
             else:
-                print(f"\n  Fit interrupted after {fit_time:.1f}s — no iterations completed")
+                print(f"\n  Fit interrupted after {fit_time:.1f}s - no iterations completed")
             sys.exit(1)
 
         print(f"\n  Fit time: {fit_time:.2f}s")
@@ -325,7 +200,7 @@ def main():
         vals_err = [(n, uncert[n][0], uncert[n][1]) for n in names]
         print(f"\n  Fitted parameters:")
         for name, val, err in vals_err:
-            print(f"    {name:50s} = {val:+.6f} ± {err:.6f}")
+            print(f"    {name:50s} = {val:+.6f} +/- {err:.6f}")
 
         # Save results
         save_path = args.save
@@ -349,7 +224,7 @@ def main():
     # ==================================================================
     print("\n" + "=" * 70)
     print("  SUMMARY")
-    print("─" * 70)
+    print("-" * 70)
     print(f"    Data       {n_data:>10,}")
     print(f"    Phsp       {n_phsp:>10,}")
     print(f"    Free vars  {n_free:>10,}")

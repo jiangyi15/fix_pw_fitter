@@ -362,6 +362,13 @@ def _handle_mass_width_bounds(fitter, spec):
             fitter.set_range(name, lo, hi)
 
 
+@register_constrain("var_range", order=36)
+def _handle_var_range(fitter, spec):
+    """``var_range: {name: [lo, hi], ...}`` — set parameter bounds."""
+    for name, (lo, hi) in spec.items():
+        fitter.set_range(name, float(lo), float(hi))
+
+
 @register_constrain("bounds", order=40)
 def _handle_bounds(fitter, spec):
     """``bounds: {name: {low: ..., high: ...}, ...}``."""
