@@ -173,6 +173,33 @@ def _handle_cp_symmetry(fitter, spec):
         fitter.set_scale(scale_list, reset=False)
 
 
+@register_constrain("cp_symmetry_mass", order=2)
+def _handle_cp_symmetry_mass(fitter, spec):
+    """Same-group mass and width of CP-conjugate particle pairs.
+
+    For each first-intermediate resonance that has both p and m
+    variants (e.g. a1(1260)p/a1(1260)m), same-groups:
+      ``{name}p_mass = {name}m_mass``
+      ``{name}p_width = {name}m_width``
+    """
+    names = set()
+    for chain in fitter.config.full_decay.chains:
+        name = chain.decays[1].core.name
+        if name.endswith("p"):
+            base = name[:-1]
+            if base + "m" in {c.decays[1].core.name
+                              for c in fitter.config.full_decay.chains}:
+                names.add(base)
+
+    for base in sorted(names):
+        for attr in ("_mass", "_width"):
+            pn = base + "p" + attr
+            mn = base + "m" + attr
+            if pn in fitter.cm._all_names and mn in fitter.cm._all_names:
+                if fitter.cm.name_res.map.get(pn, pn) != mn:
+                    fitter.set_same([[pn, mn]], reset=False)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Transform handlers — run before fix/same/scale to create params
 # ═══════════════════════════════════════════════════════════════════
