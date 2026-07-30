@@ -205,6 +205,14 @@ class NameResolution:
     def __init__(self):
         self.map = {}          # {alias: canonical}
 
+    @property
+    def input_names(self):
+        return list(dict.fromkeys(self.map.values()))
+
+    @property
+    def output_names(self):
+        return list(self.map.keys())
+
     def set_same(self, groups):
         self.map = {}
         for group in groups:
@@ -714,6 +722,14 @@ class FixedOverride:
     def __init__(self):
         self.values = {}       # {slot_name: value}
 
+    @property
+    def input_names(self):
+        return []
+
+    @property
+    def output_names(self):
+        return list(self.values.keys())
+
     def set_fixed(self, fixed):
         self.values = dict(fixed)
 
@@ -1042,20 +1058,21 @@ class ConstraintManager:
     # ── rebuild ─────────────────────────────────────────────────
 
     def _rebuild(self):
+        # Collect all output names — param fully determined by some transform
+        outputs = set()
+        outputs.update(self.fixed_tr.output_names)
+        outputs.update(self.name_res.output_names)
+        for tr in self.mass_width_transforms:
+            outputs.update(tr.output_names)
+        for tr in self.custom_transforms:
+            outputs.update(tr.output_names)
+        # scale_transforms modify values in-place (same name in/out),
+        # they don't create new determined params — skip.
+
         self._var_registry = VariableRegistry()
-        added = set()
-
-        def _add(name):
-            """Add parameter to registry, deduplicating through same-constraint."""
-            canon = self.name_res.map.get(name, name)
-            if canon in added or canon in self.fixed_tr.values:
-                return
-            added.add(canon)
-            self._var_registry.add(canon)
-
-        # All names — no type distinction (ck slots, m0, g0, scalar, extra).
         for name in self._all_names:
-            _add(name)
+            if name not in outputs:
+                self._var_registry.add(name)
 
 
 # ================================================================
