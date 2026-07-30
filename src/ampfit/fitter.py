@@ -98,7 +98,7 @@ class Fitter:
 
     # Default constraints — merged with config's ``constrains:`` section.
     # Override by putting the same key in the config's constrains section.
-    default_constrains = {"cp_symmetry": {}, "ck_redundancy": {}}
+    default_constrains = {"ck_redundancy": {}, "cp_symmetry": {}}
 
     def __init__(self, config_file="config_angle.yml", backend=None):
         """Load config, create kernel and parameter constraint.

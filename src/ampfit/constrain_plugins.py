@@ -24,13 +24,18 @@ Then in ``config.yml``::
 # Registry + dispatch
 # ═══════════════════════════════════════════════════════════════════
 
-_constrain_handlers = {}
+_constrain_handlers = {}  # name → (fn, order)
 
 
-def register_constrain(name):
-    """Decorator: register a handler for a YAML ``constrains`` section key."""
+def register_constrain(name, order=100):
+    """Decorator: register a handler for a YAML ``constrains`` section key.
+
+    Args:
+        name: key in the YAML ``constrains`` section.
+        order: execution priority (lower = earlier).  Default 100.
+    """
     def _f(fn):
-        _constrain_handlers[name] = fn
+        _constrain_handlers[name] = (fn, order)
         return fn
     return _f
 
@@ -38,17 +43,15 @@ def register_constrain(name):
 def apply_constrains(fitter, constrains=None):
     """Apply constraint handlers for each key in *constrains*.
 
-    Args:
-        fitter: Fitter instance.
-        constrains: dict of ``{key: spec}``.  If ``None``, reads from
-                    ``fitter.config.dic["constrains"]``.
+    Handlers are sorted by ``order`` (lower first) before execution.
     """
     if constrains is None:
         constrains = fitter.config.dic.get("constrains", {})
-    for key, spec in constrains.items():
-        handler = _constrain_handlers.get(key)
-        if handler:
-            handler(fitter, spec)
+    # Sort by order, then execute
+    items = [(k, v) for k, v in constrains.items() if k in _constrain_handlers]
+    items.sort(key=lambda kv: _constrain_handlers[kv[0]][1])
+    for key, spec in items:
+        _constrain_handlers[key][0](fitter, spec)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -148,131 +151,103 @@ def _handle_mass_width_bw(fitter, spec):
 # Structural constraint handlers (used via constrains section)
 # ═══════════════════════════════════════════════════════════════════
 
-@register_constrain("cp_symmetry")
+@register_constrain("cp_symmetry", order=1)
 def _handle_cp_symmetry(fitter, spec):
-    """Constrain CP-conjugate pairs based on internal particle spin.
+    """Constrain CP-conjugate pairs using chain structure.
 
-    For R -> rhopi -> 3-pi chains, the rho meson has J = 1, P = -1.
-    Under CP conjugation, the amplitude picks up a factor
-    ``(-1)^J = -1`` for a rho intermediate state.  This means
-    the gamma couplings for R+ and R- should be related by
-    a sign flip (set_scale with factor -1).
-
-    Detection logic:
-    1. Find chain pairs with same intermediate daughters (by topo_id)
-    2. The two chains differ only in CP label (name ends in p/m)
-    3. Check if an intermediate daughter has J = 1 (e.g. rho, omega)
-    4. Apply set_scale(-1) between conjugate gamma names
+    Collects decays by first intermediate resonance name, then for each
+    CP conjugate pair (p/m suffix):
+    - Same-groups ``_total_0`` within all R+ and within all R-
+    - Same-groups ``_g_ls`` between R+ and R- counterparts
+    - Scales by -1 if the decay's outgoing particle has odd J
+    - Unfixes all g_ls except one reference
     """
     chains = fitter.config.full_decay.chains
     if not chains:
         return
 
-    # Group chains by topo_id to find CP-conjugate pairs
-    from collections import defaultdict
-    by_topo = defaultdict(list)
+    particle_decays = {}
+    particle_chain = {}
     for chain in chains:
-        by_topo[chain.topo_id()].append(chain)
+        name = chain.decays[1].core.name
+        particle_decays.setdefault(name, []).append(chain.decays[1])
+        particle_chain.setdefault(name, []).append(chain)
 
-    for topo_id, group in by_topo.items():
-        if len(group) < 2:
+    same_list = []
+    free_list = []
+    scale_list = {}
+    for name, v in particle_chain.items():
+        if name.endswith(("p", "m")):
+            totals = [str(i).replace("+", ".") + "_total_0" for i in v]
+            same_list.append([i + "r" for i in totals])
+            same_list.append([i + "i" for i in totals])
+
+    for pname, v1 in particle_decays.items():
+        if not pname.endswith("p"):
             continue
-        # Find p/m pairs
-        for ci in range(len(group)):
-            for cj in range(ci + 1, len(group)):
-                a, b = group[ci], group[cj]
-                # Check if one ends in p, the other in m (same base)
-                a_name = str(a).split("+")[0] if "+" in str(a) else str(a)
-                b_name = str(b).split("+")[0] if "+" in str(b) else str(b)
-                # Extract the base particle name from the chain
-                a_particle = a.decays[1].core.name if len(a.decays) > 1 else ""
-                b_particle = b.decays[1].core.name if len(b.decays) > 1 else ""
-
-                # Check CP conjugation: same base, one p one m
-                if (a_particle.endswith("p") and b_particle.endswith("m")) or \
-                   (a_particle.endswith("m") and b_particle.endswith("p")):
-                    _constrain_cp_pair(fitter, a, b)
-
-
-def _constrain_cp_pair(fitter, chain_p, chain_m):
-    """Apply CP-symmetry scale(-1) constraint between chain_p and chain_m.
-
-    For each intermediate resonance in the chain, check if its
-    daughter (next decay) has J=1 -> apply scale(-1) to gamma names.
-    """
-    for idx in range(1, len(chain_p.decays)):
-        decay_p = chain_p.decays[idx]
-        decay_m = chain_m.decays[idx]
-
-        model_p = decay_p.core._model
-        model_m = decay_m.core._model
-        name_p = decay_p.core.name
-        name_m = decay_m.core.name
-
-        gamma_p = list(model_p.get_gamma_name())
-        gamma_m = list(model_m.get_gamma_name())
-        if not gamma_p or not gamma_m:
+        mname = pname[:-1] + "m"
+        if mname not in particle_decays:
             continue
-        if len(gamma_p) != len(gamma_m):
-            continue
+        v2 = particle_decays[mname]
+        assert len(v1) == len(v2), f"mismatch decay count for {pname}/{mname}"
+        # Sort so rhoA comes first (matching old build_constraints order)
+        def _sort_key(d):
+            name = d.outs[0].name
+            return (0, name) if name == "rhoA" else (1, name)
+        v1_sorted = sorted(v1, key=_sort_key)
+        v2_sorted = sorted(v2, key=_sort_key)
+        fix_ref = False
+        for va, vb in zip(v1_sorted, v2_sorted):
+            for ga, gb in zip(va.get_ls_names(), vb.get_ls_names()):
+                if fix_ref:
+                    free_list.append(ga + "r")
+                    free_list.append(ga + "i")
+                    free_list.append(gb + "r")
+                    free_list.append(gb + "i")
+                fix_ref = True
+                same_list.append([ga + "r", gb + "r"])
+                same_list.append([ga + "i", gb + "i"])
+                if va.outs[0]._model and int(va.outs[0]._model.kwargs.get("J", 0)) % 2 == 1:
+                    scale_list[gb + "r"] = -1
 
-        # Check if the decay products include a J=1 particle (like rho)
-        # First try via next decay chain, then fallback to kwargs
-        has_J1 = False
-        if idx + 1 < len(chain_p.decays):
-            next_model = chain_p.decays[idx + 1].core._model
-            J = int(next_model.kwargs.get("J", 0))
-            if J == 1:
-                has_J1 = True
-        else:
-            # Terminal decay -- check the model's own kwargs
-            J = int(model_p.kwargs.get("J", 0))
-            if J == 1:
-                has_J1 = True
-
-        if not has_J1:
-            continue
-
-        # Apply scale(-1) between conjugate gamma names
-        scale_dict = {}
-        for gp, gm in zip(gamma_p, gamma_m):
-            scale_dict[gm] = (gp, None) if gp in fitter.cm.var_registry.flat_names else -1.0
-            # set_scale with factor -1 on gm, using gp as reference
-            # Actually simpler: set_same with scale = -1
-        # Fitter set_scale(gm: -1.0) doesn't support relative scaling
-        # So we fix gm to -gp (scale=-1) using set_scale
-        for gm in gamma_m:
-            fitter.set_scale({gm: -1.0})
+    # Apply collected constraints
+    for rn in free_list:
+        if rn in fitter.cm.fixed_slots:
+            fitter.set_free(rn)
+    for group in same_list:
+        if len(set(group)) > 1:
+            fitter.set_same([group], reset=False)
+    if scale_list:
+        fitter.set_scale(scale_list, reset=False)
 
 
-@register_constrain("ck_redundancy")
+@register_constrain("ck_redundancy", order=0)
 def _handle_ck_redundancy(fitter, spec):
-    """Fix redundant CK degrees of freedom.
+    """Fix CK scale redundancies.
 
-    In the product structure ``ck[i] = Π term_vals``, the overall
-    scale between groups of terms is unconstrained.  We fix the
-    first ``total`` term to ``r=1, theta=0`` to break this redundancy.
+    Fix all gamma reference terms (``_g_ls_0``, ``pole.0``, ``point_5``,
+    ``fix1``) to r=1, theta=0 — one per product group.
 
-    More sophisticated analysis of co-occurring term groups is
-    possible but requires careful handling of the combinatoric
-    structure -- left for future work.
+    Also fix the first ``_total_0`` as the overall amplitude reference.
     """
+    fixed = {}
     for comb in fitter.all_comb:
         for term in comb:
-            if isinstance(term, str) and "_total_" in term:
-                r_name = f"{term}r"
-                i_name = f"{term}i"
-                flat = fitter.cm.var_registry.flat_names
-                if r_name in flat and r_name not in fitter.cm.fixed_slots:
-                    fitter.set_fixed({r_name: 1.0, i_name: 0.0}, reset=False)
-                    return
-    # If no _total_ term found, try first string term
+            if not isinstance(term, str):
+                continue
+            if any(term.endswith(s) for s in ("_g_ls_0", "pole.0", "point_5", "fix1")):
+                fixed[term + "r"] = 1.0
+                fixed[term + "i"] = 0.0
+
+    # Also fix the first _total_0 as overall reference
     for comb in fitter.all_comb:
         for term in comb:
-            if isinstance(term, str):
-                r_name = f"{term}r"
-                i_name = f"{term}i"
-                flat = fitter.cm.var_registry.flat_names
-                if r_name in flat and r_name not in fitter.cm.fixed_slots:
-                    fitter.set_fixed({r_name: 1.0, i_name: 0.0}, reset=False)
-                    return
+            if isinstance(term, str) and "_total_0" in term:
+                fixed.setdefault(term + "r", 1.0)
+                fixed.setdefault(term + "i", 0.0)
+                break
+        if any("_total_0" in t for t in comb if isinstance(t, str)):
+            break
+
+    if fixed:
+        fitter.set_fixed(fixed, reset=False)
