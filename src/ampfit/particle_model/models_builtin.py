@@ -274,20 +274,41 @@ class BSplineBasisModel(FixedShapeModel):
     """
 
     def fixed_shape(self, m):
-        from ampfit.particle_model.spline_gamma_model import bspline_basis_all
-
         mu = float(self.kwargs.get("mu", 0.775))
         sigma = float(self.kwargs.get("sigma", 0.1))
         order = int(self.kwargs.get("order", 3))
 
         # Knots: order+1 intervals on each side of mu, spacing sigma
         half = (order + 1) / 2.0
-        n_knots = order + 2
-        lo = mu - half * sigma
-        hi = mu + half * sigma
-        knots = np.linspace(lo, hi, n_knots)
+        knots = np.linspace(mu - half * sigma, mu + half * sigma, order + 2)
 
-        m_arr = np.asarray(m)
-        basis_all, n_all = bspline_basis_all(m_arr, knots, order)
-        A = basis_all[:, n_all // 2]
-        return np.clip(A, 1e-15, None).astype(complex)
+        # Clamped B-spline extended knot vector
+        t0 = np.full(order + 1, knots[0])
+        t1 = np.full(order + 1, knots[-1])
+        ext = np.concatenate([t0, knots[1:-1], t1])
+        n_all = len(ext) - order - 1  # = 2*order + 1
+        k = n_all // 2  # center basis function index
+
+        # Cox-de Boor for a single basis function B_{k,order}
+        # Only need order-0 functions B_{k} through B_{k+order}
+        B = np.zeros((order + 1, len(np.asarray(m))))
+        # Order 0
+        for i in range(order + 1):
+            mask = (np.asarray(m) >= ext[k + i]) & (np.asarray(m) < ext[k + i + 1])
+            B[i, mask] = 1.0
+        # Recursion
+        for p in range(1, order + 1):
+            for i in range(order + 1 - p):
+                denom_l = ext[k + i + p] - ext[k + i]
+                if denom_l > 0:
+                    left = (np.asarray(m) - ext[k + i]) / denom_l * B[i]
+                else:
+                    left = 0.0
+                denom_r = ext[k + i + p + 1] - ext[k + i + 1]
+                if denom_r > 0:
+                    right = (ext[k + i + p + 1] - np.asarray(m)) / denom_r * B[i + 1]
+                else:
+                    right = 0.0
+                B[i] = left + right
+
+        return np.clip(B[0], 1e-15, None).astype(complex)
