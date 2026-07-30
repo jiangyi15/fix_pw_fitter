@@ -26,6 +26,7 @@ except Exception:
 
 from .fitter import Fitter
 from . import backends
+from . import constrain_plugins  # noqa: F401 — register constraint handlers
 from .bw_form_factor import form_factor as bw_form_factor
 
 __all__ = [

@@ -230,6 +230,16 @@ class Fitter:
         """
         self.priors.append(prior)
 
+    def apply_constrains(self):
+        """Apply the ``constrains`` section from the YAML config.
+
+        Dispatches each key to its registered handler in
+        :mod:`ampfit.constrain_plugins`.  Called automatically during
+        :meth:`__init__`.
+        """
+        from ampfit.constrain_plugins import apply_constrains
+        apply_constrains(self)
+
     def set_free(self, name):
         """Unfix a previously fixed parameter so it becomes free again.
 
