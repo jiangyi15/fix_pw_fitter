@@ -343,11 +343,16 @@ def _handle_particle_float(fitter, spec):
     Runs before ``fix_var:`` (order=20) so config can re-fix if needed.
     """
     particles = fitter.config.dic.get("particle", {})
+    _shorthand = {"m": "mass", "g": "width"}
     for pname, pcfg in particles.items():
         if not isinstance(pcfg, dict):
             continue
-        float_list = pcfg.get("float")
-        if not isinstance(float_list, (list, tuple)):
+        raw = pcfg.get("float")
+        if isinstance(raw, str):
+            float_list = [_shorthand.get(c, c) for c in raw]
+        elif isinstance(raw, (list, tuple)):
+            float_list = list(raw)
+        else:
             continue
         for attr in float_list:
             fitter.set_free(f"{pname}_{attr}")
