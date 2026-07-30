@@ -322,12 +322,12 @@ def test_cm_chain_gradient():
 
 
 def test_cm_set_scale_then_free():
-    """set_scale then set_free removes the transform."""
+    """set_scale then set_free preserves the transform (fix/scale are independent)."""
     cm = _make_cm()
     cm.set_scale({'x': 2.0})
     assert 'x' in cm.scale_params
     cm.set_free('x')
-    assert 'x' not in cm.scale_params
+    assert 'x' in cm.scale_params
 
 
 # ═══════════════════════════════════════════════════════════════════

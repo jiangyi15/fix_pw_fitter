@@ -147,7 +147,7 @@ def test_set_same_reset():
 
 
 def test_set_same_then_free():
-    """Freeing a member of a same-group removes it from the group."""
+    """Freeing preserves same-group relationships (fix and same are independent)."""
     fitter = setup_fitter()
     names = fitter.free_param_names()
     if len(names) < 2:
@@ -161,10 +161,11 @@ def test_set_same_then_free():
     assert slot0 in sp.values() or slot0 in sp
     assert slot1 in sp or slot1 in sp.values()
 
+    # Free does NOT remove from same-groups — fix and same are separate stages
     fitter.set_free(slot0)
     sp = fitter._same_params
-    assert slot0 not in sp.values() and slot0 not in sp
-    assert slot1 not in sp and slot1 not in sp.values()
+    assert slot0 in sp.values() or slot0 in sp
+    assert slot1 in sp or slot1 in sp.values()
 
 
 # ── set_scale — additive ──────────────────────────────────────────
@@ -195,7 +196,8 @@ def test_set_scale_then_free():
     assert name in fitter._scale_params
 
     fitter.set_free(name)
-    assert name not in fitter._scale_params
+    # Free does NOT remove from scale — fix and scale are separate stages
+    assert name in fitter._scale_params
 
 
 # ── set_range / unset_range ───────────────────────────────────────

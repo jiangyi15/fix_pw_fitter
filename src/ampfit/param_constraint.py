@@ -908,10 +908,6 @@ class ConstraintManager:
 
     def set_free(self, name):
         self.fixed_tr.values.pop(name, None)
-        # Remove from same groups
-        self.name_res.map = {k: v for k, v in self.name_res.map.items()
-                             if k != name and v != name}
-        self.scale_transforms = [tr for tr in self.scale_transforms if tr.name != name]
         self._rebuild()
 
     def set_range(self, name, lo, hi):
