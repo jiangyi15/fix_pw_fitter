@@ -293,6 +293,34 @@ def _handle_transforms(fitter, spec):
         fitter.cm.add_transform(tr)
 
 
+@register_constrain("particle_float", order=15)
+def _handle_particle_float(fitter, spec):
+    """Free params listed in particle config's ``float:`` field.
+
+    For each particle in the config with a ``float:`` list, unfixes the
+    corresponding ``{particle_name}_{item}`` param::
+
+        particle:
+            a1(1260)p:
+                float: [mass, width]   # frees a1(1260)p_mass + a1(1260)p_width
+                mass: 1.2422
+                width: 0.466
+
+    Runs before ``fix_var:`` (order=20) so config can re-fix if needed.
+    """
+    particles = fitter.config.dic.get("particle", {})
+    for pname, pcfg in particles.items():
+        if not isinstance(pcfg, dict):
+            continue
+        float_list = pcfg.get("float")
+        if not isinstance(float_list, (list, tuple)):
+            continue
+        for attr in float_list:
+            param = f"{pname}_{attr}"
+            if param in fitter.cm._all_names and param in fitter.cm.fixed_slots:
+                fitter.set_free(param)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Config constraint handlers
 # ═══════════════════════════════════════════════════════════════════
