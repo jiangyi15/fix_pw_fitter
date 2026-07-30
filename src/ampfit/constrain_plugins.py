@@ -350,9 +350,7 @@ def _handle_particle_float(fitter, spec):
         if not isinstance(float_list, (list, tuple)):
             continue
         for attr in float_list:
-            param = f"{pname}_{attr}"
-            if param in fitter.cm._all_names and param in fitter.cm.fixed_slots:
-                fitter.set_free(param)
+            fitter.set_free(f"{pname}_{attr}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -387,8 +385,7 @@ def _handle_free_var(fitter, spec):
     else:
         return
     for name in names:
-        if name in fitter.cm.fixed_slots:
-            fitter.set_free(name)
+        fitter.set_free(name)
 
 
 @register_constrain("mass_width_bounds", order=35)
