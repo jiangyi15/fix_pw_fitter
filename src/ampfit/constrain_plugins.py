@@ -292,6 +292,39 @@ def _handle_free_var(fitter, spec):
             fitter.set_free(name)
 
 
+@register_constrain("mass_width_bounds", order=35)
+def _handle_mass_width_bounds(fitter, spec):
+    """Auto-set bounds for mass and width params from config defaults.
+
+    Mass params: ``[val - 2, val + 2]``
+    Other params: ``[max(0.01, val - 20), min(5.0, val + 4)]``
+
+    Skips ``g_ls``, ``total``, scalar params, and already-fixed params.
+    """
+    flat = set(fitter.var_registry.flat_names)
+    scalars = {'gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'}
+    for name, val in fitter.defaults.items():
+        if 'g_ls' in name or 'total' in name:
+            continue
+        if name in scalars:
+            continue
+        if name not in flat:
+            continue
+        if name.endswith('_mass'):
+            lo, hi = float(val) - 2.0, float(val) + 2.0
+        else:
+            lo = max(0.01, float(val) - 20.0)
+            hi = min(5.0, float(val) + 4.0)
+        if name not in fitter.cm.fixed_slots:
+            fitter.set_range(name, lo, hi)
+
+    # Manual overrides
+    overrides = spec.get("overrides", {}) if isinstance(spec, dict) else {}
+    for name, (lo, hi) in overrides.items():
+        if name not in fitter.cm.fixed_slots:
+            fitter.set_range(name, lo, hi)
+
+
 @register_constrain("bounds", order=40)
 def _handle_bounds(fitter, spec):
     """``bounds: {name: {low: ..., high: ...}, ...}``."""
