@@ -96,6 +96,10 @@ class BuildKernelParams:
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
+    # Default constraints — merged with config's ``constrains:`` section.
+    # Override by putting the same key in the config's constrains section.
+    default_constrains = {"cp_symmetry": {}, "ck_redundancy": {}}
+
     def __init__(self, config_file="config_angle.yml", backend=None):
         """Load config, create kernel and parameter constraint.
 
@@ -231,14 +235,18 @@ class Fitter:
         self.priors.append(prior)
 
     def apply_constrains(self):
-        """Apply the ``constrains`` section from the YAML config.
+        """Apply constraints: ``default_constrains`` merged with config's.
 
-        Dispatches each key to its registered handler in
-        :mod:`ampfit.constrain_plugins`.  Called automatically during
-        :meth:`__init__`.
+        Applies :attr:`default_constrains` first, then overlays any
+        ``constrains`` section from the YAML config.  This means
+        config entries override defaults with the same key.
         """
         from ampfit.constrain_plugins import apply_constrains
-        apply_constrains(self)
+        constrains = dict(self.default_constrains)
+        config_section = self.config.dic.get("constrains", {})
+        if config_section:
+            constrains.update(config_section)
+        apply_constrains(self, constrains)
 
     def set_free(self, name):
         """Unfix a previously fixed parameter so it becomes free again.
