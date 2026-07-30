@@ -976,17 +976,37 @@ class ConstraintManager:
         full.update(d)
         return full
 
-    def inverse(self, resolved):
-        """Full inverse: custom⁻¹ → mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹."""
+    def inverse(self, resolved, stop_before=None):
+        """Full inverse: custom⁻¹ → mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹.
+
+        Args:
+            stop_before: stop BEFORE applying the inverse of this stage.
+                ``'custom'``, ``'transforms'``, ``'scale'``, ``'same'``,
+                ``'fixed'``, ``'bounds'``, or ``None`` for full pipeline.
+                E.g. ``stop_before='fixed'`` undoes custom/scale/same but
+                leaves fixed values intact.
+        """
         d = resolved
+        if stop_before == 'custom':
+            return d
         for tr in reversed(self.custom_transforms):
             d = tr.apply_inverse(d)
+        if stop_before == 'transforms':
+            return d
         for tr in reversed(self.mass_width_transforms):
             d = tr.apply_inverse(d)
+        if stop_before == 'scale':
+            return d
         for tr in reversed(self.scale_transforms):
             d = tr.apply_inverse(d)
+        if stop_before == 'same':
+            return d
         d = self.name_res.inverse(d)
+        if stop_before == 'fixed':
+            return d
         d = self.fixed_tr.inverse(d)
+        if stop_before == 'bounds':
+            return d
         # Invert bounds: return unbounded values
         for name in list(d):
             d[name] = self.bounds.inverse(name, d[name])
