@@ -297,23 +297,26 @@ def _handle_transforms(fitter, spec):
 def _handle_fix_mass_width_default(fitter, spec):
     """Fix all mass and width params to config defaults.
 
-    After this handler runs, ``particle_float`` (order=15) can
-    selectively free individual params via the particle config's
-    ``float:`` field, and ``fix_var`` (order=20) can override::
+    Use ``true``/``false`` to enable or disable::
 
         constrains:
-            fix_mass_width_default: {}       # fix all mass/width
-            # particle_float runs next, frees only those with float:
+            fix_mass_width_default: true   # fix all mass/width
+            fix_mass_width_default: false  # leave them free (default)
+
+    When enabled, ``particle_float`` (order=15) can selectively free
+    individual params via the particle config's ``float:`` field::
 
         particle:
             a1(1260)p:
-                float: [mass, width]   # kept free
+                float: "mg"       # keeps mass+width free
                 mass: 1.2422
                 width: 0.466
-            a2(1320)p:                 # no float: kept fixed
+            a2(1320)p:            # no float: stays fixed
                 mass: 1.323
                 width: 0.120
     """
+    if not spec:
+        return
     scalars = {'gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'}
     fixed = {}
     for name, val in fitter.defaults.items():
