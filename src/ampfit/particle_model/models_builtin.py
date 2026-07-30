@@ -249,3 +249,49 @@ class GaussianBasisModel(FixedShapeModel):
         mu = float(self.kwargs.get("mu", 0.775))
         sigma = float(self.kwargs.get("sigma", 0.1))
         return np.exp(-((np.asarray(m) - mu) ** 2) / (2.0 * sigma ** 2))
+
+
+@register_model("BSplineBasis")
+class BSplineBasisModel(FixedShapeModel):
+    """B-spline basis function for amplitude expansion.
+
+    Amplitude is a single B-spline basis function centered at *mu*
+    with compact support proportional to *sigma* and *order*::
+
+        A(m) ≈ B_k(m)   (k-th B-spline basis, centred at mu, peak = 1)
+
+    Outside the support range, the amplitude is zero.
+    *order* controls the smoothness (3 = cubic).
+
+    YAML::
+
+        particle:
+          bspl_0:
+            mu: 0.5
+            sigma: 0.3
+            order: 3
+            model: BSplineBasis
+    """
+
+    def fixed_shape(self, m):
+        from ampfit.particle_model.spline_gamma_model import bspline_basis_all
+
+        mu = float(self.kwargs.get("mu", 0.775))
+        sigma = float(self.kwargs.get("sigma", 0.1))
+        order = int(self.kwargs.get("order", 3))
+
+        # Knots: order+1 intervals on each side of mu, spacing sigma
+        half = (order + 1) / 2.0
+        n_knots = order + 2
+        lo = mu - half * sigma
+        hi = mu + half * sigma
+        knots = np.linspace(lo, hi, n_knots)
+
+        m_arr = np.asarray(m)
+        basis_all, n_all = bspline_basis_all(m_arr, knots, order)
+        A = basis_all[:, n_all // 2]
+        # Normalize to unit peak
+        peak = np.max(A)
+        if peak > 0:
+            A = A / peak
+        return np.clip(A, 1e-15, None).astype(complex)
