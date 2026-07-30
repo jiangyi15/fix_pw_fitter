@@ -200,6 +200,43 @@ def _handle_cp_symmetry_mass(fitter, spec):
                     fitter.set_same([[pn, mn]], reset=False)
 
 
+@register_constrain("prefix_same", order=3)
+def _handle_prefix_same(fitter, spec):
+    """Same-group params where one prefix is replaced by another.
+
+    YAML::
+
+        constrains:
+          prefix_symmetry:
+            - [KMA, KMB]              # KMA_* = KMB_*
+            - [KMA, KMB, KMC, KM2]    # all four equal
+
+    For each param starting with the *first* prefix in a group, finds
+    corresponding names for the other prefixes and same-groups them.
+    """
+    if not isinstance(spec, (list, tuple)):
+        return
+    all_params = set()
+    for comb in fitter.all_comb:
+        for p in comb:
+            if isinstance(p, str):
+                all_params.add(p)
+    for group in spec:
+        if not isinstance(group, (list, tuple)) or len(group) < 2:
+            continue
+        pa = group[0]
+        for name in all_params:
+            if name.startswith(pa):
+                rest = name[len(pa):]
+                others = [pb + rest for pb in group[1:]
+                          if pb + rest in all_params]
+                if others:
+                    canon = fitter.cm.name_res.map.get(name, name)
+                    for other in others:
+                        if other != canon:
+                            fitter.set_same([[name, other]], reset=False)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Transform handlers — run before fix/same/scale to create params
 # ═══════════════════════════════════════════════════════════════════
