@@ -295,25 +295,20 @@ def _handle_transforms(fitter, spec):
 
 @register_constrain("fix_mass_width_default", order=14)
 def _handle_fix_mass_width_default(fitter, spec):
-    """Fix all mass and width params to config defaults.
+    """Fix all default params (mass, width, couplings) to config defaults.
 
     Use ``true``/``false`` to enable or disable::
 
         constrains:
-            fix_mass_width_default: true   # fix all mass/width
+            fix_mass_width_default: true   # fix all defaults
             fix_mass_width_default: false  # leave them free (default)
 
-    When enabled, ``particle_float`` (order=15) can selectively free
-    individual params via the particle config's ``float:`` field::
+    Skips ``g_ls``, ``total``, and scalar params — same logic as the
+    old ``--fix-mass-width`` CLI flag.  This covers Flatte couplings
+    (e.g. ``f0(980)_g0``), spline knots, etc.
 
-        particle:
-            a1(1260)p:
-                float: "mg"       # keeps mass+width free
-                mass: 1.2422
-                width: 0.466
-            a2(1320)p:            # no float: stays fixed
-                mass: 1.323
-                width: 0.120
+    When enabled, ``particle_float`` (order=15) can selectively free
+    individual params via the particle config's ``float:`` field.
     """
     if not spec:
         return
@@ -324,8 +319,7 @@ def _handle_fix_mass_width_default(fitter, spec):
             continue
         if name in scalars:
             continue
-        if name.endswith('_mass') or name.endswith('_width'):
-            fixed[name] = float(val)
+        fixed[name] = float(val)
     if fixed:
         fitter.set_fixed(fixed, reset=False)
 
