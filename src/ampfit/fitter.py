@@ -511,6 +511,28 @@ class Fitter:
 
         return x
 
+    def load_fixed_from_dict(self, data):
+        """Set fixed param values from a JSON dict, inverting constraints.
+
+        Uses ``cm.inverse(values, stop_before='fixed')`` to get the
+        state with fixed values intact, then updates ``fixed_tr.values``
+        so fixed params match the source fit.
+
+        Args:
+            data: dict with ``'value'`` key (or flat dict) of physical values.
+        """
+        values = data.get("value", data) if isinstance(data, dict) else data
+        if not values:
+            return
+        before_fixed = self.cm.inverse(values, stop_before='fixed')
+        changed = False
+        for name in list(self.cm.fixed_slots):
+            if name in before_fixed:
+                self.cm.fixed_tr.values[name] = float(before_fixed[name])
+                changed = True
+        if changed:
+            self.cm._rebuild()
+
     @property
     def var_registry(self):
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
