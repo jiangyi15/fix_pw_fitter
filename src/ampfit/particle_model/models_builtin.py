@@ -290,8 +290,4 @@ class BSplineBasisModel(FixedShapeModel):
         m_arr = np.asarray(m)
         basis_all, n_all = bspline_basis_all(m_arr, knots, order)
         A = basis_all[:, n_all // 2]
-        # Normalize to unit peak
-        peak = np.max(A)
-        if peak > 0:
-            A = A / peak
         return np.clip(A, 1e-15, None).astype(complex)
