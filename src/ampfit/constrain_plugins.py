@@ -243,41 +243,39 @@ def _handle_prefix_same(fitter, spec):
 
 @register_constrain("mass_width_bw", order=10)
 def _handle_mass_width_bw(fitter, spec):
-    """Auto-add BW constraints for all particle models.
+    """Add BW mass/width constraints for specific resonances.
 
-    For each unique particle model in the config, adds a
-    :class:`~ampfit.param_constraint.BWParamsTransform` and
-    Gaussian priors on ``mass_bw`` and ``width_bw``.
+    For each listed resonance, adds a
+    :class:`~ampfit.param_constraint.BWParamsTransform` and Gaussian
+    priors on ``mass_bw``/``width_bw``.
 
     YAML::
 
         constrains:
             mass_width_bw:
-                sigma_mass: 0.010    # width for mass Gaussian (default)
-                sigma_width: 0.005   # width for width Gaussian (default)
+                rhoA:    {mass: [0.769, 0.010], width: [0.1506, 0.005]}
+                f0(980): {mass: [0.965, 0.050], width: [0.2, 0.020]}
+
+    Per-resonance keys ``mass`` / ``width`` take ``[mu, sigma]``:
+    nominal value and Gaussian prior width.  Either may be omitted
+    (falls back to the model config, but then no prior is added).
     """
     from ampfit.param_constraint import BWParamsTransform, GaussianPrior
 
-    sigma_mass = float(spec.get("sigma_mass", 0.010))
-    sigma_width = float(spec.get("sigma_width", 0.005))
+    for name, cfg in spec.items():
+        try:
+            model = fitter.get_particle_model(name)
+        except ValueError:
+            print(f"  mass_width_bw: resonance '{name}' not found, skipping")
+            continue
 
-    seen = set()
-    for chain in fitter.config.full_decay.chains:
-        for decay in chain.decays[1:]:
-            model = decay.core._model
-            mid = id(model)
-            if mid in seen:
+        fitter.cm.add_transform(BWParamsTransform(model))
+        for attr, key in (("_mass_bw", "mass"), ("_width_bw", "width")):
+            if key not in cfg:
                 continue
-            seen.add(mid)
-
-            fitter.cm.add_transform(BWParamsTransform(model))
-
-            mu_mass = float(model.kwargs.get("mass", 0.775))
-            mu_width = float(model.kwargs.get("width", 0.1))
+            mu, sigma = (float(x) for x in cfg[key])
             fitter.add_prior(GaussianPrior(
-                f"{model.name}_mass_bw", mu=mu_mass, sigma=sigma_mass))
-            fitter.add_prior(GaussianPrior(
-                f"{model.name}_width_bw", mu=mu_width, sigma=sigma_width))
+                f"{name}{attr}", mu=mu, sigma=sigma))
 
 
 @register_constrain("custom_transforms", order=11)
