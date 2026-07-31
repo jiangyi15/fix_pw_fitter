@@ -25,6 +25,8 @@ def main():
     ap.add_argument("-o", "--output", default="plots/")
     ap.add_argument("--format", default="png",
                     help="Image format (default: png)")
+    ap.add_argument("--merge-mi", action="store_true",
+                    help="Merge MI0{i} basis particles into a single MI0 group")
     args = ap.parse_args()
 
     out_fmt = args.format
@@ -49,7 +51,10 @@ def main():
     if r.x is None or len(r.x) == 0:
         sys.exit(1)
 
-    groups = discover_groups(f.config)
+    merge = [("^MI0\\d", "MI0")] if args.merge_mi else None
+    groups = discover_groups(f.config, merge=merge)
+    if merge:
+        print(f"  merged MI0{{i}} -> MI0")
     plotter = PWGroupPlotter(f, r, groups).compute()
     print(f"  {len(plotter.labels)} groups, scale={plotter._scale:.4f}")
 

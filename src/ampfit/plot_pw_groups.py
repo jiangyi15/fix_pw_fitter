@@ -71,15 +71,24 @@ def adaptive_split_bound(datas, binning, base_bound=None):
         data_chain = new_data_chain
     return bound_chain, data_chain
 
+def discover_groups(config, merge=None):
+    """Return dict mapping label → merged ck indices (B0+B0bar).
 
-def discover_groups(config):
-    """Return dict mapping label → merged ck indices (B0+B0bar)."""
+    Args:
+        merge: optional list of ``(regex, label)`` — group keys
+            matching *regex* are merged into *label* (their ck index
+            lists are combined).  E.g. ``[("^MI0\\\\d", "MI0")]``
+            merges MI00..MI04 into a single "MI0" wave group.
+    """
+    import re as _re
+
     idx = 0
     chain_ranges = []
     for chain in config.full_decay.chains:
         n = len(chain.get_gls_combination())
         chain_ranges.append((idx, idx + n, chain))
         idx += n
+
     n_base = idx
 
     inner_set = set()
@@ -109,6 +118,15 @@ def discover_groups(config):
             key = tuple(sorted([r1, r2]))
             raw_B.setdefault(key, []).extend(range(start, end))
 
+    def _merge(label, raw, out):
+        merged = label
+        if merge:
+            for pat, newlabel in merge:
+                if _re.match(pat, label):
+                    merged = newlabel
+                    break
+        out.setdefault(merged, []).extend(raw)
+
     def expand(base):
         ck = []
         for block in range(8):
@@ -119,11 +137,12 @@ def discover_groups(config):
 
     groups = {}
     for k, v in raw_3pi.items():
-        groups[k] = expand(v)
+        _merge(k, v, groups)
     for k, v in raw_B.items():
-        groups["+".join(k)] = expand(v)
+        _merge("+".join(k), v, groups)
 
-    return groups
+    # Apply expand() to each merged group
+    return {k: expand(v) for k, v in groups.items()}
 
 
 class PWGroupPlotter:
