@@ -227,11 +227,9 @@ class NameResolution:
         return self.map.get(key, key)
 
     def apply(self, d):
-        result = {}
-        for k, v in d.items():
-            resolved = self._resolve_slot(k)
-            result[resolved] = v
-        # Inject alias slot names too
+        # Canon values are already in *d* (they're the free params).
+        # Alias keys, if present, must mirror the canon — one pass.
+        result = dict(d)
         for alias, canon in self.map.items():
             if canon in result:
                 result[alias] = result[canon]
