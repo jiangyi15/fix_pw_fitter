@@ -10,6 +10,68 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 
+def adaptive_split_bound(datas, binning, base_bound=None):
+    """Recursively split 2D data into adaptive bins.
+
+    Mirrors ``tf_pwa.adaptive_bins.AdaptiveBound``: each level of
+    *binning* (a list like ``[2, 2]``) splits every current bin into
+    equal-quantile sub-bins along each dimension in turn.
+
+    Args:
+        datas: ``(2, n)`` array of the two variables.
+        binning: nested list, e.g. ``[[2, 2]] * 3`` → 3 levels of 2×2.
+        base_bound: ``((xmin, ymin), (xmax, ymax))``; defaults to the
+                    data extrema.
+
+    Returns:
+        ``(bounds, datas)`` — list of ``((xlo, ylo), (xhi, yhi))``
+        bounds and the per-bin ``(2, n_i)`` data slices.
+    """
+    datas = np.asarray(datas, dtype=float)
+    if base_bound is None:
+        lo = np.min(datas, axis=-1)
+        hi = np.max(datas, axis=-1) + 1e-6
+        base_bound = (lo, hi)
+
+    def single_split(data, n, bnd):
+        """Split 1D data into n equal-quantile sub-bins inside bnd."""
+        lo, hi = bnd
+        bounds = []
+        num_lb = lo
+        for j in range(1, n):
+            num_rb = np.percentile(data, j / n * 100) + 1e-6
+            bounds.append((num_lb, num_rb))
+            num_lb = num_rb
+        bounds.append((num_lb, hi))
+        return bounds
+
+    bound_chain = [base_bound]
+    data_chain = [datas]
+    for level in binning:
+        new_bound_chain = []
+        new_data_chain = []
+        for bnd, data in zip(bound_chain, data_chain):
+            cur_bounds = [bnd]
+            cur_datas = [data]
+            for idx, size in enumerate(level):
+                nxt_bounds = []
+                nxt_datas = []
+                for cb, cd in zip(cur_bounds, cur_datas):
+                    subs = single_split(cd[idx], size, (cb[0][idx], cb[1][idx]))
+                    for i, (lb, rb) in enumerate(subs):
+                        l_bnd = list(cb[0]); r_bnd = list(cb[1])
+                        l_bnd[idx] = lb; r_bnd[idx] = rb
+                        mask = (cd[idx] >= lb) & (cd[idx] < rb)
+                        nxt_bounds.append((tuple(l_bnd), tuple(r_bnd)))
+                        nxt_datas.append(cd[:, mask])
+                cur_bounds, cur_datas = nxt_bounds, nxt_datas
+            new_bound_chain.extend(cur_bounds)
+            new_data_chain.extend(cur_datas)
+        bound_chain = new_bound_chain
+        data_chain = new_data_chain
+    return bound_chain, data_chain
+
+
 def discover_groups(config):
     """Return dict mapping label → merged ck indices (B0+B0bar)."""
     idx = 0
@@ -626,6 +688,105 @@ class PWGroupPlotter:
 
         path = os.path.join(output, prefix + "." + fmt)
         fig.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"  saved {path}")
+
+
+    def plot_2d(self, varfun, labels, prefix, binning=[[2, 2]] * 3,
+                output="plots/", data_weight_extra=None,
+                phsp_weight_extra=None, cmap="jet", plot_scatter=True,
+                scatter_style={"s": 1, "c": "black"}, fmt="png"):
+        """2D adaptive-bin pull plot: data scatter + total-fit pull grid.
+
+        Splits the (var1, var2) plane adaptively (equal-quantile bins,
+        following ``tf_pwa``'s ``plot_function_2dpull``).  Each bin is a
+        rectangle colored by the pull::
+
+            pull = (sum w_data - sum w_fit) / sqrt(sum w_fit)
+
+        where ``w_fit = phsp_w * P_total * scale`` (+ bkg if present).
+        A data scatter overlay and a colorbar are drawn.
+
+        Args:
+            varfun: callable(dict) -> ``[var1_data, var2_data]``.
+            labels: ``[var1_label, var2_label]``.
+            prefix: filename stem.
+            binning: adaptive split levels (default ``[[2,2]]*3``).
+            output: output directory.
+            data_weight_extra, phsp_weight_extra: optional weights.
+            cmap: colormap for the pull rectangles.
+            plot_scatter: draw data scatter points on top.
+            scatter_style: dict passed to ``ax.scatter``.
+        """
+        if not self._ready:
+            raise RuntimeError("call .compute() before .plot_2d()")
+        import matplotlib.pyplot as plt
+        import matplotlib as mpl
+        import matplotlib.patches as mpatches
+
+        f = self.fitter
+        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+
+        d1, d2 = varfun(f._data_np)
+        p1, p2 = varfun(f._phsp_np)
+
+        # Data (cut zero weights)
+        cut = dw != 0
+        x, y = d1[cut], d2[cut]
+        w = dw[cut]
+
+        # Phsp total fit weight
+        w_fit = pw * self._P_total * self._scale
+        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
+        bkg_norm = float(np.sum(pw * bkg))
+        if bkg_norm > 0:
+            purity = f._purity if f._purity is not None else 1.0
+            data_total = float(np.sum(dw))
+            bkg_scale = data_total * (1.0 - purity) / bkg_norm
+            w_fit = w_fit + pw * bkg * bkg_scale
+
+        base_bound = ((np.min(p1) - 1e-6, np.min(p2) - 1e-6),
+                      (np.max(p1) + 1e-6, np.max(p2) + 1e-6))
+        bounds, _ = adaptive_split_bound(np.array([x, y]), binning, base_bound)
+
+        pulls = []
+        for bnd in bounds:
+            xlo, ylo = bnd[0]
+            xhi, yhi = bnd[1]
+            mask_d = (x >= xlo) & (x < xhi) & (y >= ylo) & (y < yhi)
+            mask_p = (p1 >= xlo) & (p1 < xhi) & (p2 >= ylo) & (p2 < yhi)
+            ndata = float(np.sum(w[mask_d]))
+            nmc = float(np.sum(w_fit[mask_p]))
+            pulls.append((ndata - nmc) / np.sqrt(max(nmc, 1.0)))
+
+        max_weight = max(np.max(np.abs(pulls)), 5)
+        my_cmap = plt.get_cmap(cmap)
+
+        fig, ax = plt.subplots(figsize=(6, 5.5))
+        if plot_scatter:
+            ax.scatter(x, y, **scatter_style)
+        for bnd, pull in zip(bounds, pulls):
+            xlo, ylo = bnd[0]
+            xhi, yhi = bnd[1]
+            rect = mpatches.Rectangle(
+                (xlo, ylo), xhi - xlo, yhi - ylo, linewidth=1,
+                facecolor=my_cmap(pull / max_weight / 2 + 0.5),
+                edgecolor="none", zorder=-1)
+            ax.add_patch(rect)
+
+        normal = mpl.colors.Normalize(vmin=-max_weight, vmax=max_weight)
+        im = mpl.cm.ScalarMappable(norm=normal, cmap=my_cmap)
+        fig.colorbar(im, ax=ax)
+        ax.set_title(r"$\chi^2/Nbins={:.2f}/{}$".format(
+            np.sum(np.abs(pulls) ** 2), len(bounds)))
+        ax.set_xlim(np.min(p1), np.max(p1))
+        ax.set_ylim(np.min(p2), np.max(p2))
+        ax.set_xlabel(labels[0])
+        ax.set_ylabel(labels[1])
+
+        path = os.path.join(output, prefix + "." + fmt)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"  saved {path}")
 
