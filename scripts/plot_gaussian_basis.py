@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plot FixedShape basis amplitude contributions (GaussianBasis / BSplineBasis).
 
-Shows each basis particle's CK-weighted amplitude and their total
-combined lineshape per CP variant.
+Shows each basis particle's CK-weighted amplitude per sub-decay channel
+(e.g. MI00p->rhoA, MI00p->f0(980), MI00p->f0(500)) and the total.
 
 Usage::
 
@@ -16,6 +16,7 @@ Usage::
 """
 
 import sys, os, re, argparse
+from collections import defaultdict
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -82,73 +83,96 @@ def main():
 
     print(f"Found {len(particle_map)} GaussianBasis/BSplineBasis particles")
 
-    # ── Per-particle CK-weighted amplitude for a given x ────────
-    def compute_per_particle(x):
-        _, resolved = f.build_params(x)
-        ck_arr = f.pc.build_ck(resolved)
-        amp_raw = {name: model.amplitude_raw(m_grid, resolved)
-                   for name, (model, _, _) in particle_map.items()}
-        per = {name: np.zeros(len(m_grid), dtype=complex)
-               for name in particle_map}
+    # Extract the sub-decay daughter from a comb's pname term:
+    #   "MI00p->f0(980).pip2_g_ls_0" → "f0(980)"
+    def sub_decay_of(pname, comb):
+        for t in comb:
+            if isinstance(t, str) and t.startswith(pname + "->"):
+                return t[len(pname) + 2:].split(".", 1)[0]
+        return None
+
+    # ── Standalone loop: map each (variant, daughter) channel to the
+    # list of (basis_name, model, wave_index) that contribute ────
+    basis_idx = {}   # (variant, daughter) → [(basis_name, model, idx), ...]
+    for bname, (model, _, _) in particle_map.items():
         for i, comb in enumerate(f.all_comb):
-            for term in comb:
-                if isinstance(term, str):
-                    for pname in particle_map:
-                        if term.startswith(pname):
-                            per[pname] += amp_raw[pname] * ck_arr[i]
-                            break
-        return per
+            d = sub_decay_of(bname, comb)
+            if d:
+                basis_idx.setdefault((bname[-1], d), []).append((bname, model, i))
 
-    per_particle = compute_per_particle(r.x)
+    # ── Channel amplitude: A(m) = Σ_basis ck[i_b] · ak_b(m) ─────
+    # ck[i_b]: INDEX the CK wave array (one wave per basis particle).
+    # ak_b:    (n_basis, n_m) — the basis particle's amplitude shape.
+    def channel_amp(phys, variant, daughter):
+        ck_all = f.pc.build_ck(phys)                 # (n_wave,)
+        # ak_b depends only on the basis particle, not the daughter
+        ak_all = {name: model.amplitude_raw(m_grid, phys)
+                  for name, (model, _, _) in particle_map.items()}
+        entries = basis_idx[(variant, daughter)]
+        # Standalone loop: indexed ck per basis particle
+        ck_b = [ck_all[idx] for _b, _m, idx in entries]
+        # Standalone loop: basis amplitude shape (daughter-independent)
+        ak_b = [ak_all[b] for b, _m, _i in entries]
+        ck_b = np.asarray(ck_b)                      # (n_basis,)
+        ak_b = np.asarray(ak_b)                      # (n_basis, n_m)
+        assert ck_b.shape[0] == ak_b.shape[0]
+        return np.sum(ck_b[:, None] * ak_b, axis=0)  # (n_m,)
 
-    # ── Uncertainties (linear error propagation via finite diff) ─
-    free_names = f.free_param_names()
-    errs = np.zeros(len(free_names))
-    if hasattr(r, "hess_inv") and r.hess_inv is not None:
-        diag = np.diag(r.hess_inv)
-        for i in range(min(len(free_names), len(diag))):
-            errs[i] = np.sqrt(max(diag[i], 0.0))
-    else:
-        import json as _json
-        with open(args.results_json) as _fh:
-            _data = _json.load(_fh)
-        _err = _data.get("error", {})
-        for i, n in enumerate(free_names):
-            if n in _err:
-                errs[i] = abs(float(_err[n]))
+    _, resolved = f.build_params(r.x)
 
-    n_err = int(np.count_nonzero(errs))
-    print(f"Uncertainties: {n_err} free params with non-zero error")
-    if n_err > 0:
-        sq_re = {name: np.zeros(len(m_grid)) for name in particle_map}
-        sq_im = {name: np.zeros(len(m_grid)) for name in particle_map}
-        for k in range(len(free_names)):
-            sig = errs[k]
-            if sig <= 0:
+    # Unique (variant, daughter) channels for coloring
+    channels = sorted({(p[-1], d) for p in particle_map
+                       for d in (sub_decay_of(p, c) for c in f.all_comb) if d})
+    daughters = sorted({d for (_v, d) in channels})
+    _cmap = plt.get_cmap("tab10")
+    dcolors = {d: _cmap(i % 10) for i, d in enumerate(daughters)}
+
+    # ── Per-(variant, daughter) totals ──────────────────────────
+    def make_obs_tot(variant, daughter):
+        def obs(phys):
+            A = channel_amp(phys, variant, daughter)
+            out = [0.0] * (3 * len(m_grid))
+            out[0::3] = A.real
+            out[1::3] = A.imag
+            out[2::3] = np.abs(A) ** 2
+            return out
+        return obs
+
+    def relevant_params_tot(variant, daughter):
+        names = set()
+        for comb in f.all_comb:
+            if not any(p[-1] == variant and sub_decay_of(p, comb) == daughter
+                       for p in particle_map):
                 continue
-            xp = r.x.copy(); xp[k] += sig
-            xm = r.x.copy(); xm[k] -= sig
-            ap = compute_per_particle(xp)
-            am = compute_per_particle(xm)
-            for pname in particle_map:
-                half = 0.5 * (ap[pname] - am[pname])
-                sq_re[pname] += half.real ** 2
-                sq_im[pname] += half.imag ** 2
-        err_band = {name: (np.sqrt(sq_re[name]), np.sqrt(sq_im[name]))
-                    for name in particle_map}
-    else:
-        err_band = {name: (np.zeros(len(m_grid)), np.zeros(len(m_grid)))
-                    for name in particle_map}
-    print(f"Error band ready" if n_err else "No uncertainties available")
+            for t in comb:
+                if isinstance(t, str):
+                    names.add(t + "r")
+                    names.add(t + "i")
+        for pname, (model, _, _) in particle_map.items():
+            if pname[-1] != variant:
+                continue
+            for gn in model.get_gamma_name():
+                names.add(gn)
+            names.add(f"{pname}_mass")
+        return [n for n in names if n in resolved]
 
-    # Group by CP variant (strip trailing 'p'/'m')
-    from collections import defaultdict
-    grouped = defaultdict(list)
-    for name in sorted(per_particle):
-        variant = name[-1]  # 'p' or 'm'
-        grouped[variant].append(name)
+    tot_var = {ch: channel_amp(resolved, *ch) for ch in channels}
 
-    # ── Plot ────────────────────────────────────────────────────
+    err_var = {}
+    has_err = hasattr(r, "hess_inv") and r.hess_inv is not None
+    for ch in channels:
+        if not has_err:
+            err_var[ch] = tuple(np.zeros(len(m_grid)) for _ in range(3))
+            continue
+        param_names = relevant_params_tot(*ch)
+        values, errors = f.cal_uncertainties_multi_vec(
+            make_obs_tot(*ch), param_names, r, return_cov=False)
+        errors = np.asarray(errors)
+        err_var[ch] = (errors[0::3], errors[1::3], errors[2::3])
+    print(f"Uncertainties: {'covariance band' if has_err else 'no hess_inv — no band'}")
+
+    # ── Plot: one curve per sub-decay channel (sum over all basis
+    # particles), with covariance-propagated uncertainty band ─────
     fig = plt.figure(figsize=(12, 9))
     gs = fig.add_gridspec(2, 2, hspace=0.08, wspace=0.08)
     ax_revm = fig.add_subplot(gs[0, 0])                # x=Re, y=m
@@ -156,41 +180,32 @@ def main():
     ax_ar = fig.add_subplot(gs[1, 0], sharex=ax_revm)   # Argand: share Re
     ax_im = fig.add_subplot(gs[1, 1], sharex=ax_sq, sharey=ax_ar)  # share m + Im
 
-    # Plot each variant's total only (no individual particle lines)
-    for variant, names in grouped.items():
-        total_var = np.zeros(len(m_grid), dtype=complex)
-        err_re = np.zeros(len(m_grid))
-        err_im = np.zeros(len(m_grid))
-        for name in names:
-            A = per_particle[name]
-            total_var += A
-            e_re, e_im = err_band[name]
-            err_re += e_re ** 2
-            err_im += e_im ** 2
-        err_re = np.sqrt(err_re)
-        err_im = np.sqrt(err_im)
-
+    for (variant, daughter) in sorted(channels):
+        A = tot_var[(variant, daughter)]
+        e_re, e_im, e_sq = err_var[(variant, daughter)]
+        c = dcolors[daughter]
         ls = '-' if variant == 'p' else '--'
-        color = 'b' if variant == 'p' else 'r'
-        ax_revm.fill_betweenx(m_grid, total_var.real - err_re,
-                              total_var.real + err_re, color=color,
-                              alpha=0.15, linewidth=0)
-        ax_im.fill_between(m_grid, total_var.imag - err_im,
-                           total_var.imag + err_im, color=color,
-                           alpha=0.15, linewidth=0)
-        ax_revm.plot(total_var.real, m_grid, color + ls, linewidth=2,
-                     label=f'Total ({variant})')
-        ax_sq.plot(m_grid, np.abs(total_var)**2, color + ls, linewidth=2,
-                   label=f'Total ({variant})')
-        ax_im.plot(m_grid, total_var.imag, color + ls, linewidth=2,
-                   label=f'Total ({variant})')
-        ax_ar.plot(total_var.real, total_var.imag, color + ls, linewidth=1.5,
-                   label=f'Total ({variant})')
+        lbl = f'Σ MI*{variant}->{daughter}'
+        ax_revm.fill_betweenx(m_grid, A.real - e_re, A.real + e_re,
+                              color=c, alpha=0.25, linewidth=0)
+        ax_sq.fill_between(m_grid, np.abs(A) ** 2 - e_sq, np.abs(A) ** 2 + e_sq,
+                           color=c, alpha=0.25, linewidth=0)
+        ax_im.fill_between(m_grid, A.imag - e_im, A.imag + e_im,
+                           color=c, alpha=0.25, linewidth=0)
+        ax_revm.plot(A.real, m_grid, ls, color=c, linewidth=2.5, label=lbl)
+        ax_sq.plot(m_grid, np.abs(A) ** 2, ls, color=c, linewidth=2.5, label=lbl)
+        ax_im.plot(m_grid, A.imag, ls, color=c, linewidth=2.5, label=lbl)
+        ax_ar.plot(A.real, A.imag, ls, color=c, linewidth=2.0, label=lbl)
 
     for ax in [ax_revm, ax_im, ax_sq]:
-        ax.axhline(0, color="grey", linewidth=0.5)
-        ax.legend(fontsize=5, ncol=2)
         ax.grid(True, alpha=0.3)
+    # ax_revm's y-axis is mass — no axhline(0) (it would pull ymin to 0)
+    for ax in [ax_im, ax_sq]:
+        ax.axhline(0, color="grey", linewidth=0.5)
+
+    # Legend: one entry per sub-decay channel
+    handles, labels = ax_sq.get_legend_handles_labels()
+    ax_sq.legend(handles, labels, fontsize=6, ncol=3, loc='upper right')
 
     # Hide redundant tick labels on shared axes
     ax_revm.tick_params(labelbottom=False)   # x shared with Argand
@@ -209,7 +224,6 @@ def main():
     # Argand
     ax_ar.axhline(0, color="grey", linewidth=0.5)
     ax_ar.axvline(0, color="grey", linewidth=0.5)
-    ax_ar.legend(fontsize=7)
     ax_ar.grid(True, alpha=0.3)
     ax_ar.set_xlabel("Re(amplitude)")
     ax_ar.set_ylabel("Im(amplitude)")
