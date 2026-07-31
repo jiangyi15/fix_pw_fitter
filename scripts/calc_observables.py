@@ -68,14 +68,9 @@ def main():
     # ── 1. Setup fitter with same constraints ──────────────────────
     fitter = Fitter(args.config)
 
-    from run_fit import build_constraints
-    fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
-    for name in ["delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
-        fixed_slots[name] = 0.0 if name != "delta_m" else 0.506
-    fixed_slots["poqr"] = 1.0
-    fitter.set_fixed(fixed_slots)
-    fitter.set_same(same_params)
-    fitter.set_scale(scale_params)
+    fitter.apply_constrains()
+    fitter.set_fixed({"delta_gamma": 0.0, "delta_m": 0.506, "A_prod": 0.0,
+                      "poqr": 1.0, "poqi": 0.0}, reset=False)
 
     if args.constraints:
         fitter.load_constraints(args.constraints)

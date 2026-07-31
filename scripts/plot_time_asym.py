@@ -13,7 +13,6 @@ import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter, discover_groups
-from run_fit import build_constraints
 
 
 def main():
@@ -38,17 +37,14 @@ def main():
     if os.path.exists(cp):
         f.load_constraints(cp)
     else:
-        fs, sp, sc = build_constraints(f.all_comb)
+        f.apply_constrains()
+        fs2 = {}
         for name in f.config.m0_phys_name:
-            fs[name] = float(f.cm.defaults[name])
+            fs2[name] = float(f.cm.defaults[name])
         for name in f.config.g0_phys_name:
-            fs[name] = float(f.cm.defaults[name])
-        fs['delta_gamma'] = 0
-        fs['delta_m'] = 0.506
-        fs['A_prod'] = 0
-        fs['poqr'] = 1
-        fs['poqi'] = 0
-        f.set_fixed(fs); f.set_same(sp); f.set_scale(sc)
+            fs2[name] = float(f.cm.defaults[name])
+        if fs2:
+            f.set_fixed(fs2, reset=False)
 
     pn, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     dn, _ = Fitter.load_npz(args.data, max_events=args.max_events)

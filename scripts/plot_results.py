@@ -40,11 +40,7 @@ def main():
         f.load_constraints(constraints_path)
     else:
         print("WARNING: no constraints file found, using defaults")
-        from run_fit import build_constraints
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs)
-        f.set_same(sp)
-        f.set_scale(sc)
+        f.apply_constrains()
 
     # ── Load data ─────────────────────────────────────────────────
     data_np, n_data = Fitter.load_npz(args.data, max_events=args.max_events)

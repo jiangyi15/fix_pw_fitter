@@ -25,7 +25,6 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
-from run_fit import build_constraints
 
 
 def idx_total(config):
@@ -121,8 +120,7 @@ def main():
     if os.path.exists(cp):
         f.load_constraints(cp)
     else:
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs); f.set_same(sp); f.set_scale(sc)
+        f.apply_constrains()
 
     data_np, nd = Fitter.load_npz(args.data, max_events=args.max_events)
     phsp_np, np_ = Fitter.load_npz(args.phsp, max_events=args.max_events)

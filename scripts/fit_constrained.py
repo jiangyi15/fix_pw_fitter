@@ -204,25 +204,15 @@ def main():
     print("SETUP")
     print("=" * 70)
 
-    # Import and use the constraint builder from run_fit
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from run_fit import build_constraints
-
     fitter = Fitter(args.config, backend=args.backend)
-    fixed_slots, same_params, scale_params = build_constraints(fitter.all_comb)
+    fitter.apply_constrains()
 
     # gamma is free; fix other time params
-    for name in ["delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]:
-        fixed_slots[name] = 0.0 if name != "delta_m" else 0.506
-    fixed_slots["poqr"] = 1.0
-
-    fitter.set_fixed(fixed_slots)
-    fitter.set_same(same_params)
-    fitter.set_scale(scale_params)
+    fitter.set_fixed({"delta_gamma": 0.0, "delta_m": 0.506, "A_prod": 0.0,
+                      "poqr": 1.0, "poqi": 0.0}, reset=False)
 
     n_free = len(fitter.free_param_names())
-    print(f"Fixed: {len(fixed_slots)} slots, Same: {len(same_params)} groups")
-    print(f"Free params: {n_free}")
+    print(f"Applied constraints, Free params: {n_free}")
 
     # ================================================================
     # 2. Load data

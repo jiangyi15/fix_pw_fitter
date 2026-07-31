@@ -12,7 +12,6 @@ sys.path.insert(0, _SCRIPT_DIR)
 from ampfit import Fitter
 from ampfit.amp_frac import AmplitudeFractions
 from ampfit.utils import fmt_meas, fmt_particle
-from run_fit import build_constraints
 
 
 # ── PDG reference data ──────────────────────────────────────────────
@@ -224,8 +223,7 @@ def main():
     if os.path.exists(cp):
         f.load_constraints(cp)
     else:
-        fs, sp, sc = build_constraints(f.all_comb)
-        f.set_fixed(fs); f.set_same(sp); f.set_scale(sc)
+        f.apply_constrains()
 
     phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
     phsp['time'] = np.zeros(phsp['mass'].shape[0])

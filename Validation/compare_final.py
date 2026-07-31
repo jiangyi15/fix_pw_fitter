@@ -29,22 +29,22 @@ import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
 import ampfit.fitter as ft
-from run_fit import build_constraints
 
 config = Config(os.path.join(os.path.dirname(__file__), 'config_angle.yml'))
 kc = config.build_all_index(); be = create_backend("numpy", kc); kernel = be.kernel
 fitter = ft.Fitter(os.path.join(os.path.dirname(__file__), 'config_angle.yml'), backend='numpy')
-fs, sp, sc = build_constraints(fitter.all_comb)
+fitter.apply_constrains()
 # Mass/width aliasing for charge-conjugate pairs
 for name in ["a1(1260)", "a2(1320)"]:
-    sp.append([f"{name}p_mass", f"{name}m_mass"])
-    sp.append([f"{name}p_width", f"{name}m_width"])
+    fitter.set_same([[f"{name}p_mass", f"{name}m_mass"],
+                     [f"{name}p_width", f"{name}m_width"]], reset=False)
+fs2 = {}
 for n in fitter.config.m0_phys_name:
-        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
+        if n in fitter.defaults: fs2[n] = float(fitter.defaults[n])
 for n in fitter.config.g0_phys_name:
-        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
-for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]: fs[n] = v
-fitter.set_fixed(fs); fitter.set_same(sp); fitter.set_scale(sc)
+        if n in fitter.defaults: fs2[n] = float(fitter.defaults[n])
+for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]: fs2[n] = v
+fitter.set_fixed(fs2, reset=False)
 with open(REF_DIR + "pw_cfit5_td6_fix29/final_params_0.json") as f: idat = json.load(f)
 x0 = fitter.values_from_dict(idat)
 params, _ = fitter.build_params(x0)

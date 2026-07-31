@@ -129,16 +129,17 @@ for i in range(5):
 sys.path.insert(0, 'src')
 from ampfit.config_loader import Config
 from ampfit.numpy_kernel import NumpyKernel as Kernel
-from run_fit import build_constraints
 import ampfit.fitter as ft
 
 config = Config('config_amp.yml')
 fitter=ft.Fitter('config_amp.yml',backend='numpy')
-fs,sp,sc=build_constraints(fitter.all_comb)
-for n in fitter.config.m0_phys_name: fs[n]=float(fitter.defaults[n])
-for n in fitter.config.g0_phys_name: fs[n]=float(fitter.defaults[n])
-for n,v in [('delta_gamma',0),('delta_m',0.506),('A_prod',0),('poqr',1),('poqi',0)]: fs[n]=v
-fitter.set_fixed(fs);fitter.set_same(sp);fitter.set_scale(sc)
+fitter.apply_constrains()
+fs2 = {}
+for n in fitter.config.m0_phys_name: fs2[n] = float(fitter.defaults[n])
+for n in fitter.config.g0_phys_name: fs2[n] = float(fitter.defaults[n])
+for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]:
+    fs2[n] = v
+fitter.set_fixed(fs2, reset=False)
 x0=fitter.values_from_dict(pdat)
 params, resolved = fitter.build_params(x0)
 ck_kernel = params["ck"]

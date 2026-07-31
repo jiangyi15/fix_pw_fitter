@@ -16,18 +16,20 @@ from ampfit import Fitter
 
 def setup(fitter):
     """Apply same fixed/same/scale constraints as the TFPWA reference fit."""
-    from run_fit import build_constraints
-    fs, sp, sc = build_constraints(fitter.all_comb)
+    fitter.apply_constrains()
+    # Mass/width aliasing for charge-conjugate pairs
     for name in ['a1(1260)', 'a2(1320)']:
-        sp.append([f'{name}p_mass', f'{name}m_mass'])
-        sp.append([f'{name}p_width', f'{name}m_width'])
+        fitter.set_same([[f'{name}p_mass', f'{name}m_mass'],
+                         [f'{name}p_width', f'{name}m_width']], reset=False)
+    fs2 = {}
     for n in fitter.config.m0_phys_name:
-        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
+        if n in fitter.defaults: fs2[n] = float(fitter.defaults[n])
     for n in fitter.config.g0_phys_name:
-        if n in fitter.defaults: fs[n] = float(fitter.defaults[n])
-    for n, v in [('delta_gamma', 0), ('delta_m', 0.506), ('A_prod', 0), ('poqr', 1), ('poqi', 0)]:
-        fs[n] = v
-    fitter.set_fixed(fs); fitter.set_same(sp); fitter.set_scale(sc)
+        if n in fitter.defaults: fs2[n] = float(fitter.defaults[n])
+    fitter.set_fixed({'delta_gamma': 0, 'delta_m': 0.506, 'A_prod': 0,
+                      'poqr': 1, 'poqi': 0}, reset=False)
+    if fs2:
+        fitter.set_fixed(fs2, reset=False)
     fitter.load_all_data()
 
 
