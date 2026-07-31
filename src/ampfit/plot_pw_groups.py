@@ -695,7 +695,7 @@ class PWGroupPlotter:
     def plot_2d(self, varfun, labels, prefix, binning=[[2, 2]] * 3,
                 output="plots/", data_weight_extra=None,
                 phsp_weight_extra=None, cmap="jet", plot_scatter=True,
-                scatter_style={"s": 1, "c": "black"}, fmt="png"):
+                scatter_style={"s": 1, "c": "black"}, fmt="png", ax=None):
         """2D adaptive-bin pull plot: data scatter + total-fit pull grid.
 
         Splits the (var1, var2) plane adaptively (equal-quantile bins,
@@ -763,7 +763,10 @@ class PWGroupPlotter:
         max_weight = max(np.max(np.abs(pulls)), 5)
         my_cmap = plt.get_cmap(cmap)
 
-        fig, ax = plt.subplots(figsize=(6, 5.5))
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 5.5))
+        else:
+            fig = ax.get_figure()
         if plot_scatter:
             ax.scatter(x, y, **scatter_style)
         for bnd, pull in zip(bounds, pulls):
@@ -785,10 +788,12 @@ class PWGroupPlotter:
         ax.set_xlabel(labels[0])
         ax.set_ylabel(labels[1])
 
-        path = os.path.join(output, prefix + "." + fmt)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  saved {path}")
+        if output is not None:
+            path = os.path.join(output, prefix + "." + fmt)
+            fig.savefig(path, dpi=150, bbox_inches="tight")
+            if ax is None:
+                plt.close(fig)
+            print(f"  saved {path}")
 
 
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
