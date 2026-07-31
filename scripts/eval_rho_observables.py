@@ -296,6 +296,9 @@ def main():
     # ── 1. Setup fitter ───────────────────────────────────────
     fitter = Fitter(args.config)
     fitter.apply_constrains()
+    import json as _json
+    with open(args.results) as _fh:
+        fitter.load_fixed_from_dict(_json.load(_fh))
     fitter.set_fixed({"delta_gamma": 0.0, "delta_m": 0.506, "A_prod": 0.0,
                       "poqr": 1.0, "poqi": 0.0}, reset=False)
     if args.constraints:

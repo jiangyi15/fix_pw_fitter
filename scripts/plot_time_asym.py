@@ -38,6 +38,9 @@ def main():
         f.load_constraints(cp)
     else:
         f.apply_constrains()
+        import json as _json
+        with open(args.fit_json) as _fh:
+            f.load_fixed_from_dict(_json.load(_fh))
         fs2 = {}
         for name in f.config.m0_phys_name:
             fs2[name] = float(f.cm.defaults[name])

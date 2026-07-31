@@ -695,7 +695,8 @@ class PWGroupPlotter:
     def plot_2d(self, varfun, labels, prefix, binning=[[2, 2]] * 3,
                 output="plots/", data_weight_extra=None,
                 phsp_weight_extra=None, cmap="jet", plot_scatter=True,
-                scatter_style={"s": 1, "c": "black"}, fmt="png", ax=None):
+                scatter_style={"s": 1, "c": "black"}, scatter_step=1, fmt="png", ax=None,
+                x_range=None, y_range=None):
         """2D adaptive-bin pull plot: data scatter + total-fit pull grid.
 
         Splits the (var1, var2) plane adaptively (equal-quantile bins,
@@ -746,8 +747,10 @@ class PWGroupPlotter:
             bkg_scale = data_total * (1.0 - purity) / bkg_norm
             w_fit = w_fit + pw * bkg * bkg_scale
 
-        base_bound = ((np.min(p1) - 1e-6, np.min(p2) - 1e-6),
-                      (np.max(p1) + 1e-6, np.max(p2) + 1e-6))
+        xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
+        ylo0, yhi0 = y_range if y_range is not None else (np.min(p2), np.max(p2))
+        base_bound = ((xlo0 - 1e-6, ylo0 - 1e-6),
+                      (xhi0 + 1e-6, yhi0 + 1e-6))
         bounds, _ = adaptive_split_bound(np.array([x, y]), binning, base_bound)
 
         pulls = []
@@ -768,7 +771,7 @@ class PWGroupPlotter:
         else:
             fig = ax.get_figure()
         if plot_scatter:
-            ax.scatter(x, y, **scatter_style)
+            ax.scatter(x[::scatter_step], y[::scatter_step], **scatter_style)
         for bnd, pull in zip(bounds, pulls):
             xlo, ylo = bnd[0]
             xhi, yhi = bnd[1]
@@ -783,8 +786,8 @@ class PWGroupPlotter:
         fig.colorbar(im, ax=ax)
         ax.set_title(r"$\chi^2/Nbins={:.2f}/{}$".format(
             np.sum(np.abs(pulls) ** 2), len(bounds)))
-        ax.set_xlim(np.min(p1), np.max(p1))
-        ax.set_ylim(np.min(p2), np.max(p2))
+        ax.set_xlim(xlo0, xhi0)
+        ax.set_ylim(ylo0, yhi0)
         ax.set_xlabel(labels[0])
         ax.set_ylabel(labels[1])
 

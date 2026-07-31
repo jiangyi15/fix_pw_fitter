@@ -41,6 +41,9 @@ def main():
     else:
         print("WARNING: no constraints file found, using defaults")
         f.apply_constrains()
+        import json as _json
+        with open(args.fit_json) as _fh:
+            f.load_fixed_from_dict(_json.load(_fh))
 
     # ── Load data ─────────────────────────────────────────────────
     data_np, n_data = Fitter.load_npz(args.data, max_events=args.max_events)
