@@ -44,7 +44,6 @@ def main():
     if os.path.exists(cp):
         f.load_constraints(cp)
     r = f.load_results(args.results_json)
-    _, resolved = f.build_params(r.x)
 
     m_grid = np.linspace(args.mass_lo, args.mass_hi, args.n_points)
 
@@ -81,25 +80,66 @@ def main():
         print(f"Filtered {len(particle_map)} → {len(filtered)} particles by '{args.pattern}'")
         particle_map = filtered
 
-    print(f"Found {len(particle_map)} GaussianBasis particles")
+    print(f"Found {len(particle_map)} GaussianBasis/BSplineBasis particles")
 
-    # Pre-compute amplitude_raw for each particle at all m_grid points
-    amp_raw = {}
-    for name, (model, mu, sigma) in particle_map.items():
-        amp_raw[name] = model.amplitude_raw(m_grid, resolved)
+    # ── Per-particle CK-weighted amplitude for a given x ────────
+    def compute_per_particle(x):
+        _, resolved = f.build_params(x)
+        ck_arr = f.pc.build_ck(resolved)
+        amp_raw = {name: model.amplitude_raw(m_grid, resolved)
+                   for name, (model, _, _) in particle_map.items()}
+        per = {name: np.zeros(len(m_grid), dtype=complex)
+               for name in particle_map}
+        for i, comb in enumerate(f.all_comb):
+            for term in comb:
+                if isinstance(term, str):
+                    for pname in particle_map:
+                        if term.startswith(pname):
+                            per[pname] += amp_raw[pname] * ck_arr[i]
+                            break
+        return per
 
-    # Accumulate CK-weighted amplitude per particle
-    ck_arr = f.pc.build_ck(resolved)  # complex[448]
-    per_particle = {name: np.zeros(len(m_grid), dtype=complex)
+    per_particle = compute_per_particle(r.x)
+
+    # ── Uncertainties (linear error propagation via finite diff) ─
+    free_names = f.free_param_names()
+    errs = np.zeros(len(free_names))
+    if hasattr(r, "hess_inv") and r.hess_inv is not None:
+        diag = np.diag(r.hess_inv)
+        for i in range(min(len(free_names), len(diag))):
+            errs[i] = np.sqrt(max(diag[i], 0.0))
+    else:
+        import json as _json
+        with open(args.results_json) as _fh:
+            _data = _json.load(_fh)
+        _err = _data.get("error", {})
+        for i, n in enumerate(free_names):
+            if n in _err:
+                errs[i] = abs(float(_err[n]))
+
+    n_err = int(np.count_nonzero(errs))
+    print(f"Uncertainties: {n_err} free params with non-zero error")
+    if n_err > 0:
+        sq_re = {name: np.zeros(len(m_grid)) for name in particle_map}
+        sq_im = {name: np.zeros(len(m_grid)) for name in particle_map}
+        for k in range(len(free_names)):
+            sig = errs[k]
+            if sig <= 0:
+                continue
+            xp = r.x.copy(); xp[k] += sig
+            xm = r.x.copy(); xm[k] -= sig
+            ap = compute_per_particle(xp)
+            am = compute_per_particle(xm)
+            for pname in particle_map:
+                half = 0.5 * (ap[pname] - am[pname])
+                sq_re[pname] += half.real ** 2
+                sq_im[pname] += half.imag ** 2
+        err_band = {name: (np.sqrt(sq_re[name]), np.sqrt(sq_im[name]))
                     for name in particle_map}
-
-    for i, comb in enumerate(f.all_comb):
-        for term in comb:
-            if isinstance(term, str):
-                for pname in particle_map:
-                    if term.startswith(pname):
-                        per_particle[pname] += amp_raw[pname] * ck_arr[i]
-                        break
+    else:
+        err_band = {name: (np.zeros(len(m_grid)), np.zeros(len(m_grid)))
+                    for name in particle_map}
+    print(f"Error band ready" if n_err else "No uncertainties available")
 
     # Group by CP variant (strip trailing 'p'/'m')
     from collections import defaultdict
@@ -119,15 +159,32 @@ def main():
     # Plot each variant's total only (no individual particle lines)
     for variant, names in grouped.items():
         total_var = np.zeros(len(m_grid), dtype=complex)
+        err_re = np.zeros(len(m_grid))
+        err_im = np.zeros(len(m_grid))
         for name in names:
             A = per_particle[name]
             total_var += A
+            e_re, e_im = err_band[name]
+            err_re += e_re ** 2
+            err_im += e_im ** 2
+        err_re = np.sqrt(err_re)
+        err_im = np.sqrt(err_im)
 
         ls = '-' if variant == 'p' else '--'
-        ax_revm.plot(total_var.real, m_grid, 'k' + ls, linewidth=2, label=f'Total ({variant})')
-        ax_sq.plot(m_grid, np.abs(total_var)**2, 'k' + ls, linewidth=2, label=f'Total ({variant})')
-        ax_im.plot(m_grid, total_var.imag, 'k' + ls, linewidth=2, label=f'Total ({variant})')
-        ax_ar.plot(total_var.real, total_var.imag, 'k' + ls, linewidth=1.5,
+        color = 'b' if variant == 'p' else 'r'
+        ax_revm.fill_betweenx(m_grid, total_var.real - err_re,
+                              total_var.real + err_re, color=color,
+                              alpha=0.15, linewidth=0)
+        ax_im.fill_between(m_grid, total_var.imag - err_im,
+                           total_var.imag + err_im, color=color,
+                           alpha=0.15, linewidth=0)
+        ax_revm.plot(total_var.real, m_grid, color + ls, linewidth=2,
+                     label=f'Total ({variant})')
+        ax_sq.plot(m_grid, np.abs(total_var)**2, color + ls, linewidth=2,
+                   label=f'Total ({variant})')
+        ax_im.plot(m_grid, total_var.imag, color + ls, linewidth=2,
+                   label=f'Total ({variant})')
+        ax_ar.plot(total_var.real, total_var.imag, color + ls, linewidth=1.5,
                    label=f'Total ({variant})')
 
     for ax in [ax_revm, ax_im, ax_sq]:
