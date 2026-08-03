@@ -33,8 +33,6 @@ def main():
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
                         default=None, help="Plot distributions (optional: output dir)")
-    parser.add_argument("--fix-mass-width", action="store_true",
-                        help="Fix all mass and width parameters to config defaults")
     parser.add_argument("--init", type=str, default=None,
                         help="Initial parameters JSON file (from save_params output)")
     args = parser.parse_args()
@@ -55,18 +53,9 @@ def main():
     fitter = Fitter(args.config, backend=backend_spec)
 
     # All structural + config constraints via plugin system
+    # (mass/width fixing/floating is controlled by the config:
+    #  fix_mass_width_default: true + particle float: fields)
     fitter.apply_constrains()
-
-    # CLI: fix mass/width to defaults
-    if args.fix_mass_width:
-        for name, val in fitter.defaults.items():
-            if 'g_ls' in name or 'total' in name:
-                continue
-            if name in ('gamma', 'delta_gamma', 'delta_m', 'A_prod', 'poqr', 'poqi'):
-                continue
-            if name not in fitter.free_param_names():
-                continue
-            fitter.set_fixed({name: float(val)})
 
     # KMA/KMB/KMC/KM2 for i>=3: fixed to 0
     for prefix in ["KMA", "KMB", "KMC", "KM2"]:
