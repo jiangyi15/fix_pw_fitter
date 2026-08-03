@@ -35,6 +35,7 @@ from . import exp_model         # noqa: F401 — register Exp model
 from . import spline_k_model    # noqa: F401 — SplineKModel + ExpSpline
 from . import ck_matrix_disp_v2 # noqa: F401 — register ck_matrix_disp_v2
 from . import spline_gamma_model  # noqa: F401 — register BSpline model
+from . import kmatrix_model       # noqa: F401 — register pipi_swave model
 __all__ = [
     "BaseModel", "ALL_MODELS", "register_model", "build_particle",
 ]
