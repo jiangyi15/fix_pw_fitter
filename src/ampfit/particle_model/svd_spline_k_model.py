@@ -70,6 +70,81 @@ M_PION = 0.1396
 M_B_MESON = 5.279
 
 
+def balanced_mean_center_svd(G, clip=1e6, mean_center=True):
+    """Clip, mean-center and balance a complex gamma row set, then SVD.
+
+    Shared by the 1-parameter (``SVDSplineKModel``) and 2-parameter
+    (``svd_2d_spline_k_model``) reductions:
+
+    1. |gamma| is capped at *clip* (phase-preserving) so the explosive
+       exp(k·m²) tail does not dominate the SVD.
+    2. the *k-mean row* (baseline common to all parameter points) is
+       subtracted, keeping the common offset out of the truncated basis.
+    3. rows (parameters) and columns (mass) of the residual are scaled
+       to unit norm ("balanced") so no single parameter or mass point
+       dominates.
+
+    Parameters
+    ----------
+    G : ndarray, shape (n_rows, n_mass)
+        Complex gamma table, one row per parameter-grid point.
+    clip : float
+        |gamma| cap (0 disables).
+    mean_center : bool
+        Subtract the row-mean baseline before the SVD.
+
+    Returns
+    -------
+    dict with ``U, S, Vh`` (SVD of the balanced residual),
+    ``row_scale`` (n_rows,), ``col_scale`` (2·n_mass,),
+    ``mean_row`` (1, 2·n_mass), ``n_mass``.
+    """
+    G = np.asarray(G, dtype=np.complex128)
+    n_mass = G.shape[1]
+    if clip > 0:
+        mag = np.abs(G)
+        big = mag > clip
+        if np.any(big):
+            G = G.copy()
+            G[big] *= clip / mag[big]
+    M = np.concatenate([G.real, G.imag], axis=1)          # (n_rows, 2n)
+    mean_row = M.mean(axis=0, keepdims=True) if mean_center else None
+    M_res = M if mean_row is None else M - mean_row
+    row_scale = np.linalg.norm(M_res, axis=1, keepdims=True)
+    col_scale = np.linalg.norm(M_res, axis=0, keepdims=True)
+    row_scale = np.where(row_scale > 0, row_scale, 1.0)
+    col_scale = np.where(col_scale > 0, col_scale, 1.0)
+    U, S, Vh = np.linalg.svd(M_res / row_scale / col_scale,
+                             full_matrices=False)
+    return dict(U=U, S=S, Vh=Vh,
+                row_scale=row_scale[:, 0], col_scale=col_scale[0],
+                mean_row=mean_row, n_mass=n_mass)
+
+
+def build_reduced_basis(svd, n_rows, n_reduce, mean_center=True):
+    """Assemble basis rows and k-projection from an SVD dict.
+
+    Returns ``(basis, projection, n_svd)``:
+
+    * ``basis``     (n_reduce, 2·n_mass) — row 0 is the k-mean baseline
+      when *mean_center* (exact, weight 1), remaining rows are the
+      residual components ``(S_r·Vh_r)·Dc``.
+    * ``projection`` (n_reduce, n_rows) — row 0 is ones (baseline
+      weight = 1 by spline partition of unity), rows 1.. are
+      ``U_rᵀ·Dr``.
+    * ``n_svd``     number of residual SVD components kept.
+    """
+    n_svd = int(min(max(n_reduce - (1 if mean_center else 0), 1), n_rows))
+    B_res = (svd["S"][:n_svd, None] * svd["Vh"][:n_svd]) * svd["col_scale"]
+    P_res = (svd["U"][:, :n_svd].T * svd["row_scale"])
+    if mean_center:
+        assert svd["mean_row"] is not None
+        basis = np.vstack([svd["mean_row"], B_res])
+        projection = np.vstack([np.ones((1, n_rows)), P_res])
+        return basis, projection, n_svd, 1 + n_svd
+    return B_res, P_res, n_svd, n_svd
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Transform: k → SVD-reduced weights {h_0(k), ..., h_{r-1}(k)}
 # ═══════════════════════════════════════════════════════════════════
@@ -244,76 +319,25 @@ class SVDSplineKModel(SplineKModel):
         G = np.stack([self.gamma_k(m_fine, ki) for ki in k_grid])
         G = np.asarray(G, dtype=np.complex128)
 
-        # ── Clip large gamma values ─────────────────────────────────
-        # gamma grows like exp(k·m²), reaching ~1e57 at high mass —
-        # far beyond any physical running width (the amplitude there
-        # is ~exp(-k·m²) ≈ 0).  Cap |gamma| so the SVD is not
-        # dominated by the explosive tail.  Phase-preserving: values
-        # above *gamma_clip* are scaled down in magnitude.
-        gamma_clip = float(self.kwargs.get("gamma_clip", 1e6))
-        if gamma_clip > 0:
-            mag = np.abs(G)
-            big = mag > gamma_clip
-            if np.any(big):
-                G = G.copy()
-                G[big] *= gamma_clip / mag[big]
-
         # ── Balanced, mean-centered SVD ────────────────────────────
         # The exponential gamma rows span ~1e57 (they grow like
         # exp(k·m²) at high m), so a raw SVD is dominated by the
         # explosive high-mass region and cancels catastrophically at
-        # low mass.  Two countermeasures:
-        #
-        #  * the *k-mean row* (the part of gamma common to all k —
-        #    for the exp model the `(m0²-m²)/(i·m0·g0)` baseline) is
-        #    subtracted and kept as an explicit basis row with weight
-        #    1, so the SVD only models the k-variation.  This removes
-        #    the common offset ("shift") that low-rank truncation
-        #    would otherwise smear across the reduced basis.
-        #  * rows (k) and columns (mass) of the residual are scaled to
-        #    unit norm ("balanced"), with the scales folded back into
-        #    the basis rows / projection::
-        #
-        #     M  = [Re(G) | Im(G)]            (n_k, 2·n_mass_pts)
-        #     M  = mean_row + M_res
-        #     w' = U_rᵀ · Dr · w,   B = [mean_row; Sr·Vhr · Dc]
-        #
-        # so w'ᵀ·B = wᵀ·M exactly when the SVD is full rank (the
-        # mean row gets weight sum_j w_j = 1 by partition of unity).
-        M = np.concatenate([G.real, G.imag], axis=1)          # (n_k, 2n)
+        # low mass.  See :func:`balanced_mean_center_svd` — the k-mean
+        # baseline is kept exactly (weight 1), rows/columns balanced.
         mean_center = bool(self.kwargs.get("mean_center", True))
-        mean_row = M.mean(axis=0, keepdims=True) if mean_center else None
-        M_res = M if mean_row is None else M - mean_row
+        gamma_clip = float(self.kwargs.get("gamma_clip", 1e6))
+        svd = balanced_mean_center_svd(G, clip=gamma_clip,
+                                       mean_center=mean_center)
+        basis, projection, n_svd, n_reduce_tot = build_reduced_basis(
+            svd, n_k, n_reduce, mean_center=mean_center)
 
-        row_scale = np.linalg.norm(M_res, axis=1, keepdims=True)  # (n_k, 1)
-        col_scale = np.linalg.norm(M_res, axis=0, keepdims=True)  # (1, 2n)
-        row_scale = np.where(row_scale > 0, row_scale, 1.0)
-        col_scale = np.where(col_scale > 0, col_scale, 1.0)
-
-        M_bal = M_res / row_scale / col_scale
-        U, S, Vh = np.linalg.svd(M_bal, full_matrices=False)
-
-        # n_reduce total rows: 1 k-mean baseline + (n_reduce - 1) SVD
-        # components when mean-centering, else n_reduce SVD components.
-        n_svd = int(min(max(n_reduce - (1 if mean_center else 0), 1), n_k))
-        self.n_reduce = (1 + n_svd) if mean_center else n_svd
+        self.n_reduce = n_reduce_tot
         self._k_grid = k_grid
         self._m_fine = m_fine
         self._n_mass_pts = n_mass_pts
-        # Basis rows (real part in columns [0, n), imag in [n, 2n)):
-        #   (centered) row 0 = k-mean baseline (exact, weight 1)
-        #   remaining rows = (S_r·Vh_r)·Dc — residual scales folded in.
-        B_res = (S[:n_svd, None] * Vh[:n_svd]) * col_scale
-        P_res = (U[:, :n_svd].T * row_scale[:, 0])
-        if mean_center:
-            # Projection row 0 is ones — by spline partition of unity,
-            # w'[0] = Σw = 1, so the baseline enters exactly.
-            assert mean_row is not None
-            self._basis = np.vstack([mean_row, B_res])
-            self._projection = np.vstack([np.ones((1, n_k)), P_res])
-        else:
-            self._basis = B_res
-            self._projection = P_res
+        self._basis = basis
+        self._projection = projection
         self._bc = bc
 
     def gamma(self, m):
