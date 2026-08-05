@@ -72,13 +72,20 @@ def adaptive_split_bound(datas, binning, base_bound=None):
     return bound_chain, data_chain
 
 def discover_groups(config, merge=None):
-    """Return dict mapping label → merged ck indices (B0+B0bar).
+    """Return dict mapping display label → merged ck indices (B0+B0bar).
+
+    Group keys are particle *display* names (LaTeX, from
+    :meth:`Config.name_display_map`), e.g. ``$a_2(1320)^+$`` or
+    ``$\\rho$ + $\\rho$`` — the same convention used by
+    ``scripts/plot_pw_resonance.py``, so legends show display names
+    directly via ``PWGroupPlotter.labels``.
 
     Args:
         merge: optional list of ``(regex, label)`` — group keys
-            matching *regex* are merged into *label* (their ck index
-            lists are combined).  E.g. ``[("^MI0\\\\d", "MI0")]``
-            merges MI00..MI04 into a single "MI0" wave group.
+            (internal names, *before* display conversion) matching
+            *regex* are merged into *label* (their ck index lists are
+            combined).  E.g. ``[("^MI0\\\\d", "MI0")]`` merges
+            MI00..MI04 into a single "MI0" wave group.
     """
     import re as _re
 
@@ -95,12 +102,45 @@ def discover_groups(config, merge=None):
     for chain in config.full_decay.chains:
         inner_set.update(chain.inner)
 
+    display_map = config.name_display_map()
+
     def _charge_stem(name):
         if name.startswith("a1(1260)"):
             return name
         if len(name) > 1 and name[-1] in ("p", "m"):
             return name[:-1]
         return name
+
+    def _display(name):
+        """Internal group key → display name.
+
+        Exact config-name match first (``a1(1260)p`` → ``$a_1(1260)^+$``,
+        so charge-conjugate waves stay separate).  Charge-merged keys
+        (formed by ``_charge_stem`` merging the ``p``/``m`` variants,
+        e.g. ``a2(1320)``) get the ``^{\\pm}`` superscript from the
+        p-variant display.  Synthetic merged labels (e.g. ``MI0``) fall
+        back to the key itself.
+        """
+        if name in display_map:
+            return display_map[name]
+        if name + "p" in display_map:
+            disp = display_map[name + "p"]
+            if disp.endswith("^+$") or disp.endswith("^-$"):
+                return disp[:-3] + r"^{\pm}$"
+            return disp
+        if name + "m" in display_map:
+            return display_map[name + "m"]
+        return name
+
+    def _merge_label(label):
+        """Apply merge patterns to an internal group label."""
+        merged = label
+        if merge:
+            for pat, newlabel in merge:
+                if _re.match(pat, label):
+                    merged = newlabel
+                    break
+        return merged
 
     raw_3pi = {}
     raw_B = {}
@@ -118,15 +158,6 @@ def discover_groups(config, merge=None):
             key = tuple(sorted([r1, r2]))
             raw_B.setdefault(key, []).extend(range(start, end))
 
-    def _merge(label, raw, out):
-        merged = label
-        if merge:
-            for pat, newlabel in merge:
-                if _re.match(pat, label):
-                    merged = newlabel
-                    break
-        out.setdefault(merged, []).extend(raw)
-
     def expand(base):
         ck = []
         for block in range(8):
@@ -137,9 +168,13 @@ def discover_groups(config, merge=None):
 
     groups = {}
     for k, v in raw_3pi.items():
-        _merge(k, v, groups)
+        internal = _merge_label(k)
+        groups.setdefault(_display(internal), []).extend(v)
     for k, v in raw_B.items():
-        _merge("+".join(k), v, groups)
+        internal = _merge_label("+".join(k))
+        label = (" + ".join(_display(p) for p in internal.split("+"))
+                 if "+" in internal else _display(internal))
+        groups.setdefault(label, []).extend(v)
 
     # Apply expand() to each merged group
     return {k: expand(v) for k, v in groups.items()}

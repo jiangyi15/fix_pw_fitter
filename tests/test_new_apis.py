@@ -904,6 +904,50 @@ def test_config_param_display_unknown():
     assert r"\mathrm" in d, f"missing \\mathrm: {d}"
 
 
+def test_discover_groups_display_labels():
+    """discover_groups keys are particle display names.
+
+    Charge-merged waves get ``^{\pm}``; a1(1260)+ and a1(1260)- stay
+    separate (exact display names).  d1d2 groups join with `` + ``.
+    """
+    from ampfit.config_loader import Config
+    from ampfit.plot_pw_groups import discover_groups
+
+    c = Config("config_angle.yml")
+    g = discover_groups(c)
+
+    # Charge-merged keys use the ± superscript, not a p/m variant
+    assert "$a_2(1320)^{\\pm}$" in g, f"merged a2 missing: {sorted(g)}"
+    assert "$\\pi(1300)^{\\pm}$" in g
+    assert "$\\pi_1(1600)^{\\pm}$" in g
+
+    # a1(1260)+ / a1(1260)- remain separate with correct charge signs
+    assert "$a_1(1260)^+$" in g
+    assert "$a_1(1260)^-$" in g
+
+    # d1d2 mode: display-name pairs joined with " + "
+    assert "$\\rho$ + $\\rho$" in g
+    assert "$f_0(980)$ + $\\rho$" in g
+
+    # All keys are display names (contain LaTeX $), and every group
+    # expands over all 8 CP blocks (ck count divisible by 8)
+    for k, v in g.items():
+        assert "$" in k, f"non-display label: {k!r}"
+        assert len(v) % 8 == 0, f"group {k} not CP-expanded"
+
+
+def test_discover_groups_merge_preserves_labels():
+    """merge patterns apply to internal names; synthetic labels kept."""
+    from ampfit.config_loader import Config
+    from ampfit.plot_pw_groups import discover_groups
+
+    c = Config("config_angle.yml")
+    # No MI0 particles here → merge is a no-op, labels unchanged
+    g = discover_groups(c, merge=[("^MI0\\d", "MI0")])
+    assert "$a_1(1260)^+$" in g
+    assert "$\\rho$ + $\\rho$" in g
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

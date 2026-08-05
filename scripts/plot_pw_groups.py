@@ -57,32 +57,17 @@ def main():
         print(f"  merged MI0{{i}} -> MI0")
     plotter = PWGroupPlotter(f, r, groups).compute()
     print(f"  {len(plotter.labels)} groups, scale={plotter._scale:.4f}")
-
-    # Group display names (particle display, not internal names)
-    display_map = f.config.name_display_map()
-    def _stem(name):
-        return name[:-1] if len(name) > 1 and name[-1] in ("p", "m") else name
-
-    def group_display(key):
-        if "+" in key:
-            return " + ".join(group_display(p) for p in key.split("+"))
-        for full, disp in display_map.items():
-            if _stem(full) == _stem(key):
-                return disp
-        return key  # fallback to internal name
-
-    group_labels = [group_display(k) for k in plotter.labels]
-    print(f"  labels: {list(zip(plotter.labels, group_labels))}")
+    print(f"  labels: {list(zip(plotter.labels, [len(g) for g in groups.values()]))}")
 
     os.makedirs(args.output, exist_ok=True)
 
-    # Mass (group_labels = particle display names)
+    # Mass (labels = particle display names)
     nm = f._data_np["mass"].shape[1] // 8
     plotter.plot_var(
         lambda x: [x["mass"][:, i] for i in range(nm)],
         [f"mass[{i}]" for i in range(nm)],
          0.2, 5.2, 0.05, "mass", output=args.output, fmt=out_fmt,
-         smooth_sigma=1.0, group_labels=group_labels)
+         smooth_sigma=1.0)
 
     # Angles
     def angle_var(x):
@@ -96,13 +81,12 @@ def main():
     ar = [(-np.pi, np.pi), (-1, 1), (-1, 1)] * 3
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
     plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
-                     ranges=ar, output=args.output, fmt=out_fmt, unit="",
-                     group_labels=group_labels)
+                     ranges=ar, output=args.output, fmt=out_fmt, unit="")
 
     # Time
     plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 0.2, "time",
                      output=args.output, fmt=out_fmt, unit="ps",
-                     legend=True, show_pull=True, group_labels=group_labels)
+                     legend=True, show_pull=True)
 
     # ── Stacked permutation plots (hardcoded unique indices) ────
     # ch0 start=0: [0,3,6,9] → 4 unique ππ (rhoA/f0)
@@ -154,7 +138,7 @@ def main():
             [_xlabels[i]], lo, hi, bw,
             f"m_pipi_sorted_{['pp1_min','pp1_max','pp2_min','pp2_max'][i]}",
             output=args.output, fmt=out_fmt, smooth_sigma=1.0,
-            legend=(i == 0), show_pull=True, group_labels=group_labels)
+            legend=(i == 0), show_pull=True)
 
     # Sorted pipipip and pipipim (2 perms each, sorted within)
     def _sorted_pair(x, idx_a, idx_b):
