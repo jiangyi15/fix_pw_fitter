@@ -1,6 +1,7 @@
 """Base classes and registration machinery for particle models."""
 
 import numpy as np
+from ampfit.param_constraint import Transform
 
 ALL_MODELS = {}
 
@@ -53,7 +54,7 @@ class BaseModel:
         width = float(self.kwargs.get("width", 0.1))
         return {f"{self.name}_mass": mass, f"{self.name}_width": width}
 
-    def get_gamma_count(self):
+    def get_gamma_count(self) -> int:
         return 1
 
     def get_gamma_name(self):
@@ -123,7 +124,7 @@ class BaseModel:
             resolved = dict(params)
         return self.amplitude_raw(m, resolved)
 
-    def make_mass_width_transform(self):
+    def make_mass_width_transform(self) -> Transform | None:
         """Create a Transform from physical parameters to real mass/width.
 
         Returns a :class:`~ampfit.param_constraint.Transform` that reads
@@ -135,7 +136,6 @@ class BaseModel:
         to return a ``Transform`` with the appropriate computation.
         """
         return None
-
     def get_bw_params(self, params=None):
         """Breit-Wigner peak mass and width from the running gamma(m).
 

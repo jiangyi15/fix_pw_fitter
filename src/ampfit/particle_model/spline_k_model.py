@@ -360,7 +360,7 @@ class SplineKModel(BaseModel):
     def get_gamma_count(self):
         return int(self.kwargs.get("n_interp", 50))
 
-    def make_mass_width_transform(self):
+    def make_mass_width_transform(self) -> Transform:
         n_k  = int(self.kwargs.get("n_interp", 50))
         k_min, k_max = self._k_range()
         m0   = float(self.kwargs.get("mass", 0.775))
