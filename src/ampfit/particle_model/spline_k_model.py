@@ -408,7 +408,19 @@ class ExpSplineModel(SplineKModel):
         k_range     -- [k_min, k_max] (default [0.1, 5.0])
         n_interp    -- spline interpolation points (default 50)
         bc_type     -- spline boundary condition (default ``\"not-a-knot\"``)
+        pure_exp    -- True: amplitude is exactly exp(-k(m^2-m_0^2))
+                       for any width (default False).  Without it, a
+                       width != 1 reshapes the amplitude tail (a
+                       warning is emitted in that case).
+                       NOTE: ``pure_exp: true`` will become the default
+                       in the next version (legacy width-normalised
+                       behaviour is deprecated).
     """
+
+    def __init__(self, name, **kwargs):
+        super().__init__(name, **kwargs)
+        from .base import warn_exp_non_pure
+        warn_exp_non_pure(self, float(self.kwargs.get("width", 1.0)))
 
     def gamma_k(self, m, k):
         r"""Gamma(m) for A(m) = exp(-k*(m^2 - m_0^2)).
@@ -420,7 +432,14 @@ class ExpSplineModel(SplineKModel):
         we solve::
 
             gamma(m) = (m_0^2 - m^2 - exp(k*(m^2 - m_0^2))) / (i*m_0*g_0)
+
+        With ``pure_exp: true`` the ``g_0`` in the denominator is
+        dropped, so the amplitude is exactly ``exp(-k*(m^2-m_0^2))``
+        for any configured width.
         """
+        from .base import exp_gamma_denom, warn_exp_non_pure
         m0 = float(self.kwargs.get("mass", 0.775))
         g0 = float(self.kwargs.get("width", 1.0))
-        return (m0 ** 2 - m ** 2 - np.exp(k * (m ** 2 - m0 ** 2))) / (1j * m0 * g0)
+        pure = self.kwargs.get("pure_exp", False)
+        warn_exp_non_pure(self, g0)
+        return exp_gamma_denom(m, m0, k * (m ** 2 - m0 ** 2), g0, pure)

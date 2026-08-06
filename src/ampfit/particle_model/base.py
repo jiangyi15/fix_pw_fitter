@@ -1,5 +1,7 @@
 """Base classes and registration machinery for particle models."""
 
+import warnings
+
 import numpy as np
 from ampfit.param_constraint import Transform
 
@@ -23,6 +25,71 @@ def build_particle(name, **kwargs):
     """
     model = kwargs.pop("model", "BW")
     return ALL_MODELS[model](name, **kwargs)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Exponential-lineshape helpers
+# ═══════════════════════════════════════════════════════════════════
+
+def exp_gamma_denom(m, m0, exponent, g0, pure_exp):
+    """Running-width gamma for ``A(m) = exp(exponent)`` in BW form.
+
+    The BW amplitude is ``A = 1/(m_0^2 - m^2 - i*m_0*gamma)``.  Setting
+    it equal to ``exp(exponent)`` gives::
+
+        gamma = (m_0^2 - m^2 - exp(exponent)) / (i*m_0*g_0)
+
+    With ``pure_exp=True`` the reference width is dropped (equivalent
+    to g_0 = 1), so the amplitude is *exactly* ``exp(exponent)`` for
+    any configured width::
+
+        gamma = (m_0^2 - m^2 - exp(exponent)) / (i*m_0)
+
+    Parameters
+    ----------
+    m : ndarray
+        Invariant mass grid.
+    m0 : float
+        Nominal mass.
+    exponent : ndarray
+        Exponent of the target amplitude, e.g. ``-k*(m^2 - m_0^2)``.
+    g0 : float
+        Reference width (only used when ``pure_exp=False``).
+    pure_exp : bool
+        If True the amplitude is exactly ``exp(exponent)``.
+    """
+    num = m0 ** 2 - m ** 2 - np.exp(exponent)
+    if pure_exp:
+        return num / (1j * m0)
+    return num / (1j * m0 * g0)
+
+
+def warn_exp_non_pure(model, g0):
+    """Warn once per model if ``width != 1`` without ``pure_exp: true``.
+
+    The exponential lineshapes document ``A = exp(-k*(m^2-m_0^2))``,
+    which only holds exactly at ``g_0 = 1`` (or with ``pure_exp: true``).
+    Without that option a non-unit width reshapes the amplitude tail, so
+    this helper warns — once per model instance.
+
+    NOTE: ``pure_exp: true`` will become the *default* in the next
+    version; the legacy width-normalised behaviour is deprecated.
+    """
+    if abs(float(g0) - 1.0) < 1e-9:
+        return
+    if model.kwargs.get("pure_exp", False):
+        return
+    if getattr(model, "_pure_exp_warned", False):
+        return
+    model._pure_exp_warned = True
+    warnings.warn(
+        f"particle model '{model.name}' uses an exponential lineshape with "
+        f"width={g0} != 1 but 'pure_exp' is not set: the amplitude is NOT "
+        r"exp(-k(m^2-m_0^2))" f" (the width reshapes the tail). Set "
+        f"'pure_exp: true' in the particle config for the "
+        f"pure-exponential amplitude. NOTE: 'pure_exp: true' will become "
+        f"the default in the next version; the width-normalised behaviour "
+        f"is deprecated.", UserWarning)
 
 
 class BaseModel:

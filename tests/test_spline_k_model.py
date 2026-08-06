@@ -542,3 +542,69 @@ class TestGammaKIdentical:
             g_spl = spl.gamma_k(m, k)
             assert np.all(np.abs(g_exp - g_spl) < 1e-15), \
                 f"gamma_k mismatch at k={k}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. pure_exp option: exact exponential for any width
+# ═══════════════════════════════════════════════════════════════════
+
+class TestPureExp:
+    """``pure_exp: true`` makes the exp amplitude exactly exp(-k(m²-m0²))
+    regardless of the configured width (default False for backward
+    compatibility; the legacy width-normalised behaviour is deprecated
+    and will be removed in the next version)."""
+
+    def test_pure_exp_exact_any_width(self):
+        """A(m) = exp(-k(m²-m0²)) exactly at width=0.4 with pure_exp."""
+        m0 = 0.5
+        m = np.array([0.3, 0.5, 0.8, 1.2, 2.0])
+        mdl = build_particle("a", mass=m0, width=0.4, model="ExpSpline",
+                             k=1.0, k_range=[0.1, 5.0], n_interp=30,
+                             pure_exp=True)
+        for k in [0.3, 1.0, 2.5]:
+            g = mdl.gamma_k(m, k)
+            A = 1.0 / (m0 ** 2 - m ** 2 - 1j * m0 * g)
+            A_ref = np.exp(-k * (m ** 2 - m0 ** 2))
+            assert np.max(np.abs(A - A_ref)) < 1e-14, \
+                f"pure-exp amplitude off at k={k}"
+
+    def test_legacy_width_shapes_tail(self):
+        """Without pure_exp, width != 1 reshapes the amplitude."""
+        import warnings
+        m0, g0, k = 0.5, 0.4, 1.0
+        m = np.array([0.5, 1.0, 2.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            mdl = build_particle("a", mass=m0, width=g0, model="ExpSpline",
+                                 k=1.0, k_range=[0.1, 5.0], n_interp=30)
+        g = mdl.gamma_k(m, k)
+        A = 1.0 / (m0 ** 2 - m ** 2 - 1j * m0 * g)
+        A_ref = np.exp(-k * (m ** 2 - m0 ** 2))
+        # legacy shape differs from the pure exponential at width != 1
+        assert np.max(np.abs(A - A_ref)) > 1e-3
+        # and equals 1/[(m0²-m²)(1-1/g0) + exp(k(m²-m0²))/g0]
+        denom = (m0 ** 2 - m ** 2) * (1 - 1 / g0) + np.exp(k * (m ** 2 - m0 ** 2)) / g0
+        assert np.max(np.abs(A - 1 / denom)) < 1e-14
+
+    def test_warning_without_pure_exp(self):
+        """Warning at construction when width != 1 and no pure_exp."""
+        with pytest.warns(UserWarning, match="pure_exp"):
+            build_particle("a", mass=0.5, width=0.4, model="ExpSpline",
+                           k=1.0, k_range=[0.1, 5.0], n_interp=5)
+
+    def test_no_warning_width_one(self):
+        """No warning when width == 1 (pure exponential holds)."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            build_particle("a", mass=0.5, width=1.0, model="ExpSpline",
+                           k=1.0, k_range=[0.1, 5.0], n_interp=5)
+
+    def test_no_warning_with_pure_exp(self):
+        """No warning when pure_exp is set, even at width != 1."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            build_particle("a", mass=0.5, width=0.4, model="ExpSpline",
+                           k=1.0, k_range=[0.1, 5.0], n_interp=5,
+                           pure_exp=True)
