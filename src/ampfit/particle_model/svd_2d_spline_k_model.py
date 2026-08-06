@@ -244,9 +244,25 @@ class SVDSplineKModel2D(BaseModel):
                        (default True)
     """
 
-    def gamma_k(self, m, a, b):
-        """gamma(m; a, b) — subclasses MUST override this."""
+    def amplitude_k(self, m, a, b):
+        """Full complex physics amplitude A(m) at parameters (a, b).
+
+        Subclasses MUST override this.  The base :meth:`gamma_k`
+        derives the running-width gamma rows automatically.
+        """
         raise NotImplementedError
+
+    def gamma_k(self, m, a, b):
+        """Gamma(m) at (a, b), derived from :meth:`amplitude_k`.
+
+        Fixed corrected form (pure), no pure_exp option::
+
+            gamma(m) = (m_0^2 - m^2 - 1/A(m)) / (i*m_0)
+        """
+        from .base import gamma_from_amplitude
+        m0 = float(self.kwargs.get("mass", 0.775))
+        A = self.amplitude_k(m, a, b)
+        return gamma_from_amplitude(m, m0, A, 1.0, True)
 
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
@@ -359,15 +375,14 @@ class Exp2DSplineSVDModel(SVDSplineKModel2D):
     def gamma_k(self, m, a, b):
         r"""gamma(m; a, b) for A(m) = exp(-(a+bi)(m^2 - m_0^2)).
 
-        From::
+        The gamma couplings are the reduced 2D spline weights (Σ = 1),
+        so the rows are the total running width::
 
-            A = 1/(m_0^2 - m^2 - i*m_0*g_0*gamma) = exp(-(a+bi)(m^2-m_0^2))
+            gamma(m) = (m_0^2 - m^2 - exp((a+bi)(m^2-m_0^2))) / (i*m_0)
 
-        so::
-
-            gamma(m) = (m_0^2 - m^2 - exp((a+bi)(m^2-m_0^2))) / (i*m_0*g_0)
+        which gives ``A(m) = exp(-(a+bi)(m^2-m_0^2))`` exactly for any
+        configured width.
         """
         m0 = float(self.kwargs.get("mass", 0.775))
-        g0 = float(self.kwargs.get("width", 1.0))
         return (m0 ** 2 - m ** 2
-                - np.exp((a + 1j * b) * (m ** 2 - m0 ** 2))) / (1j * m0 * g0)
+                - np.exp((a + 1j * b) * (m ** 2 - m0 ** 2))) / (1j * m0)

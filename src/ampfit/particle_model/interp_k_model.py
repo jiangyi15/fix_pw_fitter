@@ -201,10 +201,12 @@ class InterpKModel(BaseModel):
         n_interp    -- CR interpolation points (default 50)
     """
 
-    def gamma_k(self, m, k):
-        """Gamma(m) at a specific *k*.
+    def amplitude_k(self, m, k):
+        """Full complex physics amplitude A(m) at parameter *k*.
 
-        Subclasses MUST override this.
+        Subclasses MUST override this — it is the only physics a
+        k-interpolated model provides.  The base :meth:`gamma_k`
+        derives the running-width gamma rows automatically.
 
         Parameters
         ----------
@@ -216,9 +218,23 @@ class InterpKModel(BaseModel):
         Returns
         -------
         ndarray
-            Complex gamma(m) for this k.
+            Complex amplitude A(m) for this k.
         """
         raise NotImplementedError
+
+    def gamma_k(self, m, k):
+        """Gamma(m) at a specific *k*, derived from :meth:`amplitude_k`.
+
+        With the kernel coupling structure ``Σ g_i·γ_i`` (g_i = the
+        interpolation weights, Σ = 1), the row reproducing the physics
+        amplitude is the total running width::
+
+            gamma(m) = (m_0^2 - m^2 - 1/A(m)) / (i*m_0)
+        """
+        from .base import gamma_from_amplitude
+        m0 = float(self.kwargs.get("mass", 0.775))
+        A = self.amplitude_k(m, k)
+        return gamma_from_amplitude(m, m0, A, 1.0, True)
 
     # -- k parameter handling ---------------------------------------
 

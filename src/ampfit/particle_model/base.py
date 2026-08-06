@@ -31,19 +31,21 @@ def build_particle(name, **kwargs):
 # Exponential-lineshape helpers
 # ═══════════════════════════════════════════════════════════════════
 
-def exp_gamma_denom(m, m0, exponent, g0, pure_exp):
-    """Running-width gamma for ``A(m) = exp(exponent)`` in BW form.
+def gamma_from_amplitude(m, m0, A, g0, pure_exp):
+    """Running-width gamma rows for the BW form from a physics amplitude.
 
-    The BW amplitude is ``A = 1/(m_0^2 - m^2 - i*m_0*gamma)``.  Setting
-    it equal to ``exp(exponent)`` gives::
+    The k-interpolated family (``InterpKModel``/``SplineKModel``) feeds
+    gamma rows into the kernel denominator ``A = 1/(m_0^2-m^2-i*m_0*γ)``
+    with couplings = the interpolation weights (Σ = 1).  Given the
+    physics amplitude ``A(m)`` at a parameter point, the row that makes
+    the BW reproduce it is the total running width::
 
-        gamma = (m_0^2 - m^2 - exp(exponent)) / (i*m_0*g_0)
+        gamma = (m_0^2 - m^2 - 1/A) / (i*m_0)          [pure_exp=True]
 
-    With ``pure_exp=True`` the reference width is dropped (equivalent
-    to g_0 = 1), so the amplitude is *exactly* ``exp(exponent)`` for
-    any configured width::
+    The legacy form (``pure_exp=False``, deprecated) kept a reference
+    width in the denominator — only exact at width = 1::
 
-        gamma = (m_0^2 - m^2 - exp(exponent)) / (i*m_0)
+        gamma = (m_0^2 - m^2 - 1/A) / (i*m_0*g_0)      [legacy]
 
     Parameters
     ----------
@@ -51,45 +53,42 @@ def exp_gamma_denom(m, m0, exponent, g0, pure_exp):
         Invariant mass grid.
     m0 : float
         Nominal mass.
-    exponent : ndarray
-        Exponent of the target amplitude, e.g. ``-k*(m^2 - m_0^2)``.
+    A : ndarray
+        Physics amplitude (complex) at *m*.
     g0 : float
         Reference width (only used when ``pure_exp=False``).
     pure_exp : bool
-        If True the amplitude is exactly ``exp(exponent)``.
+        True (default): exact amplitude for any width.  False: legacy.
     """
-    num = m0 ** 2 - m ** 2 - np.exp(exponent)
+    num = m0 ** 2 - m ** 2 - 1.0 / np.asarray(A)
     if pure_exp:
         return num / (1j * m0)
     return num / (1j * m0 * g0)
 
 
-def warn_exp_non_pure(model, g0):
-    """Warn once per model if ``width != 1`` without ``pure_exp: true``.
+def warn_exp_non_pure(model, g0, pure):
+    """Warn once per model when the ExpSpline uses width != 1 without
+    ``pure_exp: true``.
 
-    The exponential lineshapes document ``A = exp(-k*(m^2-m_0^2))``,
-    which only holds exactly at ``g_0 = 1`` (or with ``pure_exp: true``).
-    Without that option a non-unit width reshapes the amplitude tail, so
-    this helper warns — once per model instance.
-
-    NOTE: ``pure_exp: true`` will become the *default* in the next
-    version; the legacy width-normalised behaviour is deprecated.
+    ExpSpline defaults to the legacy width-normalised gamma
+    (``pure_exp`` unset = false, for backward compatibility), where a
+    non-unit width reshapes the amplitude tail and the amplitude is not
+    the documented ``A = exp(-k*(m^2-m_0^2))``.  Setting
+    ``pure_exp: true`` gives the exact exponential for any width.
+    Warns once per model instance.
     """
-    if abs(float(g0) - 1.0) < 1e-9:
-        return
-    if model.kwargs.get("pure_exp", False):
+    if abs(float(g0) - 1.0) < 1e-9 or pure:
         return
     if getattr(model, "_pure_exp_warned", False):
         return
     model._pure_exp_warned = True
     warnings.warn(
         f"particle model '{model.name}' uses an exponential lineshape with "
-        f"width={g0} != 1 but 'pure_exp' is not set: the amplitude is NOT "
-        r"exp(-k(m^2-m_0^2))" f" (the width reshapes the tail). Set "
+        f"width={g0} != 1 but 'pure_exp: true' is not set: the amplitude is "
+        r"NOT exp(-k(m^2-m_0^2))" f" (the width reshapes the tail). Set "
         f"'pure_exp: true' in the particle config for the "
         f"pure-exponential amplitude. NOTE: 'pure_exp: true' will become "
-        f"the default in the next version; the width-normalised behaviour "
-        f"is deprecated.", UserWarning)
+        f"the default in the next version.", UserWarning)
 
 
 class BaseModel:

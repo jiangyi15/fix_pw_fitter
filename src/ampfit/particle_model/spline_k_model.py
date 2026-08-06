@@ -324,10 +324,12 @@ class SplineKModel(BaseModel):
         bc_type     -- spline boundary condition (default ``"not-a-knot"``)
     """
 
-    def gamma_k(self, m, k):
-        """Gamma(m) at a specific *k*.
+    def amplitude_k(self, m, k):
+        """Full complex physics amplitude A(m) at parameter *k*.
 
-        Subclasses MUST override this.
+        Subclasses MUST override this — it is the only physics a
+        spline-k model provides.  The base :meth:`gamma_k` derives the
+        running-width gamma rows automatically.
 
         Parameters
         ----------
@@ -339,9 +341,23 @@ class SplineKModel(BaseModel):
         Returns
         -------
         ndarray
-            Complex gamma(m) for this k.
+            Complex amplitude A(m) for this k.
         """
         raise NotImplementedError
+
+    def gamma_k(self, m, k):
+        """Gamma(m) at a specific *k*, derived from :meth:`amplitude_k`.
+
+        With the kernel coupling structure ``Σ g_i·γ_i`` (g_i = the
+        spline weights, Σ = 1), the row reproducing the physics
+        amplitude is the total running width::
+
+            gamma(m) = (m_0^2 - m^2 - 1/A(m)) / (i*m_0)
+        """
+        from .base import gamma_from_amplitude
+        m0 = float(self.kwargs.get("mass", 0.775))
+        A = self.amplitude_k(m, k)
+        return gamma_from_amplitude(m, m0, A, 1.0, True)
 
     # -- k parameter handling ---------------------------------------
 
@@ -408,38 +424,36 @@ class ExpSplineModel(SplineKModel):
         k_range     -- [k_min, k_max] (default [0.1, 5.0])
         n_interp    -- spline interpolation points (default 50)
         bc_type     -- spline boundary condition (default ``\"not-a-knot\"``)
-        pure_exp    -- True: amplitude is exactly exp(-k(m^2-m_0^2))
-                       for any width (default False).  Without it, a
-                       width != 1 reshapes the amplitude tail (a
-                       warning is emitted in that case).
-                       NOTE: ``pure_exp: true`` will become the default
-                       in the next version (legacy width-normalised
-                       behaviour is deprecated).
+        pure_exp    -- default False (current version, legacy
+                       width-normalised gamma, unchanged behaviour);
+                       set True for the exact exp(-k(m^2-m_0^2))
+                       amplitude for any width.  With ``pure_exp``
+                       unset/false and width != 1 the width reshapes
+                       the tail and a warning is emitted.
+                       NOTE: will default to true in the next version.
     """
 
-    def __init__(self, name, **kwargs):
-        super().__init__(name, **kwargs)
-        from .base import warn_exp_non_pure
-        warn_exp_non_pure(self, float(self.kwargs.get("width", 1.0)))
+    def amplitude_k(self, m, k):
+        r"""Physics amplitude: ``A(m) = exp(-k*(m^2 - m_0^2))``."""
+        m0 = float(self.kwargs.get("mass", 0.775))
+        return np.exp(-k * (m ** 2 - m0 ** 2))
 
     def gamma_k(self, m, k):
         r"""Gamma(m) for A(m) = exp(-k*(m^2 - m_0^2)).
 
-        From::
+        ``pure_exp`` defaults to False in the current version (legacy
+        width-normalised gamma, backward compatible).  Set
+        ``pure_exp: true`` for the corrected total running width, which
+        gives the exact exponential for any width::
 
-            A(m) = 1/(m_0^2 - m^2 - i*m_0*g_0*gamma) = exp(-k*(m^2 - m_0^2))
+            gamma(m) = (m_0^2 - m^2 - 1/A(m)) / (i*m_0)
 
-        we solve::
-
-            gamma(m) = (m_0^2 - m^2 - exp(k*(m^2 - m_0^2))) / (i*m_0*g_0)
-
-        With ``pure_exp: true`` the ``g_0`` in the denominator is
-        dropped, so the amplitude is exactly ``exp(-k*(m^2-m_0^2))``
-        for any configured width.
+        (``pure_exp: true`` will become the default in the next version.)
         """
-        from .base import exp_gamma_denom, warn_exp_non_pure
+        from .base import gamma_from_amplitude, warn_exp_non_pure
         m0 = float(self.kwargs.get("mass", 0.775))
         g0 = float(self.kwargs.get("width", 1.0))
         pure = self.kwargs.get("pure_exp", False)
-        warn_exp_non_pure(self, g0)
-        return exp_gamma_denom(m, m0, k * (m ** 2 - m0 ** 2), g0, pure)
+        warn_exp_non_pure(self, g0, pure)
+        A = self.amplitude_k(m, k)
+        return gamma_from_amplitude(m, m0, A, g0, pure)

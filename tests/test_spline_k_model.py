@@ -569,15 +569,16 @@ class TestPureExp:
                 f"pure-exp amplitude off at k={k}"
 
     def test_legacy_width_shapes_tail(self):
-        """Without pure_exp, width != 1 reshapes the amplitude."""
+        """pure_exp: false (legacy) width != 1 reshapes the amplitude."""
         import warnings
         m0, g0, k = 0.5, 0.4, 1.0
         m = np.array([0.5, 1.0, 2.0])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             mdl = build_particle("a", mass=m0, width=g0, model="ExpSpline",
-                                 k=1.0, k_range=[0.1, 5.0], n_interp=30)
-        g = mdl.gamma_k(m, k)
+                                 k=1.0, k_range=[0.1, 5.0], n_interp=30,
+                                 pure_exp=False)
+            g = mdl.gamma_k(m, k)
         A = 1.0 / (m0 ** 2 - m ** 2 - 1j * m0 * g)
         A_ref = np.exp(-k * (m ** 2 - m0 ** 2))
         # legacy shape differs from the pure exponential at width != 1
@@ -587,10 +588,12 @@ class TestPureExp:
         assert np.max(np.abs(A - 1 / denom)) < 1e-14
 
     def test_warning_without_pure_exp(self):
-        """Warning at construction when width != 1 and no pure_exp."""
+        """Warning when width != 1 and pure_exp: false (legacy path)."""
+        mdl = build_particle("a", mass=0.5, width=0.4, model="ExpSpline",
+                             k=1.0, k_range=[0.1, 5.0], n_interp=5,
+                             pure_exp=False)
         with pytest.warns(UserWarning, match="pure_exp"):
-            build_particle("a", mass=0.5, width=0.4, model="ExpSpline",
-                           k=1.0, k_range=[0.1, 5.0], n_interp=5)
+            mdl.gamma_k(np.array([0.6]), 1.0)
 
     def test_no_warning_width_one(self):
         """No warning when width == 1 (pure exponential holds)."""
@@ -608,3 +611,46 @@ class TestPureExp:
             build_particle("a", mass=0.5, width=0.4, model="ExpSpline",
                            k=1.0, k_range=[0.1, 5.0], n_interp=5,
                            pure_exp=True)
+
+
+class TestOtherExpModelsFixed:
+    """Exp / ExpSplineSVD / Exp2DSplineSVD use the corrected formula
+    always (no pure_exp option): exact exp(-k(m²-m0²)) at any width."""
+
+    @pytest.mark.parametrize("model,kwargs", [
+        ("Exp", dict(k=1.0, k_range=[0.1, 2.0], n_interp=5)),
+        ("ExpSplineSVD", dict(k=1.0, k_range=[0.1, 2.0], n_interp=6,
+                              n_reduce=4, n_mass_pts=300,
+                              m_range=[0.3, 2.0])),
+    ])
+    def test_exact_at_width_ne_1(self, model, kwargs):
+        import warnings
+        m0 = 0.5
+        m = np.array([0.3, 0.5, 0.8, 1.2, 2.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)  # no warning expected
+            mdl = build_particle("a", mass=m0, width=0.4,
+                                 model=model, **kwargs)
+        for k in [0.5, 1.0]:
+            g = mdl.gamma_k(m, k)
+            A = 1.0 / (m0 ** 2 - m ** 2 - 1j * m0 * g)
+            A_ref = np.exp(-k * (m ** 2 - m0 ** 2))
+            assert np.max(np.abs(A - A_ref)) < 1e-14, \
+                f"{model}: amplitude off at k={k}"
+
+    def test_exp2d_exact_at_width_ne_1(self):
+        import warnings
+        m0 = 0.5
+        m = np.array([0.3, 0.5, 0.8, 1.2])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            mdl = build_particle("a", mass=m0, width=0.4,
+                                 model="Exp2DSplineSVD",
+                                 a=1.0, b=0.0, a_range=[0.1, 2.0],
+                                 b_range=[0.1, 2.0], n_a=3, n_b=3,
+                                 n_reduce=4, n_mass_pts=200,
+                                 m_range=[0.3, 2.0])
+        g = mdl.gamma_k(m, 1.0, 0.0)
+        A = 1.0 / (m0 ** 2 - m ** 2 - 1j * m0 * g)
+        A_ref = np.exp(-1.0 * (m ** 2 - m0 ** 2))
+        assert np.max(np.abs(A - A_ref)) < 1e-14

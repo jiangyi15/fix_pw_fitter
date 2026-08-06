@@ -266,11 +266,14 @@ class KToSVDWeightsTransform(Transform):
 class SVDSplineKModel(SplineKModel):
     """Base class for SVD-compressed spline-interpolated *k* models.
 
-    Subclasses MUST override :meth:`gamma_k` (as for :class:`SplineKModel`).
-    The base class compresses the full gamma table via SVD::
+    Subclasses MUST override :meth:`amplitude_k` (the physics).  The
+    base class compresses the full gamma table via SVD::
 
         n_interp  rows →  n_reduce  basis rows
         w(k) (n_interp weights) →  w'(k) = U_r^T w(k)  (n_reduce weights)
+
+    The gamma is always the corrected total running width (pure), no
+    ``pure_exp`` option.
 
     Parameters (from YAML config):
         mass        -- nominal mass (m_0)
@@ -397,13 +400,11 @@ class ExpSplineSVDModel(SVDSplineKModel):
             n_mass_pts: 10000
     """
 
-    def gamma_k(self, m, k):
-        r"""Gamma(m) for A(m) = exp(-k*(m^2 - m_0^2)).
+    def amplitude_k(self, m, k):
+        r"""Physics amplitude: ``A(m) = exp(-k*(m^2 - m_0^2))``.
 
-        Same formula as ``ExpSplineModel``::
-
-            gamma(m) = (m_0^2 - m^2 - exp(k*(m^2 - m_0^2))) / (i*m_0*g_0)
+        The base :meth:`SVDSplineKModel.gamma_k` derives the
+        running-width gamma rows automatically.
         """
         m0 = float(self.kwargs.get("mass", 0.775))
-        g0 = float(self.kwargs.get("width", 1.0))
-        return (m0 ** 2 - m ** 2 - np.exp(k * (m ** 2 - m0 ** 2))) / (1j * m0 * g0)
+        return np.exp(-k * (m ** 2 - m0 ** 2))

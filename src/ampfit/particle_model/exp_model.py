@@ -43,17 +43,11 @@ class ExpModel(InterpKModel):
         n_interp    -- CR interpolation points (default 50)
     """
 
-    def gamma_k(self, m, k):
-        r"""Gamma(m) for A(m) = exp(-k*(m^2 - m_0^2)).
+    def amplitude_k(self, m, k):
+        r"""Physics amplitude: ``A(m) = exp(-k*(m^2 - m_0^2))``.
 
-        From::
-
-            A(m) = 1/(m_0^2 - m^2 - i*m_0*g_0*gamma) = exp(-k*(m^2 - m_0^2))
-
-        we solve::
-
-            gamma(m) = (m_0^2 - m^2 - exp(k*(m^2 - m_0^2))) / (i*m_0*g_0)
+        The base :meth:`InterpKModel.gamma_k` derives the running-width
+        gamma rows automatically.
         """
         m0 = float(self.kwargs.get("mass", 0.775))
-        g0 = float(self.kwargs.get("width", 1.0))
-        return (m0 ** 2 - m ** 2 - np.exp(k * (m ** 2 - m0 ** 2))) / (1j * m0 * g0)
+        return np.exp(-k * (m ** 2 - m0 ** 2))
