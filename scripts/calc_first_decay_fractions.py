@@ -241,7 +241,10 @@ def main():
     ap.add_argument("--config", default=_default_path("config_angle.yml"))
     ap.add_argument("--phsp", default=_default_path("data/phsp_arrays.npz"))
     ap.add_argument("--max-events", type=int, default=None)
-    ap.add_argument("--backend", default="cuda32_v3")
+    ap.add_argument("--backend", default="cuda_v3_sparse",
+                    help="Compute backend (use an f64 backend — f32 "
+                         "backends like cuda32_v3 give noisy gradients "
+                         "for fraction uncertainties)")
     ap.add_argument("-o", "--output", default=None,
                     help="Output prefix for CSV, LaTeX, and PDF (e.g. /path/to/prefix)")
     args = ap.parse_args()
