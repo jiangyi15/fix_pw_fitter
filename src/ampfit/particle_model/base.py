@@ -214,6 +214,13 @@ class BaseModel:
         Solves Re(m₀² - m² - i·m₀·Σ g_i·gamma_i(m)) = 0 for m,
         then returns the BW mass and width at that point.
 
+        The gamma couplings are read from :meth:`get_gamma_name` (the
+        authoritative per-model coupling list, which handles both
+        single-channel models and multi-channel models like
+        ``ck_matrix_v2`` whose couplings are not in
+        :meth:`get_defaults`), with :meth:`get_defaults` as the
+        per-name fallback.
+
         Args:
             params: optional dict overriding config values.
                     Accepts either bare names or ``{name}_``-prefixed
@@ -243,8 +250,8 @@ class BaseModel:
 
         m0 = _p(f"{self.name}_mass", 0.775)
         defaults = self.get_defaults()
-        gamma_names = [k for k in defaults if k != f"{self.name}_mass"]
-        g0_vals = [_p(n, float(defaults[n])) for n in gamma_names]
+        gamma_names = self.get_gamma_name()
+        g0_vals = [_p(n, float(defaults.get(n, 0.0))) for n in gamma_names]
         n_ch = len(g0_vals)
 
         def sum_gamma_im(m):

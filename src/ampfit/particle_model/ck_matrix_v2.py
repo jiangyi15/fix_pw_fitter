@@ -401,61 +401,6 @@ class CKMatrixModelV2(BaseModel):
         )
 
     # ── get_bw_params ────────────────────────────────────────────
-
-    def get_bw_params(self, params=None):
-        from scipy.optimize import root_scalar
-
-        def _p(key, fallback=None):
-            if params and key in params:
-                return float(params[key])
-            if key.startswith(self.name + "_"):
-                bare = key[len(self.name) + 1:]
-            else:
-                bare = key
-            if bare in self.kwargs:
-                return float(self.kwargs[bare])
-            return fallback
-
-        m0 = _p(f"{self.name}_mass", 0.775)
-
-        # Use reference g_ls for BW computation when available
-        if self._ref_ck is not None:
-            ck = self._ref_ck
-            raw_ref = _raw_expanded(ck)
-            N_ref = np.dot(raw_ref, self._gamma_m0)
-            width = _p(f"{self.name}_width", self.kwargs.get("width", 0.1))
-            scale = width / N_ref if N_ref != 0 else 0.0
-            g0_vals = [float(r * scale) for r in raw_ref]
-        else:
-            gamma_names = self.get_gamma_name()
-            g0_vals = [_p(gamma_names[i], self._g_defaults[i])
-                       for i in range(self.get_gamma_count())]
-
-        # Read total width from params or kwargs
-        total_width = _p(f"{self.name}_width", float(self.kwargs.get("width", 0.1)))
-
-        def g_bw_re(m):
-            g_list = self.gamma(np.array([float(m)]))
-            s = 0.0
-            for i, gv in enumerate(g0_vals):
-                s += float(gv) * float(g_list[i][0].real)
-            return s
-
-        def sum_gamma_im(m):
-            g_list = self.gamma(np.array([float(m)]))
-            s = 0.0
-            for i, gv in enumerate(g0_vals):
-                s += float(gv) * float(g_list[i][0].imag)
-            return s
-
-        def f(m):
-            return m0**2 - m**2 + m0 * sum_gamma_im(m)
-
-        sol = root_scalar(f, x0=m0, x1=m0 * 1.1, method='secant', xtol=1e-8)
-        if not sol.converged:
-            raise RuntimeError(f"get_bw_params: root finding failed for {self.name}")
-
-        mass_bw = float(sol.root)
-        # The total width at the peak should equal {res}_width
-        width_bw = total_width
-        return {"mass_bw": mass_bw, "width_bw": width_bw}
+    # Inherited from BaseModel: reads the gamma couplings from
+    # get_gamma_name() (the CK-matrix re/im names, already width-scaled)
+    # and computes the peak mass / width from the running gamma.
