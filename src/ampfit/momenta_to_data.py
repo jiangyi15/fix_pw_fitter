@@ -56,38 +56,56 @@ from ampfit.phasespace_b4pi import two_body_momentum
 # Lorentz helpers (operate on (..., 4) 4-momenta, velocity (..., 3))
 # ═══════════════════════════════════════════════════════════════════
 
-def _boost(p4, v):
-    """Boost 4-momenta by velocity *v* (to the rest frame of *v*)."""
+def _boost3_op(v):
+    """Precompute the velocity-dependent factors of a spatial boost.
+
+    The three boosts inside a chain topology share the same velocity, so
+    `v²`, `γ` and `(γ−1)/v²` are computed once here and reused.
+    Returns ``(v, gamma, gm1_v2)`` for :func:`_boost` / :func:`_boost3`.
+    """
     v = np.asarray(v, dtype=float)
-    p4 = np.asarray(p4, dtype=float)
-    E, p = p4[..., 0], p4[..., 1:]
     v2 = np.sum(v * v, axis=-1)
     gamma = 1.0 / np.sqrt(np.maximum(1.0 - v2, 1e-300))
+    gm1_v2 = (gamma - 1.0) / np.maximum(v2, 1e-300)
+    return v, gamma, gm1_v2
+
+
+def _boost(p4, vop):
+    """Boost 4-momenta by a precomputed velocity operator from
+    :func:`_boost3_op`.  Returns full boosted 4-vectors (E, p)."""
+    p4 = np.asarray(p4, dtype=float)
+    v, gamma, gm1_v2 = vop
+    E, p = p4[..., 0], p4[..., 1:]
     vdotp = np.sum(v * p, axis=-1)
-    p_par = (gamma - 1.0) * vdotp / np.maximum(v2, 1e-300)
     Eo = gamma * (E - vdotp)
-    po = p + p_par[..., None] * v - gamma[..., None] * E[..., None] * v
+    po = p + (gm1_v2 * vdotp - gamma * E)[..., None] * v
     return np.concatenate([Eo[..., None], po], axis=-1)
 
 
-def _inv_mass(p4):
-    """Invariant mass of a 4-momentum (..., 4) -> (...,)."""
-    return np.sqrt(np.maximum(p4[..., 0] ** 2 - np.sum(p4[..., 1:] ** 2,
-                                                       axis=-1), 0.0))
+def _boost3(p4, vop):
+    """Boost only the spatial part of a 4-momentum by a precomputed
+    velocity operator from :func:`_boost3_op`.
+
+    The azimuth φ needs only the boosted 3-momenta, so the (unused) time
+    component and the final concatenation are skipped here.
+    """
+    p4 = np.asarray(p4, dtype=float)
+    v, gamma, gm1_v2 = vop
+    E, p = p4[..., 0], p4[..., 1:]
+    vdotp = np.sum(v * p, axis=-1)
+    return p + (gm1_v2 * vdotp - gamma * E)[..., None] * v
+
+
+def _inv_mass_sq(p4):
+    """Invariant mass-squared of a 4-momentum (..., 4) -> (...,)."""
+    return np.maximum(p4[..., 0] ** 2 - np.sum(p4[..., 1:] ** 2, axis=-1),
+                      0.0)
 
 
 def _unit(v):
     """Unit 3-vectors (..., 3); zero vectors stay zero."""
     n = np.linalg.norm(v, axis=-1, keepdims=True)
     return np.divide(v, n, out=np.zeros_like(v), where=n > 0)
-
-
-def _polar_cos(a, b):
-    """cos of the angle between 3-vectors a and b (clipped)."""
-    na = np.linalg.norm(a, axis=-1)
-    nb = np.linalg.norm(b, axis=-1)
-    c = np.sum(a * b, axis=-1) / np.maximum(na * nb, 1e-300)
-    return np.clip(c, -1.0, 1.0)
 
 
 def _azimuth(vec, axis, ref):
@@ -104,56 +122,114 @@ def _azimuth(vec, axis, ref):
     return np.arctan2(np.sum(vp * e2, axis=-1), np.sum(vp * e1, axis=-1))
 
 
-def _pair2(a, b):
-    """Invariant mass-squared of the 4-vector sum (..., 4) + (..., 4)."""
-    q = a + b
-    return np.maximum(q[..., 0] ** 2 - np.sum(q[..., 1:] ** 2, axis=-1), 0.0)
+# ═══════════════════════════════════════════════════════════════════
+# Mass descriptors: every invariant mass is keyed by a plain sorted
+# tuple of the pion indices involved — built with ``tuple(sorted(..))``.
+# The cache maps these directly to mass values.
+# ═══════════════════════════════════════════════════════════════════
+
+_B = (0, 1, 2, 3)     # mass descriptor: the B meson = all four pions
 
 
-def _pion_invariants(pb):
-    """Pre-compute all pion invariants from the (n, 4, 4) momenta.
+class _LazyDict(dict):
+    """Index→value dict that computes a missing entry lazily on first
+    access (via :meth:`dict.__missing__`) and then stores it."""
 
-    Returns ``(m2, t2, mp)``:
-      m2 : (n, 4, 4) — pair invariants ``m²(π_i, π_j)`` (with m²_i on
-                       the diagonal)
-      t2 : (n, 4)    — triple invariants ``m²(all pions except π_i)``
-      mp : (n, 4)    — individual pion masses
+    def __init__(self, compute):
+        super().__init__()
+        self._compute = compute
+
+    def __missing__(self, d):
+        v = self._compute(d)
+        self[d] = v
+        return v
+
+
+class _PionCache:
+    """Lazy cache of per-event kinematics, keyed by pion-index tuples.
+
+    The 8 blocks × 3 topologies share this one object.  Every invariant
+    mass lives in the flat :attr:`mass` dict — one entry per descriptor,
+    a sorted tuple of the pion indices involved (built with
+    ``tuple(sorted(..))``): ``_B`` (0,1,2,3), a pair ``(i,j)``, a triple
+    ``(i,j,k)``, or a single pion ``(i,)`` (and the mass-squares in
+    :attr:`sq`) — all computed lazily on first access as the invariant
+    mass of the summed pion 4-momenta.  The two generic physics
+    functions, the breakup momentum :meth:`q` and the helicity angle
+    :meth:`theta`, are lazy index→value dicts memoized by their
+    descriptors, so identical physical angles (e.g. block 0 θ₁ ==
+    block 3 θ₂) are computed once.
     """
-    n = len(pb)
-    mp = np.sqrt(np.maximum(pb[..., 0] ** 2 - np.sum(pb[..., 1:] ** 2,
-                                                     axis=-1), 0.0))
-    m2 = np.zeros((n, 4, 4))
-    for i in range(4):
-        m2[:, i, i] = mp[:, i] ** 2
-        for j in range(i + 1, 4):
-            q = pb[:, i] + pb[:, j]
-            m2[:, i, j] = m2[:, j, i] = np.maximum(
-                q[:, 0] ** 2 - np.sum(q[:, 1:] ** 2, axis=-1), 0.0)
-    tot = pb.sum(1)
-    t2 = np.zeros((n, 4))
-    for i in range(4):
-        q = tot - pb[:, i]
-        t2[:, i] = np.maximum(q[:, 0] ** 2 - np.sum(q[:, 1:] ** 2, axis=-1),
-                              0.0)
-    return m2, t2, mp
+
+    def __init__(self, pb):
+        self._pb = pb
+        self.mass = _LazyDict(self._mass_of)
+        self.sq = _LazyDict(self._sq_of)
+        self._q = _LazyDict(self._q_of)
+        self._theta = _LazyDict(self._theta_of)
+
+    def p(self, i):
+        """The (n, 4) 4-momentum of pion *i* (view)."""
+        return self._pb[:, i]
+
+    # ── invariants from the raw pion momenta ───────────────────────
+    def _sq_of(self, d):
+        """(n,) invariant mass² of the pions in descriptor *d* — the one
+        place the invariant is computed; computed once."""
+        return _inv_mass_sq(self._pb[:, d].sum(1))
+
+    def _mass_of(self, d):
+        """(n,) invariant mass of the pions in descriptor *d* — the
+        cached mass² (single source) sqrt'd."""
+        return np.sqrt(self.sq[d])
+
+    def _q_of(self, key):
+        """Breakup momentum ``q(X; 1, 2)`` for the descriptor triple."""
+        X, d1, d2 = key
+        return two_body_momentum(self.mass[X], self.mass[d1], self.mass[d2])
+
+    def _theta_of(self, key):
+        """Helicity angle (radians) of ``A -> 1+2`` in ``X -> A+C``."""
+        X, A, C, d1, d2 = key
+        return np.arccos(_helicity_cos(
+            self.q(X, A, C), self.q(A, d1, d2),
+            self.mass[X], self.mass[A], self.mass[C],
+            self.mass[d1], self.mass[d2],
+            self._cross2(d1, C), self._cross2(d2, C)))
+
+    def _cross2(self, d1, C):
+        """(n,) ``m²(daughter-1, C)`` — the pair/triple invariant of the
+        pions involved, looked up directly by their sorted index tuple."""
+        return self.sq[tuple(sorted(d1 + C))]
+
+    def q(self, X, d1, d2):
+        """Breakup momentum ``q(X; 1, 2)`` — memoized by the mass
+        descriptors ``(X, d1, d2)``."""
+        return self._q[(X, d1, d2)]
+
+    def theta(self, X, A, C, d1, d2):
+        """Helicity angle (radians) of ``A -> 1+2`` in the chain
+        ``X -> A+C`` — memoized by the five mass descriptors, so identical
+        angles across the 24 rows are computed once."""
+        return self._theta[(X, A, C, d1, d2)]
 
 
-def _helicity_cos(mX, mA, mC, m1, m2, m1C2, m2C2):
+def _helicity_cos(qX, qA, mX, mA, mC, m1, m2, m1C2, m2C2):
     """cos of the helicity angle of ``A -> 1+2`` in the chain ``X->A+C``.
 
     Pure invariant-mass formula (triangle law), no boosts needed::
 
-        cosθ = A [m²(1C) − m²(2C) − (m1²−m2²)(2·E_A·X/A² − 1)]
+        cosθ = A [m²(1C) − m²(2C) − (m1²−m2²)((X²+A²−C²)/A² − 1)]
                / (4·q(X;A,C)·q(A;1,2)·X)
 
-    with ``E_A = (X² + A² − C²)/(2X)``.  *m1C2*, *m2C2* are the
-    invariant mass-squares of the cross pairs (1,C) and (2,C).
+    *qX*, *qA* are the pre-computed breakup momenta ``q(X;A,C)`` and
+    ``q(A;1,2)`` — the caller already has them, so they are passed in
+    instead of recomputed.  *m1C2*, *m2C2* are the invariant mass-squares
+    of the cross pairs (1,C) and (2,C).
     """
     X, A, C = mX, mA, mC
-    qX = two_body_momentum(X, A, C)
-    qA = two_body_momentum(A, m1, m2)
-    EA = (X ** 2 + A ** 2 - C ** 2) / (2.0 * X)
-    num = m1C2 - m2C2 - (m1 ** 2 - m2 ** 2) * (2.0 * EA * X / A ** 2 - 1.0)
+    num = m1C2 - m2C2 - (m1 ** 2 - m2 ** 2) * \
+        ((X ** 2 + A ** 2 - C ** 2) / A ** 2 - 1.0)
     return np.clip(A * num / (4.0 * qX * qA * X), -1.0, 1.0)
 
 
@@ -161,73 +237,69 @@ def _helicity_cos(mX, mA, mC, m1, m2, m1C2, m2C2):
 # Topology 0: B → ρ₁(π⁺₁π⁻₁) ρ₂(π⁺₂π⁻₂)  (vectorised over events)
 # ═══════════════════════════════════════════════════════════════════
 
-def _topo_rhorho(p, m_B, m2, t2, mp):
-    """Vectorised ρρ topology; p (n, 4, 4), order [π⁺₁, π⁻₁, π⁺₂, π⁻₂].
+def _topo_rhorho(K, o):
+    """Vectorised ρρ topology; *o* = (o0, o1, o2, o3) pion indices in the
+    block's order (permuted), *K* the shared :class:`_PionCache` (B is
+    the implicit parent).  The block's pions are ``K.p(o0..o3)``.
 
-    *p* must be in the B rest frame; *m_B* the per-event B mass; *m2*,
-    *t2*, *mp* the pre-computed pion invariants (in this pion order).
     Returns ``(m1, m2, q0, q1, q2, phi, theta1, theta2)``.
     """
-    P1, P2 = p[:, 0] + p[:, 1], p[:, 2] + p[:, 3]   # ρ₁, ρ₂ in the B frame
-    m1, m2v = np.sqrt(m2[:, 0, 1]), np.sqrt(m2[:, 2, 3])
-    n1 = _unit(P1[:, 1:])                           # ρ₁ flight direction
+    o0, o1, o2, o3 = o
+    P1, P2 = tuple(sorted((o0, o1))), tuple(sorted((o2, o3)))  # ρ₁, ρ₂ pairs
+    i0, i1, i2, i3 = (o0,), (o1,), (o2,), (o3,)
 
-    q0 = two_body_momentum(m_B, m1, m2v)            # B breakup momentum
-    q1 = two_body_momentum(m1, mp[:, 0], mp[:, 1])  # ρ₁ → π⁺₁π⁻₁
-    q2 = two_body_momentum(m2v, mp[:, 2], mp[:, 3]) # ρ₂ → π⁺₂π⁻₂
+    m1 = K.mass[P1]                         # ρ₁ = (π⁺₁, π⁻₁)
+    m2 = K.mass[P2]                         # ρ₂ = (π⁺₂, π⁻₂)
+    q0 = K.q(_B, P1, P2)                    # B breakup momentum
 
-    # θ₁: helicity of ρ₁ — cross pairs (π⁺₁,ρ₂)²=t2[1], (π⁻₁,ρ₂)²=t2[0]
-    cos_t1 = _helicity_cos(m_B, m1, m2v, mp[:, 0], mp[:, 1], t2[:, 1], t2[:, 0])
-    # θ₂: helicity of ρ₂ — cross pairs (π⁺₂,ρ₁)²=t2[3], (π⁻₂,ρ₁)²=t2[2]
-    cos_t2 = _helicity_cos(m_B, m2v, m1, mp[:, 2], mp[:, 3], t2[:, 3], t2[:, 2])
+    q1 = K.q(P1, i0, i1)                    # ρ₁ → π⁺₁π⁻₁
+    th1 = K.theta(_B, P1, P2, i0, i1)       # θ₁ (helicity of ρ₁)
+    q2 = K.q(P2, i2, i3)                    # ρ₂ → π⁺₂π⁻₂
+    th2 = K.theta(_B, P2, P1, i2, i3)       # θ₂ (helicity of ρ₂)
 
-    # azimuth of π⁺₁ around the ρ₁ axis, referenced from π⁺₂ (plane angle)
-    phi = _azimuth(p[:, 0][:, 1:], n1, p[:, 2][:, 1:])
+    # azimuth of π⁺₁ around the ρ₁ axis (P1 direction), from π⁺₂
+    p0, p1, p2 = K.p(o0), K.p(o1), K.p(o2)
+    phi = _azimuth(p0[:, 1:], (p0 + p1)[:, 1:], p2[:, 1:])
 
-    return m1, m2v, q0, q1, q2, phi, np.arccos(cos_t1), np.arccos(cos_t2)
+    return m1, m2, q0, q1, q2, phi, th1, th2
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Topology 1: B → R₁(R₂(π⁺₁π⁻₁)π⁺₂) π⁻₂  (sequential chain)
 # ═══════════════════════════════════════════════════════════════════
 
-def _topo_chain(p, m_B, m2, t2, mp):
-    """Vectorised chain topology; p (n, 4, 4), order [π⁺₁, π⁻₁, π⁺₂, π⁻₂].
+def _topo_chain(K, o):
+    """Vectorised chain topology; *o* = (o0, o1, o2, o3) pion indices in
+    the block's order, *K* the shared :class:`_PionCache`.
 
-    R₂ = (π⁺₁, π⁻₁), R₁ = (π⁺₁, π⁻₁, π⁺₂), bachelor π⁻₂.  *p* must be
-    in the B rest frame; *m_B* the per-event B mass; *m2*, *t2*, *mp*
-    the pre-computed pion invariants (in this pion order).
+    R₂ = (π⁺₁, π⁻₁), R₁ = (π⁺₁, π⁻₁, π⁺₂), bachelor π⁻₂.
 
     Returns ``(m_R1, m_R2, q0, q1, q2, phi, theta1, theta2)``.
     """
-    R2 = p[:, 0] + p[:, 1]
-    R1 = R2 + p[:, 2]
-    d = p[:, 3]                                     # bachelor π⁻₂
-    m_R2 = np.sqrt(m2[:, 0, 1])
-    m_R1 = np.sqrt(t2[:, 3])                        # (0,1,2) = all but bachelor
+    o0, o1, o2, o3 = o
+    P2 = tuple(sorted((o0, o1)))                     # R₂ = (π⁺₁, π⁻₁)
+    T1 = tuple(sorted((o0, o1, o2)))                 # R₁ = all but bachelor
+    i0, i1, i2, i3 = (o0,), (o1,), (o2,), (o3,)
 
-    q0 = two_body_momentum(m_B, m_R1, mp[:, 3])     # B → R₁ π⁻₂
-    q1 = two_body_momentum(m_R1, m_R2, mp[:, 2])    # R₁ → R₂ π⁺₂
-    q2 = two_body_momentum(m_R2, mp[:, 0], mp[:, 1])  # R₂ → π⁺₁π⁻₁
+    m_R2 = K.mass[P2]
+    m_R1 = K.mass[T1]
 
-    # θ₁: helicity of R₁ — 1=R₂, 2=π⁺₂, cross: m(R₂,π⁻₂)²=t2[2],
-    # m(π⁺₂,π⁻₂)²=m2[2,3]
-    cos_t1 = _helicity_cos(m_B, m_R1, mp[:, 3], m_R2, mp[:, 2],
-                           t2[:, 2], m2[:, 2, 3])
-    # θ₂: helicity of R₂ — 1=π⁺₁, 2=π⁻₁, cross: m(π⁺₁,π⁺₂)²=m2[0,2],
-    # m(π⁻₁,π⁺₂)²=m2[1,2]
-    cos_t2 = _helicity_cos(m_R1, m_R2, mp[:, 2], mp[:, 0], mp[:, 1],
-                           m2[:, 0, 2], m2[:, 1, 2])
+    q0 = K.q(_B, T1, i3)                            # B → R₁ π⁻₂
+    th1 = K.theta(_B, T1, i3, P2, i2)               # θ₁ (helicity of R₁)
+    q1 = K.q(T1, P2, i2)                            # R₁ → R₂ π⁺₂
+    q2 = K.q(P2, i0, i1)                            # R₂ → π⁺₁π⁻₁
+    th2 = K.theta(T1, P2, i2, i0, i1)               # θ₂ (helicity of R₂)
 
     # ── φ: one boost to the R₁ rest frame ─────────────────────────
+    # (only here do we need the actual 4-vectors, to build R₁'s axis)
+    p0, p1, p2, p3 = K.p(o0), K.p(o1), K.p(o2), K.p(o3)
+    R2 = p0 + p1
+    R1 = R2 + p2
     beta1 = R1[:, 1:] / R1[:, 0:1]
-    R2r = _boost(R2, beta1)
-    dr = _boost(d, beta1)
-    ar = _boost(p[:, 0], beta1)
-    phi = _azimuth(ar[:, 1:], R2r[:, 1:], dr[:, 1:])
+    vop = _boost3_op(beta1)                 # v², γ, (γ−1)/v² — once for 3 boosts
+    phi = _azimuth(_boost3(p0, vop), _boost3(R2, vop), _boost3(p3, vop))
 
-    return m_R1, m_R2, q0, q1, q2, phi, \
-        np.arccos(cos_t1), np.arccos(cos_t2)
+    return m_R1, m_R2, q0, q1, q2, phi, th1, th2
 
 
 # Topology 2: mirror of the chain — same R₂ = (π⁺₁, π⁻₁) but the
@@ -236,10 +308,10 @@ def _topo_chain(p, m_B, m2, t2, mp):
 _MIRROR_PERM = [0, 1, 3, 2]
 
 
-def _topo_chain_mirror(p, m_B, m2, t2, mp):
-    perm = _MIRROR_PERM
-    return _topo_chain(p[:, perm], m_B,
-                       m2[:, perm][:, :, perm], t2[:, perm], mp[:, perm])
+def _topo_chain_mirror(K, o):
+    """Mirror of the chain — swap π⁺₂ ↔ π⁻₂ (indices 2, 3); the
+    R₂ = (π⁺₁, π⁻₁) pair is unchanged."""
+    return _topo_chain(K, (o[0], o[1], o[3], o[2]))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -274,8 +346,14 @@ def _as_1d(v, n, default):
     return np.full(n, float(v)) if v.ndim == 0 else v
 
 
-def momenta_to_data(momenta, weight=None, frac=None, time=None):
-    """Convert B → 4π momenta to the fitter data npz arrays.
+def momenta_to_data_full(momenta, weight=None, frac=None, time=None):
+    """Convert B → 4π momenta to the fitter data npz arrays (reference).
+
+    Computes all 24 rows directly from the momenta (8 blocks × 3
+    topologies).  This is the exact reference implementation; the
+    default :func:`momenta_to_data` produces the same output by
+    computing only the 4 B blocks and transforming them to the 4 CP
+    blocks.
 
     Parameters
     ----------
@@ -303,32 +381,103 @@ def momenta_to_data(momenta, weight=None, frac=None, time=None):
     angles = np.zeros((n, 24, 3))
 
     # Boost every event to the B rest frame (the input may be in the
-    # lab frame) and use the actual per-event B mass for q(B).
+    # lab frame).
     tot = momenta.sum(1)
-    mB_ev = _inv_mass(tot)
     betaB = tot[:, 1:] / tot[:, 0:1]
-    pb = _boost(momenta, betaB[:, None, :])         # (n, 4, 4) B rest frame
+    pb = _boost(momenta, _boost3_op(betaB[:, None, :]))  # (n, 4, 4) B rest frame
 
-    # Pre-compute the pion invariants once (shared by all blocks).
-    m2p, t2p, mpp = _pion_invariants(pb)
+    # Shared kinematic cache — all blocks index it by pion order; no
+    # per-block tensor copies, masses computed once.
+    K = _PionCache(pb)
 
     for b in range(8):
         perm = _IDENTICAL_PERMS[_CP_PERM_ORDER[b % 4] if b >= 4 else b % 4]
         order = np.array(perm)
         if b >= 4:                              # CP: exchange π⁺ ↔ π⁻
             order = order[list(_CP_INDEX)]
-        pe = pb[:, order]                       # (n, 4, 4) permuted
-        m2 = m2p[:, order][:, :, order]         # permuted pair invariants
-        t2 = t2p[:, order]                      # permuted triple invariants
-        mp = mpp[:, order]                      # permuted pion masses
+        o = tuple(int(x) for x in order)
         for t, topo in enumerate(_TOPOLOGIES):
             row = b * 3 + t
-            m1, m2v, q0, q1, q2, phi, th1, th2 = topo(pe, mB_ev, m2, t2, mp)
+            m1, m2v, q0, q1, q2, phi, th1, th2 = topo(K, o)
             if b >= 4:                          # CP: azimuth flips sign
                 phi = -phi
             mass[:, row, 0], mass[:, row, 1] = m1, m2v
             q[:, row] = np.stack([q0, q1, q2], axis=-1)
             angles[:, row] = np.stack([phi, th1, th2], axis=-1)
+
+    return {
+        "mass": mass,
+        "q": q,
+        "angles": angles,
+        "frac": _as_1d(frac, n, 0.5),
+        "time": _as_1d(time, n, 0.0),
+        "bkg_raw": np.zeros(n),
+        "weight": _as_1d(weight, n, 1.0),
+    }
+
+
+def momenta_to_data(momenta, weight=None, frac=None, time=None):
+    """Convert B → 4π momenta to the fitter data npz arrays (default).
+
+    The 4 B blocks (blocks 0–3) are computed directly; the 4 CP blocks
+    (4–7) are filled by transforming the B values (CP: π⁺ ↔ π⁻) — no
+    CP recomputation.  Output is identical to the reference
+    :func:`momenta_to_data_full` (same test tolerances).
+
+    Each CP block *c* (4–7) is the charge conjugate of the B block with
+    the same identical-particle permutation shape,
+    ``s = _CP_PERM_ORDER.index(c % 4)``.  The exact relations are:
+
+      ρρ row:        mass, q identical;  θ₁, θ₂ → π−θ;    φ → −φ
+      chain row:     partner is the source *mirror* row:
+                     mass, q, θ₁ identical; θ₂ → π−θ₂;   φ → π−φ
+      mirror row:    partner is the source *chain* row:
+                     mass, q, θ₁ identical; θ₂ → π−θ₂;   φ → π−φ
+    """
+    momenta = np.asarray(momenta, dtype=float)
+    n = len(momenta)
+    mass = np.zeros((n, 24, 2))
+    q = np.zeros((n, 24, 3))
+    angles = np.zeros((n, 24, 3))
+
+    # Boost every event to the B rest frame.
+    tot = momenta.sum(1)
+    betaB = tot[:, 1:] / tot[:, 0:1]
+    pb = _boost(momenta, _boost3_op(betaB[:, None, :]))  # (n, 4, 4) B rest frame
+
+    # Shared kinematic cache.
+    K = _PionCache(pb)
+
+    # ── B blocks (0-3): computed directly ─────────────────────────
+    for b in range(4):
+        o = tuple(_IDENTICAL_PERMS[b])
+        for t, topo in enumerate(_TOPOLOGIES):
+            row = b * 3 + t
+            m1, m2v, q0, q1, q2, phi, th1, th2 = topo(K, o)
+            mass[:, row, 0], mass[:, row, 1] = m1, m2v
+            q[:, row] = np.stack([q0, q1, q2], axis=-1)
+            angles[:, row] = np.stack([phi, th1, th2], axis=-1)
+
+    # ── CP blocks (4-7): one vectorised gather + transforms ────────
+    # Source B row for each of the 12 CP rows (rows 12..23): the ρρ row
+    # of the same-shape block, the chain row <- source *mirror* row,
+    # the mirror row <- source *chain* row.
+    cp_src = np.array([0, 2, 1,  6, 8, 7,  3, 5, 4,  9, 11, 10])
+    rho = np.array([1, 0, 0] * 4, dtype=bool)          # ρρ rows of the CP blocks
+
+    mass[:, 12:] = mass[:, cp_src]
+    q[:, 12:] = q[:, cp_src]
+
+    phi = angles[:, :, 0]
+    src_phi = phi[:, cp_src]
+    # ρρ rows: φ → −φ; chain/mirror rows: φ → π−φ (wrapped)
+    angles[:, 12:, 0] = np.where(
+        rho, -src_phi, (np.pi - src_phi + np.pi) % (2 * np.pi) - np.pi)
+    # ρρ rows: θ₁ → π−θ₁; chain/mirror rows: θ₁ unchanged
+    angles[:, 12:, 1] = np.where(
+        rho, np.pi - angles[:, cp_src, 1], angles[:, cp_src, 1])
+    # all rows: θ₂ → π−θ₂
+    angles[:, 12:, 2] = np.pi - angles[:, cp_src, 2]
 
     return {
         "mass": mass,

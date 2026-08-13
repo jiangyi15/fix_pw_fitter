@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from ampfit.phasespace_b4pi import generate_b4pi, two_body_momentum, M_PION
-from ampfit.momenta_to_data import momenta_to_data, _boost, _inv_mass
+from ampfit.momenta_to_data import momenta_to_data, momenta_to_data_full, _boost, _boost3_op, _inv_mass_sq
 
 
 @pytest.fixture
@@ -120,9 +120,9 @@ class TestHelpers:
         """Boosting a particle by its own velocity puts it at rest."""
         p = np.array([5.0, 1.0, 2.0, -0.5])
         v = p[1:] / p[0]
-        pr = _boost(p, v)
+        pr = _boost(p, _boost3_op(v))
         assert abs(pr[1:]).max() < 1e-12
-        assert pr[0] == pytest.approx(_inv_mass(p), rel=1e-9)
+        assert pr[0] == pytest.approx(np.sqrt(_inv_mass_sq(p)), rel=1e-9)
 
 
 class TestReference:
@@ -139,6 +139,22 @@ class TestReference:
         ref = np.load(self.REF_NPZ)
         assert mom.shape[0] == ref["mass"].shape[0]
         return mom, ref
+
+    def test_default_matches_full(self):
+        """The default (CP-transform) momenta_to_data reproduces the
+        reference full-computation within the same tolerances."""
+        mom = np.load(self.REF_MOM)[:20000]
+        if mom.shape[0] < 20000:
+            pytest.skip("reference data not available")
+        a = momenta_to_data(mom)
+        b = momenta_to_data_full(mom)
+        assert np.max(np.abs(a["mass"] - b["mass"])) < 1e-8
+        assert np.max(np.abs(a["q"] - b["q"])) < 1e-8
+        d0 = np.abs(((a["angles"][:, :, 0] - b["angles"][:, :, 0] + np.pi)
+                     % (2 * np.pi)) - np.pi)
+        assert d0.max() < 1e-6
+        assert np.max(np.abs(a["angles"][:, :, 1] - b["angles"][:, :, 1])) < 1e-6
+        assert np.max(np.abs(a["angles"][:, :, 2] - b["angles"][:, :, 2])) < 1e-6
 
     def test_mass_q_match(self, refs):
         mom, ref = refs
