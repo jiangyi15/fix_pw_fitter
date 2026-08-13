@@ -79,6 +79,7 @@ def _build_params(fitter, fit_result=None, param_dict=None):
 
 def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
                  seed=None, oversample=20, compute_batch=50000,
+                 p_max_margin=1.3,
                  m_B=M_B_MESON, m_pi=M_PION,
                  frac="random", time="exp"):
     """Generate *n_events* B → 4π events distributed like |A|².
@@ -98,8 +99,15 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
     seed : int, optional
         Random seed.
     oversample : int
-        Flat-phase-space events generated per batch before rejection
-        (also used for the P_max calibration batch).
+        Kept for compatibility (flat events per batch); the actual batch
+        size is *compute_batch*.
+    compute_batch : int
+        Flat events per GPU compute batch (also the calibration batch
+        used to estimate P_max).
+    p_max_margin : float
+        Safety factor on the estimated P_max (default 1.3) — guards
+        against under-estimating the true |A|² maximum of a peaked
+        amplitude; a larger margin costs acceptance efficiency.
     m_B, m_pi : float
         B and pion masses for the flat phase-space generation.
     frac, time : "random" | "exp" | array-like
@@ -138,7 +146,9 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
     # ── Calibration: estimate P_max from a compute_batch ───────────
     cal = generate_b4pi(compute_batch, m_B=m_B, m_pi=m_pi, seed=seed)
     _, P_cal = get_P(cal["momenta"])
-    P_max = float(np.max(P_cal)) * 1.05          # small safety margin
+    # safety margin against under-estimating the true max of a peaked
+    # amplitude (events with P > P_max would be over-accepted)
+    P_max = float(np.max(P_cal)) * p_max_margin
 
     accepted_mom, accepted_P, accepted_frac, accepted_time = [], [], [], []
     n_flat = compute_batch                       # calibration batch
@@ -167,7 +177,14 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
     n = len(momenta)
     data["mass"] = data["mass"].reshape(n, -1)
     data["q"] = data["q"].reshape(n, -1)
-    return {"momenta": momenta, "data": data, "P": P, "n_flat": n_flat}
+
+    P_final = np.real(np.asarray(P)).astype(float)
+    print(f"  accepted {len(momenta)} / {n_flat} flat "
+          f"(eff {100 * len(momenta) / n_flat:.2f}%), "
+          f"P_max bound = {P_max:.3f}, "
+          f"max |A|² observed = {P_final.max():.3f}")
+    return {"momenta": momenta, "data": data, "P": P_final,
+            "n_flat": n_flat, "p_max": P_max}
 
 
 # ═══════════════════════════════════════════════════════════════════
