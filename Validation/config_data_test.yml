@@ -1,0 +1,18 @@
+# Minimal test config for scripts/convert_data_npz.py — paths point at
+# the real files on this machine (absolute, so they resolve anywhere).
+data:
+    data_arr: "data/test_data_arrays.npz"
+    phsp_arr: "data/test_phsp_arrays.npz"
+
+    data: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/data_sig.npy"]
+    data_time: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/data_sig_time.npy"]
+    data_tag1: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/test_full_gpu/tmp_eta/data_sig_com_tag.npy"]
+    data_eta1: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/test_full_gpu/tmp_eta/data_sig_com_tageta.npy"]
+    data_bg_value: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/data_sig_bg_model.npy"]
+
+    phsp: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig.npy"]
+    phsp_time: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig_time.npy"]
+    phsp_tag1: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig_tag.npy"]
+    phsp_eta1: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig_tageta.npy"]
+    phsp_weight: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig_time_weight.npy"]
+    phsp_bg_value: ["/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/phsp_sig_bg_model.npy"]
