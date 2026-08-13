@@ -217,6 +217,15 @@ _CP_INDEX = (1, 0, 3, 2)
 _TOPOLOGIES = [_topo_rhorho, _topo_chain, _topo_chain_mirror]
 
 
+def _as_1d(v, n, default):
+    """Return a length-*n* float array: fill with *default* if None,
+    broadcast scalars, otherwise pass through."""
+    if v is None:
+        return np.full(n, default)
+    v = np.asarray(v, dtype=float)
+    return np.full(n, float(v)) if v.ndim == 0 else v
+
+
 def momenta_to_data(momenta, weight=None, frac=None, time=None):
     """Convert B → 4π momenta to the fitter data npz arrays.
 
@@ -270,13 +279,10 @@ def momenta_to_data(momenta, weight=None, frac=None, time=None):
         "mass": mass,
         "q": q,
         "angles": angles,
-        "frac": (np.ones(n) * 0.5 if frac is None
-                 else np.asarray(frac, dtype=float)),
-        "time": (np.zeros(n) if time is None
-                 else np.asarray(time, dtype=float)),
+        "frac": _as_1d(frac, n, 0.5),
+        "time": _as_1d(time, n, 0.0),
         "bkg_raw": np.zeros(n),
-        "weight": (np.ones(n) if weight is None
-                   else np.asarray(weight, dtype=float)),
+        "weight": _as_1d(weight, n, 1.0),
     }
 
 
