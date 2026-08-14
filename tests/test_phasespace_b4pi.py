@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from ampfit.phasespace_b4pi import (
-    generate_b4pi, two_body_momentum, two_body_ps, sample_masses,
+    generate_b4pi, two_body_momentum, sample_masses,
     _mass_weight, M_PION, M_B_MESON,
 )
 
@@ -81,9 +81,9 @@ class TestSampling:
 
         def marginal(x):
             m2g = np.linspace(2 * M_PION, M_B_MESON - x, 200)
-            w = two_body_ps(M_B_MESON, x, m2g) \
-                * two_body_ps(x, M_PION, M_PION) \
-                * two_body_ps(m2g, M_PION, M_PION)
+            w = two_body_momentum(M_B_MESON, x, m2g) \
+                * two_body_momentum(x, M_PION, M_PION) \
+                * two_body_momentum(m2g, M_PION, M_PION)
             return np.trapezoid(w, m2g)
 
         ref = np.array([marginal(x) for x in c])
@@ -115,8 +115,9 @@ class TestHelpers:
         assert two_body_momentum(1.0, 0.5, 0.5) == pytest.approx(0.0, abs=1e-15)
 
     def test_ps_units(self):
-        p = two_body_ps(5.279, 2.0, 2.0)
-        assert p > 0 and p < 1
+        """Breakup momentum is physical (0 < q < M/2)."""
+        q = two_body_momentum(5.279, 2.0, 2.0)
+        assert 0 < q < 2.5
 
 
 if __name__ == "__main__":

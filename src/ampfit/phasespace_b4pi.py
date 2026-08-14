@@ -58,20 +58,16 @@ def two_body_momentum(M, m1, m2):
     return np.sqrt(arg) / (2.0 * M)
 
 
-def two_body_ps(M, m1, m2):
-    """Two-body phase-space factor ``p = 2q/M``."""
-    return 2.0 * two_body_momentum(M, m1, m2) / np.asarray(M)
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Mass sampling
 # ═══════════════════════════════════════════════════════════════════
 
 def _mass_weight(m1, m2, m_B, m_pi):
-    """w = p(m_B; m1,m2) · p(m1; mπ,mπ) · p(m2; mπ,mπ)."""
-    return (two_body_ps(m_B, m1, m2)
-            * two_body_ps(m1, m_pi, m_pi)
-            * two_body_ps(m2, m_pi, m_pi))
+    """w = q(m_B; m1,m2) · q(m1; mπ,mπ) · q(m2; mπ,mπ) — the mass
+    sampling weight in the breakup-momentum convention."""
+    return (two_body_momentum(m_B, m1, m2)
+            * two_body_momentum(m1, m_pi, m_pi)
+            * two_body_momentum(m2, m_pi, m_pi))
 
 
 def _find_w_max(m_B, m_pi):
