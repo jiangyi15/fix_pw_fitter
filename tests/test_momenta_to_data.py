@@ -143,9 +143,9 @@ class TestReference:
     def test_default_matches_full(self):
         """The default (CP-transform) momenta_to_data reproduces the
         reference full-computation within the same tolerances."""
+        if not (os.path.exists(self.REF_MOM) and os.path.exists(self.REF_NPZ)):
+            pytest.skip("reference data files not available")
         mom = np.load(self.REF_MOM)[:20000]
-        if mom.shape[0] < 20000:
-            pytest.skip("reference data not available")
         a = momenta_to_data(mom)
         b = momenta_to_data_full(mom)
         assert np.max(np.abs(a["mass"] - b["mass"])) < 1e-8

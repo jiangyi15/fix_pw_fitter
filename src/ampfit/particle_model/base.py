@@ -158,7 +158,7 @@ class BaseModel:
         m_arr = np.asarray(m, dtype=float)
         m0 = float(params.get(f"{self.name}_mass", 0.775))
         g_list = self.gamma(m_arr)
-        total = 0.0
+        total = 0.0 + 0.0j
         for name, g_val in zip(self.get_gamma_name(), g_list):
             g0 = float(params.get(name, 0.0))
             total += g0 * g_val
