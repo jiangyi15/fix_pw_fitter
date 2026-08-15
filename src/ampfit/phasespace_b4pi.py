@@ -333,6 +333,81 @@ def generate_b4pi_fixed_m3pi(m3pi, n, m_B=M_B_MESON, m_pi=M_PION, seed=None,
             "cos_theta_B": ctB, "phi_B": phiB}
 
 
+def build_momenta(m1, m2, ct1, ct2, phi, m_B=M_B_MESON, m_pi=M_PION,
+                  q_B=None):
+    """Build B → (ππ)₁(ππ)₂ → π⁺π⁻π⁺π⁻ momenta from the five phase-space
+    variables, in the generator's canonical geometry (B rest frame,
+    (ππ)₁ along +z, π⁺₁ decay plane at azimuth 0, (ππ)₂ plane rotated
+    by φ about z).
+
+    Parameters
+    ----------
+    m1, m2 : ndarray (n,)
+        Di-pion invariant masses of (ππ)₁ and (ππ)₂.
+    ct1, ct2 : ndarray (n,)
+        cos of the decay angles: π⁺₁ w.r.t. +z in the (ππ)₁ frame,
+        π⁺₂ w.r.t. −z in the (ππ)₂ frame.
+    phi : ndarray (n,)
+        Azimuth between the two decay planes.
+    m_B, m_pi : float
+    q_B : ndarray (n,), optional
+        B breakup momentum.  If given, used instead of recomputing
+        ``q(m_B; m₁, m₂)`` (lets :func:`ampfit.momenta_to_data.
+        data_to_momentum` use the stored value faithfully).
+
+    Returns
+    -------
+    momenta : ndarray (n, 4, 4) — [π⁺₁, π⁻₁, π⁺₂, π⁻₂] 4-momenta
+        (E, px, py, pz) in the B rest frame.
+
+    Shared by :func:`generate_b4pi` (sampled variables) and
+    :func:`ampfit.momenta_to_data.data_to_momentum` (row-0 kinematics).
+    """
+    st1 = np.sqrt(np.maximum(1.0 - ct1 ** 2, 0.0))
+    st2 = np.sqrt(np.maximum(1.0 - ct2 ** 2, 0.0))
+
+    # B → (ππ)₁ (ππ)₂ in the B rest frame ((ππ)₁ along +z, (ππ)₂ −z)
+    q_B = two_body_momentum(m_B, m1, m2) if q_B is None else q_B
+    E1 = np.sqrt(m1 ** 2 + q_B ** 2)
+    E2 = np.sqrt(m2 ** 2 + q_B ** 2)
+    beta1 = q_B / E1
+    beta2 = q_B / E2
+    gam1 = 1.0 / np.sqrt(1.0 - beta1 ** 2)
+    gam2 = 1.0 / np.sqrt(1.0 - beta2 ** 2)
+
+    # (ππ)₁ rest frame: π⁺₁ at azimuth 0, θ₁ from +z
+    q1 = two_body_momentum(m1, m_pi, m_pi)
+    e1p = np.sqrt(q1 ** 2 + m_pi ** 2)
+    p1x, p1z = q1 * st1, q1 * ct1
+
+    # (ππ)₂ rest frame: π⁺₂ at azimuth φ, θ₂ from −z
+    q2 = two_body_momentum(m2, m_pi, m_pi)
+    e2p = np.sqrt(q2 ** 2 + m_pi ** 2)
+    p3x = q2 * st2 * np.cos(phi)
+    p3y = q2 * st2 * np.sin(phi)
+    p3z = -q2 * ct2
+
+    # Boost π⁺₁, π⁻₁ from (ππ)₁ frame → B frame (+z by β₁)
+    Eo1 = gam1 * (e1p + beta1 * p1z)
+    pzo1 = gam1 * (p1z + beta1 * e1p)
+    Eo2 = gam1 * (e1p - beta1 * p1z)
+    pzo2 = gam1 * (-p1z + beta1 * e1p)
+
+    # Boost π⁺₂, π⁻₂ from (ππ)₂ frame → B frame (−z by β₂)
+    Eo3 = gam2 * (e2p - beta2 * p3z)
+    pzo3 = gam2 * (p3z - beta2 * e2p)
+    Eo4 = gam2 * (e2p + beta2 * p3z)
+    pzo4 = gam2 * (-p3z - beta2 * e2p)
+
+    n = len(m1)
+    mom = np.empty((n, 4, 4))
+    mom[:, 0] = np.stack([Eo1, p1x, np.zeros(n), pzo1], axis=1)
+    mom[:, 1] = np.stack([Eo2, -p1x, np.zeros(n), pzo2], axis=1)
+    mom[:, 2] = np.stack([Eo3, p3x, p3y, pzo3], axis=1)
+    mom[:, 3] = np.stack([Eo4, -p3x, -p3y, pzo4], axis=1)
+    return mom
+
+
 def generate_b4pi(n_events, m_B=M_B_MESON, m_pi=M_PION, seed=None):
     """Generate *n_events* B → 4π phase-space points (B rest frame).
 
@@ -362,47 +437,8 @@ def generate_b4pi(n_events, m_B=M_B_MESON, m_pi=M_PION, seed=None):
     ct1 = rng.uniform(-1.0, 1.0, n_events)
     ct2 = rng.uniform(-1.0, 1.0, n_events)
     phi = rng.uniform(0.0, 2.0 * np.pi, n_events)
-    st1 = np.sqrt(np.maximum(1.0 - ct1 ** 2, 0.0))
-    st2 = np.sqrt(np.maximum(1.0 - ct2 ** 2, 0.0))
 
-    # B → (ππ)₁ (ππ)₂ in the B rest frame
-    q_B = two_body_momentum(m_B, m1, m2)
-    E1 = np.sqrt(m1 ** 2 + q_B ** 2)      # (ππ)₁ energy
-    E2 = np.sqrt(m2 ** 2 + q_B ** 2)      # (ππ)₂ energy
-    beta1 = q_B / E1                      # (ππ)₁ moves along +z
-    beta2 = q_B / E2                      # (ππ)₂ moves along −z
-    gam1 = 1.0 / np.sqrt(1.0 - beta1 ** 2)
-    gam2 = 1.0 / np.sqrt(1.0 - beta2 ** 2)
-
-    # (ππ)₁ rest frame: π₁ at azimuth 0 (decay plane = xz), θ₁ from +z
-    q1 = two_body_momentum(m1, m_pi, m_pi)
-    e1p = np.sqrt(q1 ** 2 + m_pi ** 2)    # pion energy in (ππ)₁ frame
-    p1x, p1z = q1 * st1, q1 * ct1         # π₁: (e1p, p1x, 0, p1z)
-
-    # (ππ)₂ rest frame: π₃ at azimuth φ, θ₂ from −z
-    q2 = two_body_momentum(m2, m_pi, m_pi)
-    e2p = np.sqrt(q2 ** 2 + m_pi ** 2)    # pion energy in (ππ)₂ frame
-    p3x = q2 * st2 * np.cos(phi)
-    p3y = q2 * st2 * np.sin(phi)
-    p3z = -q2 * ct2
-
-    # Boost π₁, π₂ from (ππ)₁ frame → B frame (+z by β1)
-    Eo1 = gam1 * (e1p + beta1 * p1z)
-    pzo1 = gam1 * (p1z + beta1 * e1p)
-    Eo2 = gam1 * (e1p - beta1 * p1z)
-    pzo2 = gam1 * (-p1z + beta1 * e1p)
-
-    # Boost π₃, π₄ from (ππ)₂ frame → B frame (velocity −β2 along z)
-    Eo3 = gam2 * (e2p - beta2 * p3z)
-    pzo3 = gam2 * (p3z - beta2 * e2p)
-    Eo4 = gam2 * (e2p + beta2 * p3z)
-    pzo4 = gam2 * (-p3z - beta2 * e2p)
-
-    mom = np.empty((n_events, 4, 4))
-    mom[:, 0] = np.stack([Eo1, p1x, np.zeros(n_events), pzo1], axis=1)
-    mom[:, 1] = np.stack([Eo2, -p1x, np.zeros(n_events), pzo2], axis=1)
-    mom[:, 2] = np.stack([Eo3, p3x, p3y, pzo3], axis=1)
-    mom[:, 3] = np.stack([Eo4, -p3x, -p3y, pzo4], axis=1)
+    mom = build_momenta(m1, m2, ct1, ct2, phi, m_B=m_B, m_pi=m_pi)
 
     return {"momenta": mom, "m1": m1, "m2": m2,
             "cos_theta1": ct1, "cos_theta2": ct2, "phi": phi}

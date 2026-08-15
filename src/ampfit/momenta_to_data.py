@@ -49,7 +49,7 @@ Usage::
 
 import numpy as np
 
-from ampfit.phasespace_b4pi import two_body_momentum
+from ampfit.phasespace_b4pi import two_body_momentum, build_momenta, M_PION
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -488,6 +488,49 @@ def momenta_to_data(momenta, weight=None, frac=None, time=None):
         "bkg_raw": np.zeros(n),
         "weight": _as_1d(weight, n, 1.0),
     }
+
+
+def data_to_momentum(data, m_pi=M_PION):
+    """Reverse of :func:`momenta_to_data`: reconstruct B → 4π momenta.
+
+    The kinematic arrays encode the event in the same parametrisation
+    as the flat phase-space generator :func:`generate_b4pi` — row 0 of
+    each block is the ρρ topology with the generator's variables::
+
+        mass[row, 0], mass[row, 1]  =  m₁, m₂        (the two di-pion masses)
+        q[row, 0..2]                =  q_B, q₁, q₂   (breakup momenta)
+        angles[row, 0..2]           =  φ, θ₁, θ₂     (azimuth, helicities)
+
+    so the momenta are rebuilt with the generator's canonical geometry
+    (B at rest, ρ₁ along +z, π⁺₁ decay plane at azimuth 0, ρ₂ plane
+    rotated by the azimuth).  Only the *first* row of each block is
+    used (all 24 rows describe the same event).
+
+    Parameters
+    ----------
+    data : dict
+        The arrays from :func:`momenta_to_data` (``mass`` (n,24,2),
+        ``q`` (n,24,3), ``angles`` (n,24,3), ...).
+    m_pi : float
+        Pion mass (default :data:`M_PION`).
+
+    Returns
+    -------
+    momenta : ndarray (n, 4, 4)
+        Pion 4-momenta (E, px, py, pz) in the B rest frame, ordered
+        [π⁺₁, π⁻₁, π⁺₂, π⁻₂].
+    """
+    mass = np.asarray(data["mass"])[:, 0]       # (n, 2) = (m₁, m₂)
+    q = np.asarray(data["q"])[:, 0]             # (n, 3) = (q_B, q₁, q₂)
+    ang = np.asarray(data["angles"])[:, 0]      # (n, 3) = (φ, θ₁, θ₂)
+    m1, m2 = mass[:, 0], mass[:, 1]
+    qB, q1, q2 = q[:, 0], q[:, 1], q[:, 2]
+    phi, th1, th2 = ang[:, 0], ang[:, 1], ang[:, 2]
+
+    # the data azimuth is measured from π⁺₂, the generator's from π⁺₁
+    # (the two planes), so the generator angle is −φ
+    return build_momenta(m1, m2, np.cos(th1), np.cos(th2), -phi,
+                         q_B=qB, m_pi=m_pi)
 
 
 # ═══════════════════════════════════════════════════════════════════

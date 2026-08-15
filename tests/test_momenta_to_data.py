@@ -12,8 +12,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.phasespace_b4pi import generate_b4pi, two_body_momentum, M_PION
-from ampfit.momenta_to_data import momenta_to_data, momenta_to_data_full, _boost, _boost3_op, _inv_mass_sq
+from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum, M_PION,
+                                    M_B_MESON)
+from ampfit.momenta_to_data import (momenta_to_data, momenta_to_data_full,
+                                    data_to_momentum, _boost, _boost3_op,
+                                    _inv_mass_sq)
 
 
 @pytest.fixture
@@ -171,6 +174,45 @@ class TestReference:
         assert d0.max() < 1e-6
         assert np.max(np.abs(oa[:, :, 1] - ra[:, :, 1])) < 1e-6
         assert np.max(np.abs(oa[:, :, 2] - ra[:, :, 2])) < 1e-6
+
+
+class TestDataToMomentum:
+    """Reverse conversion: data → momenta reproduces the data exactly."""
+
+    @pytest.fixture
+    def roundtrip(self, ev):
+        mom2 = data_to_momentum(momenta_to_data(ev["momenta"]))
+        return momenta_to_data(mom2)
+
+    def test_roundtrip_exact(self, data, roundtrip):
+        """All 24 rows of mass/q/angles are reproduced."""
+        assert np.abs(roundtrip["mass"] - data["mass"]).max() < 1e-9
+        assert np.abs(roundtrip["q"] - data["q"]).max() < 1e-9
+        d = np.abs(((roundtrip["angles"] - data["angles"] + np.pi)
+                    % (2 * np.pi)) - np.pi)
+        assert d.max() < 1e-9
+
+    def test_reconstructed_momenta_physical(self, ev):
+        """B at rest, pions on-shell, generator masses reproduced."""
+        mom2 = data_to_momentum(momenta_to_data(ev["momenta"]))
+        tot = mom2.sum(1)
+        assert np.abs(tot[:, 0] - M_B_MESON).max() < 1e-9
+        assert np.abs(tot[:, 1:]).max() < 1e-9
+        m2s = mom2[:, :, 0] ** 2 - (mom2[:, :, 1:] ** 2).sum(2)
+        assert np.abs(m2s - M_PION ** 2).max() < 1e-9
+        m12 = np.sqrt((mom2[:, 0, 0] + mom2[:, 1, 0]) ** 2
+                      - ((mom2[:, 0, 1:] + mom2[:, 1, 1:]) ** 2).sum(1))
+        assert np.abs(m12 - ev["m1"]).max() < 1e-9
+
+    def test_fixed_m3pi_roundtrip(self):
+        """The fixed-m(πππ) generator also round-trips."""
+        from ampfit.phasespace_b4pi import generate_b4pi_fixed_m3pi
+        mom = generate_b4pi_fixed_m3pi(1.3, 20000, seed=3)["momenta"]
+        data = momenta_to_data(mom)
+        mom2 = data_to_momentum(data)
+        data2 = momenta_to_data(mom2)
+        assert np.abs(data2["mass"] - data["mass"]).max() < 1e-9
+        assert np.abs(data2["q"] - data["q"]).max() < 1e-9
 
 
 if __name__ == "__main__":
