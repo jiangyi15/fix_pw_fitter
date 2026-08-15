@@ -85,19 +85,9 @@ from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum,
 from ampfit.momenta_to_data import momenta_to_data
 from ampfit.toy_generator import _build_params
 from ampfit.particle_model.ck_matrix_v2 import _gamma_functions
-
-# reuse the barrier-factor helper from the lineshape calculator
-_C3 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                   "calc_3pi_lineshape.py")
-import importlib.util as _ilu
-_spec = _ilu.spec_from_file_location("_calc3pi", _C3)
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"cannot load {_C3}")
-_calc3pi = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_calc3pi)
-b_barrier_factor = _calc3pi.b_barrier_factor
-
-_PIP = {"pip1", "pim1", "pip2", "pim2"}
+from ampfit.lineshape_common import (find_resonance, resonance_model,
+                                     b_barrier_factor, inv_mass2,
+                                     resonance_indices, fitted_ck)
 
 
 def main():
@@ -126,24 +116,10 @@ def main():
         sys.exit("no fitted parameters in results")
 
     # ── resonance chains → channels ────────────────────────────────
-    chains = []
-    bachelor = None
-    for start, end, chain in f.config._chain_ranges():
-        outs = [o.name for o in chain.decays[0].outs]
-        res_outs = [o for o in outs if o not in _PIP]
-        pion_outs = [o for o in outs if o in _PIP]
-        if not res_outs or res_outs[0] != args.resonance or not pion_outs:
-            continue
-        b = pion_outs[0]
-        if not b.startswith("pim"):
-            continue
-        if bachelor is None:
-            bachelor = b
-        elif bachelor != b:
-            raise ValueError(f"mixed bachelors {bachelor} vs {b}")
-        chains.append((start, end, chain))
-    if not chains:
-        sys.exit(f"no B -> R + pi- chain with R = {args.resonance!r}")
+    try:
+        chains, bachelor = find_resonance(f, args.resonance)
+    except ValueError as exc:
+        sys.exit(str(exc))
     n_base = f.config._chain_ranges()[-1][1]
     cm = f.config.get_ck_map()
 
@@ -160,14 +136,7 @@ def main():
         print(f"  [{i}] ck#{idx}: {n}")
 
     # ── model + mass grid (from the config's gamma_file) ───────────
-    model = None
-    for _, _, chain in chains:
-        for d in chain.decays:
-            if d.core.name == args.resonance:
-                model = d.core._model
-                break
-        if model:
-            break
+    model = resonance_model(f, args.resonance)
     if model is None:
         sys.exit("no model found")
     _, resolved = f.build_params(np.asarray(r.x))
@@ -214,7 +183,7 @@ def main():
     for ci in range(n_batch):
         cn = min(batch, args.n - done)
         mom = generate_b4pi(cn, m_B=M_B_MESON, seed=100 + ci)["momenta"]
-        s = _s_of(mom, bachelor)
+        s = inv_mass2(mom[:, resonance_indices(bachelor)].sum(1))
         m3 = np.sqrt(s)
         data = momenta_to_data(mom, frac=np.ones(cn), time=np.zeros(cn))
         data["angle"] = data.pop("angles")
@@ -240,7 +209,7 @@ def main():
                 P[(a, "i", b)] = _p(f, params, handle,
                                     make_ck([(a, 1.0), (b, 1j)]))
         # the total histogram with the fitted ck (same events as M)
-        Pfit = _p(f, params, handle, _fitted_ck(f, params, ck_ranges, n_base))
+        Pfit = _p(f, params, handle, fitted_ck(f, params, ck_ranges, n_base))
         Htot += _hist(s, se, Pfit * W)
         # accumulate M_aa (real) and M_ab = (Re + i·Im)(A_a A_b*), × W
         # Im(A_a A_b*) = (|A_a + iA_b|² − |A_a|² − |A_b|²)/2
@@ -268,32 +237,6 @@ def main():
 
     if args.validate:
         _validate(f, model, r, args, M, Htot, s_pts)
-
-
-def _fitted_ck(f, params, ck_ranges, n_base):
-    """ck with the fitted values on the resonance's blocks {0, 2}."""
-    ck = np.zeros_like(params["ck"], dtype=complex)
-    for start, end in ck_ranges:
-        for b in (0, 2):
-            s = b * n_base + start
-            ck[s:s + (end - start)] = params["ck"][s:s + (end - start)]
-    return ck
-
-
-def _s_of(mom, bachelor):
-    """s = m(πππ)² for the 3 pions that are NOT the bachelor π⁻.
-
-    Momentum order is (pip1, pim1, pip2, pim2); the bachelor is a π⁻
-    (slot 3 for pim2, slot 1 for pim1), the resonance uses the rest.
-    """
-    b_idx = 3 if bachelor == "pim2" else 1
-    idx = [i for i in range(4) if i != b_idx]
-    return _inv_sq(mom[:, idx].sum(1))
-
-
-def _inv_sq(p):
-    """Invariant mass² of a 4-momentum stack (E, px, py, pz)."""
-    return p[:, 0] ** 2 - np.einsum("ij,ij->i", p[:, 1:], p[:, 1:])
 
 
 def _p(f, params, handle, ck):

@@ -46,93 +46,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
 from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum,
                                     M_PION, M_B_MESON)
-from ampfit.momenta_to_data import momenta_to_data
-from ampfit.toy_generator import _build_params
-
-_PIP = {"pip1", "pim1", "pip2", "pim2"}
-_FINALS = ["pip1", "pim1", "pip2", "pim2"]
-
-
-def find_resonance(f, res_name):
-    """Find all ``B → R + π⁻`` chains whose top-level resonance is
-    *res_name*.  Returns ``(chains, bachelor)`` where *chains* is the
-    list of ``(start, end, chain)`` block-0 ranges (unioned for the
-    amplitude) and *bachelor* the (unique) π⁻ slot name."""
-    chains = []
-    bachelor = None
-    for start, end, chain in f.config._chain_ranges():
-        outs = [o.name for o in chain.decays[0].outs]
-        res_outs = [o for o in outs if o not in _PIP]
-        pion_outs = [o for o in outs if o in _PIP]
-        if not res_outs or res_outs[0] != res_name or not pion_outs:
-            continue
-        b = pion_outs[0]
-        if not b.startswith("pim"):      # want B -> R + π⁻
-            continue
-        if bachelor is None:
-            bachelor = b
-        elif bachelor != b:
-            raise ValueError(f"{res_name}: mixed bachelors {bachelor} vs {b}")
-        chains.append((start, end, chain))
-    if not chains:
-        raise ValueError(f"no B -> R + pi- chain with R = {res_name!r}")
-    return chains, bachelor
-
-
-def chain_amplitude(f, fit_result, momenta, ck_ranges, n_base, frac, time):
-    """|A|² of the special R's waves, including the identical-particle
-    permutation of the inner 3π (blocks 0 and 2 — the π⁺₁↔π⁺₂ swap) but
-    never swapping the π⁻ bachelor (blocks 1, 3).  All other ck zeroed.
-
-    *frac*, *time* are the fixed per-event tagging fraction and decay
-    time used for the amplitude (default frac=0.5, time=0).
-    """
-    params = _build_params(f, fit_result)
-    ck = np.zeros_like(params["ck"], dtype=complex)
-    for start, end in ck_ranges:
-        for b in (0, 2):
-            s = b * n_base + start
-            ck[s:s + (end - start)] = params["ck"][s:s + (end - start)]
-    params = dict(params)
-    params["ck"] = ck
-
-    n = len(momenta)
-    data = momenta_to_data(momenta, frac=np.full(n, frac),
-                           time=np.full(n, time))
-    data["angle"] = data.pop("angles")
-    data["mass"] = data["mass"].reshape(n, -1)
-    data["q"] = data["q"].reshape(n, -1)
-    handle = f.backend.load_data(data)
-    try:
-        _, _, P = f.backend.compute(params, handle, norm=None)
-        return np.real(np.asarray(P)).astype(float)
-    finally:
-        if hasattr(handle, "free"):
-            handle.free()
-
-
-def _inv_mass(p):
-    return np.sqrt(np.maximum(p[:, 0] ** 2 - np.sum(p[:, 1:] ** 2, axis=-1),
-                              0.0))
-
-
-def resonance_model(f, res_name):
-    """The particle model of the top-level resonance *res_name*."""
-    for chain in f.config.full_decay.chains:
-        for d in chain.decays:
-            if d.core.name == res_name:
-                return d.core._model
-    return None
-
-
-def b_barrier_factor(f, chain_wave, qB):
-    """F_L(qB) — the Blatt-Weisskopf barrier of the B→Rπ decay for the
-    chain's first wave (L from the kernel config)."""
-    from ampfit.bw_form_factor import form_factor
-    kc = f.kernel_config
-    p = int(kc["fl_order"][chain_wave * 3])     # B decay (idx 0)
-    L = int(kc["fl_type"][p])
-    return form_factor(L, qB)
+from ampfit.lineshape_common import (find_resonance, resonance_model,
+                                     b_barrier_factor, inv_mass,
+                                     resonance_indices, chain_amplitude)
 
 
 def main():
@@ -185,10 +101,7 @@ def main():
     n_wave = sum(e - s for s, e in ck_ranges)
     print(f"R = {args.resonance}: {len(chains)} chain(s) "
           f"({n_wave} wave(s), blocks {{0,2}}, bachelor={bach})")
-    if bach == "pim2":
-        r_idx = [0, 1, 2]
-    else:
-        r_idx = [0, 2, 3]
+    r_idx = resonance_indices(bach)
 
     # per-resonance constants for the weight
     model = resonance_model(f, args.resonance)
@@ -201,7 +114,7 @@ def main():
 
     def chunk_weight(mom):
         """Full weight |A|²·|D_R|²/(q·F_L²·m₃π) for one chunk of events."""
-        m_R = _inv_mass(mom[:, r_idx].sum(1))
+        m_R = inv_mass(mom[:, r_idx].sum(1))
         P = chain_amplitude(f, r, mom, ck_ranges, n_base,
                             args.frac, args.time)
         w = P / np.maximum(
