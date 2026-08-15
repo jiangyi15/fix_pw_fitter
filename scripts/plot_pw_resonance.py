@@ -24,7 +24,7 @@ import numpy as np
 from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
-from ampfit.plot_pw_groups import PWGroupPlotter
+from ampfit.plot_pw_groups import PWGroupPlotter, plot_samesign
 
 
 def idx_total(config):
@@ -167,6 +167,9 @@ def main():
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
     plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
                      ranges=ar, output=args.output, unit="", fmt=ft)
+
+    # Same-charge-pair variables: B → (π⁺π⁺)(π⁻π⁻) — one figure each
+    plot_samesign(plotter, output=args.output, fmt=ft)
 
     # ── π⁺π⁻ mass (columns 0,3,6,9) ─────────────────────────────
     def _pipi_mass(x):

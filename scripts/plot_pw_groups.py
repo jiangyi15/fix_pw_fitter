@@ -10,7 +10,8 @@ import sys, os, argparse
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampfit import Fitter
-from ampfit.plot_pw_groups import PWGroupPlotter, discover_groups
+from ampfit.plot_pw_groups import (PWGroupPlotter, discover_groups,
+                                   plot_samesign)
 
 
 def main():
@@ -82,6 +83,9 @@ def main():
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
     plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
                      ranges=ar, output=args.output, fmt=out_fmt, unit="")
+
+    # Same-charge-pair variables: B → (π⁺π⁺)(π⁻π⁻) — one figure each
+    plot_samesign(plotter, output=args.output, fmt=out_fmt)
 
     # Time
     plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 0.2, "time",

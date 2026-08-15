@@ -10,6 +10,65 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 
+# ── same-charge-pair variables (B → (π⁺π⁺)(π⁻π⁻)) ────────────────
+
+def samesign_varfun(x):
+    """Extract the five same-charge-pair variables from a data dict.
+
+    Reconstructs the momenta with :func:`ampfit.momenta_to_data.
+    data_to_momentum` (row-0 = the generator's ρρ parametrisation) and
+    reads the B → (π⁺₁π⁺₂)(π⁻₁π⁻₂) kinematics with
+    :func:`ampfit.momenta_to_data.momenta_to_data_samesign`:
+
+        [m(π⁺π⁺), m(π⁻π⁻), cosθ₁, cosθ₂, φ]
+
+    with the helicity cosines in [0, 1] (identical-pion ambiguity
+    fixed).  Suitable as *varfun* for :meth:`PWGroupPlotter.plot_var`.
+    """
+    from ampfit.momenta_to_data import (data_to_momentum,
+                                        momenta_to_data_samesign)
+    mom = data_to_momentum({"mass": x["mass"].reshape(-1, 24, 2),
+                            "q": x["q"].reshape(-1, 24, 3),
+                            "angles": x["angle"].reshape(-1, 24, 3)})
+    d = momenta_to_data_samesign(mom)
+    return [d["m_pp"], d["m_mm"],
+            d["cos_theta1"], d["cos_theta2"], d["phi"]]
+
+
+SAMESIGN_LABELS = [r"$m(\pi^+\pi^+)$", r"$m(\pi^-\pi^-)$",
+                   r"$\cos\theta_1$", r"$\cos\theta_2$", r"$\phi$"]
+SAMESIGN_RANGES = [(0.28, 5.2), (0.28, 5.2), (0, 1), (0, 1),
+                   (-np.pi, np.pi)]
+SAMESIGN_NAMES = ["m_pp", "m_mm", "cos_theta1", "cos_theta2", "phi"]
+SAMESIGN_BINW = [0.05, 0.05, 0.02, 0.02, 0.05]
+
+
+def plot_samesign(plotter, output="plots/", fmt="png"):
+    """Plot the five same-charge-pair variables as separate figures.
+
+    Each variable (m(π⁺π⁺), m(π⁻π⁻), cosθ₁, cosθ₂, φ) is saved as its
+    own ``samesign_<name>.png`` (data vs total fit + group weights).
+    The kinematics are reconstructed once per dataset and cached.
+    """
+    cache = {}
+
+    def cached(x):
+        key = id(x)
+        if key not in cache:
+            cache[key] = samesign_varfun(x)
+        return cache[key]
+
+    for j, (label, rng, name, bw) in enumerate(zip(
+            SAMESIGN_LABELS, SAMESIGN_RANGES, SAMESIGN_NAMES,
+            SAMESIGN_BINW)):
+        plotter.plot_var(
+            lambda x, jj=j: [cached(x)[jj]],
+            [label], rng[0], rng[1], bw, f"samesign_{name}",
+            output=output, fmt=fmt, ranges=[rng], unit="",
+            smooth_sigma=1.0, legend=True, show_pull=True)
+
+
+
 def adaptive_split_bound(datas, binning, base_bound=None):
     """Recursively split 2D data into adaptive bins.
 
