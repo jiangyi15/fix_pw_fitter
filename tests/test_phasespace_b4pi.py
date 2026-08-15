@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from ampfit.phasespace_b4pi import (
-    generate_b4pi, two_body_momentum, sample_masses,
+    generate_b4pi, generate_b4pi_fixed_m3pi, two_body_momentum, sample_masses,
     _mass_weight, M_PION, M_B_MESON,
 )
 
@@ -118,6 +118,87 @@ class TestHelpers:
         """Breakup momentum is physical (0 < q < M/2)."""
         q = two_body_momentum(5.279, 2.0, 2.0)
         assert 0 < q < 2.5
+
+
+class TestFixedM3pi:
+    """The fixed-m(πππ) generator (B → R + π⁻, R → π⁺π⁻π⁺)."""
+
+    def test_fixed_mass_shell(self):
+        """m(πππ) is exactly the requested value, B at rest, pions on shell."""
+        for m_R in (0.5, 1.3, 5.1):
+            mom = generate_b4pi_fixed_m3pi(m_R, 10000, seed=1)["momenta"]
+            m3 = np.sqrt((mom[:, :3].sum(1)[:, 0] ** 2
+                          - np.sum(mom[:, :3].sum(1)[:, 1:] ** 2, axis=1)))
+            assert np.all(np.abs(m3 - m_R) < 1e-9)
+            tot = mom.sum(1)
+            assert np.all(np.abs(tot[:, 0] - M_B_MESON) < 1e-9)
+            assert np.all(np.abs(tot[:, 1:]) < 1e-9)
+            m2s = mom[:, :, 0] ** 2 - np.sum(mom[:, :, 1:] ** 2, axis=2)
+            assert np.all(np.abs(m2s - M_PION ** 2) < 1e-9)
+
+    def test_scalar_and_array(self):
+        """Scalar m_R broadcasts; array m_R is honoured per event."""
+        mom = generate_b4pi_fixed_m3pi(1.2, 5000, seed=2)["momenta"]
+        m3 = np.sqrt((mom[:, :3].sum(1)[:, 0] ** 2
+                      - np.sum(mom[:, :3].sum(1)[:, 1:] ** 2, axis=1)))
+        assert np.allclose(m3, 1.2)
+
+        mR = np.linspace(0.6, 4.5, 3000)
+        mom = generate_b4pi_fixed_m3pi(mR, None, seed=2)["momenta"]
+        m3 = np.sqrt((mom[:, :3].sum(1)[:, 0] ** 2
+                      - np.sum(mom[:, :3].sum(1)[:, 1:] ** 2, axis=1)))
+        assert np.allclose(m3, mR, atol=1e-8)
+
+    def test_flat_angles(self):
+        """Production angles are uniform: ⟨cosθ⟩ = 0, std = 1/√3."""
+        ev = generate_b4pi_fixed_m3pi(1.3, 200000, seed=3)
+        for key in ("cos_theta13", "cos_theta_B"):
+            c = ev[key]
+            assert abs(c.mean()) < 5e-3 and abs(c.std() - 1 / np.sqrt(3)) < 5e-3
+
+    def test_dalitz_marginal_matches_analytic(self):
+        """m₁₂ marginal (the flat-Dalitz pdf) matches q·q."""
+        ev = generate_b4pi_fixed_m3pi(1.3, 500000, seed=4)
+        hist, edges = np.histogram(ev["m12"], bins=30,
+                                   range=(2 * M_PION, 1.3 - M_PION))
+        mc = (edges[:-1] + edges[1:]) / 2
+        w = (two_body_momentum(1.3, mc, M_PION)
+             * two_body_momentum(mc, M_PION, M_PION))
+        assert np.corrcoef(hist, w)[0, 1] > 0.999
+
+    def test_fixed_angles(self):
+        """Fixed production/decay angles override the random sampling."""
+        ev = generate_b4pi_fixed_m3pi(1.3, 5000, seed=5,
+                                      cos_theta_B=0.3, phi_B=1.2,
+                                      cos_theta13=0.0, phi13=0.5)
+        assert np.all(ev["cos_theta_B"] == 0.3)
+        assert np.all(ev["phi_B"] == 1.2)
+        assert np.all(ev["cos_theta13"] == 0.0)
+        assert np.all(ev["phi13"] == 0.5)
+        # R flight direction fixed to the requested angle
+        mom = ev["momenta"]
+        pR = mom[:, :3].sum(1)
+        nhat = pR[:, 1:] / np.linalg.norm(pR[:, 1:], axis=1)[:, None]
+        target = np.array([np.sqrt(1 - 0.3 ** 2) * np.cos(1.2),
+                           np.sqrt(1 - 0.3 ** 2) * np.sin(1.2), 0.3])
+        assert np.all(np.abs(nhat - target) < 1e-9)
+        # mixed: fixed B angle, random R angle; array phi_B honoured
+        ev2 = generate_b4pi_fixed_m3pi(1.3, 5000, seed=6, cos_theta_B=-0.7)
+        assert np.all(ev2["cos_theta_B"] == -0.7)
+        assert ev2["cos_theta13"].std() > 0.5
+        phis = np.linspace(0, 2 * np.pi, 5000)
+        ev3 = generate_b4pi_fixed_m3pi(1.3, 5000, seed=7, phi_B=phis)
+        assert np.allclose(ev3["phi_B"], phis)
+
+    def test_fixed_angles_conservation(self):
+        """Conservation and mass-shell hold with fixed angles too."""
+        mom = generate_b4pi_fixed_m3pi(1.6, 10000, seed=8,
+                                       cos_theta_B=0.5, phi_B=0.0)["momenta"]
+        m3 = np.sqrt((mom[:, :3].sum(1)[:, 0] ** 2
+                      - np.sum(mom[:, :3].sum(1)[:, 1:] ** 2, axis=1)))
+        assert np.all(np.abs(m3 - 1.6) < 1e-9)
+        assert np.all(np.abs(mom.sum(1)[:, 0] - M_B_MESON) < 1e-9)
+        assert np.all(np.abs(mom.sum(1)[:, 1:]) < 1e-9)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,11 @@ Because m₁, m₂ are sampled from the product of the two-body phase-space
 factors and cos θ, φ are flat, the generated points are uniformly
 distributed over the 5-dimensional B → 4π phase space (unit weight).
 
+:func:`generate_b4pi_fixed_m3pi` instead generates the event at a
+*fixed* m(πππ) (bottom-up: flat 3π Dalitz of R in its rest frame,
+isotropic B → R + π⁻ production angles, boosted into the B rest frame)
+— the approach of the reference lineshape generator.
+
 Usage::
 
     from ampfit.phasespace_b4pi import generate_b4pi
@@ -148,6 +153,185 @@ def sample_masses(n, m_B, m_pi, rng):
 # ═══════════════════════════════════════════════════════════════════
 # 4-momentum construction
 # ═══════════════════════════════════════════════════════════════════
+
+def _boost(p, beta):
+    """Lorentz boost a stack of 4-momenta (n, 4) by velocities (n, 3)."""
+    b = np.linalg.norm(beta, axis=-1)
+    b = np.maximum(b, 1e-15)
+    nhat = beta / b[:, None]
+    gam = 1.0 / np.sqrt(1.0 - b ** 2)
+    pvec = p[:, 1:]
+    ppar = np.sum(pvec * nhat, axis=-1)              # component along n̂
+    pperp = pvec - ppar[:, None] * nhat              # transverse part
+    E = p[:, 0]
+    Enew = gam * (E + b * ppar)
+    ppar_new = gam * (ppar + b * E)
+    pnew = ppar_new[:, None] * nhat + pperp
+    return np.stack([Enew, pnew[:, 0], pnew[:, 1], pnew[:, 2]], axis=-1)
+
+
+def generate_b4pi_fixed_m3pi(m3pi, n, m_B=M_B_MESON, m_pi=M_PION, seed=None,
+                             cos_theta13=None, phi13=None,
+                             cos_theta_B=None, phi_B=None):
+    """Generate B → R + π⁻, R → π⁺π⁻π⁺ at a **fixed** m(πππ) = *m3pi*.
+
+    Builds the event bottom-up at fixed resonance mass (the approach of
+    the reference lineshape generator, ``plot_single_chain_amp6.py``)::
+
+        1. R rest frame: a *flat* 3-body Dalitz sample of the 3π —
+           m₁₂ drawn from the mass marginal
+           ``P(m₁₂) ∝ q(m_R;m₁₂,m_π)·q(m₁₂;m_π,m_π)`` (the q·q is the
+           pdf of the *mass* m₁₂; the s₁₂ marginal carries an extra
+           m_R/m₁₂ factor), cosθ₁₃ and φ₁₃ uniform, constructed with
+           the (12) axis along +z.
+        2. B → R + π⁻: the R carries the fixed breakup momentum
+           q_B = q(m_B; m_R, m_π) in a uniformly random direction
+           (cos θ_B, φ_B flat).
+        3. Boost the 3π from the R rest frame into the B rest frame
+           along the R flight axis; the π⁻ bachelor balances momentum.
+
+    The 4 final momenta are returned in the B (lab) rest frame,
+    ordered ``[pip1, pim1, pip2, pim2]`` (pip1/pip2 are the two
+    identical π⁺ of R, pim1 the π⁻ of R, pim2 the π⁻ bachelor).  The
+    sample is uniform over the full 5-dim phase space *at* the fixed
+    m(πππ) shell.
+
+    Parameters
+    ----------
+    m3pi : float or ndarray (n,)
+        Fixed 3π mass(es); a scalar is broadcast to all events.
+    n : int
+        Number of events (ignored if ``m3pi`` is an array).
+    m_B, m_pi : float
+        B meson and pion masses.
+    seed : int, optional
+        Random seed.
+    cos_theta13, phi13 : float or ndarray (n,), optional
+        Fixed R → 3π decay angles (in the R rest frame, particle 1 of
+        the (12) pair w.r.t. the flight axis).  Default: random.
+    cos_theta_B, phi_B : float or ndarray (n,), optional
+        Fixed B → R + π⁻ production angles (direction of R in the B
+        rest frame).  Default: random.
+
+    Returns
+    -------
+    dict with:
+        momenta   : (n, 4, 4) — [pip1, pim1, pip2, pim2] 4-momenta in
+                    the B rest frame.
+        m_R       : (n,) — the fixed resonance mass(es).
+        m12       : (n,) — the (π⁺π⁻) invariant mass of the R decay.
+        cos_theta13, phi13 : (n,) — R-rest-frame decay angles.
+        cos_theta_B, phi_B : (n,) — B → R π⁻ production angles.
+    """
+    m3pi = np.asarray(m3pi, dtype=float)
+    if m3pi.ndim == 0:
+        m_R = np.full(n, float(m3pi))
+    else:
+        m_R = np.asarray(m3pi)
+        n = len(m_R)
+    rng = np.random.default_rng(seed)
+
+    def _angles(v, key):
+        """Broadcast an optional fixed angle (scalar or (n,) array)."""
+        if v is None:
+            return None
+        a = np.broadcast_to(np.asarray(v, dtype=float), (n,)).copy()
+        if key.startswith("cos"):
+            if np.any(np.abs(a) > 1.0):
+                raise ValueError(f"{key} must lie in [-1, 1]")
+        return a
+
+    ct13_f = _angles(cos_theta13, "cos_theta13")
+    phi13_f = _angles(phi13, "phi13")
+    ctB_f = _angles(cos_theta_B, "cos_theta_B")
+    phiB_f = _angles(phi_B, "phi_B")
+
+    lo, hi = 2.0 * m_pi, m_R - m_pi
+    if np.any(hi <= lo):
+        raise ValueError("m3pi must satisfy 3 m_pi < m3pi < m_B - m_pi")
+
+    # ── 1. flat 3-body Dalitz of R in its rest frame ───────────────
+    # Sample m12 from the MASS marginal P(m12) ∝ q(m_R;m12,m_π)·
+    # q(m12;m_π,m_π) — this IS the flat-Dalitz marginal (q·q is the
+    # pdf of m12; the s12 marginal carries an extra m_R/m12 factor).
+    # cosθ₁₃ uniform then makes (s12, s13) flat.
+    m12 = np.empty(n)
+    # vectorised rejection: one proposal pass per distinct mass value.
+    # w_max bound: q(m_R; m12, m_π) ≤ q at smallest m12 (=2m_π) and
+    # q(m12; m_π, m_π) ≤ q at largest m12 (=m_R−m_π), so the product is
+    # bounded by q_max·q_max (no numerical scan needed).
+    for mR_i in np.unique(m_R):
+        mask = m_R == mR_i
+        cnt = int(mask.sum())
+        lo_i, hi_i = lo, hi[mask][0]
+        wmax = (two_body_momentum(mR_i, lo_i, m_pi)
+                * two_body_momentum(hi_i, m_pi, m_pi)) * 1.0001
+        got = 0
+        buf = np.empty(cnt)
+        while got < cnt:
+            cand = rng.uniform(lo_i, hi_i, max(cnt - got, 1024))
+            ww = (two_body_momentum(mR_i, cand, m_pi)
+                  * two_body_momentum(cand, m_pi, m_pi))
+            keep = rng.uniform(0.0, wmax, len(cand)) < ww
+            k = min(int(keep.sum()), cnt - got)
+            if k:
+                buf[got:got + k] = cand[keep][:k]
+                got += k
+        m12[mask] = buf
+
+    s12 = m12 ** 2
+    ct13 = ct13_f if ct13_f is not None else rng.uniform(-1.0, 1.0, n)
+    phi13 = phi13_f if phi13_f is not None \
+        else rng.uniform(0.0, 2.0 * np.pi, n)
+    st13 = np.sqrt(np.maximum(1.0 - ct13 ** 2, 0.0))
+
+    # (12) rest frame: particles 1, 2 back-to-back along n̂13, then boost
+    q1 = two_body_momentum(m12, m_pi, m_pi)
+    E1 = np.sqrt(q1 ** 2 + m_pi ** 2)
+    q3 = two_body_momentum(m_R, m12, m_pi)    # p of particle 3 in R frame
+    E3 = np.sqrt(q3 ** 2 + m_pi ** 2)
+    E12 = np.sqrt(q3 ** 2 + m12 ** 2)         # (12) energy in R frame
+    beta12 = q3 / E12                          # (12) frame → R frame, +z
+    gam12 = 1.0 / np.sqrt(1.0 - beta12 ** 2)
+
+    p1x, p1z = q1 * st13 * np.cos(phi13), q1 * ct13
+    p1y = q1 * st13 * np.sin(phi13)
+    E1_R = gam12 * (E1 + beta12 * p1z)
+    pz1_R = gam12 * (p1z + beta12 * E1)
+    E2_R = gam12 * (E1 - beta12 * p1z)
+    pz2_R = gam12 * (-p1z + beta12 * E1)
+
+    pR_rf = np.empty((n, 3, 4))
+    pR_rf[:, 0] = np.stack([E1_R, p1x, p1y, pz1_R], axis=1)
+    pR_rf[:, 1] = np.stack([E2_R, -p1x, -p1y, pz2_R], axis=1)
+    pR_rf[:, 2] = np.stack([E3, np.zeros(n), np.zeros(n), -q3], axis=1)
+
+    # ── 2. B → R + π⁻: production angles (fixed or random) ────────
+    qB = two_body_momentum(m_B, m_R, m_pi)
+    ER = np.sqrt(qB ** 2 + m_R ** 2)
+    Epi = np.sqrt(qB ** 2 + m_pi ** 2)
+    ctB = ctB_f if ctB_f is not None else rng.uniform(-1.0, 1.0, n)
+    phiB = phiB_f if phiB_f is not None \
+        else rng.uniform(0.0, 2.0 * np.pi, n)
+    stB = np.sqrt(np.maximum(1.0 - ctB ** 2, 0.0))
+    nhat = np.stack([stB * np.cos(phiB), stB * np.sin(phiB), ctB], axis=1)
+
+    # ── 3. boost the 3π R rest → B rest along the R flight axis ───
+    betaR = (qB / ER)[:, None] * nhat
+    pB = _boost(pR_rf.reshape(n * 3, 4), np.repeat(betaR, 3, axis=0))
+    pB = pB.reshape(n, 3, 4)
+
+    mom = np.empty((n, 4, 4))
+    mom[:, 0] = pB[:, 0]                                  # pip1
+    mom[:, 1] = pB[:, 1]                                  # pim1 (π⁻ of R)
+    mom[:, 2] = pB[:, 2]                                  # pip2
+    mom[:, 3] = np.stack([Epi, -qB * nhat[:, 0],
+                          -qB * nhat[:, 1], -qB * nhat[:, 2]], axis=1)  # pim2
+
+    return {"momenta": mom, "m_R": m_R, "m12": m12,
+            "cos_theta13": ct13, "phi13": phi13,
+            "cos_theta_B": ctB, "phi_B": phiB}
+
 
 def generate_b4pi(n_events, m_B=M_B_MESON, m_pi=M_PION, seed=None):
     """Generate *n_events* B → 4π phase-space points (B rest frame).
