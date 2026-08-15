@@ -18,10 +18,16 @@ Config::
       my_res:
         mass: 1.716
         width: 0.480
-        model: ck_matrix_v2
+        model: ck_matrix_v2            # or ck_matrix_v2_sqrt (M/√s)
         gamma_file: /path/to/gamma.npy
         partial_file: /path/to/partial.npy
         order_file: /path/to/order.json
+        # divide_sqrt_s: true          # same as model ck_matrix_v2_sqrt
+
+The ``ck_matrix_v2_sqrt`` model (or ``divide_sqrt_s: true``) divides the
+partial matrix by the running mass ``√s = m``: the gamma functions then
+read ``M_ab(m)/m``, so the self-energy carries the ``1/m`` factor that
+the lineshape calculators otherwise fold into their histogram weight.
 """
 
 import json
@@ -311,6 +317,16 @@ class CKMatrixModelV2(BaseModel):
             zero_pad = np.zeros((1, self.n_ck, self.n_ck), dtype=self.M_table.dtype)
             self.M_table = np.concatenate([zero_pad, self.M_table], axis=0)
 
+        # ── M(s)/√s convention ────────────────────────────────────
+        # Optionally divide the matrix by the running mass √s = m
+        # (config ``divide_sqrt_s: true``, or the ``ck_matrix_v2_sqrt``
+        # model alias).  The gamma functions then read M_ab(m)/m, i.e.
+        # the self-energy carries the 1/m factor that the lineshape
+        # calculators otherwise fold into their histogram weight.
+        if kwargs.get("divide_sqrt_s", False):
+            denom = np.maximum(np.abs(self.x_table), 1e-9)[:, None, None]
+            self.M_table = self.M_table / denom
+
         # ── config values ─────────────────────────────────────────
         self.m0 = float(kwargs.get("mass", 0.775))
 
@@ -404,3 +420,20 @@ class CKMatrixModelV2(BaseModel):
     # Inherited from BaseModel: reads the gamma couplings from
     # get_gamma_name() (the CK-matrix re/im names, already width-scaled)
     # and computes the peak mass / width from the running gamma.
+
+
+@register_model("ck_matrix_v2_sqrt")
+class CKMatrixModelV2Sqrt(CKMatrixModelV2):
+    """``ck_matrix_v2`` with the self-energy matrix divided by √s.
+
+    The partial matrix is read as ``M_ab(s)/√s = M_ab(m)/m`` — the
+    gamma functions carry the extra ``1/m`` factor (equivalent to
+    folding the ``--w-1m`` weight of the lineshape calculators into
+    the model).  Equivalent to ``ck_matrix_v2`` with
+    ``divide_sqrt_s: true``.
+    """
+
+    def __init__(self, name, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["divide_sqrt_s"] = True
+        super().__init__(name, **kwargs)

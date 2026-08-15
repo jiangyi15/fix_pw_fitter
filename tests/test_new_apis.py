@@ -680,6 +680,29 @@ def test_ck_matrix_v2_polar_gradients(ck_matrix_test_data):
         assert abs(num_t - ana_t) < 1e-4, f"Phase gradient mismatch for {iname}: {abs(num_t-ana_t):.2e}"
 
 
+def test_ck_matrix_v2_sqrt_division(ck_matrix_test_data):
+    """ck_matrix_v2_sqrt divides the M table by √s = m."""
+    from ampfit.particle_model.ck_matrix_v2 import (CKMatrixModelV2,
+                                                    CKMatrixModelV2Sqrt)
+    kw = _ck_model_kwargs(ck_matrix_test_data, {"mass": 1.0, "width": 0.1})
+    base = CKMatrixModelV2("test", **kw)
+    sq = CKMatrixModelV2Sqrt("test", **kw)
+
+    # the sqrt model's table = base table / m (row-wise, zero-pad aligned)
+    m_arr = np.maximum(np.abs(base.x_table), 1e-9)
+    assert np.allclose(sq.M_table * m_arr[:, None, None],
+                       base.M_table)
+    # ... and the gamma functions at mass m carry the 1/m factor:
+    # both are normalised at m₀ = 1.0 (scales agree to interpolation
+    # precision), so γ_sqrt(m) ≈ γ_base(m) / m
+    m = np.linspace(0.6, 1.9, 50)
+    for gi_b, gi_s in zip(base.gamma(m), sq.gamma(m)):
+        gi_b = np.asarray(gi_b).real
+        gi_s = np.asarray(gi_s).real
+        assert np.allclose(gi_s, gi_b / m, rtol=5e-3), \
+            "sqrt-model gamma should carry the 1/m factor"
+
+
 def test_ck_matrix_v2_ref_file(ck_matrix_test_data, tmp_path):
     """CK matrix v2: ref_file loads g_ls from reference JSON."""
     from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
