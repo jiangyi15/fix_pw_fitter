@@ -49,7 +49,8 @@ Usage::
 
 import numpy as np
 
-from ampfit.phasespace_b4pi import two_body_momentum, build_momenta, M_PION
+from ampfit.phasespace_b4pi import (two_body_momentum, build_momenta, M_PION,
+                                    M_B_MESON)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -488,6 +489,95 @@ def momenta_to_data(momenta, weight=None, frac=None, time=None):
         "bkg_raw": np.zeros(n),
         "weight": _as_1d(weight, n, 1.0),
     }
+
+
+def momenta_to_data_samesign(momenta, m_pi=M_PION):
+    """Build the same-charge-pair kinematics of the topology
+    B → (π⁺₁π⁺₂)(π⁻₁π⁻₂).
+
+    Returns the five phase-space variables::
+
+        m_pp, m_mm     — m(π⁺₁π⁺₂), m(π⁻₁π⁻₂)
+        cos_theta1     — cos of the (π⁺π⁺) helicity angle, restricted to
+                         [0, 1]
+        cos_theta2     — cos of the (π⁻π⁻) helicity angle, restricted to
+                         [0, 1]
+        phi            — azimuth of π⁺₁ around the (π⁺π⁺) axis, from π⁻₁
+
+    The helicity cosines are clipped to **[0, 1]** (θ ∈ [0, π/2]): each
+    pair holds identical pions, so (θ) and (π − θ) are the same physical
+    state — restricting to the upper hemisphere removes the double
+    counting, and the result is invariant under swapping the two π⁺ (or
+    the two π⁻) of a pair.
+    """
+    momenta = np.asarray(momenta, dtype=float)
+    n = len(momenta)
+    # boost to the B rest frame (the kinematics are frame-independent)
+    tot = momenta.sum(1)
+    betaB = tot[:, 1:] / tot[:, 0:1]
+    pb = _boost(momenta, _boost3_op(betaB[:, None, :]))
+    K = _PionCache(pb)
+
+    P_pp, P_mm = (0, 2), (1, 3)          # (π⁺₁,π⁺₂) and (π⁻₁,π⁻₂)
+    m1, m2 = K.mass[P_pp], K.mass[P_mm]
+    mB = K.mass[_B]
+    q0 = K.q(_B, P_pp, P_mm)
+    q1 = K.q(P_pp, (0,), (2,))
+    q2 = K.q(P_mm, (1,), (3,))
+
+    # raw helicity cosines (daughter w.r.t. the pair axis)
+    c1 = _helicity_cos(q0, q1, mB, m1, m2, m_pi, m_pi,
+                       K.sq[(0, 1, 3)], K.sq[(1, 2, 3)])
+    c2 = _helicity_cos(q0, q2, mB, m2, m1, m_pi, m_pi,
+                       K.sq[(0, 1, 2)], K.sq[(0, 2, 3)])
+    # restrict to cosθ ∈ [0, 1]: reflect the daughter into the upper
+    # hemisphere (identical pions make θ and π−θ the same state)
+    up1 = c1 >= 0.0
+    up2 = c2 >= 0.0
+    cos_t1 = np.where(up1, c1, -c1)
+    cos_t2 = np.where(up2, c2, -c2)
+
+    # φ must use the *relabelled* daughters (the ones kept by the θ
+    # restriction): vec = the upper π⁺, ref = the upper π⁻
+    n = len(momenta)
+    idx = np.arange(n)
+    p_plus = pb[idx, np.where(up1, 0, 2)]        # (n, 4) upper π⁺
+    p_minus = pb[idx, np.where(up2, 1, 3)]       # (n, 4) upper π⁻
+    axis = (pb[:, 0] + pb[:, 2])[:, 1:]          # (π⁺π⁺) momentum
+    phi = _azimuth(p_plus[:, 1:], axis, p_minus[:, 1:])
+
+    return {"m_pp": m1, "m_mm": m2,
+            "cos_theta1": cos_t1,
+            "cos_theta2": cos_t2,
+            "phi": phi}
+
+
+def data_to_momentum_samesign(m_pp, m_mm, cos_theta1, cos_theta2, phi,
+                              m_B=M_B_MESON, m_pi=M_PION):
+    """Build B → (π⁺₁π⁺₂)(π⁻₁π⁻₂) momenta from the same-charge-pair
+    kinematics of :func:`momenta_to_data_samesign`.
+
+    The geometry is identical to :func:`data_to_momentum`
+    (:func:`build_momenta`): pair₁ of mass *m_pp* along +z, pair₂ of
+    mass *m_mm* along −z, with the helicity cosines *cos_theta1/2* and
+    azimuth *phi*.  Only the *output order* differs — the pairs are
+    same-charge, so pair₁ holds the two π⁺ and pair₂ the two π⁻::
+
+        build_momenta → [π⁺₁, π⁺₂, π⁻₁, π⁻₂]   (same-charge pairs)
+        standard order → [π⁺₁, π⁻₁, π⁺₂, π⁻₂]   (permutation (0, 2, 1, 3))
+
+    The azimuth sign is flipped (−φ): the samesign φ is measured from
+    the π⁻ reference, the generator's from the π⁺ plane.
+
+    Returns
+    -------
+    momenta : ndarray (n, 4, 4) in the B rest frame, ordered
+        [π⁺₁, π⁻₁, π⁺₂, π⁻₂].
+    """
+    m_pp = np.asarray(m_pp, dtype=float)
+    mom = build_momenta(m_pp, m_mm, cos_theta1, cos_theta2, -phi,
+                        m_B=m_B, m_pi=m_pi)
+    return mom[:, [0, 2, 1, 3]]
 
 
 def data_to_momentum(data, m_pi=M_PION):

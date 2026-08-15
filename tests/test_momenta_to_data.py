@@ -15,8 +15,9 @@ import pytest
 from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum, M_PION,
                                     M_B_MESON)
 from ampfit.momenta_to_data import (momenta_to_data, momenta_to_data_full,
-                                    data_to_momentum, _boost, _boost3_op,
-                                    _inv_mass_sq)
+                                    momenta_to_data_samesign,
+                                    data_to_momentum, data_to_momentum_samesign,
+                                    _boost, _boost3_op, _inv_mass_sq)
 
 
 @pytest.fixture
@@ -174,6 +175,71 @@ class TestReference:
         assert d0.max() < 1e-6
         assert np.max(np.abs(oa[:, :, 1] - ra[:, :, 1])) < 1e-6
         assert np.max(np.abs(oa[:, :, 2] - ra[:, :, 2])) < 1e-6
+
+
+class TestSameSignTopology:
+    """B → (π⁺₁π⁺₂)(π⁻₁π⁻₂): same-charge pairing, cosθ ∈ [0, 1]."""
+
+    @pytest.fixture
+    def samesign(self, ev):
+        return momenta_to_data_samesign(ev["momenta"])
+
+    def test_pair_masses(self, ev, samesign):
+        """m_pp/m_mm are the same-charge pair masses."""
+        mom = ev["momenta"]
+        m_pp = np.sqrt((mom[:, 0, 0] + mom[:, 2, 0]) ** 2
+                       - ((mom[:, 0, 1:] + mom[:, 2, 1:]) ** 2).sum(1))
+        m_mm = np.sqrt((mom[:, 1, 0] + mom[:, 3, 0]) ** 2
+                       - ((mom[:, 1, 1:] + mom[:, 3, 1:]) ** 2).sum(1))
+        assert np.abs(m_pp - samesign["m_pp"]).max() < 1e-9
+        assert np.abs(m_mm - samesign["m_mm"]).max() < 1e-9
+
+    def test_cos_theta_range(self, samesign):
+        """The helicity cosines are restricted to [0, 1]."""
+        assert samesign["cos_theta1"].min() >= -1e-12
+        assert samesign["cos_theta1"].max() <= 1.0 + 1e-12
+        assert samesign["cos_theta2"].min() >= -1e-12
+        assert samesign["cos_theta2"].max() <= 1.0 + 1e-12
+
+    def test_identical_particle_invariance(self, ev, samesign):
+        """Swapping the two π⁺ (or the two π⁻) leaves the variables
+        unchanged (identical-particle ambiguity fixed by cosθ ∈ [0,1]
+        and the φ relabelling)."""
+        mom = ev["momenta"]
+        for i, j in [(0, 2), (1, 3), ((0, 2), (1, 3))]:
+            s = mom.copy()
+            if isinstance(i, tuple):
+                s[:, i[0]], s[:, i[1]] = mom[:, i[1]].copy(), mom[:, i[0]].copy()
+                s[:, j[0]], s[:, j[1]] = mom[:, j[1]].copy(), mom[:, j[0]].copy()
+            else:
+                s[:, i], s[:, j] = mom[:, j].copy(), mom[:, i].copy()
+            d = momenta_to_data_samesign(s)
+            assert np.abs(d["m_pp"] - samesign["m_pp"]).max() < 1e-9
+            assert np.abs(d["m_mm"] - samesign["m_mm"]).max() < 1e-9
+            assert np.abs(d["cos_theta1"] - samesign["cos_theta1"]).max() < 1e-9
+            assert np.abs(d["cos_theta2"] - samesign["cos_theta2"]).max() < 1e-9
+            dphi = np.abs(((d["phi"] - samesign["phi"] + np.pi)
+                           % (2 * np.pi)) - np.pi)
+            assert dphi.max() < 1e-9
+
+    def test_samesign_roundtrip(self, ev, samesign):
+        """data_to_momentum_samesign reverses it exactly (only the
+        output order differs from build_momenta)."""
+        mom2 = data_to_momentum_samesign(
+            samesign["m_pp"], samesign["m_mm"],
+            samesign["cos_theta1"], samesign["cos_theta2"], samesign["phi"])
+        d2 = momenta_to_data_samesign(mom2)
+        for k in ("m_pp", "m_mm", "cos_theta1", "cos_theta2"):
+            assert np.abs(d2[k] - samesign[k]).max() < 1e-9
+        dphi = np.abs(((d2["phi"] - samesign["phi"] + np.pi)
+                       % (2 * np.pi)) - np.pi)
+        assert dphi.max() < 1e-9
+        # B at rest, pions on-shell
+        tot = mom2.sum(1)
+        assert np.abs(tot[:, 0] - M_B_MESON).max() < 1e-9
+        assert np.abs(tot[:, 1:]).max() < 1e-9
+        m2s = mom2[:, :, 0] ** 2 - (mom2[:, :, 1:] ** 2).sum(2)
+        assert np.abs(m2s - M_PION ** 2).max() < 1e-9
 
 
 class TestDataToMomentum:
