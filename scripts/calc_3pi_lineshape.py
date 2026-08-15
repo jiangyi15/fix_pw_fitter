@@ -1,21 +1,39 @@
 #!/usr/bin/env python3
 """Calculate the m(πππ) lineshape histogram of a special 3π resonance R.
 
+The histogram reproduces the CK-matrix running width: it matches
+``|Im D| = m₀·Γ(s)`` (the model's amplitude built from the partial
+matrix) — see ``reproduce_partial.py`` for the per-channel matrix
+that makes ``Re(c·M·c†) = H`` by construction.
+
 Method:
-  1. Generate a flat B → 4π phase-space sample (unit weight) with the
-     existing :func:`generate_b4pi`.
+  1. Generate a flat B → 4π phase-space sample (unit weight) with
+     :func:`generate_b4pi` (breakup-momentum ``q`` convention), in
+     batches (``--batch``) that are accumulated into the histogram and
+     freed, so peak memory is O(batch) instead of O(n).
   2. Take the R = the 3 pions that are *not* the π⁻ bachelor of the
      chain ``B → R + π⁻`` (no identical-particle swap on that π⁻).
-  3. Evaluate ``|A|²`` of the chain using only its block-0 waves (all
-     other CK couplings zeroed) — i.e. only the ``B → R + π⁻`` topology.
-  4. Histogram ``m(πππ)`` with weight ``|A|² · 1/p(m_B, m_R, m_π)``.
+  3. Evaluate ``|A|²`` of the chain using only its block-0/2 waves
+     (the π⁺₁↔π⁺₂ swap; all other CK couplings zeroed) — i.e. only the
+     ``B → R + π⁻`` topology, with the fitted ck.
+  4. Histogram ``m(πππ)`` with the full weight::
+
+        |A_chain|² · |D_R|² / (q · F_L² · m₃π)      (with --w-1m)
+
+     where ``|D_R|² = 1/|BW_R|²`` (inverse of the R-propagator
+     squared) cancels the R propagator inside ``|A_chain|²``, ``q`` is
+     the B → R π⁻ breakup momentum, ``F_L`` the barrier and ``m₃π``
+     the 3π mass.  The result is the running width lineshape
+     ``|Im D| = m₀·Γ(s)``.
 
 Usage::
 
-    python scripts/calc_3pi_lineshape.py config_angle.yml fit_output/results.json \\
-        --resonance "a1(1260)p" --n 1000000 -o plots/3pi_a1.png
-    python scripts/calc_3pi_lineshape.py config_angle.yml fit_output/results.json \\
-        --resonance "a2(1320)p" --n 1000000 --backend cuda_v3 -o plots/3pi_a2.png
+    python scripts/calc_3pi_lineshape.py Validation/ck_configs/a1_1260_p.yml \\
+        fit_output/results.json --resonance "a1(1260)p" --n 1000000 \\
+        --w-1m -o plots/3pi_a1.png
+    python scripts/calc_3pi_lineshape.py Validation/ck_configs/a2_1320_p.yml \\
+        fit_output/results.json --resonance "a2(1320)p" --n 1000000 \\
+        --w-1m -o plots/3pi_a2.png
 """
 
 import argparse

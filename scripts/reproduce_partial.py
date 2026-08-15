@@ -1,34 +1,74 @@
 #!/usr/bin/env python3
 """Reproduce a CK-matrix ``partial.npy`` from the current machinery.
 
-The partial matrix is the sub-Dalitz-integrated channel amplitude matrix::
+The partial matrix is the sub-Dalitz-integrated channel amplitude matrix
+weighted exactly like the ``calc_3pi_lineshape.py`` histogram::
 
-    M_ab(s) = Σ_events  A_a(Ω,s) · A_b*(Ω,s)
+    M_ab(s) = Σ_events  A_a(Ω,s) · A_b*(Ω,s) · |D_R(s)|²
+                             / (q_B(s) · F_L(q_B)² · m₃π)
 
 where ``A_a`` is the unit-coupling complex amplitude of channel *a*
 (the B → R π⁻ chain wave including sub-resonance BW, angular LS factor
 and barrier), summed over a flat B → 4π phase-space sample and binned
 in ``s = m(πππ)²``.
 
-The imaginary part of the ck-contracted matrix builds the running width::
+The factors are the same s-only deweight the calculator applies: the
+``|D_R|² = 1/|1/D_R|²`` (inverse of the R-propagator squared, computed
+from the ck model's amplitude) cancels the R propagator inside the
+chain amplitude, ``q_B`` is the B → R π⁻ breakup momentum, ``F_L`` the
+Blatt-Weisskopf barrier and ``m₃π`` the 3π mass.
+
+The ck-contracted matrix builds the running width::
 
     Γ(s) = width · Re(c_a M_ab(s) c_b*) / Re(c_a M_ab(m₀) c_b*)
 
 so ``|Im D| = m₀·Γ(s)`` is exactly the lineshape the calculator's
 histogram matches — reproducing ``partial.npy`` is the *same* procedure
-as the histogram, accumulating the per-channel matrix instead of ``|A|²``.
+as the histogram, accumulating the per-channel matrix instead of
+``|A|²``.  In particular ``Re(c·M·c†)(s) = H(s)`` (the histogram) by
+construction, so the model loaded with the reproduced file stays
+self-consistent with the histogram.
 
 The per-channel complex products are reconstructed with the
-polarization identity on the backend's ``|A|²`` (unit ck selections)::
+polarization identity on the backend's ``|A|²`` (unit ck selections,
+sign convention matching the original ``plot_single_chain_amp6.py``)::
 
     Re(A_a A_b*) = (|A_a + A_b|² − |A_a|² − |A_b|²) / 2
-    Im(A_a A_b*) = (|A_a|² + |A_b|² − |A_a + iA_b|²) / 2
+    Im(A_a A_b*) = (|A_a + iA_b|² − |A_a|² − |A_b|²) / 2
+
+Outputs
+-------
+``{prefix}_partial.npy``
+    ``(n_s, n_ck, n_ck)`` complex128 on the s-grid ``s = x²`` of the
+    gamma-file mass grid (99 rows for the ``x[1:]`` convention; the
+    model zero-pads to ``n_x`` rows).  The matrix is Hermitian.
+``{prefix}_partial_order.json``
+    the per-channel g_ls names in the same order as the matrix
+    (derived from ``get_ck_map()``, matching the reference ``order``
+    files).
+
+Validation (``--validate``)
+---------------------------
+1. ``Re(c·M·c†)`` contracted with the fitted ck vs the total histogram
+   ``H`` accumulated on the same events (exact identity; ≈ 1.0000).
+2. Γ(s) from the reproduced M vs the model's ``|Im(1/A)|/m₀`` — the
+   drop-in quality of the reproduced file.
+
+Caveats
+-------
+- The s-grid extends to ``m ≈ 5.26``, beyond the kinematic limit
+  ``m₃π < m_B − m_π`` (≈ 5.14).  The flat 4-body generator cannot
+  populate those last rows, so they come out empty; the reference files
+  (generated at fixed unphysical m) are non-zero there.
+- The interference (off-diagonal) terms are differences of large
+  ``|A|²`` values, so they need more events to converge (the drop-in
+  corr improves up to ~30M events; the diagonals converge quickly).
 
 Usage::
 
     python scripts/reproduce_partial.py Validation/ck_configs/a1_1260_p.yml \\
         fit_output/results.json --resonance "a1(1260)p" --n 2000000 \\
-        -o Validation/partial/a1_1260_p
+        -o Validation/partial/a1_1260_p --validate
 """
 
 import argparse
