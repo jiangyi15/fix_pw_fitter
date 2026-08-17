@@ -212,7 +212,8 @@ class KToSplineWeightsTransform(Transform):
     def __init__(self, k_name, mass_name, g0_names,
                  mass_fixed=1.0,
                  k_min=0.1, k_max=5.0,
-                 bc_type="not-a-knot"):
+                 bc_type="not-a-knot",
+                 k_default=None):
         out_names = [mass_name] + list(g0_names)
         super().__init__(input_names=[k_name],
                          output_names=out_names)
@@ -224,6 +225,11 @@ class KToSplineWeightsTransform(Transform):
         self.k_min = float(k_min)
         self.k_max = float(k_max)
         self._delta_k = (float(k_max) - float(k_min)) / max(self.n_k - 1, 1)
+        # fallback k used when the weights are absent (nothing to invert):
+        # the model passes the config's ``k`` default, so the inverse
+        # restores the intended initial value instead of the k_min edge
+        self.k_default = (float(k_default) if k_default is not None
+                          else (float(k_min) + float(k_max)) / 2.0)
 
         # Pre-compute spline basis matrix
         k_grid = np.linspace(k_min, k_max, self.n_k)
@@ -268,11 +274,14 @@ class KToSplineWeightsTransform(Transform):
         refining within the interval via ternary search.
         """
         if self.k_name in d:
-            mass = float(d.get(self.mass_name, self.mass_fixed))
-            return {self.k_name: float(d[self.k_name]),
-                    self.mass_name: mass}
+            return {self.k_name: float(d[self.k_name])}
 
         target = np.array([float(d.get(n, 0.0)) for n in self.g0_names])
+        # No weights present (all absent → all 0): nothing to reconstruct
+        # k from — fall back to the configured default k (the config's
+        # ``k:`` initial value) instead of the degenerate k_min edge.
+        if np.all(target == 0.0):
+            return {self.k_name: self.k_default}
         peak = int(np.argmax(target))
 
         if peak <= 0:
@@ -296,8 +305,7 @@ class KToSplineWeightsTransform(Transform):
                     lo = m1
             k0 = (lo + hi) / 2.0
 
-        return {self.k_name: k0,
-                self.mass_name: self.mass_fixed}
+        return {self.k_name: k0}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -391,6 +399,7 @@ class SplineKModel(BaseModel):
             mass_fixed=m0,
             k_min=k_min, k_max=k_max,
             bc_type=bc,
+            k_default=float(self.kwargs.get("k", 1.0)),
         )
 
     def gamma(self, m):

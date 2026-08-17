@@ -111,7 +111,9 @@ class TestKToSVDWeightsTransform:
         d = {"k": 3.5, "mass": 0.5}
         inv = tfm.inverse(d)
         assert inv["k"] == 3.5
-        assert inv["mass"] == 0.5
+        # the inverse reconstructs only the input k; the fixed mass is
+        # preserved by apply_inverse, not re-emitted by the inverse
+        assert "mass" not in inv
 
     def test_inverse_roundtrip(self, tfm):
         """inverse recovers k from reduced weights."""

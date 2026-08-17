@@ -511,6 +511,54 @@ def test_save_params_roundtrip():
         os.unlink(path)
 
 
+def test_values_from_dict_ignores_absent_k_param(tmp_path):
+    """A JSON missing the ExpSpline k must not pin it to the k_range edge.
+
+    The full constraint inverse reconstructs ``{name}_k`` from the CR
+    weights.  When the weights are absent (all default 0) the old code
+    fell back to k_min, which the bounds inverse maps to a huge
+    optimizer value.  The transform must return nothing in that case,
+    so the reinitial value is kept.
+    """
+    import yaml
+    from ampfit import Fitter
+    cfg = yaml.safe_load(open('config_amp.yml'))
+    cfg['particle']['NR0'].update({'model': 'ExpSpline', 'k': 0.3,
+                                   'k_range': [-1.0, 1.0], 'n_interp': 21,
+                                   'float': ['k']})
+    cfg_path = tmp_path / 'config.yml'
+    cfg_path.write_text(yaml.dump(cfg))
+    fitter = Fitter(str(cfg_path), backend='numpy')
+    fitter.apply_constrains()
+    assert 'NR0_k' in fitter.free_param_names()
+
+    x0 = fitter.initial_values(seed=1)
+    out = tmp_path / 'params.json'
+    fitter.save_params(x0, str(out))
+    data = json.loads(out.read_text())
+
+    # 1. both k and the CR weights absent -> k falls back to the config
+    #    default (k: 0.3), NOT the k_range edge
+    data_no_k = json.loads(json.dumps(data))
+    for key in list(data_no_k['value']):
+        if key.startswith('NR0_gk') or key == 'NR0_k':
+            del data_no_k['value'][key]
+    x1 = fitter.values_from_dict(data_no_k)
+    names = fitter.free_param_names()
+    phys1 = fitter.cm.flat_resolve(x1, stop_after='bounds')
+    assert abs(phys1['NR0_k'] - 0.3) < 1e-9, \
+        f"NR0_k not restored to config default: {phys1['NR0_k']}"
+
+    # 2. weights present but k absent -> k is reconstructed from them
+    #    (approximate peak-based inverse; must not be the degenerate edge)
+    data_only_gk = json.loads(json.dumps(data))
+    del data_only_gk['value']['NR0_k']
+    x2 = fitter.values_from_dict(data_only_gk)
+    phys = fitter.cm.flat_resolve(x2, stop_after='bounds')
+    assert -1.0 < phys['NR0_k'] < 1.0, \
+        f"NR0_k reconstructed to an edge value: {phys['NR0_k']}"
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 7. Fitter — basic fit integration
 # ═══════════════════════════════════════════════════════════════════

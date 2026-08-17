@@ -165,12 +165,15 @@ class KToSVDWeights2DTransform(Transform):
         ternary refinement.
         """
         if self.a_name in d and self.b_name in d:
-            mass = float(d.get(self.mass_name, self.mass_fixed))
             return {self.a_name: float(d[self.a_name]),
-                    self.b_name: float(d[self.b_name]),
-                    self.mass_name: mass}
+                    self.b_name: float(d[self.b_name])}
 
         target = np.array([float(d.get(n, 0.0)) for n in self.out_names])
+        # No weights present (all absent → all 0): nothing to reconstruct
+        # (a, b) from — fall back to the range midpoints.
+        if np.all(target == 0.0):
+            return {self.a_name: 0.5 * (self.a_min + self.a_max),
+                    self.b_name: 0.5 * (self.b_min + self.b_max)}
 
         def mse(a, b):
             w = self._weights(a, b)
@@ -210,8 +213,7 @@ class KToSVDWeights2DTransform(Transform):
             lo_b = max(lo_b, b - 0.2 * (self.b_max - self.b_min))
             hi_b = min(hi_b, b + 0.2 * (self.b_max - self.b_min))
 
-        return {self.a_name: a, self.b_name: b,
-                self.mass_name: self.mass_fixed}
+        return {self.a_name: a, self.b_name: b}
 
 
 # ═══════════════════════════════════════════════════════════════════

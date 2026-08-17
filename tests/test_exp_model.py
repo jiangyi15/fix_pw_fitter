@@ -132,7 +132,9 @@ class TestKToCRWeightsTransform:
             out = tfm.forward({"k": kt})
             inv = tfm.inverse(out)
             assert abs(inv["k"] - kt) < 0.2, f"inverse roundtrip failed at k={kt} (got {inv['k']})"
-            assert inv["mass"] == 0.5
+            # the inverse reconstructs only the input k; the fixed mass is
+            # preserved by apply_inverse, not re-emitted by the inverse
+            assert "mass" not in inv
 
     def test_edge_k_min(self, tfm):
         """g_0(k_min) = 1, sum = 1."""

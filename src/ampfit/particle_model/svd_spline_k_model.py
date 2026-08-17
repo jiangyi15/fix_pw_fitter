@@ -184,7 +184,8 @@ class KToSVDWeightsTransform(Transform):
                  projection,
                  mass_fixed=1.0,
                  k_min=0.1, k_max=5.0,
-                 bc_type="not-a-knot"):
+                 bc_type="not-a-knot",
+                 k_default=None):
         out_names = list(out_names)
         super().__init__(input_names=[k_name],
                          output_names=[mass_name] + out_names)
@@ -197,6 +198,11 @@ class KToSVDWeightsTransform(Transform):
         self.k_max = float(k_max)
         self._projection = np.asarray(projection, dtype=np.float64)
         self.n_k = self._projection.shape[1]
+        # fallback k used when the weights are absent (nothing to invert):
+        # the model passes the config's ``k`` default, so the inverse
+        # restores the intended initial value instead of a degenerate one
+        self.k_default = (float(k_default) if k_default is not None
+                          else (float(k_min) + float(k_max)) / 2.0)
 
         k_grid = np.linspace(k_min, k_max, self.n_k)
         self._h_matrix = spline_basis_matrix(k_grid, bc_type)
@@ -236,11 +242,14 @@ class KToSVDWeightsTransform(Transform):
     def inverse(self, d):
         """Recover *k* from reduced weights via ternary search."""
         if self.k_name in d:
-            mass = float(d.get(self.mass_name, self.mass_fixed))
-            return {self.k_name: float(d[self.k_name]),
-                    self.mass_name: mass}
+            return {self.k_name: float(d[self.k_name])}
 
         target = np.array([float(d.get(n, 0.0)) for n in self.out_names])
+        # No weights present (all absent → all 0): nothing to reconstruct
+        # k from — fall back to the configured default k (the config's
+        # ``k:`` initial value) instead of a degenerate value.
+        if np.all(target == 0.0):
+            return {self.k_name: self.k_default}
 
         def mse(k):
             w, _ = self._weights(k)
@@ -255,8 +264,7 @@ class KToSVDWeightsTransform(Transform):
             else:
                 lo = m1
         k0 = (lo + hi) / 2.0
-        return {self.k_name: k0,
-                self.mass_name: self.mass_fixed}
+        return {self.k_name: k0}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -372,6 +380,7 @@ class SVDSplineKModel(SplineKModel):
             mass_fixed=m0,
             k_min=k_min, k_max=k_max,
             bc_type=self._bc,
+            k_default=float(self.kwargs.get("k", 1.0)),
         )
 
 
