@@ -168,6 +168,18 @@ def main():
     plotter.plot_var(angle_var, al, 0, 1, 0.1, "angles",
                      ranges=ar, output=args.output, unit="", fmt=ft)
 
+    # Diff-histogram: hist(cos θ₁) − hist(cos θ₂) for rows 1 and 2
+    def diff_cos_theta(x, row):
+        a = x["angle"].reshape(x["angle"].shape[0], -1, 3)
+        return [np.cos(a[:, row, 1]), np.cos(a[:, row, 2])]
+    for row in (1, 2):
+        plotter.plot_stacked_perm(
+            lambda x, r=row: diff_cos_theta(x, r),
+            rf"$\cos\theta_1 - \cos\theta_2$ (row {row})",
+            -1, 1, 0.05, f"cos_theta_diff_row{row}",
+            output=args.output, fmt=ft, scales=[1, -1],
+            smooth_sigma=1.0, show_pull=True, legend=True)
+
     # Same-charge-pair variables: B → (π⁺π⁺)(π⁻π⁻) — one figure each
     plot_samesign(plotter, output=args.output, fmt=ft)
 
