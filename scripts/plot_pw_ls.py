@@ -171,7 +171,7 @@ def main():
             lambda x, idx=i: [_sorted_pipi(x)[idx]],
             [_xlabels[i]], lo, hi, bw,
             f"m_pipi_sorted_{['pp1_min','pp1_max','pp2_min','pp2_max'][i]}",
-            output=args.output, fmt=out_fmt, smooth_sigma=1.0, legend=(i == 0), show_pull=True)
+            output=args.output, fmt=out_fmt, smooth_sigma=1.0, legend=(i in (0, 2)), show_pull=True)
 
     # Sorted pipipip/pipipim
     def _sorted_pair(x, idx_a, idx_b):
@@ -190,7 +190,7 @@ def main():
                 lambda x, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
                 [label_j], rj[0], rj[1], 0.05,
                 f"{prefix}_{['min','max'][j]}", output=args.output, fmt=out_fmt,
-                smooth_sigma=1.0, show_pull=True)
+                smooth_sigma=1.0, show_pull=True, legend=True)
 
     # pipipip - pipipim difference
     def diff_pipipi(x):

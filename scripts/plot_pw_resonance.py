@@ -213,7 +213,7 @@ def main():
             lambda x, idx=i: [_sorted_pipi(x)[idx]],
             [_xlabels[i]], lo, hi, bw,
             f"m_pipi_sorted_{['pp1_min','pp1_max','pp2_min','pp2_max'][i]}",
-            output=args.output, smooth_sigma=1.0, legend=(i == 0), fmt=ft, show_pull=True)
+            output=args.output, smooth_sigma=1.0, legend=(i in (0, 2)), fmt=ft, show_pull=True)
 
     # ── Sorted pipipip and pipipim ───────────────────────────────
     for prefix, idx_a, idx_b, r_min, r_max, xl_min, xl_max in [
@@ -226,7 +226,7 @@ def main():
                 lambda x, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
                 [label_j], rj[0], rj[1], 0.05,
                 f"{prefix}_{['min','max'][j]}", output=args.output,
-                smooth_sigma=1.0, show_pull=True, fmt=ft)
+                smooth_sigma=1.0, show_pull=True, legend=True, fmt=ft)
 
     # ── Difference pipipi (B0 - B0bar) ───────────────────────────
     def diff_pipipi(x):

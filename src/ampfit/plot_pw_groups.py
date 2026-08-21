@@ -32,14 +32,14 @@ def samesign_varfun(x):
                             "angles": x["angle"].reshape(-1, 24, 3)})
     d = momenta_to_data_samesign(mom)
     return [d["m_pp"], d["m_mm"],
-            d["cos_theta1"], d["cos_theta2"], d["phi"]]
+            d["theta_p"], d["theta_m"], d["phi"]]
 
 
 SAMESIGN_LABELS = [r"$m(\pi^+\pi^+)$", r"$m(\pi^-\pi^-)$",
                    r"$\cos\theta_1$", r"$\cos\theta_2$", r"$\phi$"]
 SAMESIGN_RANGES = [(0.28, 5.2), (0.28, 5.2), (0, 1), (0, 1),
-                   (-np.pi, np.pi)]
-SAMESIGN_NAMES = ["m_pp", "m_mm", "cos_theta1", "cos_theta2", "phi"]
+                   (0, 2 * np.pi)]
+SAMESIGN_NAMES = ["m_pp", "m_mm", "theta_p", "theta_m", "phi"]
 SAMESIGN_BINW = [0.05, 0.05, 0.02, 0.02, 0.05]
 
 

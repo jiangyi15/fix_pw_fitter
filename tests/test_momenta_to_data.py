@@ -196,10 +196,10 @@ class TestSameSignTopology:
 
     def test_cos_theta_range(self, samesign):
         """The helicity cosines are restricted to [0, 1]."""
-        assert samesign["cos_theta1"].min() >= -1e-12
-        assert samesign["cos_theta1"].max() <= 1.0 + 1e-12
-        assert samesign["cos_theta2"].min() >= -1e-12
-        assert samesign["cos_theta2"].max() <= 1.0 + 1e-12
+        assert samesign["theta_p"].min() >= -1e-12
+        assert samesign["theta_p"].max() <= 1.0 + 1e-12
+        assert samesign["theta_m"].min() >= -1e-12
+        assert samesign["theta_m"].max() <= 1.0 + 1e-12
 
     def test_identical_particle_invariance(self, ev, samesign):
         """Swapping the two π⁺ (or the two π⁻) leaves the variables
@@ -216,8 +216,8 @@ class TestSameSignTopology:
             d = momenta_to_data_samesign(s)
             assert np.abs(d["m_pp"] - samesign["m_pp"]).max() < 1e-9
             assert np.abs(d["m_mm"] - samesign["m_mm"]).max() < 1e-9
-            assert np.abs(d["cos_theta1"] - samesign["cos_theta1"]).max() < 1e-9
-            assert np.abs(d["cos_theta2"] - samesign["cos_theta2"]).max() < 1e-9
+            assert np.abs(d["theta_p"] - samesign["theta_p"]).max() < 1e-9
+            assert np.abs(d["theta_m"] - samesign["theta_m"]).max() < 1e-9
             dphi = np.abs(((d["phi"] - samesign["phi"] + np.pi)
                            % (2 * np.pi)) - np.pi)
             assert dphi.max() < 1e-9
@@ -227,9 +227,9 @@ class TestSameSignTopology:
         output order differs from build_momenta)."""
         mom2 = data_to_momentum_samesign(
             samesign["m_pp"], samesign["m_mm"],
-            samesign["cos_theta1"], samesign["cos_theta2"], samesign["phi"])
+            samesign["theta_p"], samesign["theta_m"], samesign["phi"])
         d2 = momenta_to_data_samesign(mom2)
-        for k in ("m_pp", "m_mm", "cos_theta1", "cos_theta2"):
+        for k in ("m_pp", "m_mm", "theta_p", "theta_m"):
             assert np.abs(d2[k] - samesign[k]).max() < 1e-9
         dphi = np.abs(((d2["phi"] - samesign["phi"] + np.pi)
                        % (2 * np.pi)) - np.pi)

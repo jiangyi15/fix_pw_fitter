@@ -498,9 +498,9 @@ def momenta_to_data_samesign(momenta, m_pi=M_PION):
     Returns the five phase-space variables::
 
         m_pp, m_mm     — m(π⁺₁π⁺₂), m(π⁻₁π⁻₂)
-        cos_theta1     — cos of the (π⁺π⁺) helicity angle, restricted to
+        theta_p     — cos of the (π⁺π⁺) helicity angle, restricted to
                          [0, 1]
-        cos_theta2     — cos of the (π⁻π⁻) helicity angle, restricted to
+        theta_m     — cos of the (π⁻π⁻) helicity angle, restricted to
                          [0, 1]
         phi            — azimuth of π⁺₁ around the (π⁺π⁺) axis, from π⁻₁
 
@@ -544,23 +544,26 @@ def momenta_to_data_samesign(momenta, m_pi=M_PION):
     p_plus = pb[idx, np.where(up1, 0, 2)]        # (n, 4) upper π⁺
     p_minus = pb[idx, np.where(up2, 1, 3)]       # (n, 4) upper π⁻
     axis = (pb[:, 0] + pb[:, 2])[:, 1:]          # (π⁺π⁺) momentum
-    phi = _azimuth(p_plus[:, 1:], axis, p_minus[:, 1:])
+    # samesign convention: azimuth in [0, 2π) (the identical-pair
+    # relabelling makes the plane orientation modulo 2π, so keep it in
+    # the full circle instead of the [-π, π) atan2 range)
+    phi = _azimuth(p_plus[:, 1:], axis, p_minus[:, 1:]) % (2 * np.pi)
 
     return {"m_pp": m1, "m_mm": m2,
-            "cos_theta1": cos_t1,
-            "cos_theta2": cos_t2,
+            "theta_p": cos_t1,
+            "theta_m": cos_t2,
             "phi": phi}
 
 
-def data_to_momentum_samesign(m_pp, m_mm, cos_theta1, cos_theta2, phi,
+def data_to_momentum_samesign(m_pp, m_mm, theta_p, theta_m, phi,
                               m_B=M_B_MESON, m_pi=M_PION):
     """Build B → (π⁺₁π⁺₂)(π⁻₁π⁻₂) momenta from the same-charge-pair
     kinematics of :func:`momenta_to_data_samesign`.
 
     The geometry is identical to :func:`data_to_momentum`
     (:func:`build_momenta`): pair₁ of mass *m_pp* along +z, pair₂ of
-    mass *m_mm* along −z, with the helicity cosines *cos_theta1/2* and
-    azimuth *phi*.  Only the *output order* differs — the pairs are
+    mass *m_mm* along −z, with the helicity cosines *theta_p/theta_m*
+    and azimuth *phi*.  Only the *output order* differs — the pairs are
     same-charge, so pair₁ holds the two π⁺ and pair₂ the two π⁻::
 
         build_momenta → [π⁺₁, π⁺₂, π⁻₁, π⁻₂]   (same-charge pairs)
@@ -575,7 +578,7 @@ def data_to_momentum_samesign(m_pp, m_mm, cos_theta1, cos_theta2, phi,
         [π⁺₁, π⁻₁, π⁺₂, π⁻₂].
     """
     m_pp = np.asarray(m_pp, dtype=float)
-    mom = build_momenta(m_pp, m_mm, cos_theta1, cos_theta2, -phi,
+    mom = build_momenta(m_pp, m_mm, theta_p, theta_m, -phi,
                         m_B=m_B, m_pi=m_pi)
     return mom[:, [0, 2, 1, 3]]
 
