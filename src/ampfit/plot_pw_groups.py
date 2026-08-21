@@ -61,11 +61,14 @@ def plot_samesign(plotter, output="plots/", fmt="png"):
     for j, (label, rng, name, bw) in enumerate(zip(
             SAMESIGN_LABELS, SAMESIGN_RANGES, SAMESIGN_NAMES,
             SAMESIGN_BINW)):
+        # no legend on the phi panel (it is a periodic angle; the legend
+        # would only clutter it)
+        show_legend = name != "phi"
         plotter.plot_var(
             lambda x, jj=j: [cached(x)[jj]],
             [label], rng[0], rng[1], bw, f"samesign_{name}",
             output=output, fmt=fmt, ranges=[rng], unit="",
-            smooth_sigma=1.0, legend=True, show_pull=True)
+            smooth_sigma=1.0, legend=show_legend, show_pull=True)
 
 
 
