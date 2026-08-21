@@ -49,10 +49,22 @@ def _angle_var(x):
     return out
 
 
-def _diff_cos_theta(x, row):
-    """[cos θ₁, cos θ₂] of *row* — for a diff-histogram."""
+# 3π chain topology rows across the four B blocks (0–3), no Bbar (4–7):
+# 24 rows = 8 blocks × 3 topos; block b covers rows 3b..3b+2.  Topo 1 is
+# R⁺ → [ππ]⁰ + π⁺ (bachelor π⁻), topo 2 its mirror R⁻ → [ππ]⁰ + π⁻.
+_CHAIN_ROWS_B = [1, 2, 4, 5, 7, 8, 10, 11]
+
+
+def _diff_cos_theta(x):
+    """cos θ₁ and cos θ₂ over all B-block chain permutations — for a
+    diff-histogram (hist(cos θ₁) − hist(cos θ₂))."""
     a = x["angle"].reshape(x["angle"].shape[0], -1, 3)
-    return [np.cos(a[:, row, 1]), np.cos(a[:, row, 2])]
+    out = []
+    for r in _CHAIN_ROWS_B:
+        out.append(np.cos(a[:, r, 1]))
+    for r in _CHAIN_ROWS_B:
+        out.append(np.cos(a[:, r, 2]))
+    return out
 
 
 def _sorted_pipi(x):
@@ -110,14 +122,15 @@ def plot_common(plotter, fitter, output="plots/", fmt="png"):
     plotter.plot_var(_angle_var, al, 0, 1, 0.1, "angles",
                      ranges=ar, output=output, fmt=fmt, unit="")
 
-    # ── cos θ₁ − cos θ₂ diff-histograms (rows 1, 2) ──────────────
-    for row in (1, 2):
-        plotter.plot_stacked_perm(
-            lambda x, r=row: _diff_cos_theta(x, r),
-            rf"$\cos\theta_1 - \cos\theta_2$ (row {row})",
-            -1, 1, 0.05, f"cos_theta_diff_row{row}",
-            output=output, fmt=fmt, scales=[1, -1],
-            smooth_sigma=1.0, show_pull=True, legend=True)
+    # ── cos θ₁ − cos θ₂ diff-histogram over all B-block permutations ─
+    n_perm = len(_CHAIN_ROWS_B)
+    plotter.plot_stacked_perm(
+        _diff_cos_theta,
+        r"$\cos\theta^{R^{\pm} \rightarrow [\pi\pi]^0 \pi^{\pm}}$",
+        -1, 1, 0.05, "cos_theta_diff",
+        output=output, fmt=fmt,
+        scales=[1] * n_perm + [-1] * n_perm,
+        smooth_sigma=1.0, show_pull=True, legend=True)
 
     # ── same-charge-pair variables (B → (π⁺π⁺)(π⁻π⁻)) ────────────
     plot_samesign(plotter, output=output, fmt=fmt)
