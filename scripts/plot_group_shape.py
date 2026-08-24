@@ -281,25 +281,42 @@ def main():
         vp, vm = obs_both(x0)
         ep = shape_errors(f, r, lambda x: obs_both(x)[0])
         em = shape_errors(f, r, lambda x: obs_both(x)[1])
-        print(f"  axis={args.axis}  {fixname}-slice={fix:.3f} "
-              f"({fixres.name})  {OBS_LABEL[args.obs]} "
-              f"R+: {vp.min():.2e}..{vp.max():.2e}  "
-              f"R-: {vm.min():.2e}..{vm.max():.2e}")
+        # only split into R⁺/R⁻ totals when the group actually contains
+        # charge-conjugate chains; neutral groups (e.g. R.R ρρ) have no
+        # R⁻ and would otherwise show a meaningless zero curve
+        has_rminus = any(_is_rminus(f, r1) or _is_rminus(f, r2)
+                         for (r1, r2) in group_waves)
+        if has_rminus:
+            print(f"  axis={args.axis}  {fixname}-slice={fix:.3f} "
+                  f"({fixres.name})  {OBS_LABEL[args.obs]} "
+                  f"R+: {vp.min():.2e}..{vp.max():.2e}  "
+                  f"R-: {vm.min():.2e}..{vm.max():.2e}")
+        else:
+            print(f"  axis={args.axis}  {fixname}-slice={fix:.3f} "
+                  f"({fixres.name})  {OBS_LABEL[args.obs]} "
+                  f"{vp.min():.2e}..{vp.max():.2e}")
 
         base = f"{label.replace(' ', '_').replace('(', '').replace(')', '')}"
         base = base.replace(",", "_")
         obs_label = OBS_LABEL[args.obs]
         fig, ax = plt.subplots(figsize=(7, 5))
-        ax.plot(grid, vp, "k-", lw=1.5,
-                label=rf"$\sum_{{R^+}} C\cdot BW_1(m_1) BW_2(m_2)$ "
-                      rf"({fixname}={fix:.2f})")
-        ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
-                        label="1σ (R⁺)")
-        ax.plot(grid, vm, "r-", lw=1.5,
-                label=rf"$\sum_{{R^-}} C\cdot BW_1(m_1) BW_2(m_2)$ "
-                      rf"({fixname}={fix:.2f})")
-        ax.fill_between(grid, vm - em, vm + em, color="r", alpha=0.2,
-                        label="1σ (R⁻)")
+        if has_rminus:
+            ax.plot(grid, vp, "k-", lw=1.5,
+                    label=rf"$\sum_{{R^+}} C\cdot BW_1(m_1) BW_2(m_2)$ "
+                          rf"({fixname}={fix:.2f})")
+            ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
+                            label="1σ (R⁺)")
+            ax.plot(grid, vm, "r-", lw=1.5,
+                    label=rf"$\sum_{{R^-}} C\cdot BW_1(m_1) BW_2(m_2)$ "
+                          rf"({fixname}={fix:.2f})")
+            ax.fill_between(grid, vm - em, vm + em, color="r", alpha=0.2,
+                            label="1σ (R⁻)")
+        else:
+            ax.plot(grid, vp, "k-", lw=1.5,
+                    label=rf"$\sum C\cdot BW_1(m_1) BW_2(m_2)$ "
+                          rf"({fixname}={fix:.2f})")
+            ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
+                            label="1σ")
         # partial-wave components: only the R⁺ chains (the R⁻ conjugates
         # carry the same wave shape)
         for (res1, res2), idx in group_waves.items():
