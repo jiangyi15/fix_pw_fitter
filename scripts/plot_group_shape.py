@@ -299,22 +299,22 @@ def main():
         base = f"{label.replace(' ', '_').replace('(', '').replace(')', '')}"
         base = base.replace(",", "_")
         obs_label = OBS_LABEL[args.obs]
+        # topology separator for the legend: R.pi is a decay chain
+        # (R₁ → R₂), R.R two direct resonances (R₁ + R₂)
+        sep = r" \to " if label.startswith("R.pi") else " + "
         fig, ax = plt.subplots(figsize=(7, 5))
         if has_rminus:
             ax.plot(grid, vp, "k-", lw=1.5,
-                    label=rf"$\sum_{{R^+}} C\cdot BW_1(m_1) BW_2(m_2)$ "
-                          rf"({fixname}={fix:.2f})")
+                    label=rf"$R^+$  ({fixname}={fix:.2f})")
             ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
                             label="1σ (R⁺)")
             ax.plot(grid, vm, "r-", lw=1.5,
-                    label=rf"$\sum_{{R^-}} C\cdot BW_1(m_1) BW_2(m_2)$ "
-                          rf"({fixname}={fix:.2f})")
+                    label=rf"$R^-$  ({fixname}={fix:.2f})")
             ax.fill_between(grid, vm - em, vm + em, color="r", alpha=0.2,
                             label="1σ (R⁻)")
         else:
             ax.plot(grid, vp, "k-", lw=1.5,
-                    label=rf"$\sum C\cdot BW_1(m_1) BW_2(m_2)$ "
-                          rf"({fixname}={fix:.2f})")
+                    label=rf"total  ({fixname}={fix:.2f})")
             ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
                             label="1σ")
         # partial-wave components: only the R⁺ chains (the R⁻ conjugates
@@ -328,15 +328,7 @@ def main():
             if np.max(np.abs(comp)) > 0:
                 r1 = res1.display.strip("$")
                 r2 = res2.display.strip("$")
-                if args.obs == "abs2":
-                    lab = rf"$|C*BW({r1})*BW({r2})|^2$"
-                elif args.obs == "re":
-                    lab = rf"$\mathrm{{Re}}\,C*BW({r1})*BW({r2})$"
-                elif args.obs == "im":
-                    lab = rf"$\mathrm{{Im}}\,C*BW({r1})*BW({r2})$"
-                else:
-                    lab = rf"$\arg\,C*BW({r1})*BW({r2})$"
-                ax.plot(grid, comp, "--", lw=1.2, label=lab)
+                ax.plot(grid, comp, "--", lw=1.2, label=rf"${r1}{sep}{r2}$")
         ax.set_xlabel(rf"${args.axis}$ [GeV]")
         ax.set_ylabel(rf"{obs_label}")
         ax.set_title(f"{label}   ({fixname} = {fix:.3f} GeV)   {obs_label}")
