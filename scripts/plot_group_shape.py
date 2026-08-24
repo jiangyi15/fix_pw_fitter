@@ -53,6 +53,23 @@ def _load_ls_groups():
     return mod.discover_ls_groups
 
 
+def _particle_names(f):
+    """All resonance particle names in the config (for charge-conjugate
+    detection)."""
+    names = set()
+    for chain in f.config.full_decay.chains:
+        for d in chain.decays:
+            names.add(d.core.name)
+    return names
+
+
+def _is_rminus(f, res):
+    """True if *res* is the R⁻ charge conjugate (name ends with ``m``
+    and has a ``+``-charge counterpart)."""
+    name = res.name
+    return name.endswith("m") and (name[:-1] + "p") in _particle_names(f)
+
+
 def chain_resonances(chain):
     """Return ``(res1, res2)`` — the two resonance Particles whose masses
     are the topology's (m1, m2).  ``res1`` is the non-pion daughter of the
@@ -88,18 +105,22 @@ def group_wave_map(f, groups, chain_index, label):
 
 
 def build_profile_observable(f, group_waves, grid, fix, along, obs="abs2"):
-    """Return ``obs_flat`` — the 1D profile of the requested observable
-    along the profiled axis (other mass fixed at *fix*), as a function
-    of the flat fit vector *x* (no backend, pure BW propagators).
+    """Return ``obs_both(x) -> (obs_Rplus, obs_Rminus)`` — the 1D profile
+    of the requested observable along the profiled axis (other mass fixed
+    at *fix*), split into the R⁺ and R⁻ charge-conjugate totals.
+
+    The two totals are the coherent sums of the group's waves over the
+    R⁺ and R⁻ chains separately (no backend, pure BW propagators).
 
     ``along`` = ``"m1"`` profiles ``BW₁(grid)·BW₂(fix)``, ``"m2"``
     profiles ``BW₁(fix)·BW₂(grid)``.  *obs* selects the real observable:
     ``"abs2"`` (|A|²), ``"re"``, ``"im"``, or ``"phase"`` (arg A)."""
 
-    def obs_flat(x):
+    def obs_both(x):
         params, resolved = f.build_params(x)
         ck = params["ck"]
-        A = np.zeros(len(grid), dtype=complex)
+        Ap = np.zeros(len(grid), dtype=complex)
+        Am = np.zeros(len(grid), dtype=complex)
         for (res1, res2), idx in group_waves.items():
             C = ck[idx].sum()
             if along == "m1":
@@ -108,16 +129,24 @@ def build_profile_observable(f, group_waves, grid, fix, along, obs="abs2"):
             else:
                 bw1 = res1._model.amplitude_raw(np.array([fix]), resolved)[0]
                 bw2 = res2._model.amplitude_raw(grid, resolved)
-            A += C * bw1 * bw2
-        if obs == "abs2":
-            return np.abs(A) ** 2
-        if obs == "re":
-            return A.real
-        if obs == "im":
-            return A.imag
-        return np.angle(A)
+            comp = C * bw1 * bw2
+            if _is_rminus(f, res1) or _is_rminus(f, res2):
+                Am += comp
+            else:
+                Ap += comp
 
-    return obs_flat
+        def red(A):
+            if obs == "abs2":
+                return np.abs(A) ** 2
+            if obs == "re":
+                return A.real
+            if obs == "im":
+                return A.imag
+            return np.angle(A)
+
+        return red(Ap), red(Am)
+
+    return obs_both
 
 
 OBS_LABEL = {"abs2": r"$|A|^2$", "re": r"$\mathrm{Re}\,A$",
@@ -247,23 +276,35 @@ def main():
             slice_default = resonance_mass(f, res1d, x0)
         fix = args.slice if args.slice is not None else slice_default
 
-        obs_flat = build_profile_observable(f, group_waves, grid, fix,
+        obs_both = build_profile_observable(f, group_waves, grid, fix,
                                             args.axis, args.obs)
-        v = obs_flat(x0)
-        e = shape_errors(f, r, obs_flat)
+        vp, vm = obs_both(x0)
+        ep = shape_errors(f, r, lambda x: obs_both(x)[0])
+        em = shape_errors(f, r, lambda x: obs_both(x)[1])
         print(f"  axis={args.axis}  {fixname}-slice={fix:.3f} "
               f"({fixres.name})  {OBS_LABEL[args.obs]} "
-              f"{v.min():.2e}..{v.max():.2e}, 1σ max {e.max():.2e}")
+              f"R+: {vp.min():.2e}..{vp.max():.2e}  "
+              f"R-: {vm.min():.2e}..{vm.max():.2e}")
 
         base = f"{label.replace(' ', '_').replace('(', '').replace(')', '')}"
         base = base.replace(",", "_")
         obs_label = OBS_LABEL[args.obs]
         fig, ax = plt.subplots(figsize=(7, 5))
-        ax.plot(grid, v, "k-", lw=1.5,
-                label=rf"$\sum C\cdot BW_1(m_1) BW_2(m_2)$ "
+        ax.plot(grid, vp, "k-", lw=1.5,
+                label=rf"$\sum_{{R^+}} C\cdot BW_1(m_1) BW_2(m_2)$ "
                       rf"({fixname}={fix:.2f})")
-        ax.fill_between(grid, v - e, v + e, color="k", alpha=0.2, label="1σ")
+        ax.fill_between(grid, vp - ep, vp + ep, color="k", alpha=0.2,
+                        label="1σ (R⁺)")
+        ax.plot(grid, vm, "r-", lw=1.5,
+                label=rf"$\sum_{{R^-}} C\cdot BW_1(m_1) BW_2(m_2)$ "
+                      rf"({fixname}={fix:.2f})")
+        ax.fill_between(grid, vm - em, vm + em, color="r", alpha=0.2,
+                        label="1σ (R⁻)")
+        # partial-wave components: only the R⁺ chains (the R⁻ conjugates
+        # carry the same wave shape)
         for (res1, res2), idx in group_waves.items():
+            if _is_rminus(f, res1) or _is_rminus(f, res2):
+                continue
             C = ck[idx].sum()
             comp = product_component(f, res1, res2, C, grid, fix, x0,
                                      along=args.axis, obs=args.obs)
