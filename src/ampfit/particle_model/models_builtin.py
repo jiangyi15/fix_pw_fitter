@@ -105,6 +105,37 @@ class FixedShapeModel(BaseModel):
         )
 
 
+# ── Linear amplitude: A(m) = k·(m − m₀) ──────────────────────────
+
+@register_model("linear")
+class LinearShapeModel(FixedShapeModel):
+    """Linear amplitude ``A(m) = k·(m − m₀)`` (fixed shape).
+
+    A fixed-shape model whose amplitude is a linear function of the
+    mass offset.  :class:`FixedShapeModel` converts it to the gamma row
+    so the kernel's BW denominator reproduces the shape.  All
+    parameters (mass, k) are fixed from the YAML config — nothing is
+    fitted.
+
+    YAML example::
+
+        particle:
+          my_res:
+            mass: 1.0
+            k: 0.3
+            model: linear
+    """
+
+    def fixed_shape(self, m):
+        m0 = float(self.kwargs.get("mass", 0.775))
+        k = float(self.kwargs.get("k", 1.0))
+        A = k * (np.asarray(m, dtype=float) - m0)
+        # safe clip: the linear function crosses zero at m = m₀, where
+        # 1/A would diverge in the gamma conversion — keep |A| ≥ a_min
+        a_min = float(self.kwargs.get("a_min", 1e-6))
+        return np.where(np.abs(A) < a_min, np.copysign(a_min, A), A)
+
+
 # ── One / constant ───────────────────────────────────────────────
 
 @register_model("one")
