@@ -31,6 +31,10 @@ def main():
     ap.add_argument("-o", "--output", default="bw_lineshape_uncert.pdf")
     ap.add_argument("--format", default=None,
                     help="Image format (e.g. png, pdf, svg). Inferred from --output extension if omitted.")
+    ap.add_argument("--csv", default=None,
+                    help="Also save the lineshape grid to a CSV file "
+                         "(mass, Re, Re_err, Im, Im_err).  Default: "
+                         "<output stem>.csv")
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
@@ -38,9 +42,9 @@ def main():
 
     # ── Load fitter and results ──────────────────────────────────
     f = Fitter(args.config, backend="numpy")
-    # Try constraints alongside results; fall back to stripping
-    # _converted suffix (convert_ck_names.py creates _converted.json
-    # but the constraints still use the original filename)
+    # Auto-load the constraints saved alongside the results (they fully
+    # define the free-parameter space the fit was run in; there is no
+    # need to re-derive them from the config via apply_constrains()).
     cp = os.path.splitext(args.results_json)[0] + "_constraints.json"
     if not os.path.exists(cp):
         base = os.path.splitext(args.results_json)[0]
@@ -100,8 +104,18 @@ def main():
         return out
 
     print(f"  Computing Re(1/D) and Im(1/D) + uncertainties for {res_name} ({args.n_points} points)...")
-    values, errors = f.cal_uncertainties_multi_vec(
-        lineshape_obs, param_names, result, return_cov=False)
+    try:
+        values, errors = f.cal_uncertainties_multi_vec(
+            lineshape_obs, param_names, result, return_cov=False)
+    except ValueError as exc:
+        # hess_inv in the results may be a partial sub-matrix (e.g. the
+        # ρρ covariance) that doesn't match this resonance's parameters —
+        # fall back to the central values with zero uncertainties.
+        print(f"  warning: {exc}")
+        print("  hess_inv size mismatch — plotting without uncertainty band")
+        _, phys = f.build_params(result.x)
+        values = np.asarray(lineshape_obs(phys))
+        errors = np.zeros_like(values)
     values = np.asarray(values)
     errors = np.asarray(errors)
 
@@ -139,6 +153,15 @@ def main():
     fig.savefig(args.output, dpi=150, bbox_inches="tight", format=args.format)
     plt.close(fig)
     print(f"  saved {args.output}")
+
+    # ── CSV ───────────────────────────────────────────────────────
+    csv_path = args.csv if args.csv else \
+        os.path.splitext(args.output)[0] + ".csv"
+    grid = np.column_stack([m_grid, re_vals, re_errs, im_vals, im_errs])
+    np.savetxt(csv_path, grid, delimiter=",",
+               header="mass,Re(1/D),Re_err,Im(1/D),Im_err",
+               comments="", fmt="%.8e")
+    print(f"  saved {csv_path}")
 
 
 if __name__ == "__main__":
