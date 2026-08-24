@@ -146,6 +146,31 @@ def test_set_same_reset():
     assert len(fitter._same_params) == 1   # same group, but replaced not doubled
 
 
+def test_set_same_chained_transitive():
+    """Chained equality [["a","b"],["b","c"]] resolves all to the root."""
+    from ampfit.param_constraint import NameResolution
+    nr = NameResolution()
+    # both group orders must give the same transitive closure
+    for groups in ([["a", "b"], ["b", "c"]], [["b", "c"], ["a", "b"]]):
+        nr.set_same(groups)
+        assert nr.map == {"b": "a", "c": "a"}, nr.map
+        assert set(nr.input_names) == {"a"}
+        out = nr.apply({"a": 5})
+        assert out == {"a": 5, "b": 5, "c": 5}
+        assert nr._resolve_slot("c") == "a"
+        assert nr._resolve_slot("b") == "a"
+
+
+def test_set_same_chained_no_cycle():
+    """A degenerate self-referential group collapses to one root."""
+    from ampfit.param_constraint import NameResolution
+    nr = NameResolution()
+    nr.set_same([["a", "b"], ["b", "a"]])   # contradictory cycle
+    # collapses to a single canonical root (no 2-cycle)
+    assert nr.map == {"b": "a"}, nr.map
+    assert set(nr.input_names) == {"a"}
+
+
 def test_set_same_then_free():
     """Freeing preserves same-group relationships (fix and same are independent)."""
     fitter = setup_fitter()

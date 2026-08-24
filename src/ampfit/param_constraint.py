@@ -215,13 +215,56 @@ class NameResolution:
     def output_names(self):
         return list(self.map.keys())
 
-    def set_same(self, groups):
-        self.map = {}
+    def set_same(self, groups, reset=False):
+        # Additive union-find: subsequent calls extend the equal groups,
+        # reset=True starts fresh.  The first element of a group (its
+        # canonical) is the root, so the canonical convention is kept
+        # (e.g. charge pairs [[pn, mn]] keep "p" as the root, not "m"):
+        #   [["a","b"],["b","c"]] ⇒ a = b = c, map = {b: a, c: a}
+        #   [["a","b"],["b","a"]] ⇒ cycle collapses to {b: a}
+        if reset or not hasattr(self, "_parent"):
+            self._parent = {}
+        parent = self._parent
+        old_map = dict(getattr(self, "map", {}))
+
+        def find(x):
+            if x not in parent:
+                parent[x] = x
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            # *a* is the group canonical — its root stays the root
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        # roots established before this call
+        established = set(old_map.values())
         for group in groups:
-            if group:
-                canon = group[0]
-                for alias in group[1:]:
-                    self.map[alias] = canon
+            if not group:
+                continue
+            # roots established before *this* group (previous calls and
+            # earlier groups of this call)
+            before = set(established)
+            for alias in group[1:]:
+                union(group[0], alias)
+            for alias in group[1:]:
+                root = find(alias)
+                if root in before and root != alias:
+                    print(f"  same: {alias} unified into previous "
+                          f"group {root}")
+            established.add(find(group[0]))
+
+        self.map = {n: find(n) for n in parent if find(n) != n}
+
+        # log existing aliases whose root changed vs the previous call
+        for alias, root in self.map.items():
+            if alias in old_map and old_map[alias] != root:
+                print(f"  same: {alias} re-unified into {root} "
+                      f"(was {old_map[alias]})")
 
     def _resolve_slot(self, key):
         return self.map.get(key, key)
@@ -848,13 +891,7 @@ class ConstraintManager:
         self._rebuild()
 
     def set_same(self, same_params, reset=False):
-        if reset:
-            self.name_res.map = {}
-        for group in same_params:
-            if group:
-                canon = group[0]
-                for alias in group[1:]:
-                    self.name_res.map[alias] = canon
+        self.name_res.set_same(same_params, reset=reset)
         self._rebuild()
 
     def set_scale(self, scale_params, reset=False):
