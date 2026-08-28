@@ -95,8 +95,9 @@ def phys_to_opt(pname, pval, fitter):
 
     Matches how values_from_dict reconstructs x_best: runs through cm.inverse()
     so that scale, same, and bound transforms are all properly reversed.
+    The value is unblinded first when the parameter is blinded.
     """
-    raw = fitter.cm.inverse({pname: pval})
+    raw = fitter.cm.inverse(fitter.cm.unblind_result({pname: pval}))
     return raw.get(pname, pval)
 
 

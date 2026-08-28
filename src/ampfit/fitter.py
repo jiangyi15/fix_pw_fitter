@@ -203,6 +203,31 @@ class Fitter:
         """
         self.cm.set_scale(scale_params, reset=reset)
 
+    def set_blind(self, names, seed, scale=1.0, reset=False):
+        """Blind parameter(s) with a deterministic, seed-derived offset.
+
+        *Additive* — each call adds another blind group; pass
+        ``reset=True`` to replace all previous ones.
+
+        The transform sits **between the range and fixed** in the
+        constraint pipeline: the value after the bounds stage is shifted
+        by a **standalone** seed-derived offset of magnitude ``scale``
+        (``offset = U(-1, 1) * scale``; a ``{name: scale}`` dict sets
+        per-parameter magnitudes) — independent of the parameter bounds.
+        The fit model runs on the unblinded (physical) values, so the
+        fitted model is correct — while the after-bounds values that get
+        printed and saved (``get_uncertainties``, ``save_params``,
+        ``report_params``) are the **blinded report frame**.  The offset
+        is deterministic from ``seed`` plus the parameter name but
+        opaque: seeing the seed only tells you *a* shift was applied,
+        not its size.  Unblind reported values with
+        ``cm.unblind_result`` to recover the true values.  Errors are
+        unaffected (constant shift).
+
+        Delegates to :attr:`cm`.
+        """
+        self.cm.set_blind(names, seed, scale=scale, reset=reset)
+
     def setup_mass_width_transforms(self):
         """Collect mass/width transforms from all particle models and register them.
 
@@ -485,14 +510,15 @@ class Fitter:
 
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
-        
-        Reads physical (bounded) values from the 'value' section,
-        reverses constraints via ``cm.inverse()``, and inverts bound
+
+        Reads physical values from the 'value' section, **unblinds**
+        them (the saved values are in the blinded report frame), then
+        reverses constraints via ``cm.inverse()`` and inverts bound
         transforms to get optimizer-space x.
-        
+
         Args:
             data: dict from save_params() JSON (keys 'value', 'error', ...).
-        
+
         Returns:
             flat vector x suitable for get_nll() or fit().
         """
@@ -501,10 +527,11 @@ class Fitter:
         # Start from deterministic defaults, then override with JSON
         x = self.reinitial()
 
-        # Build physical dict from JSON and invert constraints
+        # Build physical dict from JSON, unblind it (report → model frame),
+        # and invert the full pipeline (incl. blind⁻¹) to get x.
         phys = {name: float(values[name]) for name in names if name in values}
         if phys:
-            raw = self.cm.inverse(phys)
+            raw = self.cm.inverse(self.cm.unblind_result(phys))
             for i, name in enumerate(names):
                 if name in raw:
                     x[i] = float(raw[name])
@@ -514,9 +541,10 @@ class Fitter:
     def load_fixed_from_dict(self, data):
         """Set fixed param values from a JSON dict, inverting constraints.
 
-        Uses ``cm.inverse(values, stop_before='fixed')`` to get the
-        state with fixed values intact, then updates ``fixed_tr.values``
-        so fixed params match the source fit.
+        Uses ``cm.inverse(values, stop_before='fixed')`` (with the
+        values unblinded first — the JSON stores the report frame) to
+        get the state with fixed values intact, then updates
+        ``fixed_tr.values`` so fixed params match the source fit.
 
         Args:
             data: dict with ``'value'`` key (or flat dict) of physical values.
@@ -524,7 +552,8 @@ class Fitter:
         values = data.get("value", data) if isinstance(data, dict) else data
         if not values:
             return
-        before_fixed = self.cm.inverse(values, stop_before='fixed')
+        before_fixed = self.cm.inverse(
+            self.cm.unblind_result(values), stop_before='fixed')
         changed = False
         for name in list(self.cm.fixed_slots):
             if name in before_fixed:
@@ -660,14 +689,33 @@ class Fitter:
     # ── unified pipeline (forward + backward) ─────────────────────
 
     def build_params(self, x):
-        """Full forward pipeline: flat x → kernel params dict.
+        """Full forward pipeline: flat x → kernel params dict (model frame).
 
-        Returns ``(params, resolved)``.
+        Returns ``(params, resolved)`` where *resolved* is the *model*
+        frame: the blind offsets have been applied between bounds and
+        fixed, so the kernel evaluates the shifted physics.  The fit
+        compensates the constant offset, so the fitted model is correct.
+
+        The *report* frame (what the analyst prints, saves, and reads) is
+        obtained with :meth:`report_params` — the after-bounds (blinded)
+        values.
         """
         x = np.asarray(x, dtype=float).ravel()
         resolved = self.cm.flat_resolve(x)
         params = self._kernel_builder.forward(resolved)
         return params, resolved
+
+    def report_params(self, x):
+        """Resolved parameters as reported to the analyst (blinded frame).
+
+        The after-bounds values of the fit — the fit result in the
+        blinded frame (true value minus the unknown seed offset).  This
+        is the frame that gets printed, saved, and used for observable
+        uncertainties.  Unblind with ``cm.unblind_result(reported)`` to
+        recover the true values.
+        """
+        return self.cm.blind_result(
+            self.build_params(np.asarray(x, dtype=float).ravel())[1])
 
     def _flat_gradient(self, grad_dict, resolved, x):
         """Full backward pipeline: per-name grads → flat gradient.
@@ -956,6 +1004,10 @@ class Fitter:
                                                     hess_inv=hess_inv)
         else:
             values, errors = self._params_from_fit(fit_result, return_bounded)
+        # Report frame: _params_from_fit returns the after-bounds values,
+        # which (with a blind transform between bounds and fixed) are the
+        # blinded report values — no extra shift needed.  Errors are
+        # unaffected (constant shift).
         return {name: (values[name], errors.get(name, 0.0)) for name in values}
 
     def compute_numerical_hessian(self, x, eps=1e-5):
@@ -1205,8 +1257,12 @@ class Fitter:
             message = str(fit_result.message)
 
         flat_names = self.cm.var_registry.flat_names
-        # Resolved physical values (post-constraints)
+        # Resolved physical values (post-constraints), converted to the
+        # blinded report frame — the after-bounds values that the analyst
+        # sees.  build_params returns the model frame (shifted), so the
+        # offsets are subtracted here.
         _, resolved = self.build_params(x)
+        resolved = self.cm.blind_result(resolved)
 
         # Errors from Hessian (transformed to physical space)
         if hess_inv is not None:
@@ -1273,6 +1329,12 @@ class Fitter:
                 corr_order = [n for i, n in corr_items]
                 corr_mat = hess_inv[np.ix_(corr_idx, corr_idx)] * grad_scale
                 out["status"]["rhorho"] = [corr_order, corr_mat.tolist()]
+
+        # Blind marker: records the seed so the result is known to be
+        # blinded (the offsets themselves are not listed — they are
+        # re-derived deterministically from seed + names).
+        if self.cm.blind_transforms:
+            out["blind"] = [tr.to_dict() for tr in self.cm.blind_transforms]
 
         with open(filepath, 'w') as f:
             json.dump(out, f, indent=2)
@@ -1374,9 +1436,15 @@ class Fitter:
                 scale_data[key + 'r'] = scale_data.pop(key)
         self.set_scale(scale_data, reset=True)
 
-        # Re-apply bounds
+        # Re-apply bounds (before blind — offsets scale with the ranges)
         for name, spec in data.get("bounds", {}).items():
             self.set_range(name, spec["low"], spec["high"])
+
+        # Re-apply blind transforms (deterministic from seed + names)
+        self.cm.blind_transforms.clear()
+        for bd in data.get("blind", []):
+            self.cm.set_blind(bd["names"], bd["seed"],
+                              scale=bd.get("scale", 1.0))
 
         # Re-apply custom transforms
         self.cm.custom_transforms.clear()
@@ -1448,7 +1516,7 @@ class Fitter:
         """
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self.build_params(x0)
+        resolved = self.report_params(x0)
 
         names = [n for n in param_names if n in resolved]
         if not names:
@@ -1517,7 +1585,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self.build_params(x0)
+        resolved = self.report_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:
@@ -1573,7 +1641,7 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        _, resolved = self.build_params(x0)
+        resolved = self.report_params(x0)
         names = [n for n in param_names if n in resolved]
 
         if jac:

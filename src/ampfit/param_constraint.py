@@ -19,6 +19,8 @@ and ``backward(grad_dict)`` (gradient backpropagation):
     flat = registry.flat_gradient(x, grad)
 """
 
+import zlib
+
 import numpy as np
 
 
@@ -530,6 +532,116 @@ ScaleTransform = LinearTransform
 
 
 # ================================================================
+# UnBlindTransform — seed-derived blinding of parameter values
+# ================================================================
+
+@_register_transform
+class UnBlindTransform(Transform):
+    """Seed-derived blinding of parameter values.
+
+    Sits **between the range (bounds) and fixed** in the resolve
+    pipeline.  It **unblinds** the bounded (blinded) values into the
+    *physical parameters* the model uses: ``v_phys = v_b + offset``.
+    The offset is **standalone** — it has its own magnitude ``scale``
+    and does not depend on the parameter's bounds::
+
+        offset[name] = U(-1, 1) * scale[name]
+
+    It is drawn pseudo-randomly from a per-name PRNG substream seeded
+    by ``(seed, name)``, so it is **deterministic** across runs and
+    adding/removing other blinded names never changes it — but
+    **opaque**: seeing the seed only tells you *a* shift was applied,
+    not what it is.
+
+    Because the model is evaluated on the unblinded (physical) values,
+    the fit lands on the true minimum — the fitted model is correct.
+    The bounded values *before* the transform (``v_b = v_phys -
+    offset``) are what the fit prints and saves: the **blinded report
+    frame**.
+
+    Directions:
+      ``forward``/``unblind``: ``d[name] += offset[name]``  (bounded →
+                               physical; between bounds and fixed)
+      ``backward``:            identity (constant shift has derivative 1)
+      ``inverse``/``blind``:   ``d[name] -= offset[name]``  (physical →
+                               blinded report; used by blind_result)
+
+    Args:
+        names : list of str
+            Parameter names to blind (must be present in the dict).
+        seed : int
+            Random seed controlling all offsets (keep it secret until
+            unblinding — it is the key that reproduces the shifts).
+        scale : float or dict, default 1.0
+            Offset magnitude: ``offset = U(-1, 1) * scale``.  A dict
+            ``{name: scale}`` sets a per-parameter magnitude.
+    """
+
+    def __init__(self, names, seed, scale=1.0):
+        names = list(names)
+        super().__init__(input_names=names, output_names=names)
+        self.seed = int(seed)
+        if isinstance(scale, dict):
+            self.scale = {n: float(scale.get(n, 1.0)) for n in names}
+        else:
+            self.scale = {n: float(scale) for n in names}
+        self.offsets = {}
+        for name in names:
+            # per-name PRNG substream: deterministic, stable across runs,
+            # independent of the other names being blinded
+            key = (self.seed ^ zlib.crc32(name.encode("utf-8"))) & 0x7FFFFFFF
+            self.offsets[name] = np.random.RandomState(key).uniform(-1, 1) \
+                * self.scale[name]
+
+    def forward(self, d):
+        """**Unblind**: bounded (blinded) values → physical parameters.
+
+        Adds the offset.  This is the direction applied *between bounds
+        and fixed* in the resolve pipeline — it is what makes the
+        physical parameters the model uses (``v_phys = v_b + offset``).
+        """
+        d = dict(d)
+        for name in self.input_names:
+            if name in d:
+                d[name] = d[name] + self.offsets[name]
+        return d
+
+    def backward(self, grad_out, d_in=None):
+        # constant shift: d(out)/d(in) = 1 → pass through unchanged
+        return {name: grad_out.get(name, 0.0) for name in self.input_names}
+
+    def inverse(self, d):
+        """**Blind**: physical/model values → blinded report values.
+
+        Subtracts the offset (the reverse of :meth:`forward`).  Used by
+        ``ConstraintManager.blind_result`` when preparing the report
+        frame for saving/printing.
+        """
+        d = dict(d)
+        for name in self.input_names:
+            if name in d:
+                d[name] = d[name] - self.offsets[name]
+        return d
+
+    # Explicit aliases for the two directions
+    def unblind(self, d):
+        """Bounded (blinded) values → physical parameters (alias of forward)."""
+        return self.forward(d)
+
+    def blind(self, d):
+        """Physical/model values → blinded report values (alias of inverse)."""
+        return self.inverse(d)
+
+    def to_dict(self):
+        return {"type": "UnBlindTransform", "names": self.input_names,
+                "seed": self.seed, "scale": self.scale}
+
+    @classmethod
+    def from_dict(cls, d, **kwargs):
+        return cls(d["names"], d["seed"], scale=d.get("scale", 1.0))
+
+
+# ================================================================
 # BWParamsTransform — get_bw_params as a Transform
 # ================================================================
 
@@ -827,6 +939,7 @@ class ConstraintManager:
 
         # Pipeline stages (independent objects)
         self.name_res = NameResolution()
+        self.blind_transforms = []    # list of UnBlindTransform (bounds → blind → fixed)
         self.scale_transforms = []    # list of ScaleTransform (applied in order)
         self.mass_width_transforms = []  # list of Transform from particle models
         self.custom_transforms = []   # list of Transform (applied after mass/width)
@@ -905,6 +1018,46 @@ class ConstraintManager:
             self.scale_transforms.append(LinearTransform(name, factor, bias))
         self._rebuild()
 
+    def set_blind(self, names, seed, scale=1.0, reset=False):
+        """Blind parameter(s) with a deterministic seed-derived offset.
+
+        *Additive* — each call adds another :class:`UnBlindTransform`; pass
+        ``reset=True`` to replace all previous ones.
+
+        The transform sits **between the range and fixed**: the value
+        after the bounds stage is shifted by the seed-derived offset.
+        The offset is **standalone** — its magnitude is ``scale`` and it
+        does not depend on the parameter's bounds::
+
+            offset = U(-1, 1) * scale
+
+        The fit model runs on the unblinded (physical) values (and
+        compensates — the fitted model is correct), while the after-
+        bounds values that are printed and saved are the **blinded
+        report frame**.  The offset is deterministic from ``seed`` (+
+        the name) but opaque: seeing the seed only tells you a shift was
+        applied, not its size.  Unblind reported values with
+        :meth:`unblind_result`.
+
+        Args:
+            names: iterable of parameter names to blind.  Note: the
+                  blind runs before the ``same`` stage, which maps each
+                  alias onto its canonical value directly — so to blind
+                  a same-group, name the **canonical** parameter
+                  (blinding an alias has no effect, the group keeps the
+                  canon's value).
+            seed: random seed controlling all offsets (keep secret until
+                  unblinding).
+            scale: offset magnitude (``U(-1, 1) * scale``); a dict
+                   ``{name: scale}`` sets per-parameter magnitudes.
+            reset: replace all existing blind transforms.
+        """
+        if reset:
+            self.blind_transforms.clear()
+        self.blind_transforms.append(
+            UnBlindTransform(list(names), seed, scale=scale))
+        self._rebuild()
+
     def set_mass_width_transforms(self, transforms, reset=True):
         if reset:
             self.mass_width_transforms.clear()
@@ -966,27 +1119,50 @@ class ConstraintManager:
     def flat_resolve(self, x, stop_after=None):
         """Flat array → resolved dict, with defaults for completeness.
 
+        The blind shift is always applied between bounds and fixed, so
+        the full resolve is the *model* frame (the fit sees shifted
+        values and compensates).  ``stop_after='bounds'`` returns the
+        *report* frame — the after-bounds (blinded) values that are
+        printed and saved.
+
         Args:
-            stop_after: ``'bounds'``, ``'fixed'``, ``'same'``, ``'scale'``,
-                       ``'transforms'``, or ``None`` for full pipeline.
+            stop_after: ``'bounds'``, ``'blind'``, ``'fixed'``, ``'same'``,
+                       ``'scale'``, ``'transforms'``, ``'custom'``, or
+                       ``None`` for full pipeline.
         """
         return self.resolve(self.from_flat(x), stop_after=stop_after)
 
     def resolve(self, raw_dict, stop_after=None):
-        """Full forward pipeline: bounds → fixed → same → scale → mass/width → custom.
-        
-        First applies bound transforms (unbounded → bounded), then
-        runs the standard constraint pipeline.  Returns a complete dict
-        with defaults for any parameters not produced by the pipeline.
+        """Full forward pipeline: bounds → blind → fixed → same → scale → mass/width → custom.
+
+        First applies bound transforms (unbounded → bounded), then the
+        blind shift, then the standard constraint pipeline.  Returns a
+        complete dict with defaults for any parameters not produced by
+        the pipeline.
+
+        The blind transform sits **between the range and fixed**: the
+        value after the bounds stage is shifted by the seed-derived
+        offset, and the fit model is evaluated on those shifted values
+        — the optimisation compensates the constant offset, so the
+        fitted model stays correct.  The values *before* the shift
+        (``stop_after='bounds'``, or :meth:`blind_result` of the full
+        resolve) are the **blinded report frame**: they differ from the
+        true values by the unknown offset and are what gets printed and
+        saved.
 
         Args:
-            stop_after: ``'bounds'``, ``'fixed'``, ``'same'``, ``'scale'``,
-                       ``'transforms'`` (all transforms but no defaults),
-                       or ``None`` for full pipeline.
+            stop_after: ``'bounds'``, ``'blind'``, ``'fixed'``, ``'same'``,
+                       ``'scale'``, ``'transforms'`` (all transforms but
+                       no defaults), ``'custom'``, or ``None`` for full
+                       pipeline.
         """
         d = dict(raw_dict)
         self.bounds.apply(d)                     # unbounded → bounded
         if stop_after == 'bounds':
+            return d
+        for tr in self.blind_transforms:
+            d = tr.apply_forward(d)              # blind: shift after bounds
+        if stop_after == 'blind':
             return d
         d = self.fixed_tr.apply(d)
         if stop_after == 'fixed':
@@ -1011,13 +1187,65 @@ class ConstraintManager:
         full.update(d)
         return full
 
+    def _blind_offset(self, name):
+        """Offset that *name* is blinded by (0.0 if not blinded).
+
+        Also resolves aliases: an alias of a blinded canonical shares
+        its offset.
+        """
+        if not self.blind_transforms:
+            return 0.0
+        canon = self.name_res.map.get(name, name)
+        for tr in self.blind_transforms:
+            if canon in tr.offsets:
+                return tr.offsets[canon]
+        return 0.0
+
+    def blind_result(self, d):
+        """**Blind** a result dict: model frame → blinded report frame.
+
+        The full resolve is the model frame (fit values, shifted by the
+        offsets).  The report frame subtracts the offsets — those are
+        the after-bounds values that the fit prints and saves.  The
+        analyst cannot recover the true values without unblinding.
+        Errors are unaffected (a constant shift does not change σ).
+        """
+        if not self.blind_transforms:
+            return dict(d)
+        d = dict(d)
+        for key in list(d):
+            d[key] = d[key] - self._blind_offset(key)
+        return d
+
+    def unblind_result(self, d):
+        """**Unblind** a result dict: blinded report frame → true values.
+
+        Inverse of :meth:`blind_result` — adds the seed-derived offsets
+        back to the reported values.
+        """
+        if not self.blind_transforms:
+            return dict(d)
+        d = dict(d)
+        for key in list(d):
+            d[key] = d[key] + self._blind_offset(key)
+        return d
+
     def inverse(self, resolved, stop_before=None):
-        """Full inverse: custom⁻¹ → mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → bounds⁻¹.
+        """Full inverse: custom⁻¹ → mass/width⁻¹ → scale⁻¹ → same⁻¹ → fixed⁻¹ → blind⁻¹ → bounds⁻¹.
+
+        The exact reverse of :meth:`resolve`, including the blind⁻¹
+        step, so ``inverse(resolve(x))`` round-trips to ``x``.  The
+        input is the *model* frame (the full resolved dict).  Saved /
+        reported values live in the *blinded report* frame (after the
+        bounds, before the blind shift), so they must be **unblinded
+        first** (:meth:`unblind_result`) before calling this — see
+        :meth:`Fitter.values_from_dict`.
 
         Args:
             stop_before: stop BEFORE applying the inverse of this stage.
                 ``'custom'``, ``'transforms'``, ``'scale'``, ``'same'``,
-                ``'fixed'``, ``'bounds'``, or ``None`` for full pipeline.
+                ``'fixed'``, ``'blind'``, ``'bounds'``, or ``None`` for
+                full pipeline.
                 E.g. ``stop_before='fixed'`` undoes custom/scale/same but
                 leaves fixed values intact.
         """
@@ -1040,6 +1268,10 @@ class ConstraintManager:
         if stop_before == 'fixed':
             return d
         d = self.fixed_tr.inverse(d)
+        if stop_before == 'blind':
+            return d
+        for tr in reversed(self.blind_transforms):
+            d = tr.apply_inverse(d)
         if stop_before == 'bounds':
             return d
         # Invert bounds: return unbounded values
@@ -1071,7 +1303,7 @@ class ConstraintManager:
         return d
 
     def to_dict(self):
-        """Serialize all constraints (fixed, same, scale, bounds) to dict.
+        """Serialize all constraints (fixed, same, scale, bounds, blind) to dict.
 
         Returns a JSON-compatible dict.
         """
@@ -1086,16 +1318,18 @@ class ConstraintManager:
             "same": same,
             "scale": dict(self.scale_params),
             "bounds": self.bounds.to_dict(),
+            "blind": [tr.to_dict() for tr in self.blind_transforms],
         }
 
     # ── backward pipeline ──────────────────────────────────────
 
     def chain_gradient(self, grad_resolved, resolved, raw):
-        """Reverse of :meth:`resolve` (custom → mass/width → scale → same → fixed).
+        """Reverse of :meth:`resolve` (custom → mass/width → scale → same → fixed → blind).
 
         Uses :meth:`Transform.apply_backward` on each stage — only
         ``input_names`` are updated; output-only and unrelated gradients
-        pass through unchanged.
+        pass through unchanged.  (The blind shift is a constant, so its
+        backward is the identity.)
         """
         grad = grad_resolved
         for tr in reversed(self.custom_transforms):
@@ -1106,6 +1340,8 @@ class ConstraintManager:
             grad = tr.apply_backward(grad)
         grad = self.name_res.chain_grad(grad, resolved)
         grad = self.fixed_tr.chain_grad(grad, raw)
+        for tr in reversed(self.blind_transforms):
+            grad = tr.apply_backward(grad)
         return grad
 
     # ── rebuild ─────────────────────────────────────────────────
@@ -1129,6 +1365,7 @@ class ConstraintManager:
         """Yield all constraint transforms in forward order."""
         yield self.fixed_tr
         yield self.name_res
+        yield from self.blind_transforms
         yield from self.scale_transforms
         yield from self.mass_width_transforms
         yield from self.custom_transforms

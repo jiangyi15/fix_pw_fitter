@@ -589,6 +589,238 @@ def test_transform_from_dict_unknown():
         transform_from_dict({"type": "NonExistentTransform"})
 
 
+# ── blind transform ───────────────────────────────────────────────
+
+def test_blind_transform_roundtrip():
+    """UnBlindTransform: forward shifts, inverse recovers, others pass through."""
+    from ampfit.param_constraint import UnBlindTransform
+    tr = UnBlindTransform(["a", "b"], seed=42, scale=3.0)
+    d = {"a": 5.0, "b": 1.0, "c": 3.0}
+    out = tr.apply_forward(dict(d))
+    assert out["a"] != d["a"] and out["b"] != d["b"]
+    assert out["c"] == d["c"]
+    back = tr.apply_inverse(out)
+    assert back["a"] == pytest.approx(d["a"])
+    assert back["b"] == pytest.approx(d["b"])
+
+
+def test_blind_deterministic_and_per_name_stable():
+    """Same seed+names → same offsets; offsets independent per name."""
+    from ampfit.param_constraint import UnBlindTransform
+    tr1 = UnBlindTransform(["a", "b"], seed=7, scale=1.0)
+    tr2 = UnBlindTransform(["a", "b"], seed=7, scale=1.0)
+    assert tr1.offsets == tr2.offsets
+    # adding another name must not reshuffle existing offsets
+    tr3 = UnBlindTransform(["a", "b", "c"], seed=7, scale=1.0)
+    assert tr1.offsets["a"] == tr3.offsets["a"]
+    assert tr1.offsets["b"] == tr3.offsets["b"]
+    # different seed → different shift
+    tr4 = UnBlindTransform(["a", "b"], seed=8, scale=1.0)
+    assert tr1.offsets != tr4.offsets
+
+
+def test_blind_offset_scale():
+    """Offset magnitude = U(-1,1) * scale; standalone, no bounds involved."""
+    from ampfit.param_constraint import UnBlindTransform
+    tr = UnBlindTransform(["a", "b"], seed=3, scale=5.0)
+    assert abs(tr.offsets["a"]) <= 5.0
+    assert abs(tr.offsets["b"]) <= 5.0
+    # per-name scale
+    tr2 = UnBlindTransform(["a", "b"], seed=3, scale={"a": 2.0, "b": 8.0})
+    assert abs(tr2.offsets["a"]) <= 2.0
+    assert abs(tr2.offsets["b"]) <= 8.0
+    # independent of any bounds (no ranges argument exists)
+    with pytest.raises(TypeError):
+        UnBlindTransform(["a"], seed=3, ranges={"a": (0, 10)})
+
+
+def test_blind_between_bounds_and_fixed():
+    """Blind sits between bounds and fixed; inverse round-trips after unblind."""
+    from ampfit.param_constraint import ConstraintManager
+    cm = ConstraintManager(["a"])
+    cm.set_range("a", 0, 10)
+    cm.set_blind(["a"], seed=7)
+    raw = {"a": 0.0}                              # unbounded 0 → bounded 5
+    b = cm.resolve(raw, stop_after="bounds")      # report frame (after bounds)
+    model = cm.resolve(raw)                       # model frame: blind applied
+    tr = cm.blind_transforms[0]
+    assert b["a"] == pytest.approx(5.0)
+    assert model["a"] == pytest.approx(b["a"] + tr.offsets["a"])
+
+    # report frame = after-bounds = model − offset (blinded)
+    report = cm.blind_result(model)
+    assert report["a"] == pytest.approx(b["a"])
+
+    # inverse is the full pipeline inverse: resolve → inverse round-trips
+    rt = cm.inverse(model)
+    assert rt["a"] == pytest.approx(raw["a"])
+    # unblind the report frame BEFORE inverting (the load path)
+    rt2 = cm.inverse(cm.unblind_result(report))
+    assert rt2["a"] == pytest.approx(raw["a"])
+
+    # blind/unblind result helpers on a model dict
+    bl = cm.blind_result(model)
+    assert bl["a"] == pytest.approx(model["a"] - tr.offsets["a"])
+    ub = cm.unblind_result(bl)
+    assert ub["a"] == pytest.approx(model["a"])
+
+    import numpy as np
+    g = cm.full_gradient({"a": 2.5}, model, np.array([0.0]))
+    assert float(g[0]) == pytest.approx(2.5)      # constant shift → d=1
+
+
+def test_blind_fit_result_is_shifted_not_compensated():
+    """The reported fit result is blinded (true − offset), model stays true.
+
+    The blind transform between bounds and fixed shifts the model values,
+    so the fit compensates and lands the model on the true minimum.  The
+    after-bounds (report) values are therefore the blinded result —
+    unblinding (adding the offset) recovers the true values.
+    """
+    from ampfit.param_constraint import ConstraintManager
+    cm = ConstraintManager(["a"])
+    cm.set_range("a", 0, 10)
+    cm.set_blind(["a"], seed=7)
+    tr = cm.blind_transforms[0]
+
+    # toy optimum: model (true) value 5.0 → x* with bounds(x*) + offset = 5.0
+    x_star = cm.bounds.inverse("a", 5.0 - tr.offsets["a"])
+    model = cm.resolve({"a": x_star})             # model frame = true
+    report = cm.blind_result(model)               # report frame = blinded
+    assert model["a"] == pytest.approx(5.0)
+    assert report["a"] == pytest.approx(5.0 - tr.offsets["a"])
+    assert cm.unblind_result(report)["a"] == pytest.approx(5.0)
+
+
+def test_blind_report_params_and_save():
+    """report_params + save_params write the blinded (after-bounds) frame."""
+    import json, tempfile, os
+    fitter = setup_fitter()
+    names = [n for n in fitter.var_registry.flat_names if "mass" in n][:1]
+    fitter.set_blind(names, seed=123, scale=0.4)
+    tr = fitter.cm.blind_transforms[0]
+
+    x = fitter.initial_values(seed=42)
+    _, model = fitter.build_params(x)             # model frame (true)
+    reported = fitter.report_params(x)            # blinded report frame
+    assert reported == fitter.cm.blind_result(model)
+    for n in names:
+        assert reported[n] == pytest.approx(model[n] - tr.offsets[n])
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        fname = f.name
+        fitter.save_params(x, fname)
+    out = json.load(open(fname))
+    assert "blind" in out
+    for n in names:
+        assert out["value"][n] == pytest.approx(model[n] - tr.offsets[n])
+        # unblind what was saved → the true value
+        assert out["value"][n] + tr.offsets[n] == pytest.approx(model[n])
+    os.unlink(fname)
+
+
+def test_blind_set_blind_reset():
+    """set_blind is additive; reset=True replaces."""
+    from ampfit.param_constraint import ConstraintManager
+    cm = ConstraintManager(["a", "b"])
+    cm.set_blind(["a"], seed=1)
+    cm.set_blind(["b"], seed=1)
+    assert len(cm.blind_transforms) == 2
+    cm.set_blind(["a"], seed=1, reset=True)
+    assert len(cm.blind_transforms) == 1
+
+
+def test_blind_save_load_round_trip():
+    """Fitter save/load reproduces identical offsets."""
+    import json, tempfile, os
+    fitter = setup_fitter()
+    names = [n for n in fitter.var_registry.flat_names if "mass" in n][:2]
+    fitter.set_blind(names, seed=20240828, scale=0.3)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        fname = f.name
+        fitter.save_constraints(fname)
+    data = json.load(open(fname))
+    assert "blind" in data and len(data["blind"]) == 1
+    assert data["blind"][0]["seed"] == 20240828
+    assert set(data["blind"][0]["names"]) == set(names)
+
+    fitter2 = setup_fitter()
+    fitter2.load_constraints(fname)
+    tr1 = fitter.cm.blind_transforms[0]
+    tr2 = fitter2.cm.blind_transforms[0]
+    assert tr2.offsets == tr1.offsets
+
+    x = fitter2.initial_values(seed=42)
+    assert fitter2.cm.flat_resolve(x) == fitter.cm.flat_resolve(x)
+    os.unlink(fname)
+
+
+def test_blind_get_uncertainties_blinded():
+    """get_uncertainties (used by the fit printout) reports blinded values."""
+    import numpy as np
+    from types import SimpleNamespace
+    fitter = setup_fitter()
+    names = [n for n in fitter.var_registry.flat_names if "mass" in n][:1]
+    fitter.set_blind(names, seed=55, scale=0.3)
+
+    x = fitter.initial_values(seed=42)
+    report = fitter.report_params(x)              # blinded report frame
+
+    unc = fitter.get_uncertainties(
+        SimpleNamespace(x=x, hess_inv=np.eye(len(x)) * 0.1))
+    for n in names:
+        # after-bounds value: blinded report frame, no extra shift needed
+        assert unc[n][0] == pytest.approx(report[n])
+        assert unc[n][1] == pytest.approx(np.sqrt(0.1))
+
+
+def test_blind_with_same_uses_canon_directly():
+    """Blinding an alias of a same group is a no-op; canon blinding works.
+
+    The blind runs before the same stage, which maps every alias onto
+    its canonical value *directly* — so an offset applied to an alias is
+    overwritten.  To blind a same-group the canonical name must be given.
+    """
+    from ampfit.param_constraint import ConstraintManager
+
+    # alias blinded → no effect: the group uses the canon's value directly
+    cm = ConstraintManager(["a", "b"])
+    cm.set_same([["a", "b"]])
+    cm.set_blind(["b"], seed=7)
+    tr = cm.blind_transforms[0]
+    assert tr.input_names == ["b"]                 # not resolved to canon
+    model = cm.resolve({"a": 0.0, "b": 0.5})
+    assert model["a"] == pytest.approx(0.0)        # canon untouched
+    assert model["b"] == pytest.approx(model["a"]) # same maps b := a
+    report = cm.blind_result(model)
+    assert report["a"] == pytest.approx(0.0)       # nothing to unshift
+    assert report["b"] == pytest.approx(report["a"])
+
+    # canon blinded → the whole group shifts and reports consistently
+    cm = ConstraintManager(["a", "b"])
+    cm.set_same([["a", "b"]])
+    cm.set_blind(["a"], seed=7)
+    tr = cm.blind_transforms[0]
+    model = cm.resolve({"a": 0.0, "b": 0.5})
+    assert model["a"] == pytest.approx(tr.offsets["a"])   # shifted
+    assert model["b"] == pytest.approx(model["a"])        # same'd to canon
+    report = cm.blind_result(model)
+    assert report["a"] == pytest.approx(0.0)              # blinded back
+    assert report["b"] == pytest.approx(report["a"])      # alias consistent
+    assert cm.unblind_result(report)["a"] == pytest.approx(model["a"])
+
+
+def test_blind_config_handler():
+    """apply_constrains('blind', spec) blinds the named parameters."""
+    from ampfit.constrain_plugins import apply_constrains
+    fitter = setup_fitter()
+    names = [n for n in fitter.var_registry.flat_names if "mass" in n][:1]
+    apply_constrains(fitter, {"blind": {"seed": 99, "names": names, "scale": 0.5}})
+    assert len(fitter.cm.blind_transforms) == 1
+    assert fitter.cm.blind_transforms[0].seed == 99
+
+
 # ── run if called directly ────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -435,6 +435,23 @@ def _handle_bounds(fitter, spec):
         fitter.set_range(name, sb["low"], sb["height"])
 
 
+@register_constrain("blind", order=41)
+def _handle_blind(fitter, spec):
+    """``blind: {seed: int, names: [...], scale?: float | {name: scale}}``.
+
+    Blinds the given parameters with a deterministic, seed-derived
+    offset of magnitude ``scale`` (pipeline position: between the range
+    and fixed).  The offset is standalone — it does not depend on the
+    parameter bounds.  Fit results are blinded — unblind with the same
+    seed to recover the true values.
+    """
+    if isinstance(spec, dict):
+        spec = [spec]
+    for item in spec:
+        fitter.set_blind(item["names"], item["seed"],
+                         scale=item.get("scale", 1.0))
+
+
 @register_constrain("priors", order=50)
 def _handle_priors(fitter, spec):
     """``priors: [{type: ..., ...}, ...]``."""
