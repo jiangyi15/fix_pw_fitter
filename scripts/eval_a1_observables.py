@@ -109,13 +109,24 @@ def main():
     print("=" * 70)
 
     results = {}
+    # (key, console label, console desc, tex label, tex desc)
     rows = [
-        ("lambda_plus",  "|λ₊|",    "a1(1260)⁺  B→a1π  |ā/a|"),
-        ("alpha_plus",   "α₊ (deg)", "a1(1260)⁺  B→a1π  ½arg(ā/a)"),
-        ("lambda_minus", "|λ₋|",    "a1(1260)⁻  B→a1π  |ā/a|"),
-        ("alpha_minus",  "α₋ (deg)", "a1(1260)⁻  B→a1π  ½arg(ā/a)"),
+        ("lambda_plus",  "|λ₊|",    "a1(1260)⁺  B→a1π  |ā/a|",
+         r"$|\lambda_{+}|$",
+         r"$B\to a_1(1260)^{+}\pi$, $|\bar{a}/a|$"),
+        ("alpha_plus",   "α₊ (deg)", "a1(1260)⁺  B→a1π  ½arg(ā/a)",
+         r"$\alpha_{+}$ (deg)",
+         r"$B\to a_1(1260)^{+}\pi$, "
+         r"$\frac{1}{2}\arg(\bar{a}/a)$"),
+        ("lambda_minus", "|λ₋|",    "a1(1260)⁻  B→a1π  |ā/a|",
+         r"$|\lambda_{-}|$",
+         r"$B\to a_1(1260)^{-}\pi$, $|\bar{a}/a|$"),
+        ("alpha_minus",  "α₋ (deg)", "a1(1260)⁻  B→a1π  ½arg(ā/a)",
+         r"$\alpha_{-}$ (deg)",
+         r"$B\to a_1(1260)^{-}\pi$, "
+         r"$\frac{1}{2}\arg(\bar{a}/a)$"),
     ]
-    for key, label, desc in rows:
+    for key, label, desc, *_ in rows:
         fn = obs[key]
         if cov is not None:
             val, err = get_error(fn, x, cov, eps=args.eps)
@@ -128,9 +139,9 @@ def main():
         lines = [r"\documentclass{standalone}", r"\begin{document}",
                  r"\begin{tabular}{|c|c|c|}", r"\hline",
                  "observable & value & description \\\\", r"\hline"]
-        for key, label, desc in rows:
+        for key, label, desc, tex_label, tex_desc in rows:
             v, e = results[key]
-            lines.append(f"{label} & {fmt_val_err(v, e)} & {desc} \\\\")
+            lines.append(f"{tex_label} & {fmt_val_err(v, e)} & {tex_desc} \\\\")
         lines += [r"\hline", r"\end{tabular}", r"\end{document}"]
         with open(args.tex, "w") as f:
             f.write("\n".join(lines))
