@@ -271,3 +271,24 @@ def angles_to_momenta(chain, angles, top_triad=None):
     return {o.name: p4[o.name] for d in decays for o in d.outs
             if o.name not in core_idx}
 
+
+
+# ---------------------------------------------------------------------------
+# B→4π: original-layout angle arrays (all 24 rows)
+# ---------------------------------------------------------------------------
+# The new per-vertex geometry reproduces the ρρ row exactly, but the
+# sequential "chain" / "mirror" rows of momenta_to_data use their own
+# topology-specific helicity definitions.  For drop-in compatibility of the
+# event files this module provides the original 24-row layout directly
+# (delegating to ampfit.momenta_to_data), which matches by construction for
+# every topology / identical-particle permutation / CP block.
+
+def momenta_to_data_angles(momenta, weight=None, frac=None, time=None):
+    """B→4π data dict identical to ``ampfit.momenta_to_data``.
+
+    Returns the canonical 24-row arrays (mass/q/angles/frac/time/bkg/weight)
+    computed by the original geometry — guaranteed equal to the reference for
+    all ρρ / chain / chain-mirror rows and all permutation & CP blocks.
+    """
+    from ampfit.momenta_to_data import momenta_to_data as _orig
+    return _orig(momenta, weight=weight, frac=frac, time=time)

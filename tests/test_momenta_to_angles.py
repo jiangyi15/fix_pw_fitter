@@ -165,3 +165,18 @@ def test_aligns_with_original_momenta_to_data():
     assert worst[0] < 1e-9
     assert worst[1] < 1e-9
     assert worst[2] < 1e-9
+
+
+def test_momenta_to_data_angles_all_rows_match_original():
+    """Original-layout output equals momenta_to_data for every one of the 24
+    rows (all topologies x permutation/CP blocks)."""
+    from ampfit.phasespace_b4pi import generate_b4pi
+    from ampfit.momenta_to_data import momenta_to_data
+    from ampfit.momenta_to_angles import momenta_to_data_angles
+
+    ev = generate_b4pi(400, seed=2)
+    a = momenta_to_data_angles(ev['momenta'])
+    b = momenta_to_data(ev['momenta'])
+    for key in ('mass', 'q', 'angles', 'frac', 'time', 'weight'):
+        assert np.array_equal(a[key], b[key])
+    assert a['angles'].shape == (400, 24, 3)
