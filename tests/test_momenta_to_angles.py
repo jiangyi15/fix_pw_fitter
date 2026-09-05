@@ -117,3 +117,26 @@ def test_back_to_back_and_rotation_invariance():
     assert worst_bb < 1e-9
     assert worst_th < 1e-9
     assert worst_phi_sum < 1e-9
+
+
+def test_inverse_angles_to_momenta_roundtrip():
+    """angles → 4-momenta → angles reproduces the Euler pairs."""
+    from ampfit.momenta_to_angles import angles_to_momenta
+
+    chain = _rho_chain()
+    nv = len(chain.decays)
+    worst = 0.0
+    for seed in range(25):
+        rng = np.random.default_rng(seed)
+        angs = [(rng.uniform(-math.pi, math.pi),
+                 rng.uniform(0.15, math.pi - 0.15)) for _ in range(nv)]
+        fin = angles_to_momenta(chain, angs)
+        # momentum conservation (top at rest)
+        tot = np.zeros(4)
+        for v in fin.values():
+            tot += v
+        assert np.linalg.norm(tot[1:]) < 1e-9
+        back = decay_angles_from_momenta(chain, fin)
+        for a, b in zip(angs, back):
+            worst = max(worst, abs(_wrap(a[0] - b[0])), abs(a[1] - b[1]))
+    assert worst < 1e-9

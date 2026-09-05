@@ -26,6 +26,8 @@ Output: ``angles[v] = (φ_v, θ_v)`` with v = position in ``chain.decays``
 (DFS pre-order), i.e. the same ordering the helicity engine uses.
 """
 
+import math
+
 import numpy as np
 
 # 4-vector layout: (E, px, py, pz)
@@ -191,3 +193,88 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
             triad[c1] = t1
 
     return [angles[i] for i in range(len(decays))]
+
+
+def _two_body_momentum(M, m1, m2):
+    """|p| of each daughter in a two-body decay M → m1 + m2 (rest)."""
+    return float(np.sqrt(max(((M ** 2 - (m1 + m2) ** 2)
+                              * (M ** 2 - (m1 - m2) ** 2)), 0.0))) / (2 * M)
+
+
+def angles_to_momenta(chain, angles, top_triad=None):
+    """Inverse of :func:`decay_angles_from_momenta`.
+
+    Given one Euler pair ``(φ_v, θ_v)`` per vertex (in ``chain.decays``
+    order) and the particle masses of the chain, build the final-state
+    4-momenta in the top (CM) rest frame.
+
+    The procedure mirrors the forward direction exactly:
+      * parent triad + (φ, θ) give the first-daughter direction
+        u = sinθ(cosφ·x + sinφ·y) + cosθ·z  (two-body |p| from the masses);
+      * the daughter triad is built with z along its momentum and
+        y = z_parent × z (the second daughter automatically gets the
+        opposite-axis rotation);
+      * daughter rest-frame momenta are boosted back into the current frame
+        with the parent's velocity (rest→CM uses boost(·, −β_parent)).
+
+    Returns a dict final-particle-name → (E, px, py, pz).
+    """
+    if top_triad is None:
+        top_triad = np.eye(3)
+
+    masses = {}
+    for d in chain.decays:
+        masses[d.core.name] = float(d.core.mass)
+        for o in d.outs:
+            masses.setdefault(o.name, float(o.mass))
+    decays = chain.decays
+    core_idx = {d.core.name: i for i, d in enumerate(decays)}
+
+    p4 = {decays[0].core.name: np.array([masses[decays[0].core.name], 0., 0., 0.])}
+    triad = {decays[0].core.name: np.asarray(top_triad, dtype=float)}
+
+    def outs_of(name):
+        for d in decays:
+            if d.core.name == name:
+                return [o.name for o in d.outs]
+        return []
+
+    def _new_triad(z0, z1):
+        """(x1,y1,z1) for the first daughter (z along z1)."""
+        y1v = np.cross(z0, z1)
+        n = _norm(y1v)
+        if n < 1e-12:
+            ref = (np.array([1.0, 0.0, 0.0]) if abs(z0[0]) < 0.9
+                   else np.array([0.0, 1.0, 0.0]))
+            v = np.cross(z0, ref)
+            y1 = v / _norm(v) if _norm(v) > 1e-12 else np.array([0.0, 1.0, 0.0])
+        else:
+            y1 = y1v / n
+        x1 = np.cross(y1, z1)
+        return np.stack([x1, y1, z1])
+
+    for i, d in enumerate(decays):
+        pname = d.core.name
+        M = masses[pname]
+        phi, theta = angles[i]
+        T = triad[pname]
+        x0, y0, z0 = T[0], T[1], T[2]
+        c0, c1 = outs_of(pname)
+        m0, m1 = masses[c0], masses[c1]
+        p = _two_body_momentum(M, m0, m1)
+        u = (math.sin(theta) * (math.cos(phi) * x0 + math.sin(phi) * y0)
+             + math.cos(theta) * z0)
+        E0 = math.hypot(p, m0)
+        E1 = math.hypot(p, m1)
+        rest0 = np.array([E0, *(p * u).tolist()])
+        rest1 = np.array([E1, *(-p * u).tolist()])
+        # boost into the current frame (parent may be moving)
+        beta_p = p4[pname][1:] / p4[pname][0] if p4[pname][0] > 0 else np.zeros(3)
+        p4[c0] = _boost_4vector(rest0, -beta_p)
+        p4[c1] = _boost_4vector(rest1, -beta_p)
+        # reference triads of the daughters (z along their momentum)
+        triad[c0] = _new_triad(z0, u)
+        triad[c1] = _new_triad(z0, -u)
+
+    return {o.name: p4[o.name] for d in decays for o in d.outs
+            if o.name not in core_idx}
