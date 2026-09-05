@@ -229,6 +229,16 @@ class Config:
         # ``scalar_names: []`` removes scalars entirely (v4 PWA model).
         self.scalar_names = self._resolve_scalar_names()
         self.scalar_defaults = self.dic.get("scalar_defaults")
+        # ── angular-formula implementation switch ──────────────────────
+        # 'helicity' (default) → the numeric helicity-angle engine
+        #   (amplitude_monomials / chain_angular_table).
+        # 'cache' → the predefined angular_formula.cache_formula tables
+        #   (kept for cross-checking the two implementations).
+        mode = self.dic.get("angle_formula", "helicity")
+        if mode not in ("helicity", "cache"):
+            raise ValueError(
+                f"angle_formula must be 'helicity' or 'cache', got {mode!r}")
+        self.angle_formula_mode = mode
 
     # ── scalar decision (data.amp_model) ──────────────────────────────
     def _data_amp_model(self):

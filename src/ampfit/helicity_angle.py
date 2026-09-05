@@ -32,6 +32,8 @@ from fractions import Fraction
 
 import numpy as np
 
+import itertools
+
 # ---------------------------------------------------------------------------
 # Spin helpers (values kept as Fraction)
 # ---------------------------------------------------------------------------
@@ -905,3 +907,99 @@ def evaluate_model(model, angles):
             acc += ka[bi] * c
         out[i] = acc
     return out
+
+
+# ---------------------------------------------------------------------------
+# Cross-check the two implementations
+# ---------------------------------------------------------------------------
+# The helicity engine should numerically reproduce the predefined
+# angular_formula.cache_formula rows for the same (topo, ls).  Because the
+# old tables use their own per-row angle-variable convention, each row is
+# compared by searching the variable layout that makes the two agree — the
+# difference, if any, is only the order/combination of the angles.
+
+def compare_to_cache(chains, tol=1e-7, verbose=True):
+    """Compare every chain partial wave against the predefined cache.
+
+    Returns ``(rows, summary)``; *rows* is a list of dicts with keys chain,
+    ls, found, matched, err, and best layout.  Only chains whose decay
+    vertices all feed spinless final states and whose ls rows exist in the
+    cache are compared.
+    """
+    from ampfit.angular_formula import cache_formula
+
+    AZS = {'p1': lambda p1, p2: p1, 'p2': lambda p1, p2: p2,
+           'p1+p2': lambda p1, p2: p1 + p2,
+           'p1-p2': lambda p1, p2: p1 - p2,
+           '-p1+p2': lambda p1, p2: -p1 + p2,
+           '-p1': lambda p1, p2: -p1, '-p2': lambda p1, p2: -p2}
+
+    def eval_cache(entry, x):
+        s = 0j
+        for t in entry:
+            f = 1.0
+            for kk, bb, xx in zip(t['k'], t['b'], x):
+                f *= math.cos(kk * xx) if bb == 'cos' else math.sin(kk * xx)
+            s += complex(t['coeffs']) * f
+        return s
+
+    rng = np.random.default_rng(2024)
+    rows = []
+    matched = total = found = 0
+    for ci, chain in enumerate(chains):
+        if to_spin(chain.decays[0].core.J) != 0:
+            continue
+        if any(to_spin(o.J) != 0 for o in decay_chain_leaves(chain)):
+            continue
+        tree = decay_chain_to_tree(chain)
+        nv = len(tree_vertices(tree))
+        if nv != 3:                      # compare covers the 3-vertex case
+            continue
+        topo = chain.topo_id()
+        for wave in decay_chain_ls_product(chain):
+            ls_int = tuple((int(l), int(s)) for (l, s) in wave)
+            if (topo, ls_int) not in cache_formula:
+                continue
+            found += 1
+            total += 1
+            entry = cache_formula[(topo, ls_int)]
+            best = (1e9, None)
+            for perm in itertools.permutations(range(3)):
+                for azn, azf in AZS.items():
+                    worst = 0.0
+                    for _ in range(12):
+                        th1 = rng.uniform(.2, math.pi - .2)
+                        th2 = rng.uniform(.2, math.pi - .2)
+                        p1 = rng.uniform(0, 2 * math.pi)
+                        p2 = rng.uniform(0, 2 * math.pi)
+                        phys = [th1, th2, azf(p1, p2)]
+                        x = [phys[perm[j]] for j in range(3)]
+                        ang = {0: (0.0, 0.0), 1: (p1, th1), 2: (p2, th2)}
+                        c = eval_cache(entry, x)
+                        o = amplitude(tree, wave, ang, 0,
+                                      tuple(0 for _ in decay_chain_leaves(chain)))
+                        worst = max(worst, abs(c - o))
+                    if worst < best[0]:
+                        best = (worst, (perm, azn))
+            ok = best[0] < tol
+            matched += ok
+            rows.append({'chain': ci, 'ls': ls_int, 'found': True,
+                         'matched': ok, 'err': best[0], 'best': best[1]})
+    summary = {'rows_found': found, 'matched': matched,
+               'mismatch': matched - total and (total - matched)}
+    summary = {'rows_found': found, 'matched': matched,
+               'unmatched': total - matched}
+    if verbose:
+        print(f"cache rows compared: {found}  matched: {matched}  "
+              f"unmatched: {total - matched}")
+        for r in rows:
+            if not r['matched']:
+                print(f"  UNMATCHED chain#{r['chain']} ls {r['ls']} "
+                      f"err {r['err']:.2e}")
+    return rows, summary
+
+
+def decay_chain_ls_product(chain):
+    """All partial waves (one (l,s) per decay) of a DecayChain."""
+    import itertools as _it
+    return list(_it.product(*decay_chain_ls_sets(chain)))

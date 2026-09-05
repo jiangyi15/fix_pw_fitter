@@ -321,3 +321,31 @@ def test_angular_model_combines_all_chains():
         Amat = evaluate_model(model, vals)[idx]
         worst = max(worst, abs(A - Amat))
     assert worst < 1e-12
+
+
+def test_angle_formula_mode_option():
+    """Config option angle_formula: 'helicity' (default) / 'cache'."""
+    import copy
+    import yaml
+    from ampfit.config_loader import Config, load_config
+
+    base = yaml.safe_load(open('config_amp.yml'))
+    assert Config(copy.deepcopy(base)).angle_formula_mode == 'helicity'
+    d = copy.deepcopy(base)
+    d['angle_formula'] = 'cache'
+    assert Config(d).angle_formula_mode == 'cache'
+    d = copy.deepcopy(base)
+    d['angle_formula'] = 'nope'
+    with pytest.raises(ValueError):
+        Config(d)
+
+
+def test_compare_to_cache_all_matched():
+    from ampfit.config_loader import Config
+    from ampfit.helicity_angle import compare_to_cache
+
+    cfg = Config('config_amp.yml')
+    rows, summary = compare_to_cache(list(cfg.full_decay.chains),
+                                     verbose=False)
+    assert summary['rows_found'] == 62
+    assert summary['unmatched'] == 0
