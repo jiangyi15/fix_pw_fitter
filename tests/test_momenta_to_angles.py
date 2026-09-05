@@ -140,3 +140,28 @@ def test_inverse_angles_to_momenta_roundtrip():
         for a, b in zip(angs, back):
             worst = max(worst, abs(_wrap(a[0] - b[0])), abs(a[1] - b[1]))
     assert worst < 1e-9
+
+
+def test_aligns_with_original_momenta_to_data():
+    """On the repo's own B→4π events the module reproduces the original
+    momenta_to_data ρρ row-0 kinematics:
+        th1 = θ₁, th2 = θ₂,  φ = wrap(φ₁+φ₂+π)."""
+    from ampfit.phasespace_b4pi import generate_b4pi
+    from ampfit.momenta_to_data import momenta_to_data
+
+    chain = _rho_chain()
+    labels = ['pip1', 'pim1', 'pip2', 'pim2']
+    ev = generate_b4pi(300, seed=11)
+    data = momenta_to_data(ev['momenta'])
+    orig = data['angles'][:, 0]                 # (φ, θ1, θ2)
+    worst = [0.0, 0.0, 0.0]
+    for i in range(ev['momenta'].shape[0]):
+        fin = {lab: ev['momenta'][i][j] for j, lab in enumerate(labels)}
+        angs = decay_angles_from_momenta(chain, fin)
+        worst[0] = max(worst[0], abs(orig[i, 1] - angs[1][1]))
+        worst[1] = max(worst[1], abs(orig[i, 2] - angs[2][1]))
+        worst[2] = max(worst[2], abs(_wrap(orig[i, 0]
+                                           - (angs[1][0] + angs[2][0] + math.pi))))
+    assert worst[0] < 1e-9
+    assert worst[1] < 1e-9
+    assert worst[2] < 1e-9
