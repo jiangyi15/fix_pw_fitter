@@ -144,8 +144,8 @@ def test_inverse_angles_to_momenta_roundtrip():
 
 def test_aligns_with_original_momenta_to_data():
     """On the repo's own B→4π events the module reproduces the original
-    momenta_to_data ρρ row-0 kinematics:
-        th1 = θ₁, th2 = θ₂,  φ = wrap(φ₁+φ₂+π)."""
+    momenta_to_data ρρ row-0 kinematics (shared-reference azimuths):
+        th1 = θ₁, th2 = θ₂,  φ = φ₁ + φ₂."""
     from ampfit.phasespace_b4pi import generate_b4pi
     from ampfit.momenta_to_data import momenta_to_data
 
@@ -161,7 +161,7 @@ def test_aligns_with_original_momenta_to_data():
         worst[0] = max(worst[0], abs(orig[i, 1] - angs[1][1]))
         worst[1] = max(worst[1], abs(orig[i, 2] - angs[2][1]))
         worst[2] = max(worst[2], abs(_wrap(orig[i, 0]
-                                           - (angs[1][0] + angs[2][0] + math.pi))))
+                                           - (angs[1][0] + angs[2][0]))))
     assert worst[0] < 1e-9
     assert worst[1] < 1e-9
     assert worst[2] < 1e-9

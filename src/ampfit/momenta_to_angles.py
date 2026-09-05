@@ -160,32 +160,38 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
         # build the new triad of the first daughter (z along its momentum)
         y1v = np.cross(z0, z1)
         n_y = _norm(y1v)
-        if n_y < 1e-12:                      # z1 ∥ z0 — pick a reference plane
+        if n_y < 1e-12:                      # z1 ∥ z0 — collinear: share ONE
+            # perpendicular reference x for BOTH children (z=±z1), so the
+            # antipodal daughter gets the same x and proper (x,−y,−z).
             ref = (np.array([1.0, 0.0, 0.0]) if abs(z0[0]) < 0.9
                    else np.array([0.0, 1.0, 0.0]))
-            y1v = np.cross(z0, ref)
-            if _norm(y1v) < 1e-12:
-                y1v = np.array([0.0, 1.0, 0.0])
-            y1 = y1v / _norm(y1v)
+            xref = np.cross(z0, ref)
+            nxr = _norm(xref)
+            xref = xref / nxr if nxr > 1e-12 else np.array([1.0, 0.0, 0.0])
+            z1n = np.asarray(z1, dtype=float) / _norm(z1)
+            y1 = np.cross(z1n, xref)
+            x1 = np.asarray(xref, dtype=float)
+            z1b = -z1n
+            y1b = np.cross(z1b, xref)
+            x1b = np.asarray(xref, dtype=float)
+            t0 = np.stack([x1, y1, z1n])
+            t1 = np.stack([x1b, y1b, z1b])
         else:
             y1 = y1v / n_y
-        x1 = np.cross(y1, z1)
-
-        # triad for child0 (z along its momentum) — exact
-        t0 = np.stack([x1, y1, z1])
-        # triad for child1 (antipodal: z along −z1) — built from q1 direction
-        z1b = _unit3(q1[1:])
-        if z1b is None:
-            z1b = -z1
-        y1b = np.cross(z0, z1b)
-        nyb = _norm(y1b)
-        if nyb < 1e-12:
-            y1b = y1
-        else:
-            y1b = y1b / nyb
-        y1b = np.asarray(y1b, dtype=float)
-        x1b = np.cross(y1b, z1b)
-        t1 = np.stack([x1b, y1b, z1b])
+            x1 = np.cross(y1, z1)
+            t0 = np.stack([x1, y1, z1])
+            z1b = _unit3(q1[1:])
+            if z1b is None:
+                z1b = -z1
+            y1b = np.cross(z0, z1b)
+            nyb = _norm(y1b)
+            if nyb < 1e-12:
+                y1b = y1
+            else:
+                y1b = y1b / nyb
+            y1b = np.asarray(y1b, dtype=float)
+            x1b = np.cross(y1b, z1b)
+            t1 = np.stack([x1b, y1b, z1b])
 
         if c0 in core_idx and c0 not in triad:
             triad[c0] = t0
