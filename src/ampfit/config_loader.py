@@ -13,6 +13,43 @@ def load_config(filename):
     return ret
 
 
+def _projection_duplicate(ret, n_proj):
+    """p-major duplication of the per-wave arrays for ``n_proj`` projections.
+
+    Every projection owns the same full wave list (the duplicated
+    ``matrix_angle`` columns are identical copies until the spin/helicity
+    angular generator lands — the angular difference per projection is the
+    later, physics step).  The kernel config thereby gains a projection
+    axis: ``n_wave → n_proj·n_wave`` while ``ck`` keeps length
+    ``n_wave`` (shared across projections).
+
+    Only the *per-wave* arrays are duplicated: ``matrix_angle`` (columns)
+    and ``bw_order`` / ``fl_order`` (rows).  The index/unique arrays
+    (``m0_index``, ``mass_index``, gamma/fl tables, …) are shared by all
+    projections and stay untouched.
+    """
+    ret = dict(ret)
+    for key in ("matrix_angle",):
+        if key in ret:
+            ret[key] = np.concatenate([ret[key]] * n_proj, axis=1)
+    for key in ("bw_order", "fl_order"):
+        if key in ret:
+            ret[key] = np.concatenate([ret[key]] * n_proj, axis=0)
+    return ret
+
+
+# Legacy time/mixing scalar parameters (D0-D0bar flavour-tagged mixing).
+LEGACY_SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod",
+                       "poqr", "poqi"]
+LEGACY_SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+                          "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
+# data.amp_model values that imply the flavour-tag mixing model ⇒ the legacy
+# six scalars are used.  ``flavour_tag_mix`` is the canonical tag-mix model
+# (configs may also spell it ``flour_tag_mix``); ``p4_directly`` kept for
+# backward compatibility of the old B→4π configs.
+MIXING_AMP_MODELS = ("flavour_tag_mix", "flour_tag_mix", "p4_directly")
+
+
 class Particle:
     def __init__(self, name, **kwargs):
         self.name = name
@@ -173,6 +210,83 @@ class Config:
         self.unique_angle_basis = []
         self.n_interp_gamma = 2000  # gamma table interpolation points
         self._param_display_map = None
+
+        # ── cuda_v4_pwa / scalar-free extensions ───────────────────────
+        # n_proj: number of incoherent projections (helicity / spin
+        # projections of the EXTERNAL particles).  Every projection shares
+        # the same ck; wave entries are stored p-major (n_wave = n_proj·N).
+        # Explicit ``n_proj`` in the config wins; otherwise auto-computed as
+        #   n_proj = ∏_i n_i   over i ∈ {top} ∪ {finals}
+        #   n_i    = len(spins) if the particle declares ``spins`` else 2J+1
+        # (intermediate resonances are NOT counted — they only shape the
+        # per-wave angular formula).
+        if self.dic.get("n_proj") is not None:
+            self.n_proj = int(self.dic["n_proj"])
+        else:
+            self.n_proj = self._auto_n_proj()
+        # scalar_names / scalar_defaults: config-driven fit scalars.  Absent
+        # → legacy six mixing scalars (kept so old time/mixing configs work);
+        # ``scalar_names: []`` removes scalars entirely (v4 PWA model).
+        self.scalar_names = self._resolve_scalar_names()
+        self.scalar_defaults = self.dic.get("scalar_defaults")
+
+    # ── scalar decision (data.amp_model) ──────────────────────────────
+    def _data_amp_model(self):
+        """The ``data.amp_model`` model name (string).
+
+        The YAML value may be a plain string (legacy, e.g. ``p4_directly``)
+        or a dict keyed by the model name, e.g.
+        ``{'flavour_tag_mix': {base_model: time_dep_cp, ...}}`` — in that
+        case the single dict key is the model name.  Returns None if unset.
+        """
+        data_d = self.dic.get("data") or {}
+        m = data_d.get("amp_model")
+        if isinstance(m, dict):
+            m = next(iter(m)) if len(m) else None
+        elif isinstance(m, (list, tuple)):
+            m = m[0] if len(m) else None
+        if isinstance(m, str):
+            m = m.strip() or None
+        return m
+
+    def _resolve_scalar_names(self):
+        """Config-driven scalar list (legacy time/mixing scalars or none).
+
+        Decided by ``data.amp_model`` (see :meth:`_data_amp_model`):
+          * explicit top-level ``scalar_names:`` list → used as-is
+          * ``data.amp_model`` in ``MIXING_AMP_MODELS`` (e.g.
+            ``flavour_tag_mix``) → the legacy six mixing scalars
+          * anything else (incl. no amp_model) → ``[]`` — scalar-free,
+            i.e. the pure-PWA / non-tag-mixing models get no scalars.
+        """
+        explicit = self.dic.get("scalar_names")
+        if explicit is not None:
+            return list(explicit)
+        amp_model = self._data_amp_model()
+        if amp_model in MIXING_AMP_MODELS:
+            return list(LEGACY_SCALAR_NAMES)
+        return []
+
+    def _spin_state_count(self, name):
+        """Number of spin states of an external particle.
+
+        ``n_i = len(spins)`` when the particle declares a ``spins`` list
+        (e.g. ``[-1, 1]`` = transverse-only spin-1), else ``2J+1``.
+        """
+        d = self.dic["particle"].get(name)
+        if not isinstance(d, dict):
+            return 1            # composite / non-dict entry — not external
+        spins = d.get("spins")
+        if spins is not None:
+            return max(1, len(list(spins)))
+        return int(2 * d.get("J", 0)) + 1
+
+    def _auto_n_proj(self):
+        """n_proj from the spin multiplicities of top + final particles."""
+        n = self._spin_state_count(self.top)
+        for f in self.finals:
+            n *= self._spin_state_count(f)
+        return max(1, n)
 
     def get_topo_index(self, decay):
         topo_id = {}
@@ -476,6 +590,19 @@ class Config:
 
         for name in ["gamma_table","fl_table", "gamma_min", "gamma_delta", "fl_min", "fl_delta"]:
             ret[name] = base[name]
+
+        # ── cuda_v4_pwa: p-major projection duplication ─────────────────
+        # When the config has more than one incoherent projection (spin
+        # projections of top/final particles), the per-wave arrays are
+        # duplicated p-major (n_wave → P·N) so every projection owns all
+        # waves.  All projections share one ck of length N = n_wave/P.
+        # PLACEHOLDER: until the spin/helicity angular generator lands, the
+        # duplicated matrix_angle columns are identical copies (the angular
+        # difference per projection is filled in later).
+        P = getattr(self, "n_proj", 1) or 1
+        ret["n_proj"] = P
+        if P > 1:
+            ret = _projection_duplicate(ret, P)
 
         return ret
 

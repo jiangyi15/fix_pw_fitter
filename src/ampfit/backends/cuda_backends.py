@@ -103,3 +103,19 @@ class CUDABackendV3AmpCache(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v3_ampcache import CUDAKernelV3AmpCache as K
         return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v4_pwa")
+class CUDABackendV4PWA(_CUDABackend):
+    """CUDA v4 PWA — projection-sum PWA on the ampcache infrastructure.
+
+    No time evolution / no D mixing / no scalar params:
+    ``P(e) = Σ_p |A_p(e)|²`` with ``A_p = Σ_k ck_k·a_{p,k}(e)``.  All
+    projections share the same ck; the projection (helicity / spin
+    projection etc.) only changes the angular part of the per-wave
+    amplitude.  Wave entries are stored p-major (n_wave = n_proj·N, ck
+    length N = n_wave/n_proj).  Config must provide ``n_proj``.
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as K
+        return K(kc, batch_size=bs)

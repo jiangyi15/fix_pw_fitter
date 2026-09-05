@@ -18,7 +18,7 @@ Usage:
         d[name] = float(val)
     for name, val in zip(fitter.config.g0_phys_name, g0_arr):
         d[name] = float(val)
-    for name, val in zip(SCALAR_NAMES, scalar_list):
+    for name, val in zip(fitter.scalar_names, scalar_list):
         d[name] = float(val)
     fitter.cm.set_defaults(d)
     
@@ -35,6 +35,10 @@ import numpy as np
 from ampfit.param_constraint import ConstraintManager
 
 SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
+# Legacy scalar defaults — used when a config does not declare ``scalar_names``
+# (so old time/mixing configs keep working unchanged).
+SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
+                   "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
 
 
 class BuildKernelParams:
@@ -43,15 +47,22 @@ class BuildKernelParams:
     Forward:  ``resolved`` dict → ``{"ck": ..., "m0": ..., "g0": ..., "scalar": ...}``
     Backward: ``total_grads`` (kernel grads) → per-resolved-name gradient dict.
 
-    Encapsulates the structural knowledge (CK combinatorics, m0/g0/scalar name lists)
-    so the Fitter doesn't need to repeat this logic.
+    Encapsulates the structural knowledge (CK combinatorics, m0/g0/scalar name
+    lists) so the Fitter doesn't need to repeat this logic.
+
+    ``scalar_names`` is config-driven: a config may declare ``scalar_names: []``
+    (or omit the key and get the legacy six mixing scalars).  Empty scalar list
+    → ``params`` has no scalar entries and backprop skips the scalar slice
+    (used by the scalar-free ``cuda_v4_pwa`` backend).
     """
 
-    def __init__(self, config, all_comb):
+    def __init__(self, config, all_comb, scalar_names=None):
         from ampfit.param_constraint import CKProduct
         self._pc = CKProduct(all_comb)
         self._m0_names = list(config.m0_phys_name)
         self._g0_names = list(config.g0_phys_name)
+        self.scalar_names = (list(scalar_names) if scalar_names is not None
+                             else list(SCALAR_NAMES))
 
     @property
     def pc(self):
@@ -63,14 +74,15 @@ class BuildKernelParams:
         ck = self._pc.build_ck(resolved)
         m0 = np.array([resolved[n] for n in self._m0_names])
         g0 = np.array([resolved[n] for n in self._g0_names])
-        scalar = np.array([resolved[n] for n in SCALAR_NAMES])
+        scalar = np.array([resolved[n] for n in self.scalar_names])
         return {"ck": ck, "m0": m0, "g0": g0, "scalar": scalar}
 
     def backward(self, total_grads, resolved):
         """Kernel grads dict → per-resolved-name gradient dict.
 
         Args:
-            total_grads: dict with keys ``ck``, ``m0``, ``g0``, ``scalar``.
+            total_grads: dict with keys ``ck``, ``m0``, ``g0`` and (if the
+                config declares scalars) ``scalar``.
             resolved: resolved param dict (for Wirtinger backprop).
 
         Returns:
@@ -79,14 +91,21 @@ class BuildKernelParams:
         # CK Wirtinger backprop
         grad_dict = self._pc.backprop_grad(resolved, total_grads["ck"])
 
-        # m0, g0, scalar → per-name (by position in name list)
+        # m0, g0 → per-name (by position in name list)
         for names_list, key in [
             (self._m0_names, "m0"),
             (self._g0_names, "g0"),
-            (SCALAR_NAMES, "scalar"),
         ]:
             arr = np.asarray(total_grads[key])
             for i, name in enumerate(names_list):
+                if i < len(arr):
+                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
+
+        # scalar → per-name (config-driven; skip if none declared)
+        scalar_g = total_grads.get("scalar")
+        if scalar_g is not None and self.scalar_names:
+            arr = np.asarray(scalar_g)
+            for i, name in enumerate(self.scalar_names):
                 if i < len(arr):
                     grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
 
@@ -138,20 +157,28 @@ class Fitter:
         self.n_g0 = len(self.config.g0_phys_name)
 
         # Standalone constraint manager — flat name list, no type distinction.
+        # Scalar parameters are config-driven: configs may declare
+        # ``scalar_names`` (a list, possibly empty).  Absent → legacy six
+        # mixing scalars, so old time/mixing configs keep working unchanged.
+        cfg_scalar_names = getattr(self.config, "scalar_names", None)
+        self.scalar_names = (list(cfg_scalar_names)
+                             if cfg_scalar_names is not None
+                             else list(SCALAR_NAMES))
         all_ck_bases = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
         all_names = list(dict.fromkeys(
             sorted([n + 'r' for n in all_ck_bases] +
                    [n + 'i' for n in all_ck_bases]) +
             list(self.config.m0_phys_name) +
             list(self.config.g0_phys_name) +
-            list(SCALAR_NAMES)
+            list(self.scalar_names)
         ))
         self.cm = ConstraintManager(all_names)
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
 
         # Kernel parameter builder (resolved ↔ kernel arrays)
-        self._kernel_builder = BuildKernelParams(self.config, self.all_comb)
+        self._kernel_builder = BuildKernelParams(
+            self.config, self.all_comb, scalar_names=self.scalar_names)
 
         # Prior penalties (additive NLL contributions)
         self.priors = []
@@ -595,10 +622,14 @@ class Fitter:
                 seen.add(mid)
                 for k, v in model.get_defaults().items():
                     d[k] = float(v)
-        scalar_base = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-                       "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
-        for name in SCALAR_NAMES:
-            d.setdefault(name, scalar_base.get(name, 0.0))
+        # Scalar defaults (config-driven list).  Config may provide its own
+        # ``scalar_defaults`` dict; anything else falls back to the legacy
+        # mixing values, then 0.0.
+        cfg_scalar_defaults = getattr(self.config, "scalar_defaults", None) or {}
+        for name in self.scalar_names:
+            d.setdefault(name,
+                         cfg_scalar_defaults.get(name,
+                                                SCALAR_DEFAULTS.get(name, 0.0)))
         self.cm.set_defaults(d)
 
     def _check_data_loaded(self):
@@ -1300,15 +1331,13 @@ class Fitter:
                 if i_name not in out["value"]:
                     out["value"][i_name] = float(self._fixed_slots[i_name])
 
-        # Fixed time parameter defaults
-        scalar_names = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
-        time_defaults = {
-            "gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-            "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0,
-        }
-        for name in scalar_names:
+        # Scalar parameter defaults (config-driven list; empty for scalar-free
+        # v4-PWA configs → nothing is added here).
+        cfg_scalar_defaults = getattr(self.config, "scalar_defaults", None) or {}
+        for name in self.scalar_names:
             if name not in out["value"]:
-                out["value"][name] = time_defaults.get(name, 0.0)
+                out["value"][name] = cfg_scalar_defaults.get(
+                    name, SCALAR_DEFAULTS.get(name, 0.0))
                 out["error"][name] = 0.0
 
         # Status
