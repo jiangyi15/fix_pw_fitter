@@ -143,7 +143,7 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
 
     def child_xz(zc, x0, z0):
         zc = np.asarray(zc, dtype=float)
-        xv = zc * float(z0 @ zc) - z0      # azimuth 0 = partner/bachelor side
+        xv = zc * float(z0 @ zc) - z0      # R_y(theta)R_z(phi) image of parent x
         n = _norm(xv)
         if n > 1e-9:
             xc = xv / n
@@ -242,7 +242,7 @@ def angles_to_momenta(chain, angles, top_triad=None):
 
     def child_xz(zc, x0, z0):
         zc = np.asarray(zc, dtype=float)
-        xv = zc * float(z0 @ zc) - z0      # azimuth 0 = partner/bachelor side
+        xv = zc * float(z0 @ zc) - z0      # R_y(theta)R_z(phi) image of parent x
         n = _norm(xv)
         if n > 1e-9:
             xc = xv / n
