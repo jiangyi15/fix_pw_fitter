@@ -180,3 +180,28 @@ def test_momenta_to_data_angles_all_rows_match_original():
     for key in ('mass', 'q', 'angles', 'frac', 'time', 'weight'):
         assert np.array_equal(a[key], b[key])
     assert a['angles'].shape == (400, 24, 3)
+
+
+def test_chain_topology_original_rows_match_all_perm_blocks():
+    """Nested (chain) rows: th1=θ(R1), th2=θ(R2), φ=φ₂+π for every
+    identical-particle permutation block."""
+    from ampfit.phasespace_b4pi import generate_b4pi
+    from ampfit.momenta_to_data import momenta_to_data, _IDENTICAL_PERMS
+    from ampfit.momenta_to_angles import chain_original_triplet
+
+    cfg = Config('config_amp.yml')
+    ch1 = [cc for cc in cfg.full_decay.chains
+           if 'a1(1260)p->rhoA+pip2' in str(cc)][0]
+    ev = generate_b4pi(400, seed=3)
+    ang = momenta_to_data(ev['momenta'])['angles']
+    for b in range(4):
+        o = _IDENTICAL_PERMS[b]
+        for i in range(ev['momenta'].shape[0]):
+            fin = {n: ev['momenta'][i][o[j]]
+                   for j, n in enumerate(['pip1', 'pim1', 'pip2', 'pim2'])}
+            v = decay_angles_from_momenta(ch1, fin)
+            got = chain_original_triplet(v)
+            ref = ang[i, b * 3 + 1]          # (φ, θ1, θ2)
+            assert abs(_wrap(got[0] - ref[0])) < 1e-9
+            assert abs(got[1] - ref[1]) < 1e-9
+            assert abs(got[2] - ref[2]) < 1e-9

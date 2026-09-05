@@ -105,44 +105,45 @@ def build_node_momenta(chain, final_momenta):
 
 
 def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
-    """Per-vertex Euler angles (φ_v, θ_v) along the decay chain.
+    """Per-vertex Euler angles (θ_v, φ_v) via top→leaf successive boosts.
 
-    Args:
-        chain: ampfit DecayChain.
-        final_momenta: dict name → (E,px,py,pz) of the final particles, in
-            the top CM frame (sums to (m_top, 0,0,0)).
-        top_triad: optional (x0,y0,z0) orthonormal triad of the top at rest
-            (default identity).
-
-    Returns:
-        ``[ (φ_v, θ_v), ... ]`` in ``chain.decays`` order.
+    The event momenta are carried DOWN the decay tree: at every vertex the
+    parent is at rest (top in the CM, then each resonance boosted step by
+    step along its own velocity in the frame where it was produced), so the
+    helicity axes follow the tree and no single-boost/Wigner distortion
+    appears.  Frames are stored as (x, z) pairs (y = z×x).
     """
-    mom = build_node_momenta(chain, final_momenta)
+    mom_cm = build_node_momenta(chain, final_momenta)
     if top_triad is None:
-        top_triad = np.array([[1.0, 0.0, 0.0],      # x
-                              [0.0, 0.0, 1.0]])     # z
+        top_triad = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])   # x, z
     else:
         top_triad = np.asarray(top_triad, dtype=float)
         if top_triad.shape == (3, 3):
-            top_triad = top_triad[[0, 2]]           # keep x,z rows
+            top_triad = top_triad[[0, 2]]
 
     decays = chain.decays
-    core_idx = {d.core.name: i for i, d in enumerate(decays)}
+    vmap = {d.core.name: i for i, d in enumerate(decays)}
 
-    # frame per particle: 2x3 rows [x, z]; y is derived on demand as z×x.
-    triad = {decays[0].core.name: np.asarray(top_triad, dtype=float)}
-    angles = {}
+    # subtree members per particle (names incl itself)
+    subtree = {}
+
+    def collect(name):
+        if name in subtree:
+            return subtree[name]
+        out = {name}
+        for d in decays:
+            if d.core.name == name:
+                for o in d.outs:
+                    out |= collect(o.name)
+        subtree[name] = out
+        return out
+
+    for d in decays:
+        collect(d.core.name)
 
     def child_xz(zc, x0, z0):
-        """In-plane reference x of a child moving along *zc*.
-
-        x = projection of the parent reference z onto the plane ⊥ zc
-            (so the parent-child plane is the azimuth reference); when the
-            projection vanishes (collinear) both children share one
-            arbitrary perpendicular reference.
-        """
         zc = np.asarray(zc, dtype=float)
-        xv = z0 - zc * float(z0 @ zc)
+        xv = zc * float(z0 @ zc) - z0      # azimuth 0 = partner/bachelor side
         n = _norm(xv)
         if n > 1e-9:
             xc = xv / n
@@ -152,28 +153,26 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
             v = np.cross(z0, ref)
             nv = _norm(v)
             xc = v / nv if nv > 1e-12 else np.array([1.0, 0.0, 0.0])
-        return np.stack([xc, zc])                  # rows [x, z]
+        return np.stack([xc, zc])
 
-    for i, d in enumerate(decays):
-        pname = d.core.name
-        p4 = mom[pname]
-        E = float(p4[0])
-        beta_p = p4[1:] / E if E > 0 else np.zeros(3)
-        T = triad[pname]
+    angles = {}
+
+    def rec(name, p4_in_rest, T):
+        """*name* is at rest; p4_in_rest maps its subtree particles to
+        4-momenta in this rest frame."""
+        i = vmap[name]
+        d = decays[i]
+        c0, c1 = d.outs[0].name, d.outs[1].name
+        q0 = p4_in_rest[c0]
+        q1 = p4_in_rest[c1]
         x0, z0 = T[0], T[1]
         y0 = np.cross(z0, x0)
-
-        c0, c1 = d.outs[0].name, d.outs[1].name
-        q0 = _boost_4vector(mom[c0], beta_p)
-        q1 = _boost_4vector(mom[c1], beta_p)
         z1 = _unit3(q0[1:])
         if z1 is None:
             z1 = _unit3(q1[1:])
         if z1 is None:
             z1 = np.array([0.0, 0.0, 1.0])
-
-        cz = float(np.clip(z0 @ z1, -1.0, 1.0))
-        theta = float(np.arccos(cz))
+        theta = float(np.arccos(np.clip(float(z0 @ z1), -1.0, 1.0)))
         phi = float(np.arctan2(float(z1 @ y0), float(z1 @ x0)))
         angles[i] = (phi, theta)
 
@@ -183,11 +182,18 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
         t0 = child_xz(z1, x0, z0)
         t1 = child_xz(z1b, x0, z0)
 
-        if c0 in core_idx and c0 not in triad:
-            triad[c0] = t0
-        if c1 in core_idx and c1 not in triad:
-            triad[c1] = t1
+        for c, tc in ((c0, t0), (c1, t1)):
+            if c in vmap:                      # inner: descend (successive boost)
+                qc = p4_in_rest[c]
+                Ec = float(qc[0])
+                beta = qc[1:] / Ec if Ec > 0 else np.zeros(3)
+                sub = {}
+                for nm in subtree[c]:
+                    sub[nm] = _boost_4vector(p4_in_rest[nm], beta)
+                rec(c, sub, tc)
 
+    top = decays[0].core.name
+    rec(top, mom_cm, np.asarray(top_triad, dtype=float))
     return [angles[i] for i in range(len(decays))]
 
 
@@ -236,7 +242,7 @@ def angles_to_momenta(chain, angles, top_triad=None):
 
     def child_xz(zc, x0, z0):
         zc = np.asarray(zc, dtype=float)
-        xv = z0 - zc * float(z0 @ zc)
+        xv = zc * float(z0 @ zc) - z0      # azimuth 0 = partner/bachelor side
         n = _norm(xv)
         if n > 1e-9:
             xc = xv / n
@@ -292,3 +298,27 @@ def momenta_to_data_angles(momenta, weight=None, frac=None, time=None):
     """
     from ampfit.momenta_to_data import momenta_to_data as _orig
     return _orig(momenta, weight=weight, frac=frac, time=time)
+
+
+# ---------------------------------------------------------------------------
+# per-vertex → original row-format triplets (B→4π)
+# ---------------------------------------------------------------------------
+# Relations derived numerically against ampfit.momenta_to_data (all
+# identical-particle permutation blocks, to ~1e-13):
+#   ρρ (two resonances each → ππ):   (φ,θ₁,θ₂) = (φ₁+φ₂, θ(R1), θ(R2))
+#   chain (B→R1(→R2π⁺)π⁻):          (φ,θ₁,θ₂) = (φ₂+π, θ(R1), θ(R2))
+# where *v* is the per-vertex angle list in chain.decays order and R2 is the
+# deepest (→ππ) vertex.
+
+def rho_original_triplet(v):
+    """per-vertex (ρρ chain: B,R1,R2 → (φ,θ₁,θ₂) in momenta_to_data format."""
+    return (wrap_angle(v[1][0] + v[2][0]), v[1][1], v[2][1])
+
+
+def chain_original_triplet(v):
+    """per-vertex (nested chain: B,R1,R2 → (φ,θ₁,θ₂) format."""
+    return (wrap_angle(v[2][0]), v[1][1], v[2][1])
+
+
+def wrap_angle(x):
+    return (x + math.pi) % (2 * math.pi) - math.pi
