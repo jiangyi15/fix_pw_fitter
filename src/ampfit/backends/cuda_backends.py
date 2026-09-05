@@ -87,3 +87,19 @@ class CUDABackendV3Sparse(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v3_sparse import CUDAKernelV3Sparse as K
         return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_ampcache")
+class CUDABackendV3AmpCache(_CUDABackend):
+    """CUDA v3 ampcache — v3 sparse + cached minimal-set angular amplitudes.
+
+    The per-wave amplitude is ``a_w = ck_w·Amp_w(q,angles)/bw_p_w(m)``; the
+    angular part (272 unique values/event) is pure kinematics and is cached
+    per handle at load_data (fp64 fill, float2 storage), while the BW
+    propagator is recomputed each iteration — so m0/g0 remain fitted
+    (unlike cuda_v3_cache, which requires them fixed).  Cache is constant
+    over the fit, so fp32 storage never moves the minimum.
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit.cuda._v3_ampcache import CUDAKernelV3AmpCache as K
+        return K(kc, batch_size=bs)

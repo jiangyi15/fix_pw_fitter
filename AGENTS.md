@@ -15,6 +15,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 | Backend | Flag | Note |
 |---------|------|------|
 | **Integrated** | `{"name": "integrated", "base": "cuda_v3"}` | Gram matrix O(n²) norm + CUDAv3 base for data NLL. Default in `fit.sh`. Base defaults to `cuda_v3`. |
+| **v3 amp-cache** | `cuda_v3_ampcache` | v3 sparse + per-handle cache of the minimal-set angular amplitudes (`Amp = fa·fl`, 272 unique/event). Forward per wave = `ck·Amp_slot[w]/bw_p`, so only the BW propagator is recomputed each iteration (m0/g0 stay fitted, grads flow). momentum/angle are uploaded only transiently for the fill and **not kept** on the GPU. fp64 fill → float2 store (constant over fit). ~1.7× faster than sparse per iteration. |
 | **v3 sparse** | `cuda_v3_sparse` | Split-kernel + sparse scatter/gather for matrix_gamma (99.5% sparse). FP32 FA + float momentum/angle. **3.8× faster than v3** (271→70 ms). FP64 for g0/m0/BW. |
 | **CPU (C+OMP)** | `cpu_v3`, `cpu64_v3` | Pure C + OpenMP + AVX2. Sparse scatter/gather. **6.3× faster than NumPy** (2459→391 ms at 10K). No GPU required. Auto-built via gcc. |
 | CUDA f64 v3 | `cuda_v3`, `cuda`, `cuda64` | Catmull-Rom (default standalone). |
