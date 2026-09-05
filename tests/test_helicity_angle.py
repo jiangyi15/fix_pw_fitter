@@ -349,3 +349,25 @@ def test_compare_to_cache_all_matched():
                                      verbose=False)
     assert summary['rows_found'] == 62
     assert summary['unmatched'] == 0
+
+
+def test_build_single_index_modes_equivalent_config_amp():
+    """config_amp (B→4π): helicity-mode build_single_index reproduces the
+    predefined cache-mode index arrays (matrix/angle basis identical)."""
+    import copy
+    from ampfit.config_loader import Config
+
+    base = {'angle_formula': 'cache'}
+    d = {'angle_formula': 'cache'}
+    # reload with explicit cache & helicity
+    c_h = Config(copy.deepcopy(Config('config_amp.yml').dic) | {'angle_formula': 'helicity'})
+    c_c = Config(copy.deepcopy(Config('config_amp.yml').dic) | {'angle_formula': 'cache'})
+    rh = c_h.build_single_index()
+    rc = c_c.build_single_index()
+    assert rh['matrix_angle'].shape == rc['matrix_angle'].shape
+    assert np.allclose(rh['matrix_angle'], rc['matrix_angle'], atol=1e-10)
+    assert np.array_equal(rh['angle_k'], rc['angle_k'])
+    assert np.allclose(rh['angle_b'], rc['angle_b'])
+    assert np.array_equal(rh['angle_index'], rc['angle_index'])
+    assert np.array_equal(rh['bw_order'], rc['bw_order'])
+    assert np.array_equal(rh['fl_order'], rc['fl_order'])

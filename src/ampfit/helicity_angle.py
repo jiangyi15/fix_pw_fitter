@@ -1003,3 +1003,42 @@ def decay_chain_ls_product(chain):
     """All partial waves (one (l,s) per decay) of a DecayChain."""
     import itertools as _it
     return list(_it.product(*decay_chain_ls_sets(chain)))
+
+
+def wave_terms_canonical(chain, ls):
+    """Term list for one partial wave, cache-schema compatible.
+
+    Given an ampfit DecayChain and one per-vertex (l, s) combination, returns
+    the angular terms in the canonical gauge-fixed phi-first layout, each as
+    ``{'coeffs': complex, 'k': [freq per angle column],
+    'b': ['cos'|'sin' per angle column]}`` — exactly the schema used by
+    ``config_loader.build_single_index`` / the predefined cache.
+
+    Requires a J=0 top and spinless final states (the current helicity-mode
+    support scope); the unique external helicity configuration is used.
+    """
+    top = chain.decays[0].core
+    leaves = decay_chain_leaves(chain)
+    if to_spin(top.J) != 0 or any(to_spin(o.J) != 0 for o in leaves):
+        raise NotImplementedError(
+            "helicity-mode wave terms currently require a J=0 top and "
+            "spinless final states")
+    tree = decay_chain_to_tree(chain)
+    nv = len(tree_vertices(tree))
+    _, mono = amplitude_monomials(tree, tuple(ls), 0,
+                                  tuple(0 for _ in leaves))
+    _, mono = gauge_fix_top0(mono, nv)     # phi-first regrouped layout
+    terms = []
+    for key, coef in mono.items():
+        if abs(coef) < 1e-12:
+            continue
+        k = []
+        b = []
+        for (kind, f) in key:
+            fr = float(f)
+            k.append(int(round(fr)) if abs(fr - round(fr)) < 1e-9 else fr)
+            b.append('cos' if kind == 'c' else 'sin')
+        terms.append({'coeffs': complex(round(coef.real, 14),
+                                        round(coef.imag, 14)),
+                      'k': k, 'b': b})
+    return terms

@@ -445,6 +445,19 @@ class Config:
 
 
 
+    def _wave_angle_formula(self, decaychain, ls):
+        """Angular terms of one partial wave, honoring angle_formula_mode.
+
+        'cache'    → predefined angular_formula.cache_formula (original path)
+        'helicity' → numeric helicity-angle engine (default), producing the
+                     same term schema {coeffs, k, b} in the canonical
+                     gauge-fixed phi-first layout.
+        """
+        if getattr(self, "angle_formula_mode", "helicity") == "helicity":
+            from ampfit.helicity_angle import wave_terms_canonical
+            return wave_terms_canonical(decaychain, ls)
+        return get_angle_formula(decaychain, ls)
+
     def build_single_index(self):
         topo_id_map = self.topo_index
         # print(topo_id_map)
@@ -478,7 +491,7 @@ class Config:
                 fl_id = (ls[idx][0], self.n_decay*topo+idx)
                 if fl_id not in self.unique_fl:
                     self.unique_fl.append(fl_id)
-            ang_formula = get_angle_formula(decaychain, ls)
+            ang_formula = self._wave_angle_formula(decaychain, ls)
             for ang in ang_formula:
                 basis_key = (topo, tuple(ang["k"]),tuple(ang["b"]))
                 if basis_key not in self.unique_angle_basis:
@@ -503,7 +516,7 @@ class Config:
                     bw_order.append(self.unique_bw.index(bw_id))
                 fl_id = (ls[idx][0], self.n_decay*topo+idx)
                 fl_order.append(self.unique_fl.index(fl_id))
-            ang_formula = get_angle_formula(decaychain, ls)
+            ang_formula = self._wave_angle_formula(decaychain, ls)
             matrix_angle_tmp = np.zeros(len(self.unique_angle_basis))+0j
             for ang in ang_formula:
                 coeff = ang["coeffs"]
