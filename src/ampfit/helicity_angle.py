@@ -808,3 +808,100 @@ def evaluate_table(table, angles):
             acc += ka[bi] * c
         out[wi] = acc
     return out
+
+
+# ---------------------------------------------------------------------------
+# Multi-chain combine → global angular model
+# ---------------------------------------------------------------------------
+# Chains are merged by their canonical variable layout (event chains that
+# share the same (φ…, θ…) column structure, i.e. the same number of vertices
+# after the top-J=0 gauge).  Within one layout the global basis is the UNION
+# of the per-chain nonzero monomials; every wave entry becomes one column of
+# the sparse matrix_angle.
+
+def angular_model(chains, verbose=False):
+    """Combine several DecayChain angular tables into global models.
+
+    Args:
+        chains: iterable of ampfit DecayChain objects.
+
+    Returns a dict ``layout_key → model`` where each model is::
+
+        {'variables': [(vertex, 'phi'|'theta'), ...],   # event angle columns
+         'basis':     [monomial key over the variables, ...],
+         'entries':   [{'chain': i, 'proj': (λtop, leafλ…), 'ls': (l,s)…,
+                        'cols': [(basis_index, complex), ...]}, ...]}
+
+    Only chains with at least one partial wave contribute entries.
+    """
+    groups = {}          # layout_key -> model skeleton
+    order = []
+    for ci, chain in enumerate(chains):
+        tbl = chain_angular_table(chain)
+        if tbl['n_waves'] == 0 or not tbl['waves']:
+            continue
+        key = tuple(tbl['variables'])
+        if key not in groups:
+            groups[key] = {'variables': tbl['variables'], 'entries': [],
+                           'n_chains': 0}
+            order.append(key)
+        groups[key]['n_chains'] += 1
+        # per-chain cols are indices into tbl['basis']; translate to keys
+        for row in tbl['waves']:
+            groups[key]['entries'].append(
+                {'chain': ci, 'proj': row['proj'], 'ls': row['ls'],
+                 'cols': [(tbl['basis'][bi], c) for bi, c in row['cols']]})
+
+    models = {}
+    for key in order:
+        g = groups[key]
+        # union basis over all tables of this layout (remap per-entry cols)
+        bas = {}
+        entries = []
+        for e in g['entries']:
+            newcols = []
+            for k, c in e['cols']:
+                # e['cols'] keys are the per-chain basis keys (tuples)
+                if k not in bas:
+                    bas[k] = len(bas)
+                newcols.append((bas[k], c))
+            entries.append({'chain': e['chain'], 'proj': e['proj'],
+                            'ls': e['ls'], 'cols': newcols})
+        basis = [None] * len(bas)
+        for k, i in bas.items():
+            basis[i] = k
+        models[key] = {'variables': g['variables'], 'basis': basis,
+                       'entries': entries, 'n_chains': g['n_chains']}
+        if verbose:
+            print(f"layout {list(key)}: chains {g['n_chains']}  "
+                  f"entries {len(entries)}  global basis {len(basis)}")
+    return models
+
+
+def evaluate_model(model, angles):
+    """Matrix-multiply amplitudes for all entries of one merged model.
+
+    *angles*: per-event values for ``model['variables']`` (list) or
+    {vertex: (φ, θ)}.
+    Returns a complex array over ``model['entries']``.
+    """
+    vars_ = model['variables']
+    if isinstance(angles, dict):
+        vals = [(angles[v][0] if k == 'phi' else angles[v][1])
+                for (v, k) in vars_]
+    else:
+        vals = list(angles)
+    nb = len(model['basis'])
+    ka = np.ones(nb, dtype=np.complex128)
+    for b, key in enumerate(model['basis']):
+        v = 1.0
+        for (kind, f), x in zip(key, vals):
+            v *= math.cos(f * x) if kind == 'c' else math.sin(f * x)
+        ka[b] = v
+    out = np.zeros(len(model['entries']), dtype=np.complex128)
+    for i, e in enumerate(model['entries']):
+        acc = 0j
+        for bi, c in e['cols']:
+            acc += ka[bi] * c
+        out[i] = acc
+    return out

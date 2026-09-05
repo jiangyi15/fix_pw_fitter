@@ -282,3 +282,42 @@ def test_chain_angular_table_self_consistent():
             Amat = evaluate_table(tbl, vals)[wi]
             worst = max(worst, abs(A - Amat))
     assert worst < 1e-12
+
+
+def test_angular_model_combines_all_chains():
+    """config_amp: all chains merge into one phi-first gauge layout with a
+    global basis; every entry reproduces amplitude() numerically."""
+    from ampfit.config_loader import Config
+    from ampfit.helicity_angle import (angular_model, evaluate_model,
+                                       decay_chain_to_tree, amplitude)
+
+    cfg = Config('config_amp.yml')
+    chains = list(cfg.full_decay.chains)
+    models = angular_model(chains)
+    assert len(models) == 1
+    key = next(iter(models))
+    model = models[key]
+    assert model['variables'] == [(2, 'phi'), (1, 'theta'), (2, 'theta')]
+    assert model['n_chains'] == len(chains)
+    assert len(model['entries']) == 62
+    assert len(model['basis']) == 19
+
+    rng = np.random.default_rng(71)
+    worst = 0.0
+    for _ in range(40):
+        e = model['entries'][int(rng.integers(len(model['entries'])))]
+        ch = chains[e['chain']]
+        tree = decay_chain_to_tree(ch)
+        ang = {0: (0.0, 0.0), 1: (0.0, 0.0), 2: (0.0, 0.0)}
+        th1 = rng.uniform(0.2, math.pi - 0.2)
+        th2 = rng.uniform(0.2, math.pi - 0.2)
+        ph2 = rng.uniform(0, 2 * math.pi)
+        ang[1] = (0.0, th1)
+        ang[2] = (ph2, th2)
+        A = amplitude(tree, e['ls'], ang, e['proj'][0], e['proj'][1])
+        vals = [(ang[v][0] if k == 'phi' else ang[v][1])
+                for (v, k) in model['variables']]
+        idx = model['entries'].index(e)
+        Amat = evaluate_model(model, vals)[idx]
+        worst = max(worst, abs(A - Amat))
+    assert worst < 1e-12
