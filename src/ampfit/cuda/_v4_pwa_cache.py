@@ -53,7 +53,8 @@ void* cuda_create_context_v4(
     int n_uniq,int n_proj);
 void cuda_free_context_v4(void*);
 void* cuda_load_data_v4(void*,const double*,int,const double*,int,
-    const double*,int,const double*,const double*,int);
+    const double*,int,const double*,const double*,int,
+    const double*,int,const double*,int);
 void cuda_free_data_v4(void*);
 void cuda_compute_v4(void*,void*,
     const double*,const double*,const double*,const double*,
@@ -103,7 +104,17 @@ class CUDAKernelV4PWACache:
     ``m0`` and ``g0``.  Gradients returned for ``ck``/``m0``/``g0`` only.
     """
 
-    def __init__(self, config, batch_size=50000, lib_path=None):
+    def __init__(self, config, batch_size=50000, lib_path=None,
+                 m0=None, g0=None):
+        """Fixed-m0/g0 pure-PWA cache kernel.
+
+        Pass the fixed masses/widths at construction (``m0``/``g0``); the
+        full-amplitude cache is then built inside :meth:`load_data` from
+        those values (strictly constant for the kernel lifetime).  If not
+        given here, ``load_data(data, params)`` accepts them per call.
+        """
+        self._fixed_m0 = None if m0 is None else np.asarray(m0, np.float64)
+        self._fixed_g0 = None if g0 is None else np.asarray(g0, np.float64)
         self._lib = _load_lib()
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
@@ -187,7 +198,27 @@ class CUDAKernelV4PWACache:
             _ib(self.rep_of_slot), len(self.rep_of_slot),
             self.n_uniq, self.n_proj)
 
-    def load_data(self, data):
+    def _padded_mg(self, params):
+        """m0/g0 padded to the kernel-unique sizes (must be fixed)."""
+        nm_ = self.n_m0_params
+        gg_ = self.n_g0_params
+        m0 = np.zeros(nm_, np.float64)
+        m0[:len(params["m0"])] = np.asarray(params["m0"])
+        g0 = np.zeros(gg_, np.float64)
+        g0[:len(params["g0"])] = np.asarray(params["g0"])
+        return m0, g0
+
+    def load_data(self, data, params=None):
+        """Upload weight/bkg and build the fixed-m0/g0 amplitude cache at
+        LOAD time: mass/momentum/angle are passed per batch transiently (like
+        the angular fill) and are not retained.  The fixed m0/g0 come from
+        the kernel constructor (preferred) or from ``params``.
+        """
+        if params is None:
+            if self._fixed_m0 is None or self._fixed_g0 is None:
+                raise ValueError("fixed m0/g0 required: pass them to the "
+                                 "kernel constructor or to load_data(params=)")
+            params = {"m0": self._fixed_m0, "g0": self._fixed_g0}
         ka = []
 
         def _db(a):
@@ -195,6 +226,8 @@ class CUDAKernelV4PWACache:
             buf = _ffi.from_buffer(arr)
             ka.append(buf)
             return _ffi.cast("double*", buf)
+
+        m0, g0 = self._padded_mg(params)
 
         ne = data["mass"].shape[0]
         mass = data["mass"].reshape(ne, -1)
@@ -206,7 +239,8 @@ class CUDAKernelV4PWACache:
         dh = DataHandle(self._lib.cuda_load_data_v4(
             self._ctx, _db(mass), mass.shape[1],
             _db(mom), mom.shape[1], _db(ang), nang,
-            _db(data["weight"]), _db(data[bkg_key]), ne), self._lib, ne)
+            _db(data["weight"]), _db(data[bkg_key]), ne,
+            _db(m0), len(m0), _db(g0), len(g0)), self._lib, ne)
         dh._keep = ka
         return dh
 
@@ -240,10 +274,7 @@ class CUDAKernelV4PWACache:
 
         ck_r = np.real(ck).astype(np.float64)
         ck_i = np.imag(ck).astype(np.float64)
-        m0 = np.zeros(nm_, np.float64)
-        m0[:len(params["m0"])] = np.asarray(params["m0"])
-        g0 = np.zeros(gg_, np.float64)
-        g0[:len(params["g0"])] = np.asarray(params["g0"])
+        m0, g0 = self._padded_mg(params)
 
         oQ = _ffi.new("double*")
         oP = np.zeros(data_handle.ne, np.float64)

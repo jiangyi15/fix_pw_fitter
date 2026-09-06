@@ -39,10 +39,14 @@ def test_v4_pwa_cache_matches_v4_pwa_fixed(pwa_small):
     from ampfit.cuda._v4_pwa_cache import CUDAKernelV4PWACache as KC
     _cfg, kc, data, params, _p = pwa_small
 
-    kv, kc_ = _make(KV4, kc), _make(KC, kc)
+    kv, kc_ = _make(KV4, kc), None
+    try:
+        kc_ = KC(kc, batch_size=128, m0=params["m0"], g0=params["g0"])
+    except RuntimeError as e:
+        pytest.skip(f"no CUDA device: {e}")
     try:
         hv = kv.load_data(data)
-        hc = kc_.load_data(data)
+        hc = kc_.load_data(data)   # cache built at load with fixed m0/g0
         try:
             q_none = None
             for norm in (None, float(len(data["weight"]))):
