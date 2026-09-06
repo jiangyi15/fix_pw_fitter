@@ -149,7 +149,16 @@ class Fitter:
         self.backend = backend
 
         # ck_map (list of param name tuples, one per partial wave)
-        self.all_comb = self.config.get_ck_map()
+        # Single-block pure-PWA configs reuse the same ck-index construction:
+        # all_comb = the N partial-wave tuples (kc['ck_map']), same products
+        # and (r, θ) slots as the legacy machinery — no new encoding.
+        if self.kernel_config.get("n_blocks", 1) == 1 \
+                and "ck_map" in self.kernel_config:
+            self.all_comb = list(self.kernel_config["ck_map"])
+            self._pwa_single_block = True
+        else:
+            self.all_comb = self.config.get_ck_map()
+            self._pwa_single_block = False
         self.n_wave = len(self.all_comb)
 
         # Physical parameter dimensions
@@ -701,6 +710,22 @@ class Fitter:
                          cfg_scalar_defaults.get(name,
                                                 SCALAR_DEFAULTS.get(name, 0.0)))
         self.cm.set_defaults(d)
+        if getattr(self, "_pwa_single_block", False):
+            # Reuse the exact legacy ck-index construction for the single
+            # block: normalization terms ('_total_0') default to 1 and every
+            # complex comb term gets its (r=1, θ=0) slots — otherwise the
+            # ck product would vanish (all defaults 0).
+            extra = {}
+            for comb in self.all_comb:
+                for p in comb:
+                    if not isinstance(p, str):
+                        continue
+                    if "_total_0" in p:
+                        extra[p] = 1.0
+                    else:
+                        extra.setdefault(p + "r", 1.0)
+                        extra.setdefault(p + "i", 0.0)
+            self.cm.set_defaults(extra)
 
     def _check_data_loaded(self):
         """Raise if data or phsp not set."""

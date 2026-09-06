@@ -209,3 +209,7 @@ def test_load_all_data_prefix_momenta(tmp_path):
     assert pn["mass"].shape == (300, 1)
     assert dn["angle"].shape == (100, 1, 4)     # canonical, any n_comps
     assert dn["q"].shape == (100, 2)
+    # single-block ck reused via kc['ck_map']; NLL finite from defaults
+    nll, grad = f.get_nll(f.initial_values())
+    assert np.isfinite(nll)
+    assert np.all(np.isfinite(np.asarray(grad)))
