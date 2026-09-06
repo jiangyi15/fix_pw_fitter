@@ -145,12 +145,12 @@ def test_declaration_driven_row_blocks(cfg):
 
 
 def test_build_all_index_routes_pure_pwa(cfg):
-    """C==1 configs route through the pwa engine inside build_all_index."""
+    """A single generic build_all_index emits the pure-PWA arrays (C==1)."""
     from ampfit.config_loader import row_block_factors
 
     assert row_block_factors(cfg.dic) == (1, 1, 1)
     c2 = Config("config_pwa.yml")
-    kc = c2.build_all_index()                      # merged single entry point
+    kc = c2.build_all_index()                      # single generic entry point
     kc_ref = build_pwa_kernel_config(Config("config_pwa.yml"))
     for key in ("matrix_angle", "bw_order", "fl_order", "m0_index",
                 "mass_index", "g0_index", "g0_mass_index", "fl_type",
@@ -160,4 +160,4 @@ def test_build_all_index_routes_pure_pwa(cfg):
     # Fitter-facing attributes synced for defaults/constraints
     assert c2.m0_phys_name == kc_ref["m0_names"]
     assert c2.g0_phys_name == kc_ref["g0_names"]
-    assert len(kc["ck_map"]) == kc_ref["matrix_angle"].shape[1] // kc["n_proj"]
+    assert len(kc["ck_map"]) == kc["matrix_angle"].shape[1] // kc["n_proj"]

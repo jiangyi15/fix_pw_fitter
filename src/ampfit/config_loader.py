@@ -472,37 +472,90 @@ class Config:
 
 
 
-    def _wave_angle_formula(self, decaychain, ls):
-        """Angular terms of one partial wave, honoring angle_formula_mode.
+    def _helicity_top_states(self):
+        """External top-helicity projection states (single for a J=0 top)."""
+        if getattr(self, "angle_formula_mode", "helicity") != "helicity":
+            return [0]
+        from ampfit.helicity_angle import to_spin
+        top_d = self.dic["particle"].get(self.top, {})
+        spins = top_d.get("spins")
+        if spins is not None:
+            return [to_spin(x) for x in spins]
+        J = top_d.get("J", 0)
+        if int(J) == 0:
+            return [to_spin(0)]
+        return [to_spin(m) for m in range(-int(J), int(J) + 1)]
 
-        'cache'    → predefined angular_formula.cache_formula (original path)
-        'helicity' → numeric helicity-angle engine (default), producing the
-                     same term schema {coeffs, k, b} in the canonical
-                     gauge-fixed phi-first layout.
+    def _wave_angle_terms(self, decaychain, ls, lam):
+        """Angular terms of one partial wave for one projection lambda.
+
+        Returns ``[{'coeffs', 'k', 'b'}, ...]`` over the canonical
+        phi-first layout (n_angles columns).  Gauge drops the top-J=0
+        rotation; a spinful top keeps all 2·n_vertices columns and uses
+        the requested external helicity *lam*.
         """
-        if getattr(self, "angle_formula_mode", "helicity") == "helicity":
-            from ampfit.helicity_angle import wave_terms_canonical
-            return wave_terms_canonical(decaychain, ls)
-        return get_angle_formula(decaychain, ls)
+        if getattr(self, "angle_formula_mode", "helicity") != "helicity":
+            return get_angle_formula(decaychain, ls)
+        from ampfit.helicity_angle import (
+            to_spin, decay_chain_to_tree, tree_vertices,
+            decay_chain_leaves, amplitude_monomials, _reduce_layout)
+        top = decaychain.decays[0].core
+        leaves = decay_chain_leaves(decaychain)
+        top_j0 = to_spin(top.J) == 0
+        if not top_j0 and any(to_spin(o.J) != 0 for o in leaves):
+            raise NotImplementedError(
+                "helicity mode: spinful final states not supported")
+        tree = decay_chain_to_tree(decaychain)
+        nv = len(tree_vertices(tree))
+        lam_top = 0 if top_j0 else to_spin(lam)
+        _, mono = amplitude_monomials(tree, tuple(ls), lam_top,
+                                      tuple(0 for _ in leaves))
+        _, mono = _reduce_layout(mono, nv, (0, 1, 2) if top_j0 else (),
+                                 phi_first=True)
+        terms = []
+        for key, coef in mono.items():
+            if abs(coef) < 1e-12:
+                continue
+            k = []
+            b = []
+            for (kind, f) in key:
+                fr = float(f)
+                k.append(int(round(fr)) if abs(fr - round(fr)) < 1e-9 else fr)
+                b.append('cos' if kind == 'c' else 'sin')
+            terms.append({'coeffs': complex(round(coef.real, 14),
+                                            round(coef.imag, 14)),
+                          'k': k, 'b': b})
+        return terms
 
     def build_single_index(self):
+        """Generic kernel-config base (any topology, any angle count, any
+        number of spin projections p-major).
+
+        * cache mode / J=0 top: one projection (lambda 0), identical to the
+          original output;
+        * helicity mode with a spinful top: one *distinct* p-major column
+          per external top helicity (columns = p·N + k), shared ck.
+        """
         topo_id_map = self.topo_index
-        # print(topo_id_map)
-
         bw_gamma = {}
+        waves = list(self.full_decay.get_partial_waves())
+        N = len(waves)
+        states = self._helicity_top_states()
+        P = len(states)
+        helicity = getattr(self, "angle_formula_mode", "helicity") == "helicity"
 
-        for ls, decaychain in self.full_decay.get_partial_waves():
+        # ── pass 1: unique bw/gamma/fl + basis union over (wave, proj) ──
+        for ls, decaychain in waves:
             for li in ls:
                 if li[0] not in self.unique_l:
                     self.unique_l.append(li[0])
             topo = topo_id_map[decaychain.topo_id()]
             for idx, decay in enumerate(decaychain.decays):
-                if idx != 0: # not top decay
-                    m_name = decay.core.name +"_mass"
+                if idx != 0:  # sub-decay resonance
+                    m_name = decay.core.name + "_mass"
                     if m_name not in self.m0_phys_name:
                         self.m0_phys_name.append(m_name)
-                    m_idx = self.n_res*topo+idx-1
-                    # print(decaychain, topo, idx,m_idx)
+                    m_idx = self.n_res * topo + idx - 1
                     bw_id = (m_name, m_idx)
                     if bw_id not in self.unique_bw:
                         self.unique_bw.append(bw_id)
@@ -515,15 +568,18 @@ class Config:
                             self.unique_gamma.append(g_id)
                         tmp.append(g_id)
                     bw_gamma[bw_id] = tmp
-                fl_id = (ls[idx][0], self.n_decay*topo+idx)
+                fl_id = (ls[idx][0], self.n_decay * topo + idx)
                 if fl_id not in self.unique_fl:
                     self.unique_fl.append(fl_id)
-            ang_formula = self._wave_angle_formula(decaychain, ls)
-            for ang in ang_formula:
-                basis_key = (topo, tuple(ang["k"]),tuple(ang["b"]))
-                if basis_key not in self.unique_angle_basis:
-                    self.unique_angle_basis.append(basis_key)
-        # build ret
+            projs = states if helicity else [0]
+            for lam in projs:
+                ang_terms = self._wave_angle_terms(decaychain, ls, lam)
+                for ang in ang_terms:
+                    basis_key = (topo, tuple(ang["k"]), tuple(ang["b"]))
+                    if basis_key not in self.unique_angle_basis:
+                        self.unique_angle_basis.append(basis_key)
+
+        # ── build ret ────────────────────────────────────────────────────
         ret = {}
         matrix_gamma = np.zeros((len(self.unique_gamma), len(self.unique_bw)))
         for idx, k in enumerate(self.unique_bw):
@@ -532,27 +588,31 @@ class Config:
         ret["matrix_gamma"] = matrix_gamma
         bw_order = []
         fl_order = []
-        matrix_angle = []
-        for ls, decaychain in self.full_decay.get_partial_waves():
+        # per-wave rows (entry-major), duplicated P times below
+        for ls, decaychain in waves:
             topo = topo_id_map[decaychain.topo_id()]
             for idx, decay in enumerate(decaychain.decays):
-                if idx != 0: # not top decay
-                    m_name = decay.core.name +"_mass"
-                    m_idx = self.n_res*topo+idx-1
-                    bw_id = (m_name, m_idx)
-                    bw_order.append(self.unique_bw.index(bw_id))
-                fl_id = (ls[idx][0], self.n_decay*topo+idx)
+                if idx != 0:
+                    m_name = decay.core.name + "_mass"
+                    m_idx = self.n_res * topo + idx - 1
+                    bw_order.append(self.unique_bw.index((m_name, m_idx)))
+                fl_id = (ls[idx][0], self.n_decay * topo + idx)
                 fl_order.append(self.unique_fl.index(fl_id))
-            ang_formula = self._wave_angle_formula(decaychain, ls)
-            matrix_angle_tmp = np.zeros(len(self.unique_angle_basis))+0j
-            for ang in ang_formula:
-                coeff = ang["coeffs"]
-                basis_key = (topo, tuple(ang["k"]), tuple(ang["b"]))
-                matrix_angle_tmp[self.unique_angle_basis.index(basis_key)] = coeff
-            matrix_angle.append(matrix_angle_tmp)
-        ret["matrix_angle"] = np.stack(matrix_angle, axis=-1)
-        ret["bw_order"] = np.array(bw_order)
-        ret["fl_order"] = np.array(fl_order)
+        # columns p-major: col = p*N + kk
+        matrix_cols = []
+        for p in range(P):
+            for ls, decaychain in waves:
+                topo = topo_id_map[decaychain.topo_id()]
+                lam = states[p] if helicity else 0
+                ang_terms = self._wave_angle_terms(decaychain, ls, lam)
+                col = np.zeros(len(self.unique_angle_basis)) + 0j
+                for ang in ang_terms:
+                    basis_key = (topo, tuple(ang["k"]), tuple(ang["b"]))
+                    col[self.unique_angle_basis.index(basis_key)] = ang["coeffs"]
+                matrix_cols.append(col)
+        ret["matrix_angle"] = np.stack(matrix_cols, axis=-1)
+        ret["bw_order"] = np.array(bw_order * P)   # p-major row duplication
+        ret["fl_order"] = np.array(fl_order * P)
 
         angle_index = []
         angle_k = []
@@ -560,10 +620,12 @@ class Config:
         for key in self.unique_angle_basis:
             angle_index.append(key[0])
             angle_k.append(key[1])
-            angle_b.append([(0 if k == "cos" else -np.pi/2) for k in key[2]])
+            angle_b.append([(0 if k == "cos" else -np.pi / 2) for k in key[2]])
         ret["angle_index"] = np.stack(angle_index)
         ret["angle_k"] = np.stack(angle_k)
         ret["angle_b"] = np.stack(angle_b)
+        ret["n_wave_base"] = N
+        ret["n_proj_base"] = P
 
         m0_index = []
         mass_index = []
@@ -588,11 +650,12 @@ class Config:
         ret["fl_q_index"] = np.stack(fl_q_index)
 
         gamma_table, g_min, g_delta = self.build_gamma_table()
-        ret["gamma_table"] = np.stack([gamma_table[i] for i in self.g0_phys_name], axis=0)
+        ret["gamma_table"] = np.stack(
+            [gamma_table[i] for i in self.g0_phys_name], axis=0)
         ret["gamma_min"] = g_min
         ret["gamma_delta"] = g_delta
-        ret["fl_table"], ret["fl_min"], ret["fl_delta"] = self.build_fl_table(self.unique_l)
-
+        ret["fl_table"], ret["fl_min"], ret["fl_delta"] =             self.build_fl_table(self.unique_l)
+        ret["ck_map"] = list(self.full_decay.get_partial_waves_params())
         return ret
 
     def _build_pwa_index(self):
@@ -612,15 +675,11 @@ class Config:
         # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
         # declarations → 1).
         n_perm, n_cp, C = row_block_factors(self.dic)
-        if C == 1 and getattr(self, "angle_formula_mode", "helicity") \
-                == "helicity":
-            # pure-PWA single-block model (no identical/CP partners): the
-            # kernel arrays come from the helicity engine in the canonical
-            # phi-first layout — any top J, any n_proj, any angle count.
-            return self._build_pwa_index()
-        # loop and shift based on block
+        # loop and shift based on block (single generic base; blocks only
+        # for declared identical/CP partners; pure PWA -> C == 1).
         base = self.build_single_index()
         ck = self.full_decay.get_partial_waves_params()
+        P = base.get("n_proj_base", 1) or 1
 
         def _repeat(arr, count=C):
             return np.concatenate([arr]*count, axis=0)
@@ -673,10 +732,9 @@ class Config:
         # PLACEHOLDER: until the spin/helicity angular generator lands, the
         # duplicated matrix_angle columns are identical copies (the angular
         # difference per projection is filled in later).
-        P = getattr(self, "n_proj", 1) or 1
         ret["n_proj"] = P
-        if P > 1:
-            ret = _projection_duplicate(ret, P)
+        if "ck_map" in base:
+            ret["ck_map"] = base["ck_map"]
 
         return ret
 
