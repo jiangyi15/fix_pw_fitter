@@ -65,6 +65,7 @@ void cuda_compute_v4_cache(void*,void*,
 int cuda_fill_common_v4_cache(void*,void*,
     const double*,int,const double*,int,
     const double*,int,const double*,int,const double*,int);
+void cuda_gram_from_cache_v4(void*,void*,double*,double*);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -232,6 +233,62 @@ class CUDAKernelV4PWACache:
         dh._fixed_mg = None
         return dh
 
+    def _fill_once(self, data_handle, m0, g0):
+        """Build the fixed-m0/g0 full-amplitude cache once (Python flag on
+        the data handle).  C keeps only weight/bkg + the cached common."""
+        if data_handle._filled:
+            fm, fg = data_handle._fixed_mg
+            if not (np.array_equal(fm, m0) and np.array_equal(fg, g0)):
+                raise ValueError(
+                    "cuda_v4_pwa_cache: m0/g0 changed after the cache was "
+                    "built — fixed m0/g0 only; use cuda_v4_pwa when they "
+                    "float")
+            return
+        mass, mom, ang = data_handle._arrays
+        ka2 = []
+
+        def _db2(a):
+            arr = np.ascontiguousarray(a, np.float64)
+            buf = _ffi.from_buffer(arr)
+            ka2.append(buf)
+            return _ffi.cast("double*", buf)
+
+        ok = self._lib.cuda_fill_common_v4_cache(
+            self._ctx, data_handle.ptr,
+            _db2(m0), len(m0), _db2(g0), len(g0),
+            _db2(mass), mass.shape[1],
+            _db2(mom), mom.shape[1],
+            _db2(ang), ang.shape[1])
+        data_handle._keep += ka2
+        if not ok:
+            raise RuntimeError("cuda_fill_common_v4_cache failed")
+        data_handle._filled = True
+        data_handle._fixed_mg = (m0.copy(), g0.copy())
+
+    def compute_gram(self, phsp_handle, m0, g0):
+        """Wave Gram D (N, N) from the CACHED full amplitude at fixed m0/g0.
+
+        The cache is built lazily on first use (same Python flag), then D is
+        reduced directly from the device common_cache — no BW recompute.
+        """
+        n = self.n_wave_base
+        m0p, g0p = self._padded_mg({"m0": m0, "g0": g0})
+        self._fill_once(phsp_handle, m0p, g0p)
+        oDr = np.zeros(n * n, np.float64)
+        oDi = np.zeros(n * n, np.float64)
+        ka = []
+
+        def _db(a):
+            arr = np.ascontiguousarray(a, np.float64)
+            buf = _ffi.from_buffer(arr)
+            ka.append(buf)
+            return _ffi.cast("double*", buf)
+
+        self._lib.cuda_gram_from_cache_v4(
+            self._ctx, phsp_handle.ptr, _db(oDr), _db(oDi))
+        D = (oDr + 1j * oDi).reshape(n, n)
+        return (D + D.conj().T) / 2.0
+
     def compute(self, params, data_handle, norm=None, return_p=True):
         """Forward + gradients; builds the fixed-m0/g0 amplitude cache lazily
         on the first call (from the m0/g0 of *params*), then only contracts
@@ -266,35 +323,7 @@ class CUDAKernelV4PWACache:
         ck_i = np.imag(ck).astype(np.float64)
         m0, g0 = self._padded_mg(params)
 
-        # ── lazy one-time cache build (first compute only) ─────────────
-        if not data_handle._filled:
-            mass, mom, ang = data_handle._arrays
-            ka2 = []
-
-            def _db2(a):
-                arr = np.ascontiguousarray(a, np.float64)
-                buf = _ffi.from_buffer(arr)
-                ka2.append(buf)
-                return _ffi.cast("double*", buf)
-
-            ok = self._lib.cuda_fill_common_v4_cache(
-                self._ctx, data_handle.ptr,
-                _db2(m0), len(m0), _db2(g0), len(g0),
-                _db2(mass), mass.shape[1],
-                _db2(mom), mom.shape[1],
-                _db2(ang), ang.shape[1])
-            data_handle._keep += ka2
-            if not ok:
-                raise RuntimeError("cuda_fill_common_v4_cache failed")
-            data_handle._filled = True
-            data_handle._fixed_mg = (m0.copy(), g0.copy())
-        else:
-            fm, fg = data_handle._fixed_mg
-            if not (np.array_equal(fm, m0) and np.array_equal(fg, g0)):
-                raise ValueError(
-                    "cuda_v4_pwa_cache: m0/g0 changed after the cache was "
-                    "built — fixed m0/g0 only; use cuda_v4_pwa when they "
-                    "float")
+        self._fill_once(data_handle, m0, g0)
 
         oQ = _ffi.new("double*")
         oP = np.zeros(data_handle.ne, np.float64)

@@ -681,6 +681,36 @@ __global__ void load_common_d2(const double2* __restrict__ in,
     if (idx < n) { double2 v = in[idx]; re[idx] = v.x; im[idx] = v.y; }
 }
 
+
+// D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j} straight from the cached
+// full-amplitude double2 buffer (fixed m0/g0; no BW recompute).
+__global__ void gram_cache_event_kernel(
+    const double2* __restrict__ common,
+    const double* __restrict__ weight,
+    int nb, int P, int N,
+    double* __restrict__ Dr, double* __restrict__ Di
+) {
+    int e = blockIdx.x;
+    int tid = threadIdx.x;
+    int bd = blockDim.x;
+    const double2* ce = common + (size_t)e * (size_t)P * N;
+    double we = (weight != NULL) ? weight[e] : 1.0;
+    int total = N * N;
+    for (int t = tid; t < total; t += bd) {
+        int k = t / N, j = t % N;
+        double sr = 0.0, si = 0.0;
+        for (int p = 0; p < P; p++) {
+            double2 ck = ce[p * N + k];
+            double2 cj = ce[p * N + j];
+            // conj(ck) * cj
+            sr += ck.x * cj.x + ck.y * cj.y;
+            si += ck.x * cj.y - ck.y * cj.x;
+        }
+        atomicAdd(&Dr[t], we * sr);
+        atomicAdd(&Di[t], we * si);
+    }
+}
+
 // ── Upload helpers (plain C, before extern "C") ──
 void* _up_int(const int* src, int n) {
     int* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
@@ -1361,6 +1391,27 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
 
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+}
+
+
+void cuda_gram_from_cache_v4(void* vctx, void* vdh,
+                             double* oDr, double* oDi) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    if (!c || !h || !h->cache_valid || !h->common_cache) return;
+    int ne = h->ne, nw = c->n_wave, P = c->n_proj, N = nw / P;
+    size_t gsz = (size_t)N * N * sizeof(double);
+    double* Dr = NULL; double* Di = NULL;
+    CUDA_CHECK(cudaMalloc(&Dr, gsz));
+    CUDA_CHECK(cudaMalloc(&Di, gsz));
+    CUDA_CHECK(cudaMemset(Dr, 0, gsz));
+    CUDA_CHECK(cudaMemset(Di, 0, gsz));
+    gram_cache_event_kernel<<<ne, 128>>>(
+        h->common_cache, h->w, ne, P, N, Dr, Di);
+    CUDA_CHECK(cudaGetLastError());
+    cudaMemcpy(oDr, Dr, gsz, cudaMemcpyDeviceToHost);
+    cudaMemcpy(oDi, Di, gsz, cudaMemcpyDeviceToHost);
+    cudaFree(Dr); cudaFree(Di);
 }
 
 } // extern "C"
