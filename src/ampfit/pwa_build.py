@@ -297,7 +297,20 @@ def pwa_event_data(cfg, kc, momenta):
     if not waves_iter:
         raise ValueError("no partial waves in config")
     finals = list(cfg.finals)
-    n = momenta.shape[0]
+
+    # boost every event to its own center-of-mass frame first (the raw
+    # sample may carry a uniform lab boost, |Σp|/E ~ 1e-2 in the current
+    # data).  TFPWA does the same (center_mass=True); without it the
+    # helicity angles are measured in the moving frame and differ at the
+    # ~1% level (amplified in deep-cancellation corners).
+    mom0 = np.asarray(momenta, dtype=float)
+    tot0 = mom0.sum(axis=1)
+    beta_cm = -(tot0[:, 1:] / tot0[:, 0:1])           # lab -> CM boost
+    nfin = mom0.shape[1]
+    mom0 = np.stack([_boost_vec(mom0[:, j], beta_cm) for j in range(nfin)],
+                    axis=1)
+
+    n = mom0.shape[0]
 
     # representative chain per topology slot (first active chain of each topo)
     chain_by_topo = {}
@@ -324,7 +337,7 @@ def pwa_event_data(cfg, kc, momenta):
         # input (NOT the reverse mapping — that is wrong whenever the leaf
         # order differs from cfg.finals)
         perm = [finals.index(nm) for nm in names]
-        mom = np.asarray(momenta[:, perm], dtype=float)
+        mom = mom0[:, perm]
         # NOTE: mom columns now follow the CHAIN LEAF order (names), so all
         # indexing below must use names, not cfg.finals.
         sub_out = [o.name for o in chain.decays[1].outs]
