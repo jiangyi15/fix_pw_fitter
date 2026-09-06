@@ -36,6 +36,10 @@ def main():
                         help="Run N independent BFGS fits, each from a fresh "
                              "random start (initial_values(seed=None)); "
                              "requires --fit")
+    parser.add_argument("--save-loop", action="store_true",
+                        help="In loop fits, also save every run as "
+                             "{save}_fit{run}.json (+ constraints); "
+                             "by default only the best run is saved")
     parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
@@ -216,17 +220,21 @@ def main():
             if best is None or res.fun < best.fun:
                 best = res
 
-            # per-run save (numbered when looping)
-            if n_runs > 1:
-                rp = os.path.splitext(base_save)[0] + f"_fit{run_id}.json"
-            else:
+            # per-run save — only when --save-loop is given (or single run)
+            if n_runs == 1:
                 rp = base_save
-            fitter.save_params(res, rp)
-            fitter.save_constraints(os.path.splitext(rp)[0] + "_constraints.json")
+                fitter.save_params(res, rp)
+                fitter.save_constraints(os.path.splitext(rp)[0]
+                                        + "_constraints.json")
+            elif args.save_loop:
+                rp = os.path.splitext(base_save)[0] + f"_fit{run_id}.json"
+                fitter.save_params(res, rp)
+                fitter.save_constraints(os.path.splitext(rp)[0]
+                                        + "_constraints.json")
             print(f"\n  Run {run_id}/{n_runs}: NLL = {res.fun:.6f}  "
                   f"time = {dt:.2f}s  nfev = {res.nfev}  nit = {res.nit}  "
                   f"success = {res.success}")
-            if n_runs > 1:
+            if n_runs > 1 and args.save_loop:
                 print(f"    saved to {rp}")
 
         result = best
