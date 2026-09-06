@@ -2,14 +2,13 @@
 """Save single-chain stand-alone mass & angles (.npy) from a 4-momentum file.
 
 Input  : event 4-momentum file (N, n_finals, 4) in ``cfg.finals`` order.
-Output : per chosen chain two plain .npy files
+Output : per chosen chain ONE plain .npy file, all variables stacked
 
-    {out}_mass.npy    (N, n_mass)  intermediate (sub-system) invariant
-                                   masses of the chain's decays[1:]
-    {out}_angles.npy  (N, n_vars)  canonical per-vertex Euler angles,
-                                   phi block first then theta block,
-                                   each ordered by vertex — the layout the
-                                   kernel/amplitude evaluation consumes
+    {out}.npy  (N, n_mass + n_vars)
+        first columns:  intermediate (sub-system) invariant masses of the
+                        chain's decays[1:]
+        last columns:   canonical per-vertex Euler angles, phi block first
+                        then theta block, each ordered by vertex
 
 Events are boosted to their own centre-of-mass frame first (identical to
 ``pwa_event_data`` / TFPWA ``center_mass=True``), so the output is frame
@@ -108,12 +107,13 @@ def main():
     for j, (v, kind) in enumerate(vars_):
         ang[:, j] = phi[:, v] if kind == 'phi' else theta[:, v]
 
+    # single output: stack ALL variables into one array
+    #   columns = [intermediate masses ..., phi(v0..), theta(v0..)]
+    arr = np.concatenate([mass, ang], axis=-1)
     prefix = args.out or str(args.chain)
-    np.save(prefix + "_mass.npy", mass)
-    np.save(prefix + "_angles.npy", ang)
-    print(f"wrote {prefix}_mass.npy    {mass.shape}")
-    print(f"wrote {prefix}_angles.npy  {ang.shape}   ({nv} vertices, "
-          f"phi-first)")
+    np.save(prefix + ".npy", arr)
+    print(f"wrote {prefix}.npy    {arr.shape}   "
+          f"[{mass.shape[1]} mass + {ang.shape[1]} angles, phi-first]")
     print(f"chain: {chain}")
     print(f"finals (columns): {cfg.finals}")
 
