@@ -125,3 +125,20 @@ def test_forward_positive_and_gradients(kc, data):
     qm = qf(ck, m0, g)
     assert (qp - qm) / (2 * eps) == pytest.approx(
         grads["g0"][0], rel=1e-3)
+
+
+def test_declaration_driven_row_blocks(cfg):
+    """Row-block factors come from identical/cp declarations in the config."""
+    from ampfit.config_loader import row_block_factors
+
+    assert row_block_factors(cfg.dic) == (1, 1, 1)     # config_pwa: none
+
+    angle = Config("config_angle.yml")                 # legacy B->4pi
+    assert row_block_factors(angle.dic) == (4, 2, 8)
+    kc = angle.build_all_index()
+    assert kc["n_blocks"] == 8 and kc["n_perm"] == 4 and kc["n_cp"] == 2
+    assert kc["matrix_angle"].shape[1] == 448
+    cm = angle.get_ck_map()
+    assert len(cm) == 448
+    n_ls = sum(1 for t in cm if "g_lsbar" in t[1])
+    assert n_ls == 224                     # CP partner half carries g_lsbar

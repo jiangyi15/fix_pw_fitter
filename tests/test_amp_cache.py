@@ -125,9 +125,10 @@ def test_cached_gradients_match_reference(config_name):
     data = _data(120, seed=2)
     n_m0 = int(np.max(c["m0_index"])) + 1
     n_g0 = int(np.max(c["g0_index"])) + 1
-    m0 = np.random.uniform(1.5, 3.0, n_m0)
-    g0 = np.random.uniform(0.05, 0.5, n_g0)
-    ck = np.random.randn(nk.n_wave) + 1j * np.random.randn(nk.n_wave)
+    rng = np.random.RandomState(3)          # deterministic: poles would flake
+    m0 = rng.uniform(1.5, 3.0, n_m0)
+    g0 = rng.uniform(0.05, 0.5, n_g0)
+    ck = rng.randn(nk.n_wave) + 1j * rng.randn(nk.n_wave)
     norm = 42.0
     scalar = (0.6, 0.01, 0.506, 0.01, 0.9, 0.2)
     params = {"ck": ck, "m0": m0, "g0": g0, "scalar": scalar}

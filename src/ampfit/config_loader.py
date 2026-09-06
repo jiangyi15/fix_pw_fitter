@@ -5,12 +5,39 @@ from .particle_model import build_particle
 from .angular_formula import get_angle_formula
 import math
 
+
 def load_config(filename):
     if isinstance(filename, dict):
         return filename
     with open(filename) as f:
         ret = yaml.safe_load(f)
     return ret
+
+
+def row_block_factors(dic):
+    """Event-row block duplication factors from the config ``data`` section.
+
+    The number of identical-particle copies and the charge-conjugate (CP)
+    block are derived from the declared particle symmetries — the
+    *combination* of ``data.identical_particles`` and ``data.cp_particles``
+    (NOT a hardcoded 8):
+
+      * every ``identical_particles`` group of size ``g`` contributes
+        ``g!`` identical-particle permutations,
+      * ``cp_particles`` declares a global charge-conjugate map → ×2.
+
+    Returns ``(n_perm, n_cp, n_blocks)`` where
+    ``n_blocks = n_perm · n_cp``.  No declarations → 1 block (a
+    single-flavour pure-PWA model, e.g. config_pwa.yml).
+    """
+    data_d = dic.get("data") or {}
+    id_groups = data_d.get("identical_particles") or []
+    cp_groups = data_d.get("cp_particles") or []
+    n_perm = 1
+    for grp in id_groups:
+        n_perm *= math.factorial(len(grp))
+    n_cp = 2 if cp_groups else 1
+    return n_perm, n_cp, n_perm * n_cp
 
 
 def _projection_duplicate(ret, n_proj):
@@ -572,18 +599,21 @@ class Config:
         # loop and shift based on block
         base = self.build_single_index()
         ck = self.full_decay.get_partial_waves_params()
+        # identical-particle × CP row blocks, from the config declarations
+        # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
+        # declarations → 1).
+        n_perm, n_cp, C = row_block_factors(self.dic)
 
-
-        def _repeat(arr, count=8):
+        def _repeat(arr, count=C):
             return np.concatenate([arr]*count, axis=0)
 
-        def _shift_repeat(arr, strip, count=8):
+        def _shift_repeat(arr, strip, count=C):
             all_arr = []
             for i in range(count):
                 all_arr.append(arr + strip * i)
             return np.concatenate(all_arr,axis=0)
 
-        def _matrix_repeat(arr, count=8):
+        def _matrix_repeat(arr, count=C):
             all_arr = []
             for i in range(count):
                 all_tmp_arr = []
@@ -610,6 +640,9 @@ class Config:
         ret["angle_index"] = _shift_repeat(base["angle_index"], self.n_topo)
         ret["matrix_angle"] = _matrix_repeat(base["matrix_angle"])
         ret["matrix_gamma"] = _matrix_repeat(base["matrix_gamma"])
+        ret["n_perm"] = n_perm
+        ret["n_cp"] = n_cp
+        ret["n_blocks"] = C
 
         for name in ["gamma_table","fl_table", "gamma_min", "gamma_delta", "fl_min", "fl_delta"]:
             ret[name] = base[name]
@@ -631,13 +664,15 @@ class Config:
 
     def get_ck_map(self):
         cks = self.full_decay.get_partial_waves_params()
+        n_perm, n_cp, C = row_block_factors(self.dic)
         ret = []
-        for i in range(8):
-            for j in cks:
-                if i < 4:
-                    ret.append(j)
-                else:
-                    ret.append((j[0], j[1].replace("g_ls", "g_lsbar"), *j[2:]))
+        for cp in range(n_cp):
+            for _ in range(n_perm):
+                for j in cks:
+                    if cp == 0:
+                        ret.append(j)
+                    else:
+                        ret.append((j[0], j[1].replace("g_ls", "g_lsbar"), *j[2:]))
         return ret
 
     def _chain_ranges(self):
