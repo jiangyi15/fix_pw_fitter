@@ -5,7 +5,7 @@ Writes kernel-format ``.npz`` files (data + phsp) plus an ``init.json``
 start point (constraint-driven: '_total_0' -> 1, couplings (r=1, θ=0)),
 so run_fit needs no --toy flag:
 
-    python gen_toy_pwa.py --config config_pwa.yml
+    python scripts/gen_toy_pwa.py --config config_pwa.yml
     python run_fit.py --config config_pwa.yml --backend numpy_pwa \\
         --data data_pwa.npz --phsp phsp_pwa.npz --init init_pwa.json --fit
 
@@ -17,7 +17,8 @@ import argparse
 import json
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
 
 import numpy as np
 

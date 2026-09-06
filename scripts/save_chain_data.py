@@ -20,14 +20,15 @@ in the decay entries); the first partial-wave chain of that pairing is
 used.
 
 Usage:
-    python save_chain_data.py --config config.yml --chain pipeta \
+    python scripts/save_chain_data.py --config config.yml --chain pipeta \
         --data ../data/data_momenta.npy --out pipeta
 """
 import argparse
 import json
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
 
 import numpy as np
 
