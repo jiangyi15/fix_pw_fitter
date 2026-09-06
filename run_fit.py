@@ -25,8 +25,11 @@ def main():
                              '\'{name: integrated, base: cuda_v3}\' '
                              "(note: spaces required after colons)")
     parser.add_argument("--config", default="config_angle.yml")
-    parser.add_argument("--data", default="data/data_arrays.npz")
-    parser.add_argument("--phsp", default="data/phsp_arrays.npz")
+    parser.add_argument("--data", default=None,
+                        help="data .npz (default: use the config's "
+                             "data_arr / prefix files via load_all_data)")
+    parser.add_argument("--phsp", default=None,
+                        help="phsp .npz (default: config-driven)")
     parser.add_argument("--check-grad", action="store_true", help="Verify gradient")
     parser.add_argument("--fit", action="store_true", help="Run BFGS minimization")
     parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
@@ -76,15 +79,24 @@ def main():
     print("LOADING DATA")
     print("=" * 70)
 
-    max_data = 1000 if args.debug else None
-    max_phsp = 10000 if args.debug else None
-    n_comp = int(fitter.kernel_config["angle_k"].shape[1])
-
     t0 = time.time()
-    data_np, n_data = Fitter.load_npz(args.data, max_events=max_data,
-                                     n_angle_comp=n_comp)
-    phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp,
-                                     n_angle_comp=n_comp)
+    if args.data is None and args.phsp is None:
+        # config-driven: data.data_arr/phsp_arr npz OR prefix 4-momentum files
+        data_np, phsp_np = fitter.load_all_data()
+        n_data = data_np["mass"].shape[0]
+        n_phsp = phsp_np["mass"].shape[0]
+        print(f"  [config] loaded {n_data:,} data + {n_phsp:,} phsp events "
+              f"via load_all_data()")
+    else:
+        if not args.data or not args.phsp:
+            raise SystemExit("Provide both --data and --phsp (or neither).")
+        max_data = 1000 if args.debug else None
+        max_phsp = 10000 if args.debug else None
+        n_comp = int(fitter.kernel_config["angle_k"].shape[1])
+        data_np, n_data = Fitter.load_npz(args.data, max_events=max_data,
+                                         n_angle_comp=n_comp)
+        phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp,
+                                         n_angle_comp=n_comp)
     load_time = time.time() - t0
     print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
 
