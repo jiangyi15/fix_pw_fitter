@@ -1042,3 +1042,81 @@ def wave_terms_canonical(chain, ls):
                                         round(coef.imag, 14)),
                       'k': k, 'b': b})
     return terms
+
+
+# ---------------------------------------------------------------------------
+# Vectorized (numpy) cascade amplitude over event batches
+# ---------------------------------------------------------------------------
+def _wigner_d_vec(J, m, mp, th):
+    """d^J_{m,mp}(θ) vectorized over an array *th* (single-frequency parts)."""
+    out = np.zeros_like(np.asarray(th, dtype=float))
+    for f, kind, c in _d_single_freq_parts(J, m, mp):
+        out = out + c * (np.cos(f * th) if kind == 'c' else np.sin(f * th))
+    return out
+
+
+def amplitude_vectorized(tree, ls, lam_top, lambda_leaves, ph, th):
+    """Vectorized :func:`amplitude` over a batch of events.
+
+    Args:
+        tree: decay tree (nested spins).
+        ls: one (l, s) per vertex.
+        lam_top, lam_leaves: external helicity configuration.
+        ph, th: arrays of shape (n_events, n_vertices) with the per-vertex
+            azimuth and polar angle of each event.
+
+    Returns complex array (n_events,) with the internal-helicity sum done
+    vectorially (small python loops over helicity values only).
+    """
+    ph = np.asarray(ph, dtype=float)
+    th = np.asarray(th, dtype=float)
+    n_ev = th.shape[0]
+    vertices, leaves, vmap, leaf_ids = tree_info(tree)
+
+    def dconj(J, lam, delta, v):
+        # D^{J}*_{lam,delta}(θ_v,φ_v) = e^{+i·lam·φ}·d^J_{lam,delta}(θ)
+        lamf = float(lam)
+        phase = np.cos(lamf * ph[:, v]) + 1j * np.sin(lamf * ph[:, v])
+        return phase * _wigner_d_vec(J, lam, delta, th[:, v])
+
+    # vertex amplitude array factory
+    cache = {}
+
+    def vfac(v, Ja, Jb, Jc, lam, lb, lc):
+        key = (v, lam, lb, lc)
+        if key in cache:
+            return cache[key]
+        l, s = ls[v]
+        delta = to_spin(lb) - to_spin(lc)
+        if abs(delta) > to_spin(Ja) or abs(delta) > to_spin(s):
+            cache[key] = None
+            return None
+        cg1 = cg(Jb, lb, Jc, -to_spin(lc), s, delta)
+        cg2 = cg(l, 0, s, delta, Ja, delta)
+        if cg1 == 0.0 or cg2 == 0.0:
+            cache[key] = None
+            return None
+        C = math.sqrt((2 * int(l) + 1) / float(2 * to_spin(Ja) + 1)) * cg1 * cg2
+        cache[key] = C * dconj(Ja, lam, delta, v)
+        return cache[key]
+
+    def rec(n, path, lam):
+        if not isinstance(n, tuple):
+            eq = (float(lam) == float(lambda_leaves[leaf_ids[path]]))
+            return np.ones(n_ev, dtype=np.complex128) * (1.0 if eq else 0.0)
+        Ja, children = n
+        Jb = children[0][0] if isinstance(children[0], tuple) else children[0]
+        Jc = children[1][0] if isinstance(children[1], tuple) else children[1]
+        vid = vmap[path]
+        tot = np.zeros(n_ev, dtype=np.complex128)
+        for lb in helicity_values(Jb):
+            for lc in helicity_values(Jc):
+                f = vfac(vid, Ja, Jb, Jc, lam, lb, lc)
+                if f is None:
+                    continue
+                c0 = rec(children[0], path + (0,), lb)
+                c1 = rec(children[1], path + (1,), lc)
+                tot = tot + f * c0 * c1
+        return tot
+
+    return rec(tree, (), to_spin(lam_top))

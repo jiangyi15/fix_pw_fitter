@@ -371,3 +371,36 @@ def test_build_single_index_modes_equivalent_config_amp():
     assert np.array_equal(rh['angle_index'], rc['angle_index'])
     assert np.array_equal(rh['bw_order'], rc['bw_order'])
     assert np.array_equal(rh['fl_order'], rc['fl_order'])
+
+
+def test_amplitude_vectorized_matches_scalar():
+    """numpy amplitude_vectorized equals the scalar amplitude (config_pwa
+    J/ψ→MI→ππη chains, both top helicities)."""
+    from ampfit.config_loader import Config
+    from ampfit.helicity_angle import (amplitude_vectorized, tree_vertices,
+                                       decay_chain_to_tree,
+                                       decay_chain_ls_sets)
+
+    cfg = Config('config_pwa.yml')
+    rng = np.random.default_rng(7)
+    nv0 = None
+    for ch in cfg.full_decay.chains:
+        waves = list(itertools.product(*decay_chain_ls_sets(ch)))
+        if not waves:
+            continue
+        tree = decay_chain_to_tree(ch)
+        nv = len(tree_vertices(tree))
+        nv0 = nv if nv0 is None else nv0
+        for wave in waves:
+            for lam in (1, -1):
+                N = 60
+                th = rng.uniform(0.2, math.pi - 0.2, size=(N, nv))
+                ph = rng.uniform(-math.pi, math.pi, size=(N, nv))
+                V = amplitude_vectorized(tree, wave, lam, (0, 0, 0), ph, th)
+                worst = 0.0
+                for i in range(N):
+                    ang = {v: (float(ph[i, v]), float(th[i, v]))
+                           for v in range(nv)}
+                    a = amplitude(tree, wave, ang, lam, (0, 0, 0))
+                    worst = max(worst, abs(a - V[i]))
+                assert worst < 1e-12
