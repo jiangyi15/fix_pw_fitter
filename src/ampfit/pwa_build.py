@@ -275,51 +275,88 @@ def _two_body_q(M, m1, m2):
 def pwa_event_data(cfg, kc, momenta):
     """Per-event kernel buffers (mass/q/angle) for a pure-PWA Config.
 
-    *momenta*: (n_events, 3, 4) final 4-vectors in cfg.finals order
-    [pip, pim, eta] (any frame; the geometry is boost-invariant).
+    *momenta*: (n_events, n_finals, 4) final 4-vectors in ``cfg.finals``
+    order (any frame; the geometry is boost-invariant).
+
+    All ACTIVE topologies are filled: for every topology slot referenced by
+    the kernel (``angle_index`` rows, ``mass_index``/``fl_q_index``
+    columns) a representative partial-wave chain of that topology provides
+    the per-vertex canonical angles and the sub-system kinematics.  This
+    supports configurations where several pairings have resonances at once
+    (each pairing = one topology slot).  Topology slots without any active
+    chain are left zero (the kernel never reads them).
 
     Returns a dict with ``mass`` (n, n_mass_slots), ``q`` (n, n_fl_slots),
-    ``angle`` (n, n_angle_total, n_angle_comp), ``weight``, ``bkg`` where the
-    column layouts match the ``pwa_build`` kernel config index arrays
-    (single topology block, canonical phi-first angle columns).
+    ``angle`` (n, n_angle_total, n_angle_comp), ``weight``, ``bkg`` where
+    the column/row layouts match the kernel index arrays.
     """
     from ampfit.helicity_angle import decay_chain_leaves
     from ampfit.momenta_to_angles import decay_angles_vectorized
 
     waves_iter = cfg.full_decay.get_partial_waves()
-    chain = waves_iter[0][1]              # representative active chain
-    names = [o.name for o in decay_chain_leaves(chain)]
+    if not waves_iter:
+        raise ValueError("no partial waves in config")
     finals = list(cfg.finals)
-    order = [names.index(f) for f in finals]
-    mom = np.asarray(momenta[:, order], dtype=float)      # (n, 3, 4)
+    n = momenta.shape[0]
 
-    n = mom.shape[0]
-    mass_pip = float(cfg.dic["particle"]["pip"]["mass"])
-    mass_pim = float(cfg.dic["particle"]["pim"]["mass"])
-    mass_eta = float(cfg.dic["particle"]["eta"]["mass"])
+    # representative chain per topology slot (first active chain of each topo)
+    chain_by_topo = {}
+    for ls, chain in waves_iter:
+        tid = cfg.topo_index.get(chain.topo_id())
+        if tid is not None and tid not in chain_by_topo:
+            chain_by_topo[tid] = chain
+    n_rows = int(np.max(kc["angle_index"])) + 1     # rows = topology slots
+    n_decay = len(waves_iter[0][1].decays)
+    n_mass = int(np.max(kc["mass_index"])) + 1
+    n_q = int(np.max(kc["fl_q_index"])) + 1
 
-    # sub-system invariant mass m(pip,pim) → mass slot 0
-    mpipi = np.sqrt(np.clip(
-        (mom[:, 0] + mom[:, 1]) ** 2 @ np.array([1, -1, -1, -1.]), 0.0, None))
+    mass = np.zeros((n, n_mass))
+    q = np.zeros((n, n_q))
+    ang = None
+    vars_ = None
 
-    # per-event total 4-momentum (top rest frame construction)
-    tot = mom.sum(axis=1)
-    mtop = np.sqrt(np.clip(tot ** 2 @ np.array([1, -1, -1, -1.]), 0.0, None))
+    for tid in range(n_rows):
+        chain = chain_by_topo.get(tid)
+        if chain is None:
+            continue
+        names = [o.name for o in decay_chain_leaves(chain)]
+        order = [names.index(f) for f in finals]
+        mom = np.asarray(momenta[:, order], dtype=float)
 
-    # fl momentum slots: 0 = top breakup q, 1 = pipi breakup q
-    q0 = _two_body_q(np.maximum(mtop, mpipi + mass_eta), mpipi, mass_eta)
-    q1 = _two_body_q(mpipi, mass_pip, mass_pim)   # per-event pipi rest frame
+        # invariant mass of the sub-system (decays[1] children)
+        sub_out = [o.name for o in chain.decays[1].outs]
+        m_a = float(cfg.dic["particle"][sub_out[0]]["mass"])
+        m_b = float(cfg.dic["particle"][sub_out[1]]["mass"])
+        tot = mom.sum(axis=1)
+        mtop = np.sqrt(np.clip(tot ** 2 @ np.array([1, -1, -1, -1.]),
+                               0.0, None))
+        pa = mom[:, finals.index(sub_out[0])]
+        pb = mom[:, finals.index(sub_out[1])]
+        m_sub = np.sqrt(np.clip(
+            (pa + pb) ** 2 @ np.array([1, -1, -1, -1.]), 0.0, None))
+        bachelor = [f for f in finals if f not in sub_out][0]
+        m_c = float(cfg.dic["particle"][bachelor]["mass"])
 
-    # canonical angle columns (phi first then theta, by vertex)
-    ph, th = decay_angles_vectorized(chain, mom)
-    vars_ = kc["variables"]               # [(vertex, 'phi'|'theta'), …]
-    ang = np.empty((n, 1, len(vars_)))
-    for j, (v, kind) in enumerate(vars_):
-        ang[:, 0, j] = ph[:, v] if kind == 'phi' else th[:, v]
+        # mass / q slots of this topology (decay idx = 1 for the sub decay)
+        m_idx = cfg.n_res * tid + 1 - 1            # n_res = n_decay - 1
+        mass[:, m_idx] = m_sub
+        q[:, cfg.n_decay * tid + 0] = _two_body_q(
+            np.maximum(mtop, m_sub + m_c), m_sub, m_c)
+        q[:, cfg.n_decay * tid + 1] = _two_body_q(m_sub, m_a, m_b)
 
+        # canonical phi-first per-vertex angles of this topology's chain
+        ph, th = decay_angles_vectorized(chain, mom)
+        if vars_ is None:
+            vars_ = kc["variables"]         # [(vertex, 'phi'|'theta'), …]
+            ang = np.zeros((n, n_rows, len(vars_)))
+        for j, (v, kind) in enumerate(vars_):
+            ang[:, tid, j] = ph[:, v] if kind == 'phi' else th[:, v]
+
+    if ang is None:
+        raise ValueError("no angle rows filled — empty wave set")
     return {
-        "mass": mpipi.reshape(n, 1),
-        "q": np.stack([q0, q1], axis=-1),
+        "mass": mass,
+        "q": q,
         "angle": ang,
         "weight": np.ones(n),
         "bkg": np.ones(n),          # default background contribution = 1
