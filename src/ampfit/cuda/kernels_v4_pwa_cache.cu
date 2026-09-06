@@ -831,7 +831,8 @@ __global__ void pwa_fpwf_forward_kernel(
     int n_wave, int n_proj, int ne,
     int use_norm, double norm,
     double* __restrict__ Q_out, double* __restrict__ P_out,
-    double2* __restrict__ G
+    double2* __restrict__ G,
+    double* __restrict__ dnsum
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
@@ -863,6 +864,9 @@ __global__ void pwa_fpwf_forward_kernel(
         double den = Ps + bv * norm;
         Q_out[e] = -wv * log(Ps / norm + bv);
         dqp = -wv / den;
+        // d(NLL)/d(norm) partial = -P*dqp/norm ; accumulated on device so the
+        // host never needs the whole per-event P for the gradient chain.
+        if (dnsum) atomicAdd(dnsum, -(Ps * dqp) / norm);
     }
     // G row = p*ne + e, written from registers (no second F pass)
     for (int p = 0; p < P; p++) {
@@ -1537,7 +1541,8 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     double nv,int use_norm,
     double* oQ,double* oP,
     double* ogck_r,double* ogck_i,
-    double* ogm0,double* ogg0
+    double* ogm0,double* ogg0,
+    double* odn
 ) {
     // fpwfitter-style evaluation over the cached full amplitude:
     //   one fused forward launch (whole dataset) writing Q/P and the
@@ -1551,6 +1556,10 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
     int P = c->n_proj, N = nw / P;
     size_t np_rows = (size_t)ne * P;
+
+    double* dsum = NULL;
+    int want_dn = (odn != NULL && use_norm != 0);
+    if (odn) *odn = 0.0;
 
     ComputeParams p;
     p.ck_real = (double*)_up_dbl(ck_r, N);
@@ -1589,14 +1598,22 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     memset(ogm0, 0, (size_t)nu * sizeof(double));
     memset(ogg0, 0, (size_t)ng * sizeof(double));
 
+    if (want_dn) {
+        CUDA_CHECK(cudaMalloc(&dsum, sizeof(double)));
+        CUDA_CHECK(cudaMemset(dsum, 0, sizeof(double)));
+    }
     // ---- one fused forward over the whole dataset ----
     {
         int thr = (int)(((size_t)ne + 255) / 256);
         pwa_fpwf_forward_kernel<<<thr, 256>>>(
             h->common_T, p.ck_real, p.ck_imag,
             h->w, h->b, nw, P, ne, use_norm, nv,
-            h->dQ, h->dP, h->dG);
+            h->dQ, h->dP, h->dG, dsum);
         CUDA_CHECK(cudaGetLastError());
+    }
+    if (want_dn) {
+        cudaMemcpy(odn, dsum, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaFree(dsum);
     }
 
     // ---- total Q (copy per-event Q once and sum host-side) ----

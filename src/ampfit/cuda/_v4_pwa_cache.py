@@ -61,7 +61,7 @@ void cuda_compute_v4(void*,void*,
 void cuda_compute_v4_cache(void*,void*,
     const double*,const double*,const double*,const double*,
     double,int,
-    double*,double*,double*,double*,double*,double*);
+    double*,double*,double*,double*,double*,double*,double*);
 int cuda_fill_common_v4_cache(void*,void*,
     const double*,int,const double*,int,
     const double*,int,const double*,int,const double*,int);
@@ -148,6 +148,8 @@ class CUDAKernelV4PWACache:
         self.n_uniq, self.slot_of_wave, self.rep_of_slot = \
             build_amp_cache_layout(c)
         self._ka = []
+        self._dnorm = None            # d(NLL)/d(norm) from the last norm compute
+        self.dnorm_on_gpu = True
 
         def _db(a):
             arr = np.ascontiguousarray(a, np.float64)
@@ -326,7 +328,8 @@ class CUDAKernelV4PWACache:
         self._fill_once(data_handle, m0, g0)
 
         oQ = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nbase, np.float64)
         ogck_i = np.zeros(nbase, np.float64)
         ogm0 = np.zeros(nu_, np.float64)
@@ -340,13 +343,17 @@ class CUDAKernelV4PWACache:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
+        odn = _ffi.new("double*")
         self._lib.cuda_compute_v4_cache(
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(m0), _db(g0),
             norm_val, use_norm,
-            oQ, _db(oP), _db(ogck_r), _db(ogck_i),
-            _db(ogm0), _db(ogg0))
+            oQ, (_db(oP) if oP is not None else _ffi.NULL),
+            _db(ogck_r), _db(ogck_i),
+            _db(ogm0), _db(ogg0), odn)
         data_handle._keep += ka
+        # d(NLL)/d(norm) accumulated on device; None when unnormalized
+        self._dnorm = odn[0] if use_norm else None
 
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]

@@ -46,6 +46,7 @@ class IntegratedPWABackend(ComputeBackend):
         self._kernel_config = kernel_config
         self.mc_batch = int(mc_batch)
         self._gram = _GramPWA(kernel_config)
+        self._last_dnorm = None
         if isinstance(base, ComputeBackend):
             self.base = base
         else:
@@ -112,6 +113,12 @@ class IntegratedPWABackend(ComputeBackend):
         bundle.g0 = np.asarray(g0).copy()
 
     # ── ComputeBackend interface ─────────────────────────────────────────
+    @property
+    def dnorm_on_gpu(self):
+        # the fixed-cache CUDA base accumulates d(NLL)/d(norm) on device
+        kern = getattr(self.base, "kernel", None)
+        return bool(getattr(kern, "dnorm_on_gpu", False))
+
     def compute(self, params, data_handle, norm=None, return_p=True):
         if norm is not None or return_p:
             # data NLL (norm given) or per-event P (plot path) → base
@@ -120,6 +127,14 @@ class IntegratedPWABackend(ComputeBackend):
                                             norm=norm, return_p=return_p)
             grads["m0"] = np.zeros_like(grads["m0"])
             grads["g0"] = np.zeros_like(grads["g0"])
+            # GPU dnorm scalar (avoids the per-event P host round-trip that
+            # the numpy dnorm fallback in the fitter would otherwise need)
+            if norm is not None and self.dnorm_on_gpu:
+                self._last_dnorm = float(
+                    getattr(getattr(self.base, "kernel", None),
+                            "_dnorm", None) or 0.0)
+            else:
+                self._last_dnorm = None
             return Q, grads, P
 
         # fast Gram norm over the phsp bundle

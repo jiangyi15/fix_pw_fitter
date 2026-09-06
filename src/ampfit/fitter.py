@@ -780,13 +780,19 @@ class Fitter:
             if norm_grads[key] is not None:
                 norm_grads[key] = np.asarray(norm_grads[key])
 
-        # 2. NLL from data (with norm)
+        # 2. NLL from data (with norm).  When the backend computes
+        # d(NLL)/d(norm) on the GPU (fixed-cache CUDA path) the per-event P
+        # is not needed for the gradient chain and is not round-tripped.
+        gpu_dn = bool(getattr(self.backend, "dnorm_on_gpu", False))
         nll, grads, P = self.backend.compute(
-            params, self._data_holder, norm=norm
+            params, self._data_holder, norm=norm, return_p=not gpu_dn
         )
 
-        # 3. dNLL/dnorm
-        dNLL_dnorm = self._compute_norm_derivative(norm, P, self._data_np)
+        # 3. dNLL/dnorm (GPU scalar when available, else numpy from P)
+        if gpu_dn and getattr(self.backend, "_last_dnorm", None) is not None:
+            dNLL_dnorm = self.backend._last_dnorm
+        else:
+            dNLL_dnorm = self._compute_norm_derivative(norm, P, self._data_np)
 
         # 4. Add purity constant: -log(purity) * sum(weight)
         # Kernel computes -w*log(P/norm + bkg_scaled).
