@@ -28,8 +28,8 @@ import numpy as np
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
 from ampfit.plot_pwa_groups import (
-    discover_pwa_groups, pwa_mass_varfun, pwa_angle_varfun,
-    angle_variable_labels, var_ranges)
+    config_panels, discover_pwa_groups, pwa_mass_varfun,
+    pwa_angle_varfun, angle_variable_labels, var_ranges)
 
 
 def main():
@@ -113,28 +113,41 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    # ── mass panels (all mass columns) ──────────────────────────────
-    n_mass = data_np["mass"].shape[1]
-    if n_mass:
+    # ── panel groups: config ``plot:`` section (ReadVar) or generic ─
+    panels = config_panels(f.config, data_np, phsp_np)
+    if panels:
+        print("  variables from config plot section: " +
+              ", ".join(f"{g}({len(p['keys'])})" for g, p in panels.items()))
+    for name, pg in panels.items():
+        is_mass = name == "mass"
         plotter.plot_var(
-            pwa_mass_varfun,
-            [f"mass[{i}]" for i in range(n_mass)],
-            0.2, 5.2, args.mass_bin, "mass", output=args.output,
-            fmt=args.format, unit="GeV",
+            pg["varfun"], pg["labels"], 0.2, 5.2, pg["width"], name,
+            output=args.output, fmt=args.format,
+            unit="GeV" if is_mass else "",
             smooth_sigma=args.smooth, legend=True,
-            ranges=var_ranges(data_np, phsp_np, pwa_mass_varfun),
-            show_pull=not args.no_pull)
-
-    # ── angle panels (canonical φ-first components) ─────────────────
-    n_var = len(pwa_angle_varfun(data_np))
-    if n_var:
-        plotter.plot_var(
-            pwa_angle_varfun,
-            angle_variable_labels(data_np),
-            -np.pi, np.pi, args.angle_bin, "angles", output=args.output,
-            fmt=args.format, unit="", legend=True,
-            smooth_sigma=args.smooth, show_pull=False,
-            ranges=var_ranges(data_np, phsp_np, pwa_angle_varfun))
+            show_pull=not args.no_pull if is_mass else False,
+            ranges=pg["ranges"])
+    if not panels:
+        # fall back to every kernel column of the loaded arrays
+        n_mass = data_np["mass"].shape[1]
+        if n_mass:
+            plotter.plot_var(
+                pwa_mass_varfun,
+                [f"mass[{i}]" for i in range(n_mass)],
+                0.2, 5.2, args.mass_bin, "mass", output=args.output,
+                fmt=args.format, unit="GeV",
+                smooth_sigma=args.smooth, legend=True,
+                ranges=var_ranges(data_np, phsp_np, pwa_mass_varfun),
+                show_pull=not args.no_pull)
+        n_var = len(pwa_angle_varfun(data_np))
+        if n_var:
+            plotter.plot_var(
+                pwa_angle_varfun,
+                angle_variable_labels(data_np),
+                -np.pi, np.pi, args.angle_bin, "angles",
+                output=args.output, fmt=args.format, unit="", legend=True,
+                smooth_sigma=args.smooth, show_pull=False,
+                ranges=var_ranges(data_np, phsp_np, pwa_angle_varfun))
 
     print(f"  saved to {args.output}")
 

@@ -182,3 +182,68 @@ def var_ranges(data, phsp, varfun):
             lo, hi = -1.0, 1.0
         out.append((lo, hi))
     return out
+
+
+# ── config-plot-driven panels (via the generic ReadVar readers) ────────────
+
+def config_panels(cfg, data_np, phsp_np):
+    """Plot panels assembled from the config's ``plot:`` section.
+
+    Uses :func:`ampfit.read_var.vars_from_config` — every variable keeps a
+    :meth:`~ampfit.read_var.ReadVar.read` on the raw kernel event dict, so
+    data and phsp histograms come from the exact same resolution.
+
+    Returns ``{'mass': pg, 'angles': pg, ...}`` with each panel group *pg*
+    holding the declared variable keys/labels/units and ready-made
+    varfun/ranges/bin-width for ``PWGroupPlotter.plot_var``.  Variables
+    whose topology is not present in the loaded arrays are skipped.
+    """
+    from ampfit.read_var import vars_from_config
+
+    items = [(k, v) for k, v in vars_from_config(cfg)
+             if _readable(v, data_np)]
+
+    groups = {}
+
+    def _group(name, vs):
+        vrs = [v for _k, v in vs]
+        sel = [it for it in items if it[1] in vrs]
+        keys = [k for k, v in sel]
+        labels = [getattr(v, "display", k) for k, v in sel]
+        units = [getattr(v, "unit", "") for k, v in sel]
+
+        def varfun(x):
+            return [v.read(x) for v in vrs]
+
+        ranges = []
+        for v in vrs:
+            rng = getattr(v, "range", None)
+            if rng is None:
+                lo = float(min(np.min(v.read(data_np)),
+                               np.min(v.read(phsp_np))))
+                hi = float(max(np.max(v.read(data_np)),
+                               np.max(v.read(phsp_np))))
+                if hi - lo < 1e-12 or not np.all(np.isfinite([lo, hi])):
+                    lo, hi = -1.0, 1.0
+                rng = (lo, hi)
+            ranges.append(rng)
+        spans = np.array([r[1] - r[0] for r in ranges])
+        span = float(np.median(spans)) if len(spans) else 1.0
+        width = span / 60.0 if span > 0 else 1.0
+        return {"keys": keys, "labels": labels, "units": units,
+                "varfun": varfun, "ranges": ranges, "width": width}
+
+    for key, v in items:
+        if getattr(v, "kind", None) == "mass":
+            groups.setdefault("mass", []).append((key, v))
+        else:
+            groups.setdefault("angles", []).append((key, v))
+    return {name: _group(name, vs) for name, vs in groups.items()}
+
+
+def _readable(v, data_np):
+    try:
+        v.read(data_np)
+        return True
+    except (IndexError, ValueError):
+        return False

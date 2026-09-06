@@ -67,3 +67,78 @@ def test_var_ranges_union():
     b = {"mass": np.array([[0.5], [2.0]])}
     r = var_ranges(a, b, pwa_mass_varfun)
     assert r[0] == pytest.approx((0.5, 3.0))
+
+
+# ── ReadVar item classes (read_var.py) ────────────────────────────────
+
+@pytest.fixture(scope="module")
+def pwa_events():
+    ne = 12
+    rng = np.random.RandomState(11)
+    return {"mass": np.arange(ne * 3, dtype=float).reshape(ne, 3) / 3 + 1,
+            "angle": rng.uniform(-np.pi, np.pi, size=(ne, 3, 4)),
+            "q": np.ones((ne, 3)), "weight": np.ones(ne)}
+
+
+def test_readvar_item_classes(cfg_pwa):
+    from ampfit.read_var import ReadVar, MassVar, AngleVar
+    m = ReadVar(cfg_pwa, "pipeta")
+    assert isinstance(m, MassVar) and m.kind == "mass"
+    a = ReadVar(cfg_pwa, ("angle", "pipi/pip", "alpha"))
+    assert isinstance(a, AngleVar) and a.kind == "angle"
+    b = ReadVar(cfg_pwa, ("angle", "pipi", "cos(beta)"))
+    assert isinstance(b, AngleVar) and b.angle_kind == "cos(beta)"
+    with pytest.raises(ValueError):
+        ReadVar(cfg_pwa, ("angle", "pipeta", "alpha"))   # no wave chain
+
+
+def test_massvar_reads_column(cfg_pwa, pwa_events):
+    from ampfit.read_var import MassVar
+    m0 = MassVar(cfg_pwa, "pipi")
+    m1 = MassVar(cfg_pwa, "pipeta")
+    assert np.allclose(m0.read(pwa_events), pwa_events["mass"][:, 0])
+    assert np.allclose(m1.read(pwa_events), pwa_events["mass"][:, 1])
+
+
+def test_anglevar_vertex_mapping(cfg_pwa, pwa_events):
+    from ampfit.read_var import AngleVar
+    a = pwa_events["angle"]
+    wrap = (a[:, 0, 0] + np.pi) % (2 * np.pi) - np.pi
+    assert np.allclose(AngleVar(cfg_pwa, "pipi", "alpha").read(pwa_events),
+                       wrap)
+    wrap1 = (a[:, 0, 1] + np.pi) % (2 * np.pi) - np.pi
+    assert np.allclose(
+        AngleVar(cfg_pwa, "pipi/pip", "alpha").read(pwa_events), wrap1)
+    assert np.allclose(
+        AngleVar(cfg_pwa, "pipi", "cos(beta)").read(pwa_events),
+        np.cos(a[:, 0, 2]))
+    assert AngleVar(cfg_pwa, "pipi", "alpha").range == (-np.pi, np.pi)
+
+
+def test_exprvar_elementwise(cfg_pwa, pwa_events):
+    from ampfit.read_var import MassVar, ExprVar
+    mv = {f"m_{n}": MassVar(cfg_pwa, n) for n in ("pipi", "pipeta")}
+    e = ExprVar("max(m_pipi,m_pipeta) ** 2 - m_pipi", mv)
+    got = e.read(pwa_events)
+    want = np.maximum(pwa_events["mass"][:, 0],
+                      pwa_events["mass"][:, 1]) ** 2 - pwa_events["mass"][:, 0]
+    assert np.allclose(got, want)
+
+
+def test_vars_from_config_classes(cfg_pwa):
+    from ampfit.read_var import vars_from_config, MassVar, AngleVar
+    items = dict(vars_from_config(cfg_pwa))
+    assert isinstance(items["pipi"], MassVar)
+    # config_pwa has only topology 0 wave-active -> pipeta angles skipped
+    assert "pipi alpha" in items and "pipi/pip alpha" in items
+    assert not any(k.startswith("pipeta ") for k in items)
+
+
+def test_config_panels_from_readvars(cfg_pwa, pwa_events):
+    from ampfit.plot_pwa_groups import config_panels
+    p = config_panels(cfg_pwa, pwa_events, pwa_events)
+    assert p["mass"]["keys"] == ["pipi", "pipeta", "pimeta"]
+    # pipi + pipi/pip (alpha/cos) + the two extra_vars expressions
+    assert len(p["angles"]["keys"]) == 6
+    v = p["angles"]["varfun"](pwa_events)
+    assert len(v) == 6 and all(x.shape == (12,) for x in v)
