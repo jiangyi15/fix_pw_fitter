@@ -180,3 +180,32 @@ def test_generate_pwa_phsp_conserves_four_momentum(cfg):
     for i, f in enumerate(cfg.finals):
         assert np.allclose(mass_ok[i], cfg.dic["particle"][f]["mass"],
                            atol=1e-6)
+
+
+def test_load_all_data_prefix_momenta(tmp_path):
+    """load_all_data converts data/phsp 4-momentum files via pwa_event_data."""
+    import yaml
+    from ampfit import Fitter
+    from ampfit.pwa_build import generate_pwa_phsp
+
+    cfg0 = Config("config_pwa.yml")
+    chain = cfg0.full_decay.get_partial_waves()[0][1]
+    mom = generate_pwa_phsp(cfg0, chain, 300, seed=7)
+
+    d = yaml.safe_load(open("config_pwa.yml"))
+    for pref in ("data", "phsp"):
+        d["data"][pref] = f"{pref}.npy"
+        d["data"][f"{pref}_weight"] = f"{pref}_w.npy"
+    cfgp = tmp_path / "cfg.yml"
+    cfgp.write_text(yaml.safe_dump(d))
+    np.save(tmp_path / "data.npy", mom[:100])
+    np.save(tmp_path / "data_w.npy", np.ones(100))
+    np.save(tmp_path / "phsp.npy", mom)
+    np.save(tmp_path / "phsp_w.npy", np.ones(300))
+
+    f = Fitter(str(cfgp), backend="numpy_pwa")
+    dn, pn = f.load_all_data()
+    assert dn["mass"].shape == (100, 1)
+    assert pn["mass"].shape == (300, 1)
+    assert dn["angle"].shape == (100, 1, 4)     # canonical, any n_comps
+    assert dn["q"].shape == (100, 2)

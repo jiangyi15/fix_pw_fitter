@@ -397,11 +397,21 @@ class Fitter:
         return out, n_events
 
     def load_all_data(self):
-        """Load data and phsp from ``data_arr`` / ``phsp_arr`` in config.
+        """Load data and phsp and call set_phsp()/set_data().
 
-        Config keys ``data.data_arr`` and ``data.phsp_arr`` specify paths
-        to ``.npz`` files (relative to the config file directory).
-        Calls :meth:`set_phsp` and :meth:`set_data` automatically.
+        Two data-source conventions are supported (in the ``data`` section
+        of the config):
+
+        * ``data_arr`` / ``phsp_arr``: precomputed ``.npz`` files with the
+          kernel-ready arrays (legacy B→4π flow);
+        * ``prefix`` / ``prefix_weight`` 4-momentum files — e.g.
+          ``data: ./data_slice.npy`` (N, n_finals, 4), ``data_weight``
+          per-event weights, and analogously for ``phsp``.  The momenta
+          are converted on the fly to the kernel-array format with the
+          model-matched converter (``pwa_event_data`` for single-block
+          pure-PWA models, ``momenta_to_data`` for the legacy block models).
+          ``data.dat_order`` names the per-column final particles (default:
+          ``cfg.finals``).
 
         Returns:
             ``(data_np, phsp_np)`` — the loaded numpy dicts.
@@ -409,28 +419,85 @@ class Fitter:
         import os
         cfg_dir = os.path.dirname(os.path.abspath(
             self.config._config_path))
+        data_conf = self.config.dic.get("data") or {}
 
         def _resolve(key):
-            val = self.config.dic.get("data", {}).get(key)
+            val = data_conf.get(key)
             if isinstance(val, (list, tuple)):
                 val = val[0] if val else None
             return os.path.join(cfg_dir, val) if val else None
 
         data_path = _resolve("data_arr")
         phsp_path = _resolve("phsp_arr")
-        if not data_path or not phsp_path:
-            raise ValueError(
-                "Config must have 'data.data_arr' and 'data.phsp_arr' "
-                "pointing to .npz files.")
-        # Resolve relative to config file
-        data_path = os.path.join(cfg_dir, data_path)
-        phsp_path = os.path.join(cfg_dir, phsp_path)
         n_comp = int(self.kernel_config["angle_k"].shape[1])
-        data_np, _ = self.load_npz(data_path, n_angle_comp=n_comp)
-        phsp_np, _ = self.load_npz(phsp_path, n_angle_comp=n_comp)
+        if data_path and phsp_path:
+            data_np, _ = self.load_npz(data_path, n_angle_comp=n_comp)
+            phsp_np, _ = self.load_npz(phsp_path, n_angle_comp=n_comp)
+        else:
+            data_np = self._load_momenta_conf("data")
+            phsp_np = self._load_momenta_conf("phsp")
+            if data_np is None or phsp_np is None:
+                raise ValueError(
+                    "Config 'data' must provide either data_arr/phsp_arr "
+                    "(.npz) or prefix data/phsp (+ *_weight) 4-momentum "
+                    "files.")
         self.set_phsp(phsp_np)
         self.set_data(data_np)
         return data_np, phsp_np
+
+    def _load_momenta_conf(self, prefix):
+        """Convert a ``prefix`` + ``prefix_weight`` 4-momentum config pair
+        into kernel-ready arrays (or None if not configured)."""
+        import os
+        cfg_dir = os.path.dirname(os.path.abspath(
+            self.config._config_path))
+        data_conf = self.config.dic.get("data") or {}
+
+        def _resolve(key):
+            val = data_conf.get(key)
+            if isinstance(val, (list, tuple)):
+                val = val[0] if val else None
+            return os.path.join(cfg_dir, val) if val else None
+
+        mom_path = _resolve(prefix)
+        if not mom_path:
+            return None
+        momenta = np.load(mom_path)
+        if momenta.ndim != 3 or momenta.shape[-1] != 4:
+            raise ValueError(f"{prefix}: expected (n, n_finals, 4), got "
+                             f"{momenta.shape}")
+        w_path = _resolve(f"{prefix}_weight")
+        weight = np.load(w_path) if w_path else np.ones(momenta.shape[0])
+
+        # reorder columns from data.dat_order into cfg.finals order
+        order = data_conf.get("dat_order") or list(self.config.finals)
+        if len(order) != momenta.shape[1]:
+            raise ValueError(
+                f"{prefix}: {momenta.shape[1]} columns but dat_order has "
+                f"{len(order)} entries")
+        perm = [list(order).index(f) for f in self.config.finals]
+        momenta = momenta[:, perm]
+
+        from ampfit.config_loader import row_block_factors
+        C = row_block_factors(self.config.dic)[2]
+        if C == 1:
+            from ampfit.pwa_build import pwa_event_data
+            out = pwa_event_data(self.config, self.kernel_config, momenta)
+            out["weight"] = np.asarray(weight, dtype=float)
+            out["bkg"] = np.zeros(momenta.shape[0])
+        else:
+            from ampfit.momenta_to_data import momenta_to_data
+            d = momenta_to_data(momenta, weight=weight)
+            out = {
+                "mass": d["mass"].reshape(momenta.shape[0], -1),
+                "q": d["q"].reshape(momenta.shape[0], -1),
+                "angle": d["angles"],
+                "frac": d["frac"],
+                "time": d["time"],
+                "bkg": d["bkg_raw"],
+                "weight": np.asarray(d["weight"], dtype=float),
+            }
+        return out
 
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
