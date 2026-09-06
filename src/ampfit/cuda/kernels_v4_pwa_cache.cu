@@ -924,10 +924,12 @@ typedef struct {
     float2* amp_cache;    // [ne · n_uniq], built at load_data
     int n_uniq;
     // fixed-m0/g0 full-amplitude cache (cuda_compute_v4_cache): per-event
-    // per-entry a_{p,k}(e) = Amp/bw at the cached m0/g0, filled on demand.
+    // per-entry a_{p,k}(e) = Amp/bw at the FIRST-SEEN m0/g0, filled once.
+    // It is the caller's responsibility to only present that same fixed
+    // m0/g0 afterwards; changed (fitted) parameters must go through the
+    // original cuda_v4_pwa kernel (see _v4_pwa_cache.py fallback).
     double2* common_cache;   // [ne · n_wave]
-    double* cm0; double* cg0;   // host copies of the cached params
-    int cache_valid; int m0n; int g0n;
+    int cache_valid;
 } DataHandle2;
 
 void cuda_free_context_v4(void* vctx);  // forward decl (used by create on error)
@@ -1101,7 +1103,6 @@ void cuda_free_data_v4(void* vh) {
     cudaFree((void*)h->w); cudaFree((void*)h->b);
     if (h->amp_cache) cudaFree(h->amp_cache);
     if (h->common_cache) cudaFree(h->common_cache);
-    free(h->cm0); free(h->cg0);
     free(h);
 }
 
@@ -1323,12 +1324,11 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
     p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
 
-    // ---- refill the fixed-amplitude cache when m0/g0 changed -------------
-    int changed = !h->cache_valid
-        || h->m0n != c->n_m0_params || h->g0n != c->n_g0_params
-        || memcmp(h->cm0, m0, c->n_m0_params * sizeof(double)) != 0
-        || memcmp(h->cg0, g0, c->n_g0_params * sizeof(double)) != 0;
-    if (changed) {
+    // ---- fill the fixed-amplitude cache exactly once ----------------------
+    // m0/g0 seen on the first call are assumed constant for the whole
+    // handle lifetime (the Python wrapper routes any later change to the
+    // original cuda_v4_pwa kernel).
+    if (!h->cache_valid) {
         if (h->common_cache == NULL) {
             if (cudaMalloc(&h->common_cache,
                            (size_t)ne * nw * sizeof(double2)) != cudaSuccess) {
@@ -1337,12 +1337,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
                 return;
             }
         }
-        double* cm0 = (double*)malloc(c->n_m0_params * sizeof(double));
-        double* cg0 = (double*)malloc(c->n_g0_params * sizeof(double));
-        if (!cm0 || !cg0) { free(cm0); free(cg0); return; }
-        memcpy(cm0, m0, c->n_m0_params * sizeof(double));
-        memcpy(cg0, g0, c->n_g0_params * sizeof(double));
-
         ComputeData s;
         if (c->scratch) {
             s = *c->scratch;
@@ -1392,9 +1386,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
             #undef F
         }
-        free(h->cm0); free(h->cg0);
-        h->cm0 = cm0; h->cg0 = cg0;
-        h->m0n = c->n_m0_params; h->g0n = c->n_g0_params;
         h->cache_valid = 1;
     }
 

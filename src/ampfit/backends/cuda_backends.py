@@ -126,14 +126,13 @@ class CUDABackendV4PWACache(_CUDABackend):
     """CUDA v4 PWA cache — full-amplitude cache for the fixed m0/g0 case.
 
     Same pure-PWA model as ``cuda_v4_pwa`` (P = Σ_p |Σ_k ck·a|², shared ck,
-    p-major entries).  Intended for fits where every m0/g0 is fixed: the
+    p-major entries).  Strictly for fits where every m0/g0 is fixed: the
     per-event per-entry spatial amplitude common[e, p·N+k] (angular cache ×
-    BW propagator) is then constant, so it is computed once per data handle
-    at the given m0/g0 and cached (fpwfitter-style).  Every later compute()
-    only contracts ck over the cached amplitude (forward + ck gradient) and
-    returns zero m0/g0 gradients.  If m0/g0 nevertheless change between
-    calls the cache is silently refilled, so results stay identical to
-    ``cuda_v4_pwa`` — usable as a drop-in when masses/widths are fixed.
+    BW propagator) is then constant and is computed ONCE per data handle at
+    the parameters seen on the first compute().  Every later compute() only
+    contracts ck over the cached amplitude (forward + ck gradient) and
+    returns zero m0/g0 gradients.  There is no automatic refill or switch —
+    when masses/widths float, pick ``cuda_v4_pwa`` instead.
     """
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v4_pwa_cache import CUDAKernelV4PWACache as K
