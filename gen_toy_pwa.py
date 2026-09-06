@@ -27,16 +27,14 @@ from ampfit.numpy_pwa import NumpyPWA
 
 
 def _npz(data):
-    """Kernel-format npz dict (load_npz-compatible keys)."""
-    n = data["mass"].shape[0]
+    """Kernel-format npz dict — only the keys the PWA path actually needs
+    (mass/q/angle/weight).  time/frac/bkg_raw are legacy-mixing inputs and
+    are omitted to save disk + load memory; the loader fills defaults."""
     return {
         "mass": data["mass"],
         "q": data["q"],
         "angle": data["angle"],
         "weight": data["weight"],
-        "time": np.zeros(n),
-        "frac": np.full(n, 0.5),
-        "bkg_raw": data["bkg"],
     }
 
 

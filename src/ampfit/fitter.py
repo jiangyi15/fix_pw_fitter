@@ -393,11 +393,17 @@ class Fitter:
             "mass": data["mass"][idx].reshape(n_events, -1),
             "q": data["q"][idx].reshape(n_events, -1),
             "angle": data["angle"][idx].reshape(n_events, -1, n_angle_comp),
-            "time": data["time"][idx].astype(np.float64),
-            "frac": data["frac"][idx].astype(np.float64),
-            "bkg": data["bkg_raw"][idx].astype(np.float64),
-            "weight": data["weight"][idx].astype(np.float64),
         }
+        # time/frac/bkg_raw are legacy-mixing inputs — keep them only when
+        # the npz actually provides them (pure-PWA files may omit them).
+        for key, cast in (("time", np.float64), ("frac", np.float64)):
+            if key in data:
+                out[key] = data[key][idx].astype(cast)
+        if "bkg_raw" in data:
+            out["bkg"] = data["bkg_raw"][idx].astype(np.float64)
+        else:
+            out["bkg"] = np.zeros(n_events)
+        out["weight"] = data["weight"][idx].astype(np.float64)
         assert not np.any(np.isnan(out["mass"])), "NaN in mass"
         return out, n_events
 
