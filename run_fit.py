@@ -80,36 +80,30 @@ def main():
     print("=" * 70)
 
     t0 = time.time()
-    cfg_data = cfg_phsp = None
-    if args.data is None or args.phsp is None:
-        # any missing dataset comes from the config (load_all_data:
-        # data_arr/phsp_arr npz or prefix 4-momentum files)
-        cfg_data, cfg_phsp = fitter.load_all_data()
+    have_both = bool(args.data) and bool(args.phsp)
+    if not have_both and (bool(args.data) or bool(args.phsp)):
+        import warnings
+        warnings.warn("Provide BOTH --data and --phsp, or neither; "
+                      "falling back to the config datasets.")
+    if have_both:
+        # explicit npz for both datasets
+        n_comp = int(fitter.kernel_config["angle_k"].shape[1])
+        max_data = 1000 if args.debug else None
+        max_phsp = 10000 if args.debug else None
+        data_np, n_data = Fitter.load_npz(args.data, max_events=max_data,
+                                         n_angle_comp=n_comp)
+        phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp,
+                                         n_angle_comp=n_comp)
+        fitter.set_phsp(phsp_np)
+        fitter.set_data(data_np)
+    else:
+        # both datasets come from the config (load_all_data installs them)
+        data_np, phsp_np = fitter.load_all_data()
+        n_data = data_np["mass"].shape[0]
+        n_phsp = phsp_np["mass"].shape[0]
         print(f"  [config] loaded data + phsp via load_all_data()")
-    n_comp = int(fitter.kernel_config["angle_k"].shape[1])
-    max_data = 1000 if args.debug else None
-    max_phsp = 10000 if args.debug else None
-
-    def _load(npz, key, n_max):
-        if npz is None:
-            return cfg_data if key == "data" else cfg_phsp,                 (cfg_data if key == "data" else cfg_phsp)["mass"].shape[0]
-        d, n = Fitter.load_npz(npz, max_events=n_max, n_angle_comp=n_comp)
-        return d, n
-
-    data_np, n_data = _load(args.data, "data", max_data)
-    phsp_np, n_phsp = _load(args.phsp, "phsp", max_phsp)
     load_time = time.time() - t0
     print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
-
-    t0 = time.time()
-    fitter.set_phsp(phsp_np)
-    phsp_gpu_time = time.time() - t0
-    print(f"  Phsp -> GPU: {phsp_gpu_time:.2f}s")
-
-    t0 = time.time()
-    fitter.set_data(data_np)
-    data_gpu_time = time.time() - t0
-    print(f"  Data -> GPU: {data_gpu_time:.2f}s")
 
     n_free = len(fitter.free_param_names())
     print(f"  Free params: {n_free}")
