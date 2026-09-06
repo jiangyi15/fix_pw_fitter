@@ -31,16 +31,6 @@ def main():
     parser.add_argument("--fit", action="store_true", help="Run BFGS minimization")
     parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
-    parser.add_argument("--toy", action="store_true",
-                        help="Generate data/phsp on the fly (pure-PWA models: "
-                             "flat phase space via generate_pwa_phsp + model-"
-                             "weighted toy sample)")
-    parser.add_argument("--nph", type=int, default=8000,
-                        help="toy: phase-space events for the norm")
-    parser.add_argument("--nprop", type=int, default=40000,
-                        help="toy: independent proposal events for data")
-    parser.add_argument("--ndata", type=int, default=4000,
-                        help="toy: data events drawn from the model")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
                         default=None, help="Plot distributions (optional: output dir)")
     parser.add_argument("--init", type=str, default=None,
@@ -86,77 +76,17 @@ def main():
     print("LOADING DATA")
     print("=" * 70)
 
-    if args.toy:
-        # ── toy mode (pure-PWA): flat phsp + independent model-weighted data
-        from ampfit.pwa_build import generate_pwa_phsp, pwa_event_data
-        from ampfit.numpy_pwa import NumpyPWA
-        cfg = fitter.config
-        kc = fitter.kernel_config
-        chain = cfg.full_decay.get_partial_waves()[0][1]
-        phsp_np = pwa_event_data(cfg, kc,
-                                 generate_pwa_phsp(cfg, chain, args.nph, seed=11))
-        prop = pwa_event_data(cfg, kc,
-                              generate_pwa_phsp(cfg, chain, args.nprop, seed=22))
-        rng = np.random.RandomState(42)
-        n_ck = kc["matrix_angle"].shape[1] // kc["n_proj"]
-        ck0 = rng.normal(size=n_ck) + 1j * rng.normal(size=n_ck)
-        m0 = np.full(int(np.max(kc["m0_index"])) + 1, 0.769)
-        g0 = np.full(int(np.max(kc["g0_index"])) + 1, 0.10)
-        npw = NumpyPWA(kc)
-        _, _, P0 = npw.compute({"ck": ck0, "m0": m0, "g0": g0},
-                               npw.load_data(prop))
-        prob = np.clip(np.asarray(P0, dtype=float), 0, None)
-        prob /= prob.sum()
-        idx = rng.choice(args.nprop, size=args.ndata, replace=False, p=prob)
-        data_np = {kk: vv[idx] for kk, vv in prop.items()}
-        n_data, n_phsp = len(data_np["weight"]), args.nph
-        print(f"  [toy] generated {n_data:,} data + {n_phsp:,} phsp events")
-        fitter.set_phsp(phsp_np)
-        fitter.set_data(data_np)
-        if args.init is None:
-            # constraint-driven start: '_total_0' -> 1, couplings (r=1, θ=0)
-            start = {}
-            for comb in fitter.all_comb:
-                for p in comb:
-                    if not isinstance(p, str):
-                        continue
-                    if "_total_0" in p:
-                        start[p] = 1.0
-                    else:
-                        start.setdefault(p + "r", 1.0)
-                        start.setdefault(p + "i", 0.0)
-            x0 = fitter.values_from_dict(start)
-            print(f"  [toy] constraint-driven ck start (x0 len {len(x0)})")
-            _toy_x0_set = True
-        else:
-            _toy_x0_set = False
-        n_free = len(fitter.free_param_names())
-        print(f"  Free params: {n_free}")
-        load_time = 0.0
-        phsp_gpu_time = data_gpu_time = 0.0
-    else:
-        max_data = 1000 if args.debug else None
-        max_phsp = 10000 if args.debug else None
+    max_data = 1000 if args.debug else None
+    max_phsp = 10000 if args.debug else None
+    n_comp = int(fitter.kernel_config["angle_k"].shape[1])
 
-        t0 = time.time()
-        data_np, n_data = Fitter.load_npz(args.data, max_events=max_data)
-        phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp)
-        load_time = time.time() - t0
-        print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
-
-        t0 = time.time()
-        fitter.set_phsp(phsp_np)
-        phsp_gpu_time = time.time() - t0
-        print(f"  Phsp -> GPU: {phsp_gpu_time:.2f}s")
-
-        t0 = time.time()
-        fitter.set_data(data_np)
-        data_gpu_time = time.time() - t0
-        print(f"  Data -> GPU: {data_gpu_time:.2f}s")
-
-        n_free = len(fitter.free_param_names())
-        print(f"  Free params: {n_free}")
-
+    t0 = time.time()
+    data_np, n_data = Fitter.load_npz(args.data, max_events=max_data,
+                                     n_angle_comp=n_comp)
+    phsp_np, n_phsp = Fitter.load_npz(args.phsp, max_events=max_phsp,
+                                     n_angle_comp=n_comp)
+    load_time = time.time() - t0
+    print(f"  Loaded {n_data:,} data + {n_phsp:,} phsp events in {load_time:.2f}s")
 
     t0 = time.time()
     fitter.set_phsp(phsp_np)
@@ -170,17 +100,13 @@ def main():
 
     n_free = len(fitter.free_param_names())
     print(f"  Free params: {n_free}")
-
-    # ==================================================================
     # 3. Compute NLL
     # ==================================================================
     print("\n" + "=" * 70)
     print("COMPUTING NLL")
     print("=" * 70)
 
-    if args.toy and _toy_x0_set:
-        pass                      # x0 already built (constraint-driven start)
-    elif args.init:
+    if args.init:
         import json
         with open(args.init) as f:
             init_data = json.load(f)
