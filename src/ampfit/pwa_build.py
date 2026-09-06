@@ -322,7 +322,7 @@ def pwa_event_data(cfg, kc, momenta):
         "q": np.stack([q0, q1], axis=-1),
         "angle": ang,
         "weight": np.ones(n),
-        "bkg": np.zeros(n),
+        "bkg": np.ones(n),          # default background contribution = 1
     }
 
 

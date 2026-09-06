@@ -402,7 +402,7 @@ class Fitter:
         if "bkg_raw" in data:
             out["bkg"] = data["bkg_raw"][idx].astype(np.float64)
         else:
-            out["bkg"] = np.zeros(n_events)
+            out["bkg"] = np.ones(n_events)     # default bkg contribution = 1
         out["weight"] = data["weight"][idx].astype(np.float64)
         assert not np.any(np.isnan(out["mass"])), "NaN in mass"
         return out, n_events
@@ -495,7 +495,6 @@ class Fitter:
             from ampfit.pwa_build import pwa_event_data
             out = pwa_event_data(self.config, self.kernel_config, momenta)
             out["weight"] = np.asarray(weight, dtype=float)
-            out["bkg"] = np.zeros(momenta.shape[0])
         else:
             from ampfit.momenta_to_data import momenta_to_data
             d = momenta_to_data(momenta, weight=weight)
@@ -537,7 +536,7 @@ class Fitter:
         # Copy data and scale bkg if we have purity + phsp background
         data = dict(data)
         if self._purity is not None and self._N_b is not None and self._N_b > 0:
-            bkg_raw = data.get("bkg", 0.0)
+            bkg_raw = data.get("bkg", 1.0)
             if np.isscalar(bkg_raw):
                 bkg_raw = np.full(data["mass"].shape[0], bkg_raw, dtype=np.float64)
             p = self._purity
@@ -580,7 +579,7 @@ class Fitter:
 
         # Compute N_b = weighted average of bkg over phsp
         # (weights sum to 1, so sum(weight*bkg) is the weighted mean)
-        b = phsp.get("bkg", np.zeros(phsp["mass"].shape[0]))
+        b = phsp.get("bkg", np.ones(phsp["mass"].shape[0]))
         if np.isscalar(b):
             b = np.full(phsp["mass"].shape[0], b, dtype=np.float64)
         self._N_b = float(np.sum(phsp["weight"] * b)) if w_sum > 0 else 0.0
@@ -732,7 +731,7 @@ class Fitter:
         d(NLL)/d(norm) = sum(weight * P / (norm * (P + bkg * norm)))
         """
         weight = data["weight"]
-        bkg = data.get("bkg", 0.0)
+        bkg = data.get("bkg", 1.0)
         if np.isscalar(bkg):
             bkg = np.full_like(weight, bkg)
         # Use float64 to avoid overflow with f32 backends
@@ -1228,7 +1227,7 @@ class Fitter:
         data_total = float(np.sum(dw))
 
         pw_sig = phsp_np["weight"] * P_phsp                  # unnormalized signal
-        pw_bkg = phsp_np["weight"] * phsp_np.get("bkg", np.zeros(ne_p))
+        pw_bkg = phsp_np["weight"] * phsp_np.get("bkg", np.ones(ne_p))
 
         sig_norm = float(np.sum(pw_sig))                     # = ∫P·w  (norm)
         bkg_norm = float(np.sum(pw_bkg))                     # = ∫bkg·w (N_b)

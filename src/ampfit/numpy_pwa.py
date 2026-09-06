@@ -125,7 +125,7 @@ class NumpyPWA:
         P_e = np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
 
         weight = data.get("weight", np.ones(ne))
-        bkg = data.get("bkg", 0.0)
+        bkg = data.get("bkg", 1.0)
         if norm is None:
             Q = float(np.sum(weight * P_e))
             dQ_dP = weight
