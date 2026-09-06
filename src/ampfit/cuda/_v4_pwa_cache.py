@@ -1,6 +1,5 @@
 """
-CUDA kernel v4 PWA cache — projection-sum PWA with a FULLY cached spatial
-amplitude for fixed m0/g0 (derived from cuda_v3_ampcache + cuda_v4_pwa).
+CUDA kernel v4 PWA — projection-sum PWA (derived from cuda_v3_ampcache).
 
 No time evolution / no D0-D0bar mixing / no scalar (Gamma, DeltaGamma, ...)
 parameters.  The event probability is an incoherent sum over *projections*:
@@ -63,6 +62,9 @@ void cuda_compute_v4_cache(void*,void*,
     const double*,const double*,const double*,const double*,
     double,int,
     double*,double*,double*,double*,double*,double*);
+int cuda_fill_common_v4_cache(void*,void*,
+    const double*,int,const double*,int,
+    const double*,int,const double*,int,const double*,int);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -96,11 +98,17 @@ class DataHandle:
         self.free()
 
 
-class CUDAKernelV4PWACache:
-    """Projection-sum PWA kernel on the ampcache infrastructure.
 
-    No time/mixing: ``params`` needs only ``ck`` (length N = n_wave/n_proj),
-    ``m0`` and ``g0``.  Gradients returned for ``ck``/``m0``/``g0`` only.
+class CUDAKernelV4PWACache:
+    """Projection-sum PWA kernel, fixed m0/g0 FULL-amplitude cache.
+
+    Standard kernel interface (``load_data(data)`` / ``compute(params, h)``):
+    the device handle keeps only weight/bkg + the cached spatial amplitude
+    ``common[e, p·N+k] = Amp/bw`` at the fixed m0/g0.  The one-time cache is
+    built lazily inside the FIRST ``compute()`` from the host arrays retained
+    at load (mass/momentum/angle uploaded per batch, transient).  ``params``
+    m0/g0 seen then must stay constant — changing them raises ValueError
+    (floating fits must use the plain ``cuda_v4_pwa`` kernel instead).
     """
 
     def __init__(self, config, batch_size=50000, lib_path=None):
@@ -187,7 +195,18 @@ class CUDAKernelV4PWACache:
             _ib(self.rep_of_slot), len(self.rep_of_slot),
             self.n_uniq, self.n_proj)
 
+    def _padded_mg(self, params):
+        nm_ = self.n_m0_params
+        gg_ = self.n_g0_params
+        m0 = np.zeros(nm_, np.float64)
+        m0[:len(params["m0"])] = np.asarray(params["m0"])
+        g0 = np.zeros(gg_, np.float64)
+        g0[:len(params["g0"])] = np.asarray(params["g0"])
+        return m0, g0
+
     def load_data(self, data):
+        """Standard load — keep weight/bkg on device and the kernel-array
+        momenta on the CPU side for the lazy one-time cache fill."""
         ka = []
 
         def _db(a):
@@ -197,9 +216,9 @@ class CUDAKernelV4PWACache:
             return _ffi.cast("double*", buf)
 
         ne = data["mass"].shape[0]
-        mass = data["mass"].reshape(ne, -1)
-        mom = data["q"].reshape(ne, -1)
-        ang = data["angle"].reshape(ne, -1)
+        mass = np.ascontiguousarray(data["mass"].reshape(ne, -1))
+        mom = np.ascontiguousarray(data["q"].reshape(ne, -1))
+        ang = np.ascontiguousarray(data["angle"].reshape(ne, -1))
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
@@ -208,20 +227,25 @@ class CUDAKernelV4PWACache:
             _db(mom), mom.shape[1], _db(ang), nang,
             _db(data["weight"]), _db(data[bkg_key]), ne), self._lib, ne)
         dh._keep = ka
+        dh._arrays = (mass, mom, ang)
+        dh._filled = False
+        dh._fixed_mg = None
         return dh
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        """Forward + gradients for the projection-sum PWA model.
+        """Forward + gradients; builds the fixed-m0/g0 amplitude cache lazily
+        on the first call (from the m0/g0 of *params*), then only contracts
+        ck.  Gradients for m0/g0 are zero.
 
         Args:
-            params: dict with 'ck' (complex length N), 'm0', 'g0'.
-                A 'scalar' key (if present, e.g. from a legacy config) is
-                ignored — this model has no scalar parameters.
+            params: dict with 'ck' (complex length N), 'm0', 'g0'.  The
+                m0/g0 are FIXED for the handle lifetime; a later call with
+                different values raises ValueError (use cuda_v4_pwa).
             norm: optional float normalization; None → unnormalized.
             return_p: if True return per-event P (always returned here).
 
         Returns:
-            (Q, grads, P) with grads keys ck/m0/g0 (no 'scalar').
+            (Q, grads, P) with grads keys ck/m0/g0 (m0/g0 all zero).
         """
         ck = params["ck"]
         nw = self.n_wave
@@ -235,15 +259,42 @@ class CUDAKernelV4PWACache:
 
         if len(ck) != nbase:
             raise ValueError(
-                f"v4 PWA: ck length {len(ck)} != n_wave/n_proj = {nbase} "
-                f"({self.n_wave}/{self.n_proj})")
+                f"v4 PWA cache: ck length {len(ck)} != n_wave/n_proj = "
+                f"{nbase} ({self.n_wave}/{self.n_proj})")
 
         ck_r = np.real(ck).astype(np.float64)
         ck_i = np.imag(ck).astype(np.float64)
-        m0 = np.zeros(nm_, np.float64)
-        m0[:len(params["m0"])] = np.asarray(params["m0"])
-        g0 = np.zeros(gg_, np.float64)
-        g0[:len(params["g0"])] = np.asarray(params["g0"])
+        m0, g0 = self._padded_mg(params)
+
+        # ── lazy one-time cache build (first compute only) ─────────────
+        if not data_handle._filled:
+            mass, mom, ang = data_handle._arrays
+            ka2 = []
+
+            def _db2(a):
+                arr = np.ascontiguousarray(a, np.float64)
+                buf = _ffi.from_buffer(arr)
+                ka2.append(buf)
+                return _ffi.cast("double*", buf)
+
+            ok = self._lib.cuda_fill_common_v4_cache(
+                self._ctx, data_handle.ptr,
+                _db2(m0), len(m0), _db2(g0), len(g0),
+                _db2(mass), mass.shape[1],
+                _db2(mom), mom.shape[1],
+                _db2(ang), ang.shape[1])
+            data_handle._keep += ka2
+            if not ok:
+                raise RuntimeError("cuda_fill_common_v4_cache failed")
+            data_handle._filled = True
+            data_handle._fixed_mg = (m0.copy(), g0.copy())
+        else:
+            fm, fg = data_handle._fixed_mg
+            if not (np.array_equal(fm, m0) and np.array_equal(fg, g0)):
+                raise ValueError(
+                    "cuda_v4_pwa_cache: m0/g0 changed after the cache was "
+                    "built — fixed m0/g0 only; use cuda_v4_pwa when they "
+                    "float")
 
         oQ = _ffi.new("double*")
         oP = np.zeros(data_handle.ne, np.float64)
@@ -266,6 +317,7 @@ class CUDAKernelV4PWACache:
             norm_val, use_norm,
             oQ, _db(oP), _db(ogck_r), _db(ogck_i),
             _db(ogm0), _db(ogg0))
+        data_handle._keep += ka
 
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]
