@@ -422,7 +422,9 @@ class Fitter:
           model-matched converter (``pwa_event_data`` for single-block
           pure-PWA models, ``momenta_to_data`` for the legacy block models).
           ``data.dat_order`` names the per-column final particles (default:
-          ``cfg.finals``).
+          ``cfg.finals``).  An optional per-event ``{prefix}_bg_value``
+          file (shape ``(N,)``) is loaded into ``out["bkg"]``; without it
+          the converter defaults apply (pwa: ones; legacy: zeros).
 
         Returns:
             ``(data_np, phsp_np)`` — the loaded numpy dicts.
@@ -480,6 +482,16 @@ class Fitter:
         w_path = _resolve(f"{prefix}_weight")
         weight = np.load(w_path) if w_path else np.ones(momenta.shape[0])
 
+        # Optional per-event background contribution {prefix}_bg_value
+        bg_path = _resolve(f"{prefix}_bg_value")
+        bg = None
+        if bg_path:
+            bg = np.load(bg_path).astype(np.float64).ravel()
+            if len(bg) != momenta.shape[0]:
+                raise ValueError(
+                    f"{prefix}_bg_value: {len(bg)} entries but {momenta.shape[0]} "
+                    "events")
+
         # reorder columns from data.dat_order into cfg.finals order
         order = data_conf.get("dat_order") or list(self.config.finals)
         if len(order) != momenta.shape[1]:
@@ -495,6 +507,8 @@ class Fitter:
             from ampfit.pwa_build import pwa_event_data
             out = pwa_event_data(self.config, self.kernel_config, momenta)
             out["weight"] = np.asarray(weight, dtype=float)
+            if bg is not None:
+                out["bkg"] = bg
         else:
             from ampfit.momenta_to_data import momenta_to_data
             d = momenta_to_data(momenta, weight=weight)
@@ -504,7 +518,7 @@ class Fitter:
                 "angle": d["angles"],
                 "frac": d["frac"],
                 "time": d["time"],
-                "bkg": d["bkg_raw"],
+                "bkg": d["bkg_raw"] if bg is None else bg,
                 "weight": np.asarray(d["weight"], dtype=float),
             }
         return out
