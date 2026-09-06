@@ -59,7 +59,7 @@ def main():
                     help="Gaussian smoothing sigma in units of bin width")
     ap.add_argument("--no-pull", action="store_true",
                     help="do not draw the (data-model)/sigma pull row "
-                         "below each mass panel")
+                         "below every variable panel")
     ap.add_argument("-o", "--output", default="plots_pwa/")
     ap.add_argument("--format", default="png")
     args = ap.parse_args()
@@ -124,8 +124,7 @@ def main():
             it["varfun"], [it["label"]], lo, hi, it["width"], it["stem"],
             output=args.output, fmt=args.format, unit=it["unit"],
             smooth_sigma=args.smooth, legend=it["legend"],
-            ranges=[it["range"]],
-            show_pull=it["kind"] == "mass" and not args.no_pull)
+            ranges=[it["range"]], show_pull=not args.no_pull)
     if not items:
         # fall back to every kernel column of the loaded arrays
         n_mass = data_np["mass"].shape[1]
