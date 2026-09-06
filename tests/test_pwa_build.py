@@ -229,3 +229,24 @@ def test_load_all_data_prefix_momenta(tmp_path):
     nll, grad = f.get_nll(x0)
     assert np.isfinite(nll)
     assert np.all(np.isfinite(np.asarray(grad)))
+
+
+def test_topo_index_from_decay_struct(cfg):
+    """Topology axis enumerates ALL structural pairings (incl. without
+    resonances) so adding a resonance later does not renumber anything."""
+    from ampfit.config_loader import Config as _C
+
+    c2 = _C("config_pwa.yml")
+    # three declared pairings, even though only the pipi pairing has waves
+    assert c2.n_topo == 3
+    keys = set(c2.topo_index)
+    assert (("pim", "pip"),) in keys          # pipi pairing (has waves)
+    assert (("eta", "pip"),) in keys          # pipeta pairing (no waves yet)
+    assert (("eta", "pim"),) in keys          # pimeta pairing
+    # the active partial-wave chain sits on the first structural slot
+    ch = cfg.full_decay.get_partial_waves()[0][1]
+    assert c2.topo_index[ch.topo_id()] == 0
+
+    # legacy models unchanged (identical key ordering to chain-derived)
+    a = _C("config_angle.yml")
+    assert a.n_topo == 3

@@ -226,7 +226,7 @@ class Config:
         self.n_angles = 2 * self.n_decay
         if self.dic["particle"][top]["J"] == 0:
             self.n_angles = self.n_angles - 3 # 3d rotaion is not need
-        self.topo_index = self.get_topo_index(self.full_decay)
+        self.topo_index = self._build_topo_from_struct()
         self.n_topo = len(self.topo_index)
         self.m0_phys_name = []
         self.g0_phys_name = []
@@ -324,6 +324,47 @@ class Config:
         for f in self.finals:
             n *= self._spin_state_count(f)
         return max(1, n)
+
+    def _build_topo_from_struct(self):
+        """Stable topology index over ``decay_struct`` structural paths.
+
+        The topology axis is enumerated from the DECAY STRUCTURE (all final
+        pairings declared in ``decay:`` — including pairings that currently
+        have no resonance candidates), not from the resonance-resolved
+        chains.  Every structure path gets a fixed slot, so later adding a
+        resonance to another pairing does not renumber the existing
+        topologies and does not break the built data/kernel indices.
+
+        A path is keyed by the canonical final-partition of its inner cores
+        (identical to ``DecayChain.topo_id()``).  As a safety net, if a
+        chain topology is not covered by the structural enumeration the
+        previous chain-derived map is returned unchanged.
+        """
+        struct_keys = []
+        for path in self.decay_struct:
+            outs_all = {}
+            for p, outs, _kw in path:
+                outs_all[p] = list(outs)
+
+            def _leaves(n):
+                if n not in outs_all:
+                    return [n]
+                out = []
+                for o in outs_all[n]:
+                    out += _leaves(o)
+                return out
+
+            cores = [p for p in outs_all if p != self.top]
+            key = tuple(sorted(tuple(sorted(_leaves(c))) for c in cores))
+            if key not in struct_keys:
+                struct_keys.append(key)
+        struct_map = {k: i for i, k in enumerate(struct_keys)}
+
+        # all chain topologies must be covered by the structural paths
+        chain_keys = {ch.topo_id() for ch in self.full_decay.chains}
+        if not chain_keys.issubset(struct_map):
+            return self.get_topo_index(self.full_decay)
+        return struct_map
 
     def get_topo_index(self, decay):
         topo_id = {}
