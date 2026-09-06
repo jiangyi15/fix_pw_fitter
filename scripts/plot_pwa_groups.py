@@ -53,6 +53,9 @@ def main():
     ap.add_argument("--angle-bin", type=float, default=0.10)
     ap.add_argument("--smooth", type=float, default=1.0,
                     help="Gaussian smoothing sigma in units of bin width")
+    ap.add_argument("--no-pull", action="store_true",
+                    help="do not draw the (data-model)/sigma pull row "
+                         "below each mass panel")
     ap.add_argument("-o", "--output", default="plots_pwa/")
     ap.add_argument("--format", default="png")
     args = ap.parse_args()
@@ -100,8 +103,9 @@ def main():
             [f"mass[{i}]" for i in range(n_mass)],
             0.2, 5.2, args.mass_bin, "mass", output=args.output,
             fmt=args.format, unit="GeV",
-            smooth_sigma=args.smooth, legend=True, show_pull=True,
-            ranges=var_ranges(data_np, phsp_np, pwa_mass_varfun))
+            smooth_sigma=args.smooth, legend=True,
+            ranges=var_ranges(data_np, phsp_np, pwa_mass_varfun),
+            show_pull=not args.no_pull)
 
     # ── angle panels (canonical φ-first components) ─────────────────
     n_var = len(pwa_angle_varfun(data_np))
