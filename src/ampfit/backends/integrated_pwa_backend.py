@@ -31,8 +31,20 @@ from ampfit.integrated_pwa import IntegratedPWA as _GramPWA
 class IntegratedPWABackend(ComputeBackend):
     """Hyper backend: Gram norm (pure PWA) + base backend for data NLL."""
 
-    def __init__(self, kernel_config, base="cuda_v4_pwa"):
+    def __init__(self, kernel_config, base="cuda_v4_pwa", mc_batch=5000):
+        """Hyper backend: Gram norm (pure PWA) + base backend for data NLL.
+
+        Args:
+            kernel_config: kernel config dict.
+            base: backend spec for the data NLL.
+            mc_batch: phase-space (MC) batch size for the streamed Gram
+                build — per batch the phsp is loaded to the base kernel,
+                Gram-reduced and freed (memory bound by one batch).
+                Larger batches (e.g. 20000–50000) build D faster; 5000
+                keeps the transient memory minimal.
+        """
         self._kernel_config = kernel_config
+        self.mc_batch = int(mc_batch)
         self._gram = _GramPWA(kernel_config)
         if isinstance(base, ComputeBackend):
             self.base = base
@@ -66,7 +78,9 @@ class IntegratedPWABackend(ComputeBackend):
         return bundle.handle
 
     # ── Gram norm (phsp): streamed in batches ────────────────────────────
-    def _ensure_gram(self, bundle, m0, g0, batch=5000):
+    def _ensure_gram(self, bundle, m0, g0, batch=None):
+        if batch is None:
+            batch = self.mc_batch
         if bundle.D is not None and np.array_equal(m0, bundle.m0) \
                 and np.array_equal(g0, bundle.g0):
             return
