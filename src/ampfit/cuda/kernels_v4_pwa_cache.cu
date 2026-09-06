@@ -682,6 +682,143 @@ __global__ void load_common_d2(const double2* __restrict__ in,
 }
 
 
+// Fused fixed-cache forward + ck gradient (fpwfitter-style): one block per
+// event reads the cached double2 amplitude directly (no double conversion),
+// computes A_p, P/Q/dQdP and the projection-reduced ck-gradient partials.
+__global__ void pwa_fused_cache_kernel(
+    const double2* __restrict__ common,
+    const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
+    const double* __restrict__ weight, const double* __restrict__ bkg,
+    int n_wave, int n_proj, int n_events, int use_norm, double norm,
+    double* __restrict__ Q_out, double* __restrict__ P_out,
+    double* __restrict__ gk_r, double* __restrict__ gk_i
+) {
+    int e = blockIdx.x;
+    int tid = threadIdx.x;
+    int bd = blockDim.x;
+    int P = n_proj;
+    int N = n_wave / P;
+    const double2* cm = common + (size_t)e * n_wave;
+
+    extern __shared__ double s_dyn[];
+    double* sR   = s_dyn;
+    double* sI   = s_dyn + bd;
+    double* sAr  = s_dyn + 2 * bd;
+    double* sAi  = s_dyn + 2 * bd + P;
+    double* sq   = s_dyn + 2 * bd + 2 * P;
+
+    for (int p = 0; p < P; p++) {
+        double ar = 0.0, ai = 0.0;
+        for (int k = tid; k < N; k += bd) {
+            double2 cv = cm[p * N + k];
+            double ckr = ck_real[k], cki = ck_imag[k];
+            ar += ckr * cv.x - cki * cv.y;
+            ai += ckr * cv.y + cki * cv.x;
+        }
+        sR[tid] = ar; sI[tid] = ai;
+        __syncthreads();
+        for (int s2 = bd / 2; s2 > 0; s2 >>= 1) {
+            if (tid < s2) { sR[tid] += sR[tid + s2]; sI[tid] += sI[tid + s2]; }
+            __syncthreads();
+        }
+        if (tid == 0) { sAr[p] = sR[0]; sAi[p] = sI[0]; }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        double Ps = 0.0;
+        for (int p = 0; p < P; p++)
+            Ps += sAr[p] * sAr[p] + sAi[p] * sAi[p];
+        P_out[e] = Ps;
+        double wv = weight[e];
+        double bv = bkg[e];
+        double q;
+        if (use_norm == 0) {
+            q = wv * Ps;
+            sq[0] = wv;
+        } else {
+            q = -wv * log(Ps / norm + bv);
+            sq[0] = -wv / (Ps + bv * norm);
+        }
+        Q_out[e] = q;
+    }
+    __syncthreads();
+
+    // projection-reduced ck gradient partial per (e, k):
+    //   dQ/dck_k = Σ_p dQ_dA_p · common[e,p·N+k],  dQ_dA_p = dQdP·conj(A_p)
+    double dqp = sq[0];
+    for (int k = tid; k < N; k += bd) {
+        double gr = 0.0, gi = 0.0;
+        for (int p = 0; p < P; p++) {
+            double2 cv = cm[p * N + k];
+            double dqr = dqp * sAr[p];
+            double dqi = -dqp * sAi[p];
+            gr += dqr * cv.x - dqi * cv.y;
+            gi += dqr * cv.y + dqi * cv.x;
+        }
+        gk_r[(size_t)e * N + k] = gr;
+        gk_i[(size_t)e * N + k] = gi;
+    }
+}
+
+// fpwfitter-style: ONE THREAD PER EVENT, no shared memory / no block sync.
+// Grid = ceil(ne/256); each thread serially does A_p, P/Q/dQdP and the
+// projection-reduced ck-gradient partials (P and N are small).
+#define PWA_MAX_P 128
+__global__ void pwa_fused_thread_kernel(
+    const double2* __restrict__ common,
+    const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
+    const double* __restrict__ weight, const double* __restrict__ bkg,
+    int n_wave, int n_proj, int n_events, int use_norm, double norm,
+    double* __restrict__ Q_out, double* __restrict__ P_out,
+    double* __restrict__ gk_r, double* __restrict__ gk_i
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_events) return;
+    const int P = n_proj;
+    const int N = n_wave / P;
+    const double2* cm = common + (size_t)i * n_wave;
+
+    double aR[PWA_MAX_P], aI[PWA_MAX_P];
+    if (P > PWA_MAX_P) return;
+    double Ps = 0.0;
+    for (int p = 0; p < P; p++) {
+        double ar = 0.0, ai = 0.0;
+        for (int k = 0; k < N; k++) {
+            double2 cv = cm[p * N + k];
+            ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
+            ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
+        }
+        aR[p] = ar; aI[p] = ai;
+        Ps += ar * ar + ai * ai;
+    }
+    P_out[i] = Ps;
+    double wv = weight[i];
+    double bv = bkg[i];
+    double dqp;
+    if (use_norm == 0) {
+        Q_out[i] = wv * Ps;
+        dqp = wv;
+    } else {
+        double den = Ps + bv * norm;
+        Q_out[i] = -wv * log(Ps / norm + bv);
+        dqp = -wv / den;
+    }
+    for (int k = 0; k < N; k++) {
+        double gr = 0.0, gi = 0.0;
+        for (int p = 0; p < P; p++) {
+            double2 cv = cm[p * N + k];
+            double dqr = dqp * aR[p];
+            double dqi = -dqp * aI[p];
+            gr += dqr * cv.x - dqi * cv.y;
+            gi += dqr * cv.y + dqi * cv.x;
+        }
+        gk_r[(size_t)i * N + k] = gr;
+        gk_i[(size_t)i * N + k] = gi;
+    }
+}
+#undef PWA_MAX_P
+
 // D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j} straight from the cached
 // full-amplitude double2 buffer (fixed m0/g0; no BW recompute).
 __global__ void gram_cache_event_kernel(
@@ -1331,32 +1468,21 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         d.n_events = nb;
         d.amp_cache = NULL;       // angular factor lives in the cached common
 
-        // cached full amplitude -> scratch doubles, then K3 + K4 only
-        int ntot = nb * nw;
-        int gb = (ntot + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        load_common_d2<<<gb, BLOCK_SIZE>>>(
-            h->common_cache + (size_t)st * nw,
-            d.common_amp_factor_real, d.common_amp_factor_imag, ntot);
-        CUDA_CHECK(cudaGetLastError());
-
+        // fused single kernel: forward + ck gradient straight from the
+        // cached double2 amplitude (fpwfitter-style, no double conversion)
         {
-            size_t shmem = (2 * BLOCK_SIZE + 2 * c->n_proj) * sizeof(double);
-            pwa_amp_reduce_kernel<<<nb, BLOCK_SIZE, shmem>>>(
-                d.common_amp_factor_real, d.common_amp_factor_imag,
-                p.ck_real, p.ck_imag,
-                d.weight, d.bkg,
-                nw, c->n_proj, nb, use_norm, nv,
-                d.Q_out, d.P_out,
-                d.dQ_dA_real, d.dQ_dA_imag);
-        }
-        CUDA_CHECK(cudaGetLastError());
-        {
-            size_t shmem = 2 * N * sizeof(double);
-            grad_ck_kernel_v4<<<nb, BLOCK_SIZE, shmem>>>(
-                d.common_amp_factor_real, d.common_amp_factor_imag,
-                d.dQ_dA_real, d.dQ_dA_imag,
-                d.grad_ck_real_partial, d.grad_ck_imag_partial,
-                nw, c->n_proj, nb);
+            size_t shmem = (2 * BLOCK_SIZE + 2 * c->n_proj + 1)
+                           * sizeof(double);
+            {
+                int thr = (nb + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                pwa_fused_thread_kernel<<<thr, BLOCK_SIZE>>>(
+                    h->common_cache + (size_t)st * nw,
+                    p.ck_real, p.ck_imag,
+                    d.weight, d.bkg,
+                    nw, c->n_proj, nb, use_norm, nv,
+                    d.Q_out, d.P_out,
+                    d.grad_ck_real_partial, d.grad_ck_imag_partial);
+            }
         }
         CUDA_CHECK(cudaGetLastError());
 
