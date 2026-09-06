@@ -392,7 +392,7 @@ class PWGroupPlotter:
                  group_labels=None, colors=None,
                  data_weight_extra=None, phsp_weight_extra=None,
                  smooth_sigma=None, unit="GeV", show_pull=False,
-                 fmt="png"):
+                 mc_uncert=False, fmt="png"):
         """Plot variable(s) using pre-computed weights.
 
         Args:
@@ -409,6 +409,11 @@ class PWGroupPlotter:
             smooth_sigma: sigma in x‑axis units for Gaussian smoothing.
             unit: physical unit for bin width in y-label (default "GeV").
             show_pull: if True, show pull (data−model)/σ below each panel.
+            mc_uncert: if True, the pull/χ² error also includes the MC
+                (signal/background) statistical uncertainty per bin —
+                ``σ² = Σ_data w² + Σ_sig w² + Σ_bkg w²`` — treating each
+                weighted component as Poisson; default False (model exact,
+                data-only errors).
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_var()")
@@ -479,13 +484,25 @@ class PWGroupPlotter:
             # Total fit = signal + background
             tot = sig + bkg_y
 
+            # Pull variance per bin: data always; optional MC (model) term
+            #   var = Σ_data w² + (Σ_sig w² + Σ_bkg w² if mc_uncert)
+            # treating each weighted component as independent Poisson.
+            pull_var = dw2.copy()
+            if mc_uncert:
+                sig2, _ = np.histogram(
+                    p, bins=bins, weights=(pw * self._P_total * self._scale) ** 2)
+                bkg2, _ = np.histogram(
+                    p, bins=bins, weights=(pw * bkg * bkg_scale) ** 2)
+                pull_var = pull_var + sig2 + bkg2
+
             # Partial waves (signal only)
             gys = [np.histogram(p, bins=bins,
                                 weights=pw * Pg * self._scale)[0]
                    for Pg in self._P_groups]
 
-            # Pull = (data - model) / sqrt(var(data))
-            pull = np.divide(dy - tot, np.sqrt(dw2), where=dw2 > 0, out=np.zeros_like(dy))
+            # Pull = (data - model) / sqrt(var)
+            pull = np.divide(dy - tot, np.sqrt(pull_var),
+                             where=pull_var > 0, out=np.zeros_like(dy))
 
             ax.errorbar(bin_c, dy, yerr=np.sqrt(dw2),
                         fmt='o', color='black', markersize=3, capsize=2,
@@ -524,10 +541,12 @@ class PWGroupPlotter:
 
             # Pull (data - model) / σ  — only when show_pull=True
             if show_pull:
-                pull_den = np.clip(np.sqrt(dw2), 1.0, None)
+                pull_den = np.clip(np.sqrt(pull_var), 1.0, None)
                 pull = (dy - tot) / pull_den
                 pmax = max(np.nanmax(np.abs(pull)), 5)
-                ax.set_title(rf"$\chi^2$/ndf = {np.sum(pull**2):.1f}/{np.sum(dw2 > 0)}",
+                ax.set_title(rf"$\chi^2$/ndf = {np.sum(pull**2):.1f}/"
+                             rf"{np.sum(pull_var > 0)}"
+                             + (" (data+MC)" if mc_uncert else ""),
                              fontsize=8)
                 ax.tick_params(direction="in")
                 ax_pull.bar(bin_c, pull, width=np.diff(bins), alpha=0.5,

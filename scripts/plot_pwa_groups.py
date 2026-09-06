@@ -57,6 +57,10 @@ def main():
     ap.add_argument("--angle-bin", type=float, default=0.10)
     ap.add_argument("--smooth", type=float, default=1.0,
                     help="Gaussian smoothing sigma in units of bin width")
+    ap.add_argument("--mc-uncert", action="store_true",
+                    help="include the MC (signal/background) statistical "
+                         "uncertainty per bin in the pull/chi2 errors "
+                         "(sigma^2 = sum_data w^2 + sum_sig w^2 + sum_bkg w^2)")
     ap.add_argument("--no-pull", action="store_true",
                     help="do not draw the (data-model)/sigma pull row "
                          "below every variable panel")
@@ -124,7 +128,8 @@ def main():
             it["varfun"], [it["label"]], lo, hi, it["width"], it["stem"],
             output=args.output, fmt=args.format, unit=it["unit"],
             smooth_sigma=args.smooth, legend=it["legend"],
-            ranges=[it["range"]], show_pull=not args.no_pull)
+            ranges=[it["range"]], show_pull=not args.no_pull,
+            mc_uncert=args.mc_uncert)
     if not items:
         # fall back to every kernel column of the loaded arrays
         n_mass = data_np["mass"].shape[1]
@@ -136,7 +141,7 @@ def main():
                 fmt=args.format, unit="GeV",
                 smooth_sigma=args.smooth, legend=True,
                 ranges=var_ranges(data_np, phsp_np, pwa_mass_varfun),
-                show_pull=not args.no_pull)
+                show_pull=not args.no_pull, mc_uncert=args.mc_uncert)
         n_var = len(pwa_angle_varfun(data_np))
         if n_var:
             plotter.plot_var(
@@ -145,6 +150,7 @@ def main():
                 -np.pi, np.pi, args.angle_bin, "angles",
                 output=args.output, fmt=args.format, unit="", legend=True,
                 smooth_sigma=args.smooth, show_pull=False,
+                mc_uncert=args.mc_uncert,
                 ranges=var_ranges(data_np, phsp_np, pwa_angle_varfun))
 
     print(f"  saved to {args.output}")
