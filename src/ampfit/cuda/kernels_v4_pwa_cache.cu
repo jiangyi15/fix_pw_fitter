@@ -832,7 +832,7 @@ __global__ void pwa_fpwf_forward_kernel(
     int use_norm, double norm,
     double* __restrict__ Q_out, double* __restrict__ P_out,
     double2* __restrict__ G,
-    double* __restrict__ dnsum
+    double* __restrict__ dnsum, double* __restrict__ qsum
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
@@ -858,11 +858,15 @@ __global__ void pwa_fpwf_forward_kernel(
     double bv = bkg[e];
     double dqp;
     if (use_norm == 0) {
-        Q_out[e] = wv * Ps;
+        double q = wv * Ps;
+        Q_out[e] = q;
+        if (qsum) atomicAdd(qsum, q);
         dqp = wv;
     } else {
         double den = Ps + bv * norm;
-        Q_out[e] = -wv * log(Ps / norm + bv);
+        double q = -wv * log(Ps / norm + bv);
+        Q_out[e] = q;
+        if (qsum) atomicAdd(qsum, q);
         dqp = -wv / den;
         // d(NLL)/d(norm) partial = -P*dqp/norm ; accumulated on device so the
         // host never needs the whole per-event P for the gradient chain.
@@ -1558,6 +1562,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     size_t np_rows = (size_t)ne * P;
 
     double* dsum = NULL;
+    double* dqsum = NULL;
     int want_dn = (odn != NULL && use_norm != 0);
     if (odn) *odn = 0.0;
 
@@ -1602,33 +1607,26 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         CUDA_CHECK(cudaMalloc(&dsum, sizeof(double)));
         CUDA_CHECK(cudaMemset(dsum, 0, sizeof(double)));
     }
+    CUDA_CHECK(cudaMalloc(&dqsum, sizeof(double)));
+    CUDA_CHECK(cudaMemset(dqsum, 0, sizeof(double)));
     // ---- one fused forward over the whole dataset ----
     {
         int thr = (int)(((size_t)ne + 255) / 256);
         pwa_fpwf_forward_kernel<<<thr, 256>>>(
             h->common_T, p.ck_real, p.ck_imag,
             h->w, h->b, nw, P, ne, use_norm, nv,
-            h->dQ, h->dP, h->dG, dsum);
+            h->dQ, h->dP, h->dG, dsum, dqsum);
         CUDA_CHECK(cudaGetLastError());
     }
+    // total Q: single scalar accumulated in the kernel (no whole-array D2H)
+    cudaMemcpy(oQ, dqsum, sizeof(double), cudaMemcpyDeviceToHost);
+    cudaFree(dqsum);
     if (want_dn) {
         cudaMemcpy(odn, dsum, sizeof(double), cudaMemcpyDeviceToHost);
         cudaFree(dsum);
     }
 
-    // ---- total Q (copy per-event Q once and sum host-side) ----
-    {
-        double* qh = (double*)malloc((size_t)ne * sizeof(double));
-        if (qh) {
-            cudaMemcpy(qh, h->dQ, (size_t)ne * sizeof(double),
-                       cudaMemcpyDeviceToHost);
-            double sum = 0.0;
-            for (int i = 0; i < ne; i++) sum += qh[i];
-            *oQ = sum;
-            free(qh);
-        }
-    }
-    // ---- per-event P ----
+    // ---- per-event P (only when explicitly requested) ----
     if (oP) cudaMemcpy(oP, h->dP, (size_t)ne * sizeof(double),
                        cudaMemcpyDeviceToHost);
 
