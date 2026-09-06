@@ -259,3 +259,12 @@ def test_topo_index_from_name(cfg):
     assert c2.topo_index_from_name("pipi") == 0
     assert c2.topo_index_from_name("pipeta") == 1
     assert c2.topo_index_from_name("pimeta") == 2
+
+
+def test_topo_index_from_name_list(cfg):
+    """List of internal decay cores selects multi-decay topologies."""
+    from ampfit.config_loader import Config as _C
+    a = _C("config_angle.yml")
+    assert a.topo_index_from_name(["pipi1", "pipi2"]) == 0      # rho-rho-like
+    assert a.topo_index_from_name(["pipi1", "pipipi"]) == 1     # chain
+    assert a.topo_index_from_name(["pipi1", "pipipi2"]) == 2    # mirror

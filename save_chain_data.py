@@ -25,6 +25,7 @@ Usage:
         --data ../data/data_momenta.npy --out pipeta
 """
 import argparse
+import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,8 +45,10 @@ def main():
     ap.add_argument("--data", required=True,
                     help="4-momentum .npy (N, n_finals, 4), cfg.finals order")
     ap.add_argument("--chain", required=True,
-                    help="structural resonance name in decay:, e.g. pipeta; "
-                         "or an integer topology slot")
+                    help="structural resonance name(s) in decay: — a single "
+                         "label (pipeta), a comma/JSON list of the internal "
+                         "cores of one chain ([rhoA,rhoB] for any number of "
+                         "decays), or an integer topology slot")
     ap.add_argument("--out", default=None,
                     help="output file prefix (default = --chain value)")
     args = ap.parse_args()
@@ -53,11 +56,16 @@ def main():
     cfg = Config(args.config)
     kc = cfg.build_all_index()
 
-    # resolve chain id -> topology slot (name via Config helper, or int)
+    # resolve chain selector -> topology slot (int, single name, or list)
+    sel = args.chain
     try:
-        tid = int(args.chain)
+        tid = int(sel)
     except ValueError:
-        tid = cfg.topo_index_from_name(args.chain)
+        if sel.strip().startswith("["):
+            sel = json.loads(sel)
+        elif "," in sel:
+            sel = [x.strip() for x in sel.split(",")]
+        tid = cfg.topo_index_from_name(sel)
 
     chain = None
     for ls, ch in cfg.full_decay.get_partial_waves():
