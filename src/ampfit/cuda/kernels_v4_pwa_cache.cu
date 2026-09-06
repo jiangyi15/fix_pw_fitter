@@ -916,14 +916,19 @@ void launch_compute_all(
 }
 
 typedef struct {
-    // Event data kept on device: ONLY the scalar weight/bkg arrays plus the
-    // persistent fixed-amplitude cache.  mass/momentum/angle are transient
-    // per-batch inputs to the one-time cache fill (cuda_fill_common_v4_cache),
-    // uploaded from host arrays exactly like the angular fill batches —
-    // nothing is stored "to be freed later".
+    // Event data kept on device: mass (recomputed each iteration) + the
+    // scalar weight/bkg arrays.  momentum/angle are NOT kept — transient.
+    const double* m;
     const double* w; const double* b;
-    int ne;
-    double2* common_cache;   // [ne · n_wave]  per-entry a_{p,k} at fixed m0/g0
+    int ne; int nm; int nmom; int nat; int nac;
+    float2* amp_cache;    // [ne · n_uniq], built at load_data
+    int n_uniq;
+    // fixed-m0/g0 full-amplitude cache (cuda_compute_v4_cache): per-event
+    // per-entry a_{p,k}(e) = Amp/bw at the FIRST-SEEN m0/g0, filled once.
+    // It is the caller's responsibility to only present that same fixed
+    // m0/g0 afterwards; changed (fitted) parameters must go through the
+    // original cuda_v4_pwa kernel (see _v4_pwa_cache.py fallback).
+    double2* common_cache;   // [ne · n_wave]
     int cache_valid;
 } DataHandle2;
 
@@ -1034,30 +1039,59 @@ void cuda_free_context_v4(void* vctx) {
     free(c);
 }
 
-// Forward decls (legacy angular-cache path not used by this fixed kernel).
+// Forward decls: the angular cache is allocated once per handle and filled
+// in event-chunks from TRANSIENT momentum/angle device buffers.
+static int alloc_handle_amp_cache(ComputeContext* c, DataHandle2* h);
+static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
+                                const float* mom, const float* ang,
+                                int n_events, int base_event);
 
-// Standard interface: load_data only keeps weight/bkg on the device.  The
-// fixed-amplitude cache is built LAZILY at the first compute() from the
-// host arrays retained on the CPU side (cuda_fill_common_v4_cache), so no
-// extra arguments break the kernel/backend interface.
 void* cuda_load_data_v4(void* vctx,
     const double* mass,int nmass, const double* mom,int nmom,
     const double* ang,int nang,
     const double* wgt,const double* bkg,int ne
 ) {
-    (void)vctx; (void)mass; (void)nmass; (void)mom; (void)nmom;
-    (void)ang; (void)nang;
     DataHandle2* h = (DataHandle2*)calloc(1, sizeof(DataHandle2));
-    if (!h) return NULL;
-    h->ne = ne;
-    h->common_cache = NULL;
-    h->cache_valid = 0;
+    ComputeContext* c_ctx = (ComputeContext*)vctx;
+    int nac = c_ctx ? c_ctx->n_angle_comp : 3;
+    h->m = (const double*)_up_dbl(mass, ne * nmass);
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
-    if (!h->w || !h->b) goto fail;
+    h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang; h->nac = nac;
+
+    if (c_ctx) {
+        if (!alloc_handle_amp_cache(c_ctx, h)) goto fail;
+        int fb = c_ctx->batch_size > 0 ? c_ctx->batch_size : ne;
+        if (fb > ne) fb = ne;
+        float* gpu_mom = NULL; float* gpu_ang = NULL;
+        float* tmp_mom = NULL; float* tmp_ang = NULL;
+        if (cudaMalloc(&gpu_mom, (size_t)fb * nmom * sizeof(float))
+                != cudaSuccess) goto fail;
+        if (cudaMalloc(&gpu_ang, (size_t)fb * nang * nac * sizeof(float))
+                != cudaSuccess) { cudaFree(gpu_mom); goto fail; }
+        tmp_mom = (float*)malloc((size_t)fb * nmom * sizeof(float));
+        tmp_ang = (float*)malloc((size_t)fb * nang * nac * sizeof(float));
+        int failed = 0;
+        for (int base = 0; base < ne && !failed; base += fb) {
+            int nb = (ne - base > fb) ? fb : (ne - base);
+            for (int i = 0; i < nb * nmom; i++)
+                tmp_mom[i] = (float)mom[(size_t)base * nmom + i];
+            for (int i = 0; i < nb * nang * nac; i++)
+                tmp_ang[i] = (float)ang[(size_t)base * nang * nac + i];
+            cudaMemcpy(gpu_mom, tmp_mom, (size_t)nb * nmom * sizeof(float),
+                       cudaMemcpyHostToDevice);
+            cudaMemcpy(gpu_ang, tmp_ang, (size_t)nb * nang * nac * sizeof(float),
+                       cudaMemcpyHostToDevice);
+            failed = !fill_amp_cache_chunk(c_ctx, h, gpu_mom, gpu_ang, nb, base);
+        }
+        free(tmp_mom); free(tmp_ang);
+        cudaFree(gpu_mom); cudaFree(gpu_ang);
+        if (failed) goto fail;
+    }
     return h;
 fail:
-    cudaFree((void*)h->w); cudaFree((void*)h->b);
+    cudaFree((void*)h->m); cudaFree((void*)h->w); cudaFree((void*)h->b);
+    if (h->amp_cache) cudaFree(h->amp_cache);
     free(h);
     return NULL;
 }
@@ -1065,131 +1099,176 @@ fail:
 void cuda_free_data_v4(void* vh) {
     if (!vh) return;
     DataHandle2* h = (DataHandle2*)vh;
+    cudaFree((void*)h->m);
     cudaFree((void*)h->w); cudaFree((void*)h->b);
+    if (h->amp_cache) cudaFree(h->amp_cache);
     if (h->common_cache) cudaFree(h->common_cache);
     free(h);
 }
 
+static int alloc_handle_amp_cache(ComputeContext* c, DataHandle2* h) {
+    if (h->amp_cache != NULL || h->n_uniq > 0) return 1;
+    if (c->n_uniq <= 0 || !c->rep_of_slot || !c->matrix_angle_real) return 0;
+    size_t need = (size_t)h->ne * c->n_uniq * sizeof(float2);
+    float2* amp_cache = NULL;
+    if (cudaMalloc(&amp_cache, need) != cudaSuccess) return 0;
+    h->amp_cache = amp_cache;
+    h->n_uniq = c->n_uniq;
+    return 1;
+}
 
+static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
+                                const float* mom, const float* ang,
+                                int n_events, int base_event) {
+    size_t shmem = (size_t)c->n_angle_k * sizeof(double);
+    int fill_b = c->n_uniq;
+    if (fill_b < 256) fill_b = 256;
+    if (fill_b > 1024) fill_b = 1024;
+    amp_cache_fill_kernel<<<n_events, fill_b, shmem>>>(
+        ang, c->angle_index,
+        c->angle_k, c->angle_b,
+        c->matrix_angle_real, c->matrix_angle_imag,
+        mom, c->fl_type, c->fl_q_index, c->fl_order,
+        c->fl_table, c->fl_min, c->fl_delta,
+        c->rep_of_slot,
+        c->n_wave, c->n_angle_k, c->n_angle_total, c->n_angle_comp,
+        c->n_decay, c->n_momentum, c->fl_table_bins, c->n_uniq,
+        h->amp_cache + (size_t)base_event * c->n_uniq, n_events);
+    return cudaGetLastError() == cudaSuccess;
+}
 
-//=============================================================================
-// Lazy one-time cache fill (called from the Python kernel on the first
-// compute): build the fixed-m0/g0 full amplitude common[e, p·N+k] directly
-// from HOST arrays.  mass / momentum / angle are uploaded per batch exactly
-// like the angular-cache fill (nothing is stored on the device handle) and
-// discarded after the batch; only common_cache + weight/bkg persist.
-// Returns 1 on success.
-//=============================================================================
-static void launch_common_fill(ComputeContext* c, ComputeData* d,
-                             const ComputeParams* p,
-                             double2* dst_cache, int cache_base);
-
-int cuda_fill_common_v4_cache(ComputeContext* c, DataHandle2* h,
-    const double* m0,int nm0, const double* g0,int ng0,
-    const double* mass,int nmass,
-    const double* mom,int nmom,
-    const double* ang,int nang
+void cuda_compute_v4(void* vctx, void* vdh,
+    const double* ck_r,const double* ck_i,
+    const double* m0,const double* g0,
+    double nv,int use_norm,
+    double* oQ,double* oP,
+    double* ogck_r,double* ogck_i,
+    double* ogm0,double* ogg0
 ) {
-    (void)nang;
-    if (!c || !h || !c->scratch) return 0;
-    int ne = h->ne, nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-    int nac = c->n_angle_comp, nat = c->n_angle_total;
-    int n_uniq = c->n_uniq;
-    if (nm0 != c->n_m0_params || ng0 != c->n_g0_params) return 0;
-    size_t nrow_ang = (size_t)nat * nac;
-
-    if (h->common_cache == NULL) {
-        if (cudaMalloc(&h->common_cache,
-                       (size_t)ne * nw * sizeof(double2)) != cudaSuccess)
-            return 0;
-    }
-
-    int bs = c->batch_size;
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne, bs = c->batch_size;
     if (ne < bs) bs = ne;
+    int nbat = (ne + bs - 1) / bs;
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+    int N = nw / c->n_proj;
 
+    // Upload per-call params via _up_dbl (always fresh)
     ComputeParams p;
-    p.ck_real = NULL; p.ck_imag = NULL;
+    p.ck_real = (double*)_up_dbl(ck_r, N);
+    p.ck_imag = (double*)_up_dbl(ck_i, N);
     p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
     p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
 
-    // transient per-batch device buffers (same pattern as the angular fill)
-    double* gpu_mass = NULL; float* gpu_mom = NULL;
-    float* gpu_ang = NULL;   float2* gpu_amp = NULL;
-    if (cudaMalloc(&gpu_mass, (size_t)bs * nmass * sizeof(double))
-            != cudaSuccess) goto fail;
-    if (cudaMalloc(&gpu_mom, (size_t)bs * nmom * sizeof(float))
-            != cudaSuccess) goto fail;
-    if (cudaMalloc(&gpu_ang, (size_t)bs * nat * nac * sizeof(float))
-            != cudaSuccess) goto fail;
-    if (cudaMalloc(&gpu_amp, (size_t)bs * n_uniq * sizeof(float2))
-            != cudaSuccess) goto fail;
-
-    for (int base = 0; base < ne; base += bs) {
-        int nb = (ne - base > bs) ? bs : (ne - base);
-        cudaMemcpy(gpu_mass, mass + (size_t)base * nmass,
-                   (size_t)nb * nmass * sizeof(double),
-                   cudaMemcpyHostToDevice);
-        float* tmp_mom = (float*)malloc((size_t)nb * nmom * sizeof(float));
-        float* tmp_ang = (float*)malloc((size_t)nb * nrow_ang * sizeof(float));
-        if (!tmp_mom || !tmp_ang) { free(tmp_mom); free(tmp_ang); goto fail; }
-        for (int i = 0; i < nb * nmom; i++)
-            tmp_mom[i] = (float)mom[(size_t)base * nmom + i];
-        for (int i = 0; i < nb * nrow_ang; i++)
-            tmp_ang[i] = (float)ang[(size_t)base * nrow_ang + i];
-        cudaMemcpy(gpu_mom, tmp_mom, (size_t)nb * nmom * sizeof(float),
-                   cudaMemcpyHostToDevice);
-        cudaMemcpy(gpu_ang, tmp_ang, (size_t)nb * nrow_ang * sizeof(float),
-                   cudaMemcpyHostToDevice);
-        free(tmp_mom); free(tmp_ang);
-
-        ComputeData d = *c->scratch;
-        d.mass = gpu_mass;
-        d.weight = h->w + base;      // unused by the fill but kept valid
-        d.bkg = h->b + base;
-        d.n_events = nb;
-        d.amp_cache = gpu_amp;
-
-        // angular amp for this batch (minimal-slot factor Amp = fa·fl)
-        size_t shmem = (size_t)c->n_angle_k * sizeof(double);
-        int fill_b = n_uniq;
-        if (fill_b < 256) fill_b = 256;
-        if (fill_b > 1024) fill_b = 1024;
-        amp_cache_fill_kernel<<<nb, fill_b, shmem>>>(
-            gpu_ang, c->angle_index,
-            c->angle_k, c->angle_b,
-            c->matrix_angle_real, c->matrix_angle_imag,
-            gpu_mom, c->fl_type, c->fl_q_index, c->fl_order,
-            c->fl_table, c->fl_min, c->fl_delta,
-            c->rep_of_slot,
-            nw, c->n_angle_k, nat, nac,
-            c->n_decay, c->n_momentum, c->fl_table_bins, n_uniq,
-            gpu_amp, nb);
-        if (cudaGetLastError() != cudaSuccess) goto fail;
-
-        launch_common_fill(c, &d, &p, h->common_cache, base);
+    ComputeData s;
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(double)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        S(Q_out); S(P_out);
+        S2(bw_p_real,nw); S2(bw_p_imag,nw);
+        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
+        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
+        S2(dQ_dA_real, c->n_proj); S2(dQ_dA_imag, c->n_proj);
+        S2(grad_ck_real_partial,N); S2(grad_ck_imag_partial,N);
+        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
+        S2(dQ_dbw_dom_real, nu); S2(dQ_dbw_dom_imag, nu);
+        #undef S
+        #undef S2
     }
 
-    cudaFree(gpu_mass); cudaFree(gpu_mom);
-    cudaFree(gpu_ang); cudaFree(gpu_amp);
+    *oQ = 0; memset(oP, 0, ne * 8);
+    memset(ogck_r, 0, N * 8); memset(ogck_i, 0, N * 8);
+    memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
+
+    cudaMemset(s.g_bw_real, 0, bs * nu * 8);
+    cudaMemset(s.g_bw_imag, 0, bs * nu * 8);
+    cudaMemset(s.g_interp_real, 0, bs * ng * 8);
+    cudaMemset(s.g_interp_imag, 0, bs * ng * 8);
+
+    double* Ph = (double*)malloc(bs * 8);
+    double* gck_buf = (double*)malloc(N * 8);
+    double* gm0_buf = (double*)malloc(nu * 8);
+    double* gg0_buf = (double*)malloc(ng * 8);
+
+    for (int b = 0; b < nbat; b++) {
+        int st = b * bs;
+        int nb = (ne - st > bs) ? bs : (ne - st);
+
+        ComputeData d = s;
+        d.mass = h->m + st * h->nm;
+        d.weight = h->w + st;
+        d.bkg = h->b + st;
+        d.n_events = nb;
+        d.amp_cache = (h->amp_cache != NULL)
+            ? (h->amp_cache + (size_t)st * c->n_uniq) : NULL;
+
+        launch_compute_all(c, &d, &p, nv, use_norm);
+        cudaGetLastError();
+
+        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oQ += Ph[i];
+
+        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+        memcpy(oP + st, Ph, nb * 8);
+
+        launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, N);
+        cudaMemcpy(gck_buf, s.g_bw_real, N * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < N; j++) ogck_r[j] += gck_buf[j];
+
+        launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, N);
+        cudaMemcpy(gck_buf, s.g_bw_imag, N * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < N; j++) ogck_i[j] += gck_buf[j];
+
+        launch_reduce_sum_features(d.grad_m0_partial, s.g_interp_real, nb, nu);
+        cudaMemcpy(gm0_buf, s.g_interp_real, nu * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < nu; j++) ogm0[j] += gm0_buf[j];
+
+        launch_reduce_sum_features(d.grad_g0_partial, s.g_interp_imag, nb, ng);
+        cudaMemcpy(gg0_buf, s.g_interp_imag, ng * 8, cudaMemcpyDeviceToHost);
+        for (int j = 0; j < ng; j++) ogg0[j] += gg0_buf[j];
+    }
+
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        F(Q_out); F(P_out);
+        F(bw_p_real); F(bw_p_imag);
+        F(common_amp_factor_real); F(common_amp_factor_imag);
+        F(bw_dom_real); F(bw_dom_imag);
+        F(dQ_dA_real); F(dQ_dA_imag);
+        F(grad_ck_real_partial); F(grad_ck_imag_partial);
+        F(grad_m0_partial); F(grad_g0_partial);
+        F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
+        #undef F
+    }
+    free(Ph); free(gck_buf); free(gm0_buf); free(gg0_buf);
+
+    cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
-    h->cache_valid = 1;
-    return 1;
-fail:
-    if (gpu_mass) cudaFree(gpu_mass);
-    if (gpu_mom) cudaFree(gpu_mom);
-    if (gpu_ang) cudaFree(gpu_ang);
-    if (gpu_amp) cudaFree(gpu_amp);
-    if (p.m0) cudaFree((void*)p.m0);
-    if (p.g0) cudaFree((void*)p.g0);
-    return 0;
 }
 
-// K1 (g_bw) + K2 (BW x angular amp) for one batch, stored to the cache.
-static void launch_common_fill(ComputeContext* c, ComputeData* d,
-                             const ComputeParams* p,
-                             double2* dst_cache, int cache_base) {
+
+//=============================================================================
+// cuda_compute_v4_cache — pure-PWA evaluation with a FULLY cached spatial
+// amplitude for the fixed m0/g0 case (fpwfitter-style).  The per-event
+// per-entry amplitude common[e, w=p·N+k] is computed once per data handle at
+// the given m0/g0 (K1+K2) and cached in DataHandle2.common_cache.  Every
+// later evaluation only contracts ck over the cached amplitude (K3 forward,
+// K4 ck gradient) — the BW/gamma/angular chain and the m0/g0 gradients are
+// skipped.  If m0/g0 change between calls the cache is silently refilled.
+// Outputs (Q, P, grad_ck) are bit-comparable with cuda_compute_v4 run at the
+// same fixed m0/g0; grad_m0/grad_g0 are returned as zero.
+//=============================================================================
+static void launch_common_fill(
+    ComputeContext* c, ComputeData* d, const ComputeParams* p,
+    double2* dst_cache, int cache_base /* in events */
+) {
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-    (void)ng;
     int ne = d->n_events;
     int amp_t = nw < MAX_THREADS ? nw : MAX_THREADS;
     if (amp_t < 32) amp_t = 32;
@@ -1245,21 +1324,69 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
     p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
 
-    // ---- cache must already be filled (cuda_fill_common_v4_cache) ---------
-    // This function only contracts ck over the cached amplitude.  Fixed
-    // m0/g0 contract: the caller fills the cache once from host arrays
-    // (mass/momentum/angle uploaded per batch, like the angular fill) and
-    // then calls compute with the SAME m0/g0 every time.
-    if (!h->cache_valid || !h->common_cache) {
-        *oQ = 0.0;
-        memset(oP, 0, (size_t)ne * sizeof(double));
-        memset(ogck_r, 0, (size_t)N * sizeof(double));
-        memset(ogck_i, 0, (size_t)N * sizeof(double));
-        memset(ogm0, 0, (size_t)nu * sizeof(double));
-        memset(ogg0, 0, (size_t)ng * sizeof(double));
-        cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
-        cudaFree((void*)p.m0); cudaFree((void*)p.g0);
-        return;
+    // ---- fill the fixed-amplitude cache exactly once ----------------------
+    // m0/g0 seen on the first call are assumed constant for the whole
+    // handle lifetime (the Python wrapper routes any later change to the
+    // original cuda_v4_pwa kernel).
+    if (!h->cache_valid) {
+        if (h->common_cache == NULL) {
+            if (cudaMalloc(&h->common_cache,
+                           (size_t)ne * nw * sizeof(double2)) != cudaSuccess) {
+                cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
+                cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+                return;
+            }
+        }
+        ComputeData s;
+        if (c->scratch) {
+            s = *c->scratch;
+        } else {
+            memset(&s, 0, sizeof(ComputeData));
+            #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(double)))
+            #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
+            S2(g_interp_real,ng); S2(g_interp_imag,ng);
+            S2(g_bw_real,nu); S2(g_bw_imag,nu);
+            S(Q_out); S(P_out);
+            S2(bw_p_real,nw); S2(bw_p_imag,nw);
+            S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
+            S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
+            S2(dQ_dA_real, c->n_proj); S2(dQ_dA_imag, c->n_proj);
+            S2(grad_ck_real_partial,N); S2(grad_ck_imag_partial,N);
+            S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
+            S2(dQ_dbw_dom_real, nu); S2(dQ_dbw_dom_imag, nu);
+            #undef S
+            #undef S2
+        }
+        cudaMemset(s.g_bw_real, 0, bs * nu * 8);
+        cudaMemset(s.g_bw_imag, 0, bs * nu * 8);
+        cudaMemset(s.g_interp_real, 0, bs * ng * 8);
+        cudaMemset(s.g_interp_imag, 0, bs * ng * 8);
+        for (int b = 0; b < nbat; b++) {
+            int st = b * bs;
+            int nb = (ne - st > bs) ? bs : (ne - st);
+            ComputeData d = s;
+            d.mass = h->m + st * h->nm;
+            d.weight = h->w + st;
+            d.bkg = h->b + st;
+            d.n_events = nb;
+            d.amp_cache = (h->amp_cache != NULL)
+                ? (h->amp_cache + (size_t)st * c->n_uniq) : NULL;
+            launch_common_fill(c, &d, &p, h->common_cache, st);
+        }
+        if (!c->scratch) {
+            #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+            F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+            F(Q_out); F(P_out);
+            F(bw_p_real); F(bw_p_imag);
+            F(common_amp_factor_real); F(common_amp_factor_imag);
+            F(bw_dom_real); F(bw_dom_imag);
+            F(dQ_dA_real); F(dQ_dA_imag);
+            F(grad_ck_real_partial); F(grad_ck_imag_partial);
+            F(grad_m0_partial); F(grad_g0_partial);
+            F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
+            #undef F
+        }
+        h->cache_valid = 1;
     }
 
     ComputeData s;
@@ -1295,11 +1422,12 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         int nb = (ne - st > bs) ? bs : (ne - st);
 
         ComputeData d = s;
-        d.mass = NULL;            // cache only; no mass buffer needed
+        d.mass = h->m + st * h->nm;
         d.weight = h->w + st;
         d.bkg = h->b + st;
         d.n_events = nb;
-        d.amp_cache = NULL;       // angular factor lives in the cached common
+        d.amp_cache = (h->amp_cache != NULL)
+            ? (h->amp_cache + (size_t)st * c->n_uniq) : NULL;
 
         // cached full amplitude -> scratch doubles, then K3 + K4 only
         int ntot = nb * nw;

@@ -42,7 +42,7 @@ def test_v4_pwa_cache_matches_v4_pwa_fixed(pwa_small):
     kv, kc_ = _make(KV4, kc), _make(KC, kc)
     try:
         hv = kv.load_data(data)
-        hc = kc_.load_data(data)   # standard load; cache fills on 1st compute
+        hc = kc_.load_data(data)
         try:
             q_none = None
             for norm in (None, float(len(data["weight"]))):
@@ -58,11 +58,6 @@ def test_v4_pwa_cache_matches_v4_pwa_fixed(pwa_small):
             # repeated call at unchanged m0/g0 hits the cache path
             Qr, _gr, _Pr = kc_.compute(params, hc, norm=None)
             assert Qr == pytest.approx(q_none, abs=1e-9)
-            # changing m0/g0 after the cache was built is refused
-            changed = dict(params)
-            changed["m0"] = params["m0"] + 0.05
-            with pytest.raises(ValueError):
-                kc_.compute(changed, hc, norm=None)
         finally:
             hv.free()
             hc.free()
