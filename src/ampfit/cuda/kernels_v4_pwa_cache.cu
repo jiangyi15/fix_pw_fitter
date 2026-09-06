@@ -875,43 +875,47 @@ __global__ void pwa_fpwf_forward_kernel(
 }
 
 // ck-gradient reduction replacing the cuBLAS ZGEMV.  F is column-per-k
-// (column k at F + (long)k*total, contiguous); block (seg, k) reduces its
-// row segment and atomicAdds into out[k].  Reads are coalesced along each
-// column for a given block.
+// (column k at F + (long)k*total, contiguous).  Grid is (row segments) x
+// (columns handled per pass); a block reduces its row segment of a column
+// and atomicAdds into out[k].  Columns are strided over gridDim.y so ANY
+// N is supported (gridDim.y stays small); each column stream is read
+// coalesced.
 __global__ void fpwf_gradreduce_kernel(
     const double2* __restrict__ F,
     const double2* __restrict__ G,
     double2* __restrict__ out,
     int N, int total, int seg_len
 ) {
-    int k = blockIdx.y;
-    if (k >= N) return;
     int tid = threadIdx.x;
     int bd = blockDim.x;
     long start = (long)blockIdx.x * seg_len;
     long end = start + seg_len;
     if (end > total) end = total;
-    const double2* Fc = F + (long)k * total;
-
-    double ar = 0.0, ai = 0.0;
-    for (long r = start + tid; r < end; r += bd) {
-        double2 f = Fc[r];
-        double2 g = G[r];
-        ar += f.x * g.x - f.y * g.y;
-        ai += f.x * g.y + f.y * g.x;
-    }
     __shared__ double2 sh[256];
-    sh[tid] = make_double2(ar, ai);
-    __syncthreads();
-    for (int st = bd / 2; st > 0; st >>= 1) {
-        if (tid < st) {
-            sh[tid].x += sh[tid + st].x;
-            sh[tid].y += sh[tid + st].y;
+    for (int k = blockIdx.y; k < N; k += gridDim.y) {
+        const double2* Fc = F + (long)k * total;
+        double ar = 0.0, ai = 0.0;
+        for (long r = start + tid; r < end; r += bd) {
+            double2 f = Fc[r];
+            double2 g = G[r];
+            ar += f.x * g.x - f.y * g.y;
+            ai += f.x * g.y + f.y * g.x;
         }
+        sh[tid] = make_double2(ar, ai);
         __syncthreads();
+        for (int st = bd / 2; st > 0; st >>= 1) {
+            if (tid < st) {
+                sh[tid].x += sh[tid + st].x;
+                sh[tid].y += sh[tid + st].y;
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            atomicAdd(&out[k].x, sh[0].x);
+            atomicAdd(&out[k].y, sh[0].y);
+        }
+        __syncthreads();  // protect sh reuse across k iterations
     }
-    if (tid == 0)
-        atomicAdd(&out[k].x, sh[0].x), atomicAdd(&out[k].y, sh[0].y);
 }
 
 
