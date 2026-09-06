@@ -667,6 +667,41 @@ __global__ void reduce_sum_complex_features_kernel(
     if (tid == 0) { real_out[feat] = sreal[0]; imag_out[feat] = simag[0]; }
 }
 
+
+//=============================================================================
+// PWA wave-Gram reduction: D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j}
+// One block per event; each thread owns one (k,j) cell of N×N.
+//=============================================================================
+__global__ void gram_v4_event_kernel(
+    const double* __restrict__ common_r,
+    const double* __restrict__ common_i,
+    const double* __restrict__ weight,
+    int nb, int P, int N,
+    double* __restrict__ Dr, double* __restrict__ Di
+) {
+    int e = blockIdx.x;
+    int tid = threadIdx.x;
+    int bd = blockDim.x;
+    size_t off = (size_t)e * (size_t)P * N;
+    const double* cr = common_r + off;
+    const double* ci = common_i + off;
+    double we = (weight != NULL) ? weight[e] : 1.0;
+    int total = N * N;
+    for (int t = tid; t < total; t += bd) {
+        int k = t / N, j = t % N;
+        double sr = 0.0, si = 0.0;
+        for (int p = 0; p < P; p++) {
+            double kr = cr[p * N + k], ki = ci[p * N + k];
+            double jr = cr[p * N + j], ji = ci[p * N + j];
+            // conj(kr+iki) * (jr+iji)
+            sr += kr * jr + ki * ji;
+            si += kr * ji - ki * jr;
+        }
+        atomicAdd(&Dr[t], we * sr);
+        atomicAdd(&Di[t], we * si);
+    }
+}
+
 // ── Upload helpers (plain C, before extern "C") ──
 void* _up_int(const int* src, int n) {
     int* d; CUDA_CHECK(cudaMalloc(&d, n * sizeof(int)));
@@ -1228,6 +1263,121 @@ void cuda_compute_v4(void* vctx, void* vdh,
 
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+}
+
+
+//=============================================================================
+// Wave Gram matrix D (N,N) for a loaded phsp handle, batched over events
+// (batch_size slices; per-batch scratch, device N×N accumulator).
+//   D[k,j] = Σ_e w_e Σ_p conj(common[e,pN+k])·common[e,pN+j]
+//=============================================================================
+void cuda_gram_matrix_v4(void* vctx, void* vdh,
+    const double* m0, const double* g0,
+    double* oDr, double* oDi
+) {
+    ComputeContext* c = (ComputeContext*)vctx;
+    DataHandle2* h = (DataHandle2*)vdh;
+    int ne = h->ne, bs = c->batch_size;
+    if (ne < bs) bs = ne;
+    int nbat = (ne + bs - 1) / bs;
+    int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
+    int P = c->n_proj, N = nw / P;
+
+    ComputeParams p;
+    p.ck_real = NULL; p.ck_imag = NULL;
+    p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
+    p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
+
+    ComputeData s;
+    if (c->scratch) {
+        s = *c->scratch;
+    } else {
+        memset(&s, 0, sizeof(ComputeData));
+        #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(double)))
+        #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
+        S2(g_interp_real,ng); S2(g_interp_imag,ng);
+        S2(g_bw_real,nu); S2(g_bw_imag,nu);
+        S(Q_out); S(P_out);
+        S2(bw_p_real,nw); S2(bw_p_imag,nw);
+        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
+        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
+        S2(dQ_dA_real, P); S2(dQ_dA_imag, P);
+        S2(grad_ck_real_partial,N); S2(grad_ck_imag_partial,N);
+        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
+        S2(dQ_dbw_dom_real, nu); S2(dQ_dbw_dom_imag, nu);
+        #undef S
+        #undef S2
+    }
+
+    double* Dr = NULL; double* Di = NULL;
+    size_t gsz = (size_t)N * N * sizeof(double);
+    CUDA_CHECK(cudaMalloc(&Dr, gsz));
+    CUDA_CHECK(cudaMalloc(&Di, gsz));
+    CUDA_CHECK(cudaMemset(Dr, 0, gsz));
+    CUDA_CHECK(cudaMemset(Di, 0, gsz));
+
+    for (int b = 0; b < nbat; b++) {
+        int st = b * bs;
+        int nb = (ne - st > bs) ? bs : (ne - st);
+        ComputeData d = s;
+        d.mass = h->m + (size_t)st * h->nm;
+        d.weight = h->w + st;
+        d.bkg = h->b + st;
+        d.n_events = nb;
+        d.amp_cache = (h->amp_cache != NULL)
+            ? (h->amp_cache + (size_t)st * c->n_uniq) : NULL;
+
+        cudaMemset(d.g_bw_real, 0, bs * nu * 8);
+        cudaMemset(d.g_bw_imag, 0, bs * nu * 8);
+        cudaMemset(d.g_interp_real, 0, bs * ng * 8);
+        cudaMemset(d.g_interp_imag, 0, bs * ng * 8);
+
+        launch_compute_g_bw(
+            d.mass, p.g0, c->g0_index, c->g0_mass_index, c->gamma_col_idx,
+            c->gamma_table_real, c->gamma_table_imag,
+            c->gamma_min, c->gamma_delta,
+            c->n_gamma_rows, c->n_unique_bw, c->n_mass, c->gamma_table_bins,
+            d.g_interp_real, d.g_interp_imag,
+            d.g_bw_real, d.g_bw_imag, nb);
+        CUDA_CHECK(cudaGetLastError());
+
+        int amp_t = nw < MAX_THREADS ? nw : MAX_THREADS;
+        if (amp_t < 32) amp_t = 32;
+        size_t shmem = (size_t)(c->n_mass + 2 * nu) * sizeof(double);
+        amp_cache_amp_kernel<<<nb, amp_t, shmem>>>(
+            d.mass, c->m0_index, c->mass_index, c->bw_order,
+            d.g_bw_real, d.g_bw_imag,
+            nw, c->n_res, nu, c->n_mass, p.m0,
+            d.amp_cache, c->slot_of_wave, c->n_uniq,
+            d.bw_p_real, d.bw_p_imag,
+            d.common_amp_factor_real, d.common_amp_factor_imag,
+            d.bw_dom_real, d.bw_dom_imag, nb);
+        CUDA_CHECK(cudaGetLastError());
+
+        gram_v4_event_kernel<<<nb, 128>>>(
+            d.common_amp_factor_real, d.common_amp_factor_imag,
+            d.weight, nb, P, N, Dr, Di);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    cudaMemcpy(oDr, Dr, gsz, cudaMemcpyDeviceToHost);
+    cudaMemcpy(oDi, Di, gsz, cudaMemcpyDeviceToHost);
+
+    cudaFree(Dr); cudaFree(Di);
+    cudaFree((void*)p.m0); cudaFree((void*)p.g0);
+    if (!c->scratch) {
+        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
+        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
+        F(Q_out); F(P_out);
+        F(bw_p_real); F(bw_p_imag);
+        F(common_amp_factor_real); F(common_amp_factor_imag);
+        F(bw_dom_real); F(bw_dom_imag);
+        F(dQ_dA_real); F(dQ_dA_imag);
+        F(grad_ck_real_partial); F(grad_ck_imag_partial);
+        F(grad_m0_partial); F(grad_g0_partial);
+        F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
+        #undef F
+    }
 }
 
 } // extern "C"

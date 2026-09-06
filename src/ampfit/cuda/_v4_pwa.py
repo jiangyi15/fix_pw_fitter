@@ -58,6 +58,8 @@ void cuda_compute_v4(void*,void*,
     const double*,const double*,const double*,const double*,
     double,int,
     double*,double*,double*,double*,double*,double*);
+void cuda_gram_matrix_v4(void*,void*,
+    const double*,const double*,double*,double*);
 int cuda_get_device_count();
 int cuda_get_device_name(char*,int);
 """)
@@ -274,6 +276,36 @@ class CUDAKernelV4PWA:
         grads = {"ck": ogck_r + 1j * ogck_i,
                  "m0": grad_m0, "g0": grad_g0}
         return oQ[0], grads, oP
+
+    def compute_gram(self, phsp_handle, m0, g0):
+        """Wave Gram matrix D (N, N) of a loaded phsp handle at m0/g0.
+
+        ``D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j}`` — the pre-integrated
+        phase-space norm matrix for the shared-ck PWA model.  Callers stream
+        the phsp in batches (load → compute_gram → free) to bound memory.
+        """
+        n = self.n_wave_base
+        nu_ = self.n_unique_bw
+        ng_ = self.n_gamma_rows
+        m0_arr = np.zeros(self.n_m0_params, np.float64)
+        m0_arr[:len(m0)] = np.asarray(m0)
+        g0_arr = np.zeros(self.n_g0_params, np.float64)
+        g0_arr[:len(g0)] = np.asarray(g0)
+        oDr = np.zeros(n * n, np.float64)
+        oDi = np.zeros(n * n, np.float64)
+        ka = []
+
+        def _db(a):
+            arr = np.ascontiguousarray(a, np.float64)
+            buf = _ffi.from_buffer(arr)
+            ka.append(buf)
+            return _ffi.cast("double*", buf)
+
+        self._lib.cuda_gram_matrix_v4(
+            self._ctx, phsp_handle.ptr,
+            _db(m0_arr), _db(g0_arr), _db(oDr), _db(oDi))
+        D = (oDr + 1j * oDi).reshape(n, n)
+        return (D + D.conj().T) / 2.0
 
     def free(self):
         if self._ctx is not None:

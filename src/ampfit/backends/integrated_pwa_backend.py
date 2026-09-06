@@ -40,30 +40,60 @@ class IntegratedPWABackend(ComputeBackend):
             self.base = create_backend(base, kernel_config)
 
     # ── data loading ────────────────────────────────────────────────────
+    # The base (GPU data) handle is created LAZILY only when a data NLL /
+    # per-event P is requested; the phsp norm path streams per-batch
+    # kernel.load() → compute_gram() → free() so the whole phsp never
+    # resides on the device at once.
     class _Bundle:
-        def __init__(self, handle, data_np):
-            self.handle = handle
+        def __init__(self, data_np):
+            self.handle = None          # base handle, lazily created
             self.data = dict(data_np)
             self.m0 = self.g0 = None
             self.D = None
 
         def free(self):
-            if hasattr(self.handle, "free"):
+            if self.handle is not None and hasattr(self.handle, "free"):
                 self.handle.free()
+                self.handle = None
             self.D = None
 
     def load_data(self, data_np):
-        h = self.base.load_data(data_np)
-        return self._Bundle(h, data_np)
+        return self._Bundle(data_np)
 
-    # ── Gram norm (phsp) ────────────────────────────────────────────────
-    def _ensure_gram(self, bundle, m0, g0):
+    def _get_data_handle(self, bundle):
+        if bundle.handle is None:
+            bundle.handle = self.base.load_data(bundle.data)
+        return bundle.handle
+
+    # ── Gram norm (phsp): streamed in batches ────────────────────────────
+    def _ensure_gram(self, bundle, m0, g0, batch=5000):
         if bundle.D is not None and np.array_equal(m0, bundle.m0) \
                 and np.array_equal(g0, bundle.g0):
             return
-        d = dict(bundle.data)
+        base_kernel = getattr(self.base, "kernel", None)
+        gpu_gram = getattr(base_kernel, "compute_gram", None)
+        d = bundle.data
+        ne = d["mass"].shape[0]
         w = d.get("weight")
-        bundle.D = self._gram.gram(d, m0, g0, weight=w)
+
+        D = None
+        for b0 in range(0, ne, batch):
+            b1 = min(b0 + batch, ne)
+            sub = {k: v[b0:b1] for k, v in d.items()
+                   if isinstance(v, np.ndarray)}
+            if gpu_gram is not None:
+                # streaming: load the batch, gram it, free it
+                h = self.base.load_data(sub)
+                try:
+                    M = gpu_gram(h, m0, g0)
+                finally:
+                    h.free()
+            else:
+                M = self._gram.gram(sub, m0, g0,
+                                    weight=sub.get("weight"))
+            D = M if D is None else D + M
+
+        bundle.D = (D + D.conj().T) / 2.0
         bundle.m0 = np.asarray(m0).copy()
         bundle.g0 = np.asarray(g0).copy()
 
@@ -71,7 +101,8 @@ class IntegratedPWABackend(ComputeBackend):
     def compute(self, params, data_handle, norm=None, return_p=True):
         if norm is not None or return_p:
             # data NLL (norm given) or per-event P (plot path) → base
-            Q, grads, P = self.base.compute(params, data_handle.handle,
+            h = self._get_data_handle(data_handle)
+            Q, grads, P = self.base.compute(params, h,
                                             norm=norm, return_p=return_p)
             grads["m0"] = np.zeros_like(grads["m0"])
             grads["g0"] = np.zeros_like(grads["g0"])
