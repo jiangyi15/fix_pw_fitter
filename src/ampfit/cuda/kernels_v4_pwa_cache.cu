@@ -1034,22 +1034,19 @@ void cuda_free_context_v4(void* vctx) {
     free(c);
 }
 
-// Forward decls: the angular cache is allocated once per handle and filled
-// in event-chunks from TRANSIENT momentum/angle device buffers.
+// Forward decls (legacy angular-cache path not used by this fixed kernel).
 
-static int fill_common_cache(ComputeContext* c, DataHandle2* h,
-                         const double* m0,int nm0, const double* g0,int ng0,
-                         const double* mass,int nmass,
-                         const double* mom,int nmom,
-                         const double* ang,int nang);
-
+// Standard interface: load_data only keeps weight/bkg on the device.  The
+// fixed-amplitude cache is built LAZILY at the first compute() from the
+// host arrays retained on the CPU side (cuda_fill_common_v4_cache), so no
+// extra arguments break the kernel/backend interface.
 void* cuda_load_data_v4(void* vctx,
     const double* mass,int nmass, const double* mom,int nmom,
     const double* ang,int nang,
-    const double* wgt,const double* bkg,int ne,
-    const double* m0,int nm0, const double* g0,int ng0
+    const double* wgt,const double* bkg,int ne
 ) {
-    (void)nang;
+    (void)vctx; (void)mass; (void)nmass; (void)mom; (void)nmom;
+    (void)ang; (void)nang;
     DataHandle2* h = (DataHandle2*)calloc(1, sizeof(DataHandle2));
     if (!h) return NULL;
     h->ne = ne;
@@ -1058,13 +1055,9 @@ void* cuda_load_data_v4(void* vctx,
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
     if (!h->w || !h->b) goto fail;
-
-    if (!fill_common_cache((ComputeContext*)vctx, h, m0, nm0, g0, ng0,
-                           mass, nmass, mom, nmom, ang, nang)) goto fail;
     return h;
 fail:
     cudaFree((void*)h->w); cudaFree((void*)h->b);
-    if (h->common_cache) cudaFree(h->common_cache);
     free(h);
     return NULL;
 }
@@ -1080,9 +1073,10 @@ void cuda_free_data_v4(void* vh) {
 
 
 //=============================================================================
-// One-time cache fill: build the fixed-m0/g0 full amplitude common[e, p·N+k]
-// directly from HOST arrays.  mass / momentum / angle are uploaded per batch
-// exactly like the angular-cache fill (nothing is stored on the handle) and
+// Lazy one-time cache fill (called from the Python kernel on the first
+// compute): build the fixed-m0/g0 full amplitude common[e, p·N+k] directly
+// from HOST arrays.  mass / momentum / angle are uploaded per batch exactly
+// like the angular-cache fill (nothing is stored on the device handle) and
 // discarded after the batch; only common_cache + weight/bkg persist.
 // Returns 1 on success.
 //=============================================================================
@@ -1090,7 +1084,7 @@ static void launch_common_fill(ComputeContext* c, ComputeData* d,
                              const ComputeParams* p,
                              double2* dst_cache, int cache_base);
 
-static int fill_common_cache(ComputeContext* c, DataHandle2* h,
+int cuda_fill_common_v4_cache(ComputeContext* c, DataHandle2* h,
     const double* m0,int nm0, const double* g0,int ng0,
     const double* mass,int nmass,
     const double* mom,int nmom,
