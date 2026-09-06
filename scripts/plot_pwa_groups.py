@@ -123,7 +123,7 @@ def main():
         plotter.plot_var(
             it["varfun"], [it["label"]], lo, hi, it["width"], it["stem"],
             output=args.output, fmt=args.format, unit=it["unit"],
-            smooth_sigma=args.smooth, legend=True,
+            smooth_sigma=args.smooth, legend=it["legend"],
             ranges=[it["range"]],
             show_pull=it["kind"] == "mass" and not args.no_pull)
     if not items:

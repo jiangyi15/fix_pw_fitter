@@ -86,6 +86,37 @@ class BaseVar:
         self.range = range
         self.bin_width = bin_width
         self.trans = trans
+        self.nbins = None          # per-variable 'bins' from the config
+        self.plot_cfg = {}         # extra tf-style plot options (legend, …)
+
+    def apply_plot_entry(self, entry, defaults=None):
+        """Apply a tf-style plot entry to this variable's metadata.
+
+        Supported keys (merged over the ``plot.config`` *defaults*):
+        ``display``, ``range``, ``bins``, ``units``, ``legend``,
+        ``legend_outside``, ``yscale``, ``upper_ylim``.
+        """
+        if not isinstance(entry, dict):
+            entry = {}
+        defaults = defaults or {}
+        meta = dict(defaults)
+        meta.update(entry)
+        # 'nbins' is an accepted alias for the tf-style 'bins'
+        if meta.get("bins") is None and meta.get("nbins") is not None:
+            meta["bins"] = meta["nbins"]
+
+        if "display" in meta:
+            self.display = meta["display"]
+        if "range" in meta and meta["range"] is not None:
+            self.range = tuple(meta["range"])
+        if "bins" in meta and meta["bins"] is not None:
+            self.nbins = int(meta["bins"])
+        if "units" in meta and meta["units"]:
+            self.unit = meta["units"]
+        for key in ("legend", "legend_outside", "yscale", "upper_ylim"):
+            if key in meta:
+                self.plot_cfg[key] = meta[key]
+        return self
 
     @property
     def name(self):
@@ -296,16 +327,21 @@ def vars_from_config(cfg, section="plot"):
     def _meta(entry):
         return entry if isinstance(entry, dict) else {}
 
+    defaults = (plot.get("config") if isinstance(plot.get("config"), dict)
+                else {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+
     for topo, entry in (plot.get("mass") or {}).items():
-        v = MassVar(cfg, topo, display=_meta(entry).get("display"))
+        v = MassVar(cfg, topo).apply_plot_entry(_meta(entry), defaults)
         mass_vars[v.name] = v
         out.append((topo, v))
 
     for path, group in (plot.get("angle") or {}).items():
         for kind, entry in (group or {}).items():
             try:
-                v = AngleVar(cfg, path, kind,
-                             display=_meta(entry).get("display"))
+                v = AngleVar(cfg, path, kind).apply_plot_entry(
+                    _meta(entry), defaults)
             except ValueError:
                 continue          # topology not wave-active here
             out.append((f"{path} {kind}", v))
@@ -314,7 +350,7 @@ def vars_from_config(cfg, section="plot"):
         expr = _meta(entry).get("expr")
         if expr is None:
             continue
-        v = ExprVar(expr, mass_vars, display=_meta(entry).get("display", name),
-                    name=name)
+        v = ExprVar(expr, mass_vars, name=name).apply_plot_entry(
+            _meta(entry), defaults)
         out.append((name, v))
     return out

@@ -274,12 +274,17 @@ def config_plot_items(cfg, data_np, phsp_np, nbins=60):
                 lo, hi = -1.0, 1.0
             rng = (lo, hi)
         span = rng[1] - rng[0]
-        stem = _safe_stem(v.name)
+        nbins = int(getattr(v, "nbins", None) or nbins)
+        width = getattr(v, "bin_width", None)
+        if width is None:
+            width = span / max(nbins, 1)
+        cfg_ = getattr(v, "plot_cfg", {})
         out.append({
             "key": key, "var": v, "label": getattr(v, "display", key),
             "unit": getattr(v, "unit", ""), "range": rng,
-            "width": span / max(nbins, 1), "stem": stem,
+            "width": float(width), "stem": _safe_stem(v.name),
             "kind": getattr(v, "kind", "expr"),
+            "legend": bool(cfg_.get("legend", True)),
             "varfun": lambda x, vv=v: [vv.read(x)]})
     return out
 
