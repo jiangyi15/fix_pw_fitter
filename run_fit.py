@@ -232,10 +232,8 @@ def main():
         result = best
         fit_time = float(sum(fits)) if fits else 0.0   # total in summary
         if n_runs > 1:
-            mean_t = fit_time / n_runs
             print(f"\n  Loop summary: best NLL {best.fun:.6f} over "
-                  f"{n_runs} runs (total {fit_time:.2f}s, "
-                  f"mean {mean_t:.2f}s/run)")
+                  f"{n_runs} runs (total fit time {fit_time:.2f}s)")
         else:
             print(f"\n  Final NLL: {result.fun:.6f}")
 
