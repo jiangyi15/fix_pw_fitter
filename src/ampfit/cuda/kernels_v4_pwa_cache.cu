@@ -837,16 +837,19 @@ __global__ void pwa_fpwf_forward_kernel(
     if (e >= ne) return;
     const int P = n_proj;
     const int N = n_wave / P;
-    const size_t col = (size_t)e * P;
-
+    const size_t neP = (size_t)ne * P;
+    double aR[8], aI[8];
+    if (P > 8) return;   // register single-pass version; P<=8 covers all models
     double Ps = 0.0;
     for (int p = 0; p < P; p++) {
+        const double2* Fp = F + (size_t)p * ne + e;   // coalesced across e
         double ar = 0.0, ai = 0.0;
         for (int k = 0; k < N; k++) {
-            double2 cv = F[(size_t)k * ((size_t)ne * P) + col + p];
+            double2 cv = Fp[(size_t)k * neP];
             ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
             ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
         }
+        aR[p] = ar; aI[p] = ai;
         Ps += ar * ar + ai * ai;
     }
     P_out[e] = Ps;
@@ -861,16 +864,10 @@ __global__ void pwa_fpwf_forward_kernel(
         Q_out[e] = -wv * log(Ps / norm + bv);
         dqp = -wv / den;
     }
+    // G row = p*ne + e, written from registers (no second F pass)
     for (int p = 0; p < P; p++) {
-        double ar = 0.0, ai = 0.0;
-        for (int k = 0; k < N; k++) {
-            double2 cv = F[(size_t)k * ((size_t)ne * P) + col + p];
-            ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
-            ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
-        }
-        // G[row] = dqp * conj(A_p): one ZGEMV over F then equals the exact
-        // gk partial the old path produced (verified algebraically).
-        G[col + p] = make_double2(dqp * ar, -dqp * ai);
+        double2* Gp = G + (size_t)p * ne + e;
+        Gp[0] = make_double2(dqp * aR[p], -dqp * aI[p]);
     }
 }
 
@@ -921,7 +918,9 @@ __global__ void fpwf_gradreduce_kernel(
 
 
 // event-major common_cache -> coalesced [k][p][e] layout:
-//   dst[k * neP + e * P + p] = src[e*n_wave + p*N + k] (fpwf col-per-k)
+//   dst[k * neP + p * ne + e] = src[e*n_wave + p*N + k] (fpwf col-per-k)
+//   row = p*ne + e -> consecutive events at consecutive addresses: fully
+//   coalesced warp reads for every (k,p) stream; reduce uses same row order.
 __global__ void transpose_common_kernel(
     const double2* __restrict__ src, double2* __restrict__ dst,
     int ne, int P, int N, int n_wave, int total
@@ -932,7 +931,7 @@ __global__ void transpose_common_kernel(
     int w = idx - e * n_wave;
     int p = w / N;
     int k = w - p * N;
-    dst[(size_t)k * ((size_t)ne * P) + (size_t)e * P + p] = src[idx];
+    dst[(size_t)k * ((size_t)ne * P) + (size_t)p * ne + e] = src[idx];
 }
 
 // D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j} straight from the cached
@@ -1626,6 +1625,8 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             cudaMemset(dg, 0, (size_t)N * sizeof(double2));
             int seg = 2048;
             int nseg = (total + seg - 1) / seg;
+            // gridDim.y = N: one block per (row segment, column) gives enough
+            // blocks to saturate; G re-reads are L2-served.
             dim3 grid((unsigned)nseg, (unsigned)N);
             fpwf_gradreduce_kernel<<<grid, 256>>>(
                 h->common_T, h->dG, dg, N, total, seg);
