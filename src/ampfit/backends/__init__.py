@@ -23,6 +23,8 @@ from . import onnx_backend         # noqa: F401 — register ONNXBackend
 from . import integrated_backend   # noqa: F401 — register IntegratedBackend
 from . import cpu_backend          # noqa: F401 — register CPU backends
 from . import shard_backend        # noqa: F401 — register ShardBackend
+from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
+from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 
 
 __all__ = [

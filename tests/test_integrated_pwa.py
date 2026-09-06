@@ -69,3 +69,50 @@ def test_gram_projection_count():
     assert np.all(np.linalg.eigvalsh((D + D.conj().T) / 2) >= -1e-8)
     assert ip.norm(ck, D) == pytest.approx(
         ip.norm_from_data(data, {"ck": ck, "m0": m0, "g0": g0}), rel=1e-9)
+
+
+def test_integrated_pwa_backend():
+    """Backend phsp-norm via Gram matches direct sum; data path = numpy."""
+    from ampfit.backends import create_backend
+
+    kc, phsp = _pwa_setup(n_events=1500)
+    mom = np.load("data/phsp.npy")
+    cfg = Config("config_pwa.yml")
+    dt = pwa_event_data(cfg, kc, mom[3000:3500])
+
+    rng = np.random.RandomState(4)
+    n_m0 = int(np.max(kc["m0_index"])) + 1
+    n_g0 = int(np.max(kc["g0_index"])) + 1
+    ck = rng.normal(size=kc["n_proj"] and kc["matrix_angle"].shape[1]
+                    // kc["n_proj"])
+    ck = ck + 1j * rng.normal(size=len(ck))
+    m0 = rng.uniform(0.7, 1.5, n_m0)
+    g0 = rng.uniform(0.05, 0.5, n_g0)
+    params = {"ck": ck, "m0": m0, "g0": g0}
+
+    be = create_backend({"name": "integrated_pwa", "base": "numpy_pwa"}, kc)
+    php = be.load_data(phsp)
+    norm, gnorm, _ = be.compute(params, php, norm=None, return_p=False)
+
+    # Gram norm == direct per-event sum over the same phsp
+    from ampfit.integrated_pwa import IntegratedPWA
+    direct = IntegratedPWA(kc).norm_from_data(phsp, params)
+    assert norm == pytest.approx(direct, rel=1e-9)
+    # norm ck gradient == D @ ck
+    D = be._gram.gram(phsp, m0, g0)
+    assert np.allclose(gnorm["ck"], D @ ck, rtol=1e-9)
+    assert np.all(gnorm["m0"] == 0)          # frozen at Gram pre-integration
+
+    # data NLL path with the Gram norm == numpy_pwa with the same norm
+    dth = be.load_data(dt)
+    Q, grads, P = be.compute(params, dth, norm=norm)
+
+    from ampfit.numpy_pwa import NumpyPWA
+    npw = NumpyPWA(kc)
+    Qn, grads_n, Pn = npw.compute(params, npw.load_data(dt), norm=norm)
+    assert Q == pytest.approx(Qn, rel=1e-9)
+    assert np.allclose(P, Pn, rtol=1e-9)
+    # data-term ck gradient from base matches numpy; m0/g0 frozen like the
+    # legacy integrated backend (Gram pre-integrated at fixed m0/g0)
+    assert np.allclose(grads["ck"], grads_n["ck"], rtol=1e-6)
+    assert np.all(grads["m0"] == 0) and np.all(grads["g0"] == 0)
