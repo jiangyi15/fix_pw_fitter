@@ -925,9 +925,9 @@ typedef struct {
     int n_uniq;
     // fixed-m0/g0 full-amplitude cache (cuda_compute_v4_cache): per-event
     // per-entry a_{p,k}(e) = Amp/bw at the FIRST-SEEN m0/g0, filled once.
-    // It is the caller's responsibility to only present that same fixed
-    // m0/g0 afterwards; changed (fitted) parameters must go through the
-    // original cuda_v4_pwa kernel (see _v4_pwa_cache.py fallback).
+    // Steady state stores ONLY common_cache + weight/bkg: the transient
+    // mass / angular amp_cache needed for the one-time fill are freed as
+    // soon as the cache is built (no refill, no param changes allowed).
     double2* common_cache;   // [ne · n_wave]
     int cache_valid;
 } DataHandle2;
@@ -1386,6 +1386,9 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
             #undef F
         }
+        // transient mass + angular amp cache are no longer needed: drop them
+        if (h->m) { cudaFree((void*)h->m); h->m = NULL; }
+        if (h->amp_cache) { cudaFree(h->amp_cache); h->amp_cache = NULL; }
         h->cache_valid = 1;
     }
 
@@ -1422,7 +1425,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         int nb = (ne - st > bs) ? bs : (ne - st);
 
         ComputeData d = s;
-        d.mass = h->m + st * h->nm;
+        d.mass = (h->m != NULL) ? h->m + (size_t)st * h->nm : NULL;
         d.weight = h->w + st;
         d.bkg = h->b + st;
         d.n_events = nb;
