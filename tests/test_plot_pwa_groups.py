@@ -142,3 +142,17 @@ def test_config_panels_from_readvars(cfg_pwa, pwa_events):
     assert len(p["angles"]["keys"]) == 6
     v = p["angles"]["varfun"](pwa_events)
     assert len(v) == 6 and all(x.shape == (12,) for x in v)
+
+
+def test_apply_plot_entry_priority(cfg_pwa):
+    """per-variable config bins/range override plot.config defaults."""
+    from ampfit.read_var import MassVar
+    defaults = {"nbins": 200, "legend": False, "range": [0.0, 5.0]}
+    v = MassVar(cfg_pwa, "pipi").apply_plot_entry(defaults)
+    assert v.nbins == 200 and v.range == (0.0, 5.0)
+    v2 = MassVar(cfg_pwa, "pipi").apply_plot_entry(
+        {"bins": 25, "range": [0.5, 2.0]}, defaults)
+    assert v2.nbins == 25 and v2.range == (0.5, 2.0)   # entry wins
+    v3 = MassVar(cfg_pwa, "pipi").apply_plot_entry(
+        {"bins": 40}, defaults)
+    assert v3.nbins == 40 and v3.range == (0.0, 5.0)   # defaults retained
