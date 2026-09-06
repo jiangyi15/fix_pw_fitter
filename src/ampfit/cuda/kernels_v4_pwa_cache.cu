@@ -34,6 +34,7 @@
  */
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <device_launch_parameters.h>
 #include <thrust/complex.h>
 #include <cstdio>
@@ -785,7 +786,7 @@ __global__ void pwa_fused_thread_kernel(
     for (int p = 0; p < P; p++) {
         double ar = 0.0, ai = 0.0;
         for (int k = 0; k < N; k++) {
-            double2 cv = commonT[(size_t)(k * P + p) * ne_total + eG];
+            double2 cv = commonT[(size_t)k * ((size_t)ne_total * P) + (size_t)eG * P + p];
             ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
             ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
         }
@@ -807,7 +808,7 @@ __global__ void pwa_fused_thread_kernel(
     for (int k = 0; k < N; k++) {
         double gr = 0.0, gi = 0.0;
         for (int p = 0; p < P; p++) {
-            double2 cv = commonT[(size_t)(k * P + p) * ne_total + eG];
+            double2 cv = commonT[(size_t)k * ((size_t)ne_total * P) + (size_t)eG * P + p];
             double dqr = dqp * aR[p];
             double dqi = -dqp * aI[p];
             gr += dqr * cv.x - dqi * cv.y;
@@ -819,10 +820,65 @@ __global__ void pwa_fused_thread_kernel(
 }
 #undef PWA_MAX_P
 
+// fpwfitter-style SINGLE forward kernel over the fpwf layout.  One thread per
+// event, two passes (no per-thread P-arrays -> no local memory): pass 1 sums
+// |A_p|^2 and writes Q/P, pass 2 recomputes A_p and writes the complex
+// gradient vector G[e*P+p] = dQdP * conj(A_p).  The ck gradient is then one
+// cuBLAS ZGEMV over F (see cuda_compute_v4_cache).
+__global__ void pwa_fpwf_forward_kernel(
+    const double2* __restrict__ F,
+    const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
+    const double* __restrict__ weight, const double* __restrict__ bkg,
+    int n_wave, int n_proj, int ne,
+    int use_norm, double norm,
+    double* __restrict__ Q_out, double* __restrict__ P_out,
+    double2* __restrict__ G
+) {
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= ne) return;
+    const int P = n_proj;
+    const int N = n_wave / P;
+    const size_t col = (size_t)e * P;
+
+    double Ps = 0.0;
+    for (int p = 0; p < P; p++) {
+        double ar = 0.0, ai = 0.0;
+        for (int k = 0; k < N; k++) {
+            double2 cv = F[(size_t)k * ((size_t)ne * P) + col + p];
+            ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
+            ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
+        }
+        Ps += ar * ar + ai * ai;
+    }
+    P_out[e] = Ps;
+    double wv = weight[e];
+    double bv = bkg[e];
+    double dqp;
+    if (use_norm == 0) {
+        Q_out[e] = wv * Ps;
+        dqp = wv;
+    } else {
+        double den = Ps + bv * norm;
+        Q_out[e] = -wv * log(Ps / norm + bv);
+        dqp = -wv / den;
+    }
+    for (int p = 0; p < P; p++) {
+        double ar = 0.0, ai = 0.0;
+        for (int k = 0; k < N; k++) {
+            double2 cv = F[(size_t)k * ((size_t)ne * P) + col + p];
+            ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
+            ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
+        }
+        // G[row] = dqp * conj(A_p): one ZGEMV over F then equals the exact
+        // gk partial the old path produced (verified algebraically).
+        G[col + p] = make_double2(dqp * ar, -dqp * ai);
+    }
+}
+
 
 
 // event-major common_cache -> coalesced [k][p][e] layout:
-//   dst[(k*P + p)*ne + e] = src[e*n_wave + p*N + k]
+//   dst[k * neP + e * P + p] = src[e*n_wave + p*N + k] (fpwf col-per-k)
 __global__ void transpose_common_kernel(
     const double2* __restrict__ src, double2* __restrict__ dst,
     int ne, int P, int N, int n_wave, int total
@@ -833,7 +889,7 @@ __global__ void transpose_common_kernel(
     int w = idx - e * n_wave;
     int p = w / N;
     int k = w - p * N;
-    dst[(k * P + p) * ne + e] = src[idx];
+    dst[(size_t)k * ((size_t)ne * P) + (size_t)e * P + p] = src[idx];
 }
 
 // D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j} straight from the cached
@@ -1108,7 +1164,11 @@ typedef struct {
     const double* w; const double* b;
     int ne;
     double2* common_cache;   // [ne · n_wave]  per-entry a_{p,k} at fixed m0/g0
-    double2* common_T;       // transposed [k][p][e] copy (coalesced reads)
+    double2* common_T;       // fpwf layout [k][e*P+p] (cuBLAS column per k)
+    double2* dG;             // [ne*P] gradient vector G (device)
+    double* dQ;              // [ne] per-event Q (device)
+    double* dP;              // [ne] per-event P (device)
+    int fpwf_ok;             // device bufs allocated
     int cache_valid;
 } DataHandle2;
 
@@ -1237,6 +1297,8 @@ void* cuda_load_data_v4(void* vctx,
     h->ne = ne;
     h->common_cache = NULL;
     h->common_T = NULL;
+    h->dG = NULL; h->dQ = NULL; h->dP = NULL;
+    h->fpwf_ok = 0;
     h->cache_valid = 0;
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
@@ -1253,6 +1315,10 @@ void cuda_free_data_v4(void* vh) {
     DataHandle2* h = (DataHandle2*)vh;
     cudaFree((void*)h->w); cudaFree((void*)h->b);
     if (h->common_cache) cudaFree(h->common_cache);
+    if (h->common_T) cudaFree(h->common_T);
+    if (h->dG) cudaFree(h->dG);
+    if (h->dQ) cudaFree(h->dQ);
+    if (h->dP) cudaFree(h->dP);
     free(h);
 }
 
@@ -1423,6 +1489,8 @@ static void launch_common_fill(ComputeContext* c, ComputeData* d,
     CUDA_CHECK(cudaGetLastError());
 }
 
+static cublasHandle_t fpw_hblas = NULL;   // one lazily-created handle
+
 void cuda_compute_v4_cache(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* m0,const double* g0,
@@ -1431,124 +1499,112 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     double* ogck_r,double* ogck_i,
     double* ogm0,double* ogg0
 ) {
+    // fpwfitter-style evaluation over the cached full amplitude:
+    //   one fused forward launch (whole dataset) writing Q/P and the
+    //   gradient vector G[e*P+p] = dQdP*conj(A_p), then a SINGLE cuBLAS
+    //   ZGEMV (OP_T over the (ne*P) x N column-major F) gives the whole
+    //   ck gradient.  No batching, no per-event gk partials, no
+    //   feature-reduces.  m0/g0 are fixed by the cache -> zero grads.
     ComputeContext* c = (ComputeContext*)vctx;
     DataHandle2* h = (DataHandle2*)vdh;
-    int ne = h->ne, bs = c->batch_size;
-    if (ne < bs) bs = ne;
-    int nbat = (ne + bs - 1) / bs;
+    int ne = h->ne;
     int nw = c->n_wave, nu = c->n_unique_bw, ng = c->n_gamma_rows;
-    int N = nw / c->n_proj;
+    int P = c->n_proj, N = nw / P;
+    size_t np_rows = (size_t)ne * P;
 
-    // ---- upload per-call params (same convention as cuda_compute_v4) ----
     ComputeParams p;
     p.ck_real = (double*)_up_dbl(ck_r, N);
     p.ck_imag = (double*)_up_dbl(ck_i, N);
     p.m0 = (double*)_up_dbl(m0, c->n_m0_params);
     p.g0 = (double*)_up_dbl(g0, c->n_g0_params);
 
-    // ---- cache must already be filled (cuda_fill_common_v4_cache) ---------
-    // This function only contracts ck over the cached amplitude.  Fixed
-    // m0/g0 contract: the caller fills the cache once from host arrays
-    // (mass/momentum/angle uploaded per batch, like the angular fill) and
-    // then calls compute with the SAME m0/g0 every time.
-    if (!h->cache_valid || !h->common_cache) {
+    if (!h->cache_valid || !h->common_cache || !h->common_T) {
         *oQ = 0.0;
         memset(oP, 0, (size_t)ne * sizeof(double));
         memset(ogck_r, 0, (size_t)N * sizeof(double));
         memset(ogck_i, 0, (size_t)N * sizeof(double));
         memset(ogm0, 0, (size_t)nu * sizeof(double));
         memset(ogg0, 0, (size_t)ng * sizeof(double));
-        cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
-        cudaFree((void*)p.m0); cudaFree((void*)p.g0);
-        return;
+        goto out;
     }
-
-    ComputeData s;
-    if (c->scratch) {
-        s = *c->scratch;
-    } else {
-        memset(&s, 0, sizeof(ComputeData));
-        #define S(f) CUDA_CHECK(cudaMalloc(&s.f, bs * sizeof(double)))
-        #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
-        S2(g_interp_real,ng); S2(g_interp_imag,ng);
-        S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        S(Q_out); S(P_out);
-        S2(bw_p_real,nw); S2(bw_p_imag,nw);
-        S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
-        S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
-        S2(dQ_dA_real, c->n_proj); S2(dQ_dA_imag, c->n_proj);
-        S2(grad_ck_real_partial,N); S2(grad_ck_imag_partial,N);
-        S2(grad_m0_partial,nu); S2(grad_g0_partial,ng);
-        S2(dQ_dbw_dom_real, nu); S2(dQ_dbw_dom_imag, nu);
-        #undef S
-        #undef S2
-    }
-
-    *oQ = 0; memset(oP, 0, ne * 8);
-    memset(ogck_r, 0, N * 8); memset(ogck_i, 0, N * 8);
-    memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
-
-    double* Ph = (double*)malloc(bs * 8);
-    double* gck_buf = (double*)malloc(N * 8);
-
-    for (int b = 0; b < nbat; b++) {
-        int st = b * bs;
-        int nb = (ne - st > bs) ? bs : (ne - st);
-
-        ComputeData d = s;
-        d.mass = NULL;            // cache only; no mass buffer needed
-        d.weight = h->w + st;
-        d.bkg = h->b + st;
-        d.n_events = nb;
-        d.amp_cache = NULL;       // angular factor lives in the cached common
-
-        // fused single kernel: forward + ck gradient straight from the
-        // cached double2 amplitude (fpwfitter-style, no double conversion)
-        {
-            size_t shmem = (2 * BLOCK_SIZE + 2 * c->n_proj + 1)
-                           * sizeof(double);
-            {
-                int thr = (nb + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                pwa_fused_thread_kernel<<<thr, BLOCK_SIZE>>>(
-                    h->common_T,
-                    p.ck_real, p.ck_imag,
-                    d.weight, d.bkg,
-                    nw, c->n_proj, st, nb, h->ne, use_norm, nv,
-                    d.Q_out, d.P_out,
-                    d.grad_ck_real_partial, d.grad_ck_imag_partial);
-            }
+    if (!h->fpwf_ok) {
+        if (cudaMalloc(&h->dG, np_rows * sizeof(double2)) != cudaSuccess ||
+            cudaMalloc(&h->dQ, (size_t)ne * sizeof(double)) != cudaSuccess ||
+            cudaMalloc(&h->dP, (size_t)ne * sizeof(double)) != cudaSuccess) {
+            *oQ = 0.0;
+            memset(oP, 0, (size_t)ne * sizeof(double));
+            memset(ogck_r, 0, (size_t)N * sizeof(double));
+            memset(ogck_i, 0, (size_t)N * sizeof(double));
+            memset(ogm0, 0, (size_t)nu * sizeof(double));
+            memset(ogg0, 0, (size_t)ng * sizeof(double));
+            goto out;
         }
+        h->fpwf_ok = 1;
+    }
+
+    *oQ = 0;
+    memset(oP, 0, (size_t)ne * sizeof(double));
+    memset(ogck_r, 0, (size_t)N * sizeof(double));
+    memset(ogck_i, 0, (size_t)N * sizeof(double));
+    memset(ogm0, 0, (size_t)nu * sizeof(double));
+    memset(ogg0, 0, (size_t)ng * sizeof(double));
+
+    // ---- one fused forward over the whole dataset ----
+    {
+        int thr = (int)(((size_t)ne + 255) / 256);
+        pwa_fpwf_forward_kernel<<<thr, 256>>>(
+            h->common_T, p.ck_real, p.ck_imag,
+            h->w, h->b, nw, P, ne, use_norm, nv,
+            h->dQ, h->dP, h->dG);
         CUDA_CHECK(cudaGetLastError());
-
-        cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
-        for (int i = 0; i < nb; i++) *oQ += Ph[i];
-        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * 8);
-
-        launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, N);
-        cudaMemcpy(gck_buf, s.g_bw_real, N * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < N; j++) ogck_r[j] += gck_buf[j];
-
-        launch_reduce_sum_features(d.grad_ck_imag_partial, s.g_bw_imag, nb, N);
-        cudaMemcpy(gck_buf, s.g_bw_imag, N * 8, cudaMemcpyDeviceToHost);
-        for (int j = 0; j < N; j++) ogck_i[j] += gck_buf[j];
     }
 
-    if (!c->scratch) {
-        #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
-        F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-        F(Q_out); F(P_out);
-        F(bw_p_real); F(bw_p_imag);
-        F(common_amp_factor_real); F(common_amp_factor_imag);
-        F(bw_dom_real); F(bw_dom_imag);
-        F(dQ_dA_real); F(dQ_dA_imag);
-        F(grad_ck_real_partial); F(grad_ck_imag_partial);
-        F(grad_m0_partial); F(grad_g0_partial);
-        F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag);
-        #undef F
+    // ---- total Q (copy per-event Q once and sum host-side) ----
+    {
+        double* qh = (double*)malloc((size_t)ne * sizeof(double));
+        if (qh) {
+            cudaMemcpy(qh, h->dQ, (size_t)ne * sizeof(double),
+                       cudaMemcpyDeviceToHost);
+            double sum = 0.0;
+            for (int i = 0; i < ne; i++) sum += qh[i];
+            *oQ = sum;
+            free(qh);
+        }
     }
-    free(Ph); free(gck_buf);
+    // ---- per-event P ----
+    if (oP) cudaMemcpy(oP, h->dP, (size_t)ne * sizeof(double),
+                       cudaMemcpyDeviceToHost);
 
+    // ---- ck gradient: single ZGEMV over F ----
+    if (!fpw_hblas) cublasCreate(&fpw_hblas);
+    {
+        double2* dz = NULL;
+        if (fpw_hblas &&
+            cudaMalloc(&dz, (size_t)N * sizeof(double2)) == cudaSuccess) {
+            cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+            cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
+            cublasZgemv(fpw_hblas, CUBLAS_OP_T,
+                        (int)np_rows, N,
+                        &alpha,
+                        (const cuDoubleComplex*)h->common_T, (int)np_rows,
+                        (const cuDoubleComplex*)h->dG, 1,
+                        &beta,
+                        dz, 1);
+            double2* zh = (double2*)malloc((size_t)N * sizeof(double2));
+            if (zh) {
+                cudaMemcpy(zh, dz, (size_t)N * sizeof(double2),
+                           cudaMemcpyDeviceToHost);
+                for (int j = 0; j < N; j++) {
+                    ogck_r[j] = zh[j].x;
+                    ogck_i[j] = zh[j].y;
+                }
+                free(zh);
+            }
+            cudaFree(dz);
+        }
+    }
+
+out:
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
 }
