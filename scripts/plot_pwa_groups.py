@@ -37,8 +37,12 @@ def main():
         description="Plot partial-wave group distributions (pure-PWA mode)")
     ap.add_argument("fit_json")
     ap.add_argument("--config", default="config_pwa.yml")
-    ap.add_argument("--data")
-    ap.add_argument("--phsp")
+    ap.add_argument("--data",
+                    help="data .npz (kernel arrays); omit with --phsp to "
+                         "use the config's data/phsp section")
+    ap.add_argument("--phsp",
+                    help="phsp .npz (kernel arrays); omit with --data to "
+                         "use the config's data/phsp section")
     ap.add_argument("--backend", default="numpy_pwa",
                     help="backend computing the pwa model (default numpy_pwa)")
     ap.add_argument("--by", default="resonance",
