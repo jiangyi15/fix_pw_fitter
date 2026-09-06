@@ -250,3 +250,12 @@ def test_topo_index_from_decay_struct(cfg):
     # legacy models unchanged (identical key ordering to chain-derived)
     a = _C("config_angle.yml")
     assert a.n_topo == 3
+
+
+def test_topo_index_from_name(cfg):
+    """Structural decay-section name -> stable topology slot."""
+    from ampfit.config_loader import Config as _C
+    c2 = _C("config_pwa.yml")
+    assert c2.topo_index_from_name("pipi") == 0
+    assert c2.topo_index_from_name("pipeta") == 1
+    assert c2.topo_index_from_name("pimeta") == 2

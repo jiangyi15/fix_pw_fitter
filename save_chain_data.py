@@ -38,36 +38,6 @@ from ampfit.momenta_to_angles import decay_angles_vectorized
 from ampfit.pwa_build import _boost_vec
 
 
-def _core_leaves(cfg, name):
-    """Final leaves beneath a structural (decay-section) particle *name*."""
-    d = cfg.dic["decay"]
-    finals = cfg.finals
-
-    def outs_of(n):
-        entry = d.get(n)
-        if entry is None:
-            return []
-        if not isinstance(entry, list):
-            entry = [entry]
-        outs = []
-        for item in entry:
-            if isinstance(item, str):
-                outs.append(item)
-            elif isinstance(item, (list, tuple)):
-                outs += [k for k in item if isinstance(k, str)]
-        return outs
-
-    def rec(n):
-        if n in finals:
-            return [n]
-        leaves = []
-        for o in outs_of(n):
-            leaves += rec(o)
-        return leaves
-
-    return rec(name)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -83,21 +53,11 @@ def main():
     cfg = Config(args.config)
     kc = cfg.build_all_index()
 
-    # resolve chain id -> topology slot (by structural name leaves)
-    tid = None
+    # resolve chain id -> topology slot (name via Config helper, or int)
     try:
         tid = int(args.chain)
     except ValueError:
-        want = sorted(_core_leaves(cfg, args.chain))
-        for key, idx in cfg.topo_index.items():
-            leaves = sorted(sum((list(grp) for grp in key), []))
-            if leaves == want:
-                tid = idx
-                break
-        if tid is None:
-            raise SystemExit(
-                f"chain name {args.chain!r} leaves {want} not found in "
-                f"topologies {cfg.topo_index}")
+        tid = cfg.topo_index_from_name(args.chain)
 
     chain = None
     for ls, ch in cfg.full_decay.get_partial_waves():

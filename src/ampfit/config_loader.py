@@ -366,6 +366,47 @@ class Config:
             return self.get_topo_index(self.full_decay)
         return struct_map
 
+    def topo_index_from_name(self, name):
+        """Topology slot of a structural decay-section name (e.g. 'pipeta').
+
+        Resolves the intermediate pairing label used in ``decay:`` to its
+        stable topology index (from ``self.topo_index``).  Raises KeyError
+        if the name has no matching topology.
+        """
+        finals = self.finals
+        d = self.dic["decay"]
+
+        def _outs_of(n):
+            entry = d.get(n)
+            if entry is None:
+                return []
+            if not isinstance(entry, list):
+                entry = [entry]
+            outs = []
+            for item in entry:
+                if isinstance(item, str):
+                    outs.append(item)
+                elif isinstance(item, (list, tuple)):
+                    outs += [k for k in item if isinstance(k, str)]
+            return outs
+
+        def _leaves(n):
+            if n in finals:
+                return [n]
+            out = []
+            for o in _outs_of(n):
+                out += _leaves(o)
+            return out
+
+        want = sorted(_leaves(name))
+        for key, idx in self.topo_index.items():
+            leaves = sorted(sum((list(grp) for grp in key), []))
+            if leaves == want:
+                return idx
+        raise KeyError(
+            f"no topology for decay name {name!r} (leaves {want}); "
+            f"available: {self.topo_index}")
+
     def get_topo_index(self, decay):
         topo_id = {}
         for i in decay.chains:
