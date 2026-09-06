@@ -656,6 +656,19 @@ class Config:
         ret["gamma_delta"] = g_delta
         ret["fl_table"], ret["fl_min"], ret["fl_delta"] =             self.build_fl_table(self.unique_l)
         ret["ck_map"] = list(self.full_decay.get_partial_waves_params())
+        # canonical per-event angle columns (phi-first) of the first chain —
+        # the layout the event data builder must fill for pure-PWA models
+        try:
+            from ampfit.helicity_angle import (decay_chain_to_tree,
+                                               tree_vertices, canonical_variables,
+                                               to_spin)
+            first_chain = waves[0][1]
+            _nv = len(tree_vertices(decay_chain_to_tree(first_chain)))
+            _topj0 = to_spin(first_chain.decays[0].core.J) == 0
+            ret["variables"] = canonical_variables(_nv, top_j0=_topj0)
+            ret["top_j0"] = bool(_topj0)
+        except Exception:
+            pass
         return ret
 
     def _build_pwa_index(self):
@@ -733,8 +746,9 @@ class Config:
         # duplicated matrix_angle columns are identical copies (the angular
         # difference per projection is filled in later).
         ret["n_proj"] = P
-        if "ck_map" in base:
-            ret["ck_map"] = base["ck_map"]
+        for meta in ("ck_map", "variables", "top_j0", "n_proj_base"):
+            if meta in base:
+                ret[meta] = base[meta]
 
         return ret
 

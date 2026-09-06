@@ -355,7 +355,7 @@ class Fitter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def load_npz(npz_path, max_events=None):
+    def load_npz(npz_path, max_events=None, n_angle_comp=3):
         """Load ``.npz`` data and format for the kernel.
 
         Args:
@@ -364,7 +364,9 @@ class Fitter:
                       ``bkg_raw``, ``weight`` arrays.
             max_events: if given, subsample to this many events
                         (deterministic seed 0).
-
+            n_angle_comp: per-row angle columns (kernel ``angle_k`` last
+                          dim) — 3 for the legacy B→4π layout, any other
+                          count for pure-PWA canonical layouts.
         Returns:
             ``(data_dict, n_events)``.
         """
@@ -385,7 +387,7 @@ class Fitter:
         out = {
             "mass": data["mass"][idx].reshape(n_events, -1),
             "q": data["q"][idx].reshape(n_events, -1),
-            "angle": data["angle"][idx].reshape(n_events, -1, 3),
+            "angle": data["angle"][idx].reshape(n_events, -1, n_angle_comp),
             "time": data["time"][idx].astype(np.float64),
             "frac": data["frac"][idx].astype(np.float64),
             "bkg": data["bkg_raw"][idx].astype(np.float64),
@@ -423,8 +425,9 @@ class Fitter:
         # Resolve relative to config file
         data_path = os.path.join(cfg_dir, data_path)
         phsp_path = os.path.join(cfg_dir, phsp_path)
-        data_np, _ = self.load_npz(data_path)
-        phsp_np, _ = self.load_npz(phsp_path)
+        n_comp = int(self.kernel_config["angle_k"].shape[1])
+        data_np, _ = self.load_npz(data_path, n_angle_comp=n_comp)
+        phsp_np, _ = self.load_npz(phsp_path, n_angle_comp=n_comp)
         self.set_phsp(phsp_np)
         self.set_data(data_np)
         return data_np, phsp_np
