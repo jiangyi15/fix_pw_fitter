@@ -136,18 +136,21 @@ class NumpyPWA:
         # ── back-prop through the projection sum ──────────────────────────
         # ∂Q/∂A_p = dQ/dP · conj(A_p);  entry w=(p,k) takes the A_p gradient
         dQ_dA = dQ_dP[:, None] * np.conj(A)              # (ne, P)
-        dQ_da = np.repeat(dQ_dA, N, axis=-1)            # (ne, n_wave)
+        # S[e,k] = Σ_p dQ_dA[e,p]·a_{p,k}(e) — project P away up front:
+        # the BW propagators (and fl_q/mass) are identical across projections
+        # (p-major duplication), so only the angular part differs and every
+        # m0/g0 gradient contribution is linear in this p-reduced sum.
+        S_ek = np.einsum("ep,epk->ek", dQ_dA, cm)       # (ne, N)
+        grad_ck = S_ek.sum(axis=0)
 
-        grad_ck = np.einsum("ep,epk->k", dQ_dA, cm)
-
-        # BW chain gradients — verbatim formulas of the original kernel,
-        # with the shared ck tiled to per-entry values.
-        ck_w = np.tile(ck, P)                            # ck[entry % N]
-        dQ_dbw_p = dQ_da * (-ck_w * one_over_bw * common)
-        dQ_dbw_dom_all = dQ_dbw_p[:, :, None] * (
-            bw_p[:, :, None] / bw_dom_r)                 # (ne, n_wave, n_res)
-        dQ_dbw_dom = (dQ_dbw_dom_all.reshape(ne, -1)
-                      @ k._bw_scatter)
+        # BW chain gradient, reduced to the N base waves:
+        #   dQ/dbw_dom[e,bw] = Σ_{k,r→bw} −ck_k·S[e,k] / bw_dom[e,bw]
+        V = -ck[None, :] * S_ek                          # (ne, N)
+        boN = k.bw_order.reshape(n_wave, k.n_res)[:N]
+        bw_dom_t = np.take(bw_dom, boN, axis=-1)         # (ne, N, n_res)
+        dQ_dbw_dom = ((V[:, :, None] / bw_dom_t)
+                      .reshape(ne, N * k.n_res)
+                      @ k._bw_scatter[:N * k.n_res])     # (ne, n_unique_bw)
 
         dbw_dom_dm0 = 2 * m0_all - 1j * g_bw
         grad_m0 = np.sum(2 * np.real(dQ_dbw_dom * dbw_dom_dm0),
