@@ -161,3 +161,22 @@ def test_build_all_index_routes_pure_pwa(cfg):
     assert c2.m0_phys_name == kc_ref["m0_names"]
     assert c2.g0_phys_name == kc_ref["g0_names"]
     assert len(kc["ck_map"]) == kc["matrix_angle"].shape[1] // kc["n_proj"]
+
+
+def test_generate_pwa_phsp_conserves_four_momentum(cfg):
+    """Flat phsp via two-body products + inverse boost chain: on shell."""
+    from ampfit.pwa_build import generate_pwa_phsp
+
+    chain = cfg.full_decay.get_partial_waves()[0][1]
+    mom = generate_pwa_phsp(cfg, chain, 2000, seed=3)
+    tot = mom.sum(axis=1)
+    E = tot[:, 0]
+    p3 = np.linalg.norm(tot[:, 1:], axis=1)
+    M = cfg.dic["particle"][cfg.top]["mass"]
+    assert np.abs(E - M).max() < 1e-6
+    assert p3.max() < 1e-6
+    mass_ok = [np.sqrt(np.clip(mom[:, i] ** 2 @ np.array([1, -1, -1, -1.]),
+                               0, None)) for i in range(3)]
+    for i, f in enumerate(cfg.finals):
+        assert np.allclose(mass_ok[i], cfg.dic["particle"][f]["mass"],
+                           atol=1e-6)

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 import numpy as np
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data
+from ampfit.pwa_build import pwa_event_data, generate_pwa_phsp
 from ampfit.numpy_pwa import NumpyPWA
 
 
@@ -44,26 +44,35 @@ def main():
           f"n_proj {kc['n_proj']}  N {N}")
 
     # ── phsp / data buffers (canonical layout) ────────────────────────────
-    mom = np.load("data/phsp.npy")
-    phsp_mom = mom[:args.nph]
-    phsp = pwa_event_data(cfg, kc, phsp_mom)
+    # Correct phase space: generated on the fly with the config masses via
+    # the product of two-body decays + an inverse boost chain (flat in the
+    # final invariants).  Two independent samples — block 1 integrates the
+    # norm, block 2 is the proposal set for the toy data.
+    chain = cfg.full_decay.get_partial_waves()[0][1]
+    phsp = pwa_event_data(cfg, kc,
+                          generate_pwa_phsp(cfg, chain, args.nph, seed=11))
 
-    # toy data: events importance-sampled from the model at a random ck0
+    # toy data: events importance-sampled (without replacement) from the
+    # model density on the independent proposal sample
     rng = np.random.RandomState(42)
     n_m0 = int(np.max(kc["m0_index"])) + 1
     n_g0 = int(np.max(kc["g0_index"])) + 1
     ck0 = rng.normal(size=N) + 1j * rng.normal(size=N)
     m0 = np.full(n_m0, 0.769)
     g0 = np.full(n_g0, 0.10)
+    prop = pwa_event_data(cfg, kc,
+                          generate_pwa_phsp(cfg, chain, args.nprop, seed=22))
     npw = NumpyPWA(kc)
     _, _, P0 = npw.compute({"ck": ck0, "m0": m0, "g0": g0},
-                           npw.load_data(phsp))
-    prob = np.clip(P0, 0, None)
+                           npw.load_data(prop))
+    if P0 is None:
+        raise SystemExit("model compute returned no P")
+    prob = np.clip(np.asarray(P0, dtype=float), 0, None)
     if prob.sum() <= 0:
-        raise SystemExit("model probability zero on phsp sample")
+        raise SystemExit("model probability zero on proposal sample")
     prob /= prob.sum()
-    idx = rng.choice(args.nph, size=args.ndata, p=prob)
-    data = {kk: vv[idx] for kk, vv in phsp.items()}
+    idx = rng.choice(args.nprop, size=args.ndata, replace=False, p=prob)
+    data = {kk: vv[idx] for kk, vv in prop.items()}
 
     # ── backend: integrated_pwa (Gram norm) + base ────────────────────────
     from ampfit.backends import create_backend

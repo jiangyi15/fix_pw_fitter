@@ -324,3 +324,109 @@ def pwa_event_data(cfg, kc, momenta):
         "weight": np.ones(n),
         "bkg": np.zeros(n),
     }
+
+
+def _two_body_p(M, m1, m2):
+    """Two-body breakup momentum (scalar/array), 0 below threshold."""
+    return np.sqrt(np.clip(
+        (M * M - (m1 + m2) ** 2) * (M * M - (m1 - m2) ** 2), 0.0, None)) \
+        / (2.0 * M)
+
+
+def _boost_vec(p, beta):
+    """Lorentz boost (batch over rows) by velocity *beta* (rest -> moving)."""
+    b2 = np.sum(beta * beta, axis=-1)
+    gamma = 1.0 / np.sqrt(np.maximum(1.0 - b2, 1e-300))
+    bp = np.einsum('ni,ni->n', beta, p[:, 1:])
+    coef = np.where(b2 > 1e-300, (gamma - 1.0) / np.where(b2 > 1e-300, b2, 1.0), 0.0)
+    out = np.empty_like(p)
+    out[:, 0] = gamma * (p[:, 0] + bp)
+    out[:, 1:] = p[:, 1:] + coef[:, None] * beta * bp[:, None] \
+        + gamma[:, None] * p[:, 0:1] * beta
+    return out
+
+
+def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
+    """Flat 3-body phase space of the chain via the product of two-body
+    decays + an inverse boost chain (same masses as the config).
+
+    For a decay top(M) -> (sub -> a b) + c the event mass *s* of the sub
+    system is sampled with density  p_top(M; s, m_c) · p_sub(s; m_a, m_b)
+    (uniform 3-body phase space), every two-body decay is generated
+    isotropically in its rest frame, and the daughters are boosted up the
+    chain into the top rest frame — the exact inverse of
+    ``decay_angles_from_momenta``.
+
+    Returns final 4-momenta (n_events, n_finals, 4) in ``cfg.finals``
+    order (optionally (momenta, weights)).
+    """
+    rng = np.random.RandomState(seed) if seed is not None \
+        else np.random.RandomState()
+    sub = chain.decays[1]                 # sub -> a + b  (two pions)
+    names = [o.name for o in sub.outs]
+    tops_out = [o.name for o in chain.decays[0].outs]
+    bachelor = [o for o in tops_out if o not in (sub.core.name,)][0]
+
+    M_top = float(cfg.dic["particle"][chain.decays[0].core.name]["mass"])
+    m_a = float(cfg.dic["particle"][names[0]]["mass"])
+    m_b = float(cfg.dic["particle"][names[1]]["mass"])
+    m_c = float(cfg.dic["particle"][bachelor]["mass"])
+
+    s_min = m_a + m_b
+    s_max = M_top - m_c
+    # ── sample s with weight p_top(s)*p_sub(s) (flat 3-body) by rejection ──
+    grid = np.linspace(s_min, s_max, 600)
+    wgrid = _two_body_p(np.full_like(grid, M_top), grid, m_c) \
+        * _two_body_p(grid, m_a, m_b)
+    wmax = float(wgrid.max()) * 1.0001
+
+    s = np.empty(n_events)
+    got = 0
+    while got < n_events:
+        cand = rng.uniform(s_min, s_max, min(8192, n_events - got))
+        w = _two_body_p(np.full_like(cand, M_top), cand, np.full_like(cand, m_c)) \
+            * _two_body_p(cand, m_a, m_b)
+        keep = rng.uniform(0, wmax, len(cand)) < w
+        k = int(keep.sum())
+        s[got:got + k] = cand[keep]
+        got += k
+
+    # ── orientations (isotropic at every vertex) ──────────────────────────
+    def _unit_vec(n):
+        z = rng.uniform(-1, 1, n)
+        phi = rng.uniform(0, 2 * np.pi, n)
+        r = np.sqrt(np.maximum(1 - z * z, 0.0))
+        return np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=-1)
+
+    u_top = _unit_vec(n_events)          # sub direction in top rest
+    u_sub = _unit_vec(n_events)          # a direction in sub rest
+
+    # sub vertex in its rest frame
+    p_sub = _two_body_p(s, m_a, m_b)
+    Ea = np.sqrt(p_sub ** 2 + m_a ** 2)
+    Eb = np.sqrt(p_sub ** 2 + m_b ** 2)
+    pa3 = p_sub[:, None] * u_sub
+    pb3 = -pa3
+    pa_rest = np.concatenate([Ea[:, None], pa3], axis=-1)
+    pb_rest = np.concatenate([Eb[:, None], pb3], axis=-1)
+
+    # boost daughters from the sub rest frame up to the top rest frame:
+    # the sub system moves with velocity beta in the top rest frame
+    p_top = _two_body_p(np.full(n_events, M_top), s, np.full(n_events, m_c))
+    E_sub = np.sqrt(p_top ** 2 + s ** 2)
+    sub4 = np.concatenate([E_sub[:, None], (p_top[:, None] * u_top)],
+                         axis=-1)
+    beta = sub4[:, 1:] / sub4[:, 0:1]
+
+    pa = _boost_vec(pa_rest, beta)
+    pb = _boost_vec(pb_rest, beta)
+    top4 = np.zeros(n_events)                     # top rest frame: (M, 0, 0, 0)
+    top4[:] = 0.0
+    top4 = np.tile([M_top, 0.0, 0.0, 0.0], (n_events, 1))
+    pc = top4 - sub4                       # eta = top 4-momentum - sub system
+
+    out = {names[0]: pa, names[1]: pb, bachelor: pc}
+    mom = np.stack([out[f] for f in cfg.finals], axis=1)
+    if weights_out:
+        return mom, np.ones(n_events)
+    return mom
