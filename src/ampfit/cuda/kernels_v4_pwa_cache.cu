@@ -34,7 +34,6 @@
  */
 
 #include <cuda_runtime.h>
-#include <cublas_v2.h>
 #include <device_launch_parameters.h>
 #include <thrust/complex.h>
 #include <cstdio>
@@ -875,6 +874,46 @@ __global__ void pwa_fpwf_forward_kernel(
     }
 }
 
+// ck-gradient reduction replacing the cuBLAS ZGEMV.  F is column-per-k
+// (column k at F + (long)k*total, contiguous); block (seg, k) reduces its
+// row segment and atomicAdds into out[k].  Reads are coalesced along each
+// column for a given block.
+__global__ void fpwf_gradreduce_kernel(
+    const double2* __restrict__ F,
+    const double2* __restrict__ G,
+    double2* __restrict__ out,
+    int N, int total, int seg_len
+) {
+    int k = blockIdx.y;
+    if (k >= N) return;
+    int tid = threadIdx.x;
+    int bd = blockDim.x;
+    long start = (long)blockIdx.x * seg_len;
+    long end = start + seg_len;
+    if (end > total) end = total;
+    const double2* Fc = F + (long)k * total;
+
+    double ar = 0.0, ai = 0.0;
+    for (long r = start + tid; r < end; r += bd) {
+        double2 f = Fc[r];
+        double2 g = G[r];
+        ar += f.x * g.x - f.y * g.y;
+        ai += f.x * g.y + f.y * g.x;
+    }
+    __shared__ double2 sh[256];
+    sh[tid] = make_double2(ar, ai);
+    __syncthreads();
+    for (int st = bd / 2; st > 0; st >>= 1) {
+        if (tid < st) {
+            sh[tid].x += sh[tid + st].x;
+            sh[tid].y += sh[tid + st].y;
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+        atomicAdd(&out[k].x, sh[0].x), atomicAdd(&out[k].y, sh[0].y);
+}
+
 
 
 // event-major common_cache -> coalesced [k][p][e] layout:
@@ -1489,8 +1528,6 @@ static void launch_common_fill(ComputeContext* c, ComputeData* d,
     CUDA_CHECK(cudaGetLastError());
 }
 
-static cublasHandle_t fpw_hblas = NULL;   // one lazily-created handle
-
 void cuda_compute_v4_cache(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* m0,const double* g0,
@@ -1575,24 +1612,23 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     if (oP) cudaMemcpy(oP, h->dP, (size_t)ne * sizeof(double),
                        cudaMemcpyDeviceToHost);
 
-    // ---- ck gradient: single ZGEMV over F ----
-    if (!fpw_hblas) cublasCreate(&fpw_hblas);
+    // ---- ck gradient: reduction kernel over F (no cuBLAS) ----
+    // ogck[k] = Σ_{row=0}^{ne*P-1} F[k*total + row] * G[row]
+    // Grid = (row-segments) x (N columns); column-contiguous coalesced reads.
     {
-        double2* dz = NULL;
-        if (fpw_hblas &&
-            cudaMalloc(&dz, (size_t)N * sizeof(double2)) == cudaSuccess) {
-            cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-            cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
-            cublasZgemv(fpw_hblas, CUBLAS_OP_T,
-                        (int)np_rows, N,
-                        &alpha,
-                        (const cuDoubleComplex*)h->common_T, (int)np_rows,
-                        (const cuDoubleComplex*)h->dG, 1,
-                        &beta,
-                        dz, 1);
+        double2* dg = NULL;
+        int total = (int)np_rows;
+        if (cudaMalloc(&dg, (size_t)N * sizeof(double2)) == cudaSuccess) {
+            cudaMemset(dg, 0, (size_t)N * sizeof(double2));
+            int seg = 2048;
+            int nseg = (total + seg - 1) / seg;
+            dim3 grid((unsigned)nseg, (unsigned)N);
+            fpwf_gradreduce_kernel<<<grid, 256>>>(
+                h->common_T, h->dG, dg, N, total, seg);
+            CUDA_CHECK(cudaGetLastError());
             double2* zh = (double2*)malloc((size_t)N * sizeof(double2));
             if (zh) {
-                cudaMemcpy(zh, dz, (size_t)N * sizeof(double2),
+                cudaMemcpy(zh, dg, (size_t)N * sizeof(double2),
                            cudaMemcpyDeviceToHost);
                 for (int j = 0; j < N; j++) {
                     ogck_r[j] = zh[j].x;
@@ -1600,7 +1636,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
                 }
                 free(zh);
             }
-            cudaFree(dz);
+            cudaFree(dg);
         }
     }
 

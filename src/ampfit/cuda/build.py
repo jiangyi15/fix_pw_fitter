@@ -121,7 +121,7 @@ def _build_one(src_name, lib_name):
 
     gcc = detect_gcc()
     script_dir = SCRIPT_DIR
-    base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lcublas', '-lm', '-O2']
+    base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
     base.extend(_arch_flags(nvcc))
 
     # Probe flags
