@@ -1277,39 +1277,44 @@ class Fitter:
             plt.close(fig)
             print(f"  saved {path}")
 
-        # ---- Mass (first 6 columns = 48/8, 3×2 grid, range (0.2,5.2), 100 bins) ----
-        n_mass_total = data_np["mass"].shape[1]  # 48
-        n_mass_plot = n_mass_total // 8            # 6
-        fig, axes = plt.subplots(3, 2,
-            figsize=(figsize[0] * 0.5, 6.5), squeeze=False)
-        for i in range(n_mass_plot):
-            _make_hist(axes.flatten()[i], f"mass[{i}]",
-                       data_np["mass"][:, i], phsp_np["mass"][:, i],
-                       bins_range=(0.2, 5.2), n_bins_override=100)
+        # ---- Mass (ALL columns; legacy B→4π kept its 48/8 layout) ----
+        n_mass_total = data_np["mass"].shape[1]
+        grid_cols = 3 if n_mass_total > 4 else 2
+        grid_rows = int(np.ceil(n_mass_total / grid_cols))
+        fig, axes = plt.subplots(grid_rows, grid_cols,
+            figsize=(figsize[0] * 0.5 * (grid_cols / 2.0),
+                     2.2 * grid_rows), squeeze=False)
+        for i in range(n_mass_total):
+            ax = axes.ravel()[i]
+            _make_hist(ax, f"mass[{i}]",
+                       data_np["mass"][:, i], phsp_np["mass"][:, i])
+        for j in range(n_mass_total, grid_rows * grid_cols):
+            axes.ravel()[j].axis("off")
         plt.tight_layout()
         _save_figure(fig, "mass.png")
 
-        # ---- Angles (first 9 = 72/8, 3 positions × 3 components, 3×3 grid) ----
-        d_angle = data_np["angle"].reshape(ne_d, -1, 3)
-        p_angle = phsp_np["angle"].reshape(ne_p, -1, 3)
-        n_pos_plot = d_angle.shape[1] // 8  # 3 positions
+        # ---- Angles (ALL rows × components; legacy keeps its transforms) ----
+        d_angle = data_np["angle"].reshape(ne_d, -1, data_np["angle"].shape[-1])
+        p_angle = phsp_np["angle"].reshape(ne_p, -1, phsp_np["angle"].shape[-1])
+        n_pos = d_angle.shape[1]
+        n_comp = d_angle.shape[2]
 
-        fig, axes = plt.subplots(3, 3,
-            figsize=(figsize[0] * 0.75, 7), squeeze=False)
-        for pos in range(n_pos_plot):
-            d0 = (d_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
-            d1 = np.cos(d_angle[:, pos, 1])
-            d2 = np.cos(d_angle[:, pos, 2])
-            p0 = (p_angle[:, pos, 0] + np.pi) % (2 * np.pi) - np.pi
-            p1 = np.cos(p_angle[:, pos, 1])
-            p2 = np.cos(p_angle[:, pos, 2])
-            for cmp, (d, p, lbl) in enumerate([
-                    (d0, p0, f"angle_phi [{pos},0]"),
-                    (d1, p1, f"cos_theta1[{pos},1]"),
-                    (d2, p2, f"cos_theta2[{pos},2]"),
-            ]):
-                ax = axes[pos, cmp]
-                _make_hist(ax, lbl, d, p)
+        grid_rows = n_pos
+        fig, axes = plt.subplots(grid_rows, n_comp,
+            figsize=(figsize[0] * 0.6 * (n_comp / 3.0),
+                     2.2 * grid_rows), squeeze=False)
+        for pos in range(n_pos):
+            for comp in range(n_comp):
+                d = d_angle[:, pos, comp]
+                p = p_angle[:, pos, comp]
+                if n_comp == 3 and comp == 0:          # legacy: azimuth
+                    d = (d + np.pi) % (2 * np.pi) - np.pi
+                    p = (p + np.pi) % (2 * np.pi) - np.pi
+                elif n_comp == 3 and comp in (1, 2):   # legacy: polar cos
+                    d = np.cos(d)
+                    p = np.cos(p)
+                _make_hist(axes[pos, comp],
+                           f"angle[{pos},{comp}]", d, p)
         plt.tight_layout()
         _save_figure(fig, "angles.png")
 
