@@ -98,9 +98,9 @@ def test_integrated_pwa_backend():
     from ampfit.integrated_pwa import IntegratedPWA
     direct = IntegratedPWA(kc).norm_from_data(phsp, params)
     assert norm == pytest.approx(direct, rel=1e-9)
-    # norm ck gradient == D @ ck
+    # norm ck gradient == conj(D @ ck)  (∂norm/∂ck, data-kernel convention)
     D = be._gram.gram(phsp, m0, g0)
-    assert np.allclose(gnorm["ck"], D @ ck, rtol=1e-9)
+    assert np.allclose(gnorm["ck"], np.conj(D @ ck), rtol=1e-9)
     assert np.all(gnorm["m0"] == 0)          # frozen at Gram pre-integration
 
     # data NLL path with the Gram norm == numpy_pwa with the same norm
