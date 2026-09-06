@@ -28,7 +28,7 @@ import numpy as np
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
 from ampfit.plot_pwa_groups import (
-    config_panels, discover_pwa_groups, pwa_mass_varfun,
+    config_plot_items, discover_pwa_groups, pwa_mass_varfun,
     pwa_angle_varfun, angle_variable_labels, var_ranges)
 
 
@@ -113,21 +113,20 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
-    # ── panel groups: config ``plot:`` section (ReadVar) or generic ─
-    panels = config_panels(f.config, data_np, phsp_np)
-    if panels:
-        print("  variables from config plot section: " +
-              ", ".join(f"{g}({len(p['keys'])})" for g, p in panels.items()))
-    for name, pg in panels.items():
-        is_mass = name == "mass"
+    # ── one figure per config-plot variable (ReadVar items) ─────────
+    items = config_plot_items(f.config, data_np, phsp_np)
+    if items:
+        print("  variables from config plot section (one figure each): " +
+              ", ".join(it["key"] for it in items))
+    for it in items:
+        lo, hi = it["range"]
         plotter.plot_var(
-            pg["varfun"], pg["labels"], 0.2, 5.2, pg["width"], name,
-            output=args.output, fmt=args.format,
-            unit="GeV" if is_mass else "",
+            it["varfun"], [it["label"]], lo, hi, it["width"], it["stem"],
+            output=args.output, fmt=args.format, unit=it["unit"],
             smooth_sigma=args.smooth, legend=True,
-            show_pull=not args.no_pull if is_mass else False,
-            ranges=pg["ranges"])
-    if not panels:
+            ranges=[it["range"]],
+            show_pull=it["kind"] == "mass" and not args.no_pull)
+    if not items:
         # fall back to every kernel column of the loaded arrays
         n_mass = data_np["mass"].shape[1]
         if n_mass:

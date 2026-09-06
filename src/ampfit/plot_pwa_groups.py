@@ -247,3 +247,44 @@ def _readable(v, data_np):
         return True
     except (IndexError, ValueError):
         return False
+
+
+def config_plot_items(cfg, data_np, phsp_np, nbins=60):
+    """Flat per-variable panels from the config ``plot:`` section.
+
+    Every variable (mass, angle, extra expr) becomes its own item with a
+    ready single-variable ``varfun``, fixed/auto range, bin width and a
+    filename stem — call ``PWGroupPlotter.plot_var`` once per item so each
+    variable gets its own figure.  Items whose topology is absent from the
+    loaded arrays are skipped.
+    """
+    from ampfit.read_var import vars_from_config
+
+    out = []
+    for key, v in vars_from_config(cfg):
+        if not _readable(v, data_np):
+            continue
+        rng = getattr(v, "range", None)
+        if rng is None:
+            dv = v.read(data_np)
+            pv = v.read(phsp_np)
+            lo = float(min(np.min(dv), np.min(pv)))
+            hi = float(max(np.max(dv), np.max(pv)))
+            if hi - lo < 1e-12 or not np.all(np.isfinite([lo, hi])):
+                lo, hi = -1.0, 1.0
+            rng = (lo, hi)
+        span = rng[1] - rng[0]
+        stem = _safe_stem(v.name)
+        out.append({
+            "key": key, "var": v, "label": getattr(v, "display", key),
+            "unit": getattr(v, "unit", ""), "range": rng,
+            "width": span / max(nbins, 1), "stem": stem,
+            "kind": getattr(v, "kind", "expr"),
+            "varfun": lambda x, vv=v: [vv.read(x)]})
+    return out
+
+
+def _safe_stem(name):
+    """Filename stem for a variable name."""
+    import re
+    return re.sub(r"[^\w.-]+", "_", name).strip("_") or "var"
