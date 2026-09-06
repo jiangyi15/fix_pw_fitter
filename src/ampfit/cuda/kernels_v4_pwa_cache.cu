@@ -761,23 +761,23 @@ __global__ void pwa_fused_cache_kernel(
     }
 }
 
-// fpwfitter-style: ONE THREAD PER EVENT, no shared memory / no block sync.
-// Grid = ceil(ne/256); each thread serially does A_p, P/Q/dQdP and the
-// projection-reduced ck-gradient partials (P and N are small).
+// fpwfitter-style: ONE THREAD PER EVENT reading the coalesced [k][p][e]
+// cache layout (no shared memory / block sync).  Grid = ceil(ne/256).
 #define PWA_MAX_P 128
 __global__ void pwa_fused_thread_kernel(
-    const double2* __restrict__ common,
+    const double2* __restrict__ commonT,
     const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
     const double* __restrict__ weight, const double* __restrict__ bkg,
-    int n_wave, int n_proj, int n_events, int use_norm, double norm,
+    int n_wave, int n_proj, int base_event, int nb, int ne_total,
+    int use_norm, double norm,
     double* __restrict__ Q_out, double* __restrict__ P_out,
     double* __restrict__ gk_r, double* __restrict__ gk_i
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_events) return;
+    if (i >= nb) return;
+    int eG = base_event + i;
     const int P = n_proj;
     const int N = n_wave / P;
-    const double2* cm = common + (size_t)i * n_wave;
 
     double aR[PWA_MAX_P], aI[PWA_MAX_P];
     if (P > PWA_MAX_P) return;
@@ -785,7 +785,7 @@ __global__ void pwa_fused_thread_kernel(
     for (int p = 0; p < P; p++) {
         double ar = 0.0, ai = 0.0;
         for (int k = 0; k < N; k++) {
-            double2 cv = cm[p * N + k];
+            double2 cv = commonT[(size_t)(k * P + p) * ne_total + eG];
             ar += ck_real[k] * cv.x - ck_imag[k] * cv.y;
             ai += ck_real[k] * cv.y + ck_imag[k] * cv.x;
         }
@@ -807,7 +807,7 @@ __global__ void pwa_fused_thread_kernel(
     for (int k = 0; k < N; k++) {
         double gr = 0.0, gi = 0.0;
         for (int p = 0; p < P; p++) {
-            double2 cv = cm[p * N + k];
+            double2 cv = commonT[(size_t)(k * P + p) * ne_total + eG];
             double dqr = dqp * aR[p];
             double dqi = -dqp * aI[p];
             gr += dqr * cv.x - dqi * cv.y;
@@ -818,6 +818,23 @@ __global__ void pwa_fused_thread_kernel(
     }
 }
 #undef PWA_MAX_P
+
+
+
+// event-major common_cache -> coalesced [k][p][e] layout:
+//   dst[(k*P + p)*ne + e] = src[e*n_wave + p*N + k]
+__global__ void transpose_common_kernel(
+    const double2* __restrict__ src, double2* __restrict__ dst,
+    int ne, int P, int N, int n_wave, int total
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int e = idx / n_wave;
+    int w = idx - e * n_wave;
+    int p = w / N;
+    int k = w - p * N;
+    dst[(k * P + p) * ne + e] = src[idx];
+}
 
 // D[k,j] = Σ_e w_e Σ_p conj(a_{p,k})·a_{p,j} straight from the cached
 // full-amplitude double2 buffer (fixed m0/g0; no BW recompute).
@@ -1091,6 +1108,7 @@ typedef struct {
     const double* w; const double* b;
     int ne;
     double2* common_cache;   // [ne · n_wave]  per-entry a_{p,k} at fixed m0/g0
+    double2* common_T;       // transposed [k][p][e] copy (coalesced reads)
     int cache_valid;
 } DataHandle2;
 
@@ -1218,6 +1236,7 @@ void* cuda_load_data_v4(void* vctx,
     if (!h) return NULL;
     h->ne = ne;
     h->common_cache = NULL;
+    h->common_T = NULL;
     h->cache_valid = 0;
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
@@ -1267,6 +1286,11 @@ int cuda_fill_common_v4_cache(ComputeContext* c, DataHandle2* h,
 
     if (h->common_cache == NULL) {
         if (cudaMalloc(&h->common_cache,
+                       (size_t)ne * nw * sizeof(double2)) != cudaSuccess)
+            return 0;
+    }
+    if (h->common_T == NULL) {
+        if (cudaMalloc(&h->common_T,
                        (size_t)ne * nw * sizeof(double2)) != cudaSuccess)
             return 0;
     }
@@ -1334,6 +1358,16 @@ int cuda_fill_common_v4_cache(ComputeContext* c, DataHandle2* h,
         if (cudaGetLastError() != cudaSuccess) goto fail;
 
         launch_common_fill(c, &d, &p, h->common_cache, base);
+    }
+
+    // coalesced [k][p][e] copy for the fused forward kernel
+    {
+        int total = ne * nw;
+        int gb = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        transpose_common_kernel<<<gb, BLOCK_SIZE>>>(
+            h->common_cache, h->common_T, ne, c->n_proj,
+            nw / c->n_proj, nw, total);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     cudaFree(gpu_mass); cudaFree(gpu_mom);
@@ -1476,10 +1510,10 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             {
                 int thr = (nb + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 pwa_fused_thread_kernel<<<thr, BLOCK_SIZE>>>(
-                    h->common_cache + (size_t)st * nw,
+                    h->common_T,
                     p.ck_real, p.ck_imag,
                     d.weight, d.bkg,
-                    nw, c->n_proj, nb, use_norm, nv,
+                    nw, c->n_proj, st, nb, h->ne, use_norm, nv,
                     d.Q_out, d.P_out,
                     d.grad_ck_real_partial, d.grad_ck_imag_partial);
             }
