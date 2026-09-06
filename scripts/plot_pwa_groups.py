@@ -74,13 +74,27 @@ def main():
     if os.path.exists(cp):
         f.load_constraints(cp)
 
-    data_np, nd = Fitter.load_npz(args.data, max_events=args.max_events,
-                                  n_angle_comp=n_comp)
-    phsp_np, np_ = Fitter.load_npz(args.phsp, max_events=args.max_events,
-                                   n_angle_comp=n_comp)
-    print(f"  Loaded {nd:,} data + {np_:,} phsp events")
-    f.set_phsp(phsp_np)
-    f.set_data(data_np)
+    # ── data / phsp sources ────────────────────────────────────────
+    # Provide --data/--phsp npz files explicitly, or omit both and the
+    # config's ``data`` / ``phsp`` section (npz arrays or 4-momentum
+    # prefix + _weight[/_bg_value] files) is used via load_all_data().
+    if bool(args.data) != bool(args.phsp):
+        sys.exit("give both --data and --phsp, or neither (falls back to "
+                 "the config data section)")
+    if args.data:
+        data_np, nd = Fitter.load_npz(args.data,
+                                      max_events=args.max_events,
+                                      n_angle_comp=n_comp)
+        phsp_np, np_ = Fitter.load_npz(args.phsp,
+                                       max_events=args.max_events,
+                                       n_angle_comp=n_comp)
+        print(f"  Loaded {nd:,} data + {np_:,} phsp events")
+        f.set_phsp(phsp_np)
+        f.set_data(data_np)
+    else:
+        data_np, phsp_np = f.load_all_data()
+        print(f"  Loaded {len(data_np['weight']):,} data + "
+              f"{len(phsp_np['weight']):,} phsp events from config")
 
     r = f.load_results(args.fit_json)
     if r.x is None or len(r.x) == 0:
