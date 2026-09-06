@@ -320,21 +320,24 @@ def pwa_event_data(cfg, kc, momenta):
         if chain is None:
             continue
         names = [o.name for o in decay_chain_leaves(chain)]
-        order = [names.index(f) for f in finals]
-        mom = np.asarray(momenta[:, order], dtype=float)
-
-        # invariant mass of the sub-system (decays[1] children)
+        # perm = for each chain-leaf slot, its column in the finals-ordered
+        # input (NOT the reverse mapping — that is wrong whenever the leaf
+        # order differs from cfg.finals)
+        perm = [finals.index(nm) for nm in names]
+        mom = np.asarray(momenta[:, perm], dtype=float)
+        # NOTE: mom columns now follow the CHAIN LEAF order (names), so all
+        # indexing below must use names, not cfg.finals.
         sub_out = [o.name for o in chain.decays[1].outs]
         m_a = float(cfg.dic["particle"][sub_out[0]]["mass"])
         m_b = float(cfg.dic["particle"][sub_out[1]]["mass"])
         tot = mom.sum(axis=1)
         mtop = np.sqrt(np.clip(tot ** 2 @ np.array([1, -1, -1, -1.]),
                                0.0, None))
-        pa = mom[:, finals.index(sub_out[0])]
-        pb = mom[:, finals.index(sub_out[1])]
+        pa = mom[:, names.index(sub_out[0])]
+        pb = mom[:, names.index(sub_out[1])]
         m_sub = np.sqrt(np.clip(
             (pa + pb) ** 2 @ np.array([1, -1, -1, -1.]), 0.0, None))
-        bachelor = [f for f in finals if f not in sub_out][0]
+        bachelor = [nm for nm in names if nm not in sub_out][0]
         m_c = float(cfg.dic["particle"][bachelor]["mass"])
 
         # mass / q slots of this topology (decay idx = 1 for the sub decay)
