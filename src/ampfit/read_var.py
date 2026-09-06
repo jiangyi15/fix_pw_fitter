@@ -220,15 +220,18 @@ class ExprVar(BaseVar):
     kind = "expr"
 
     def __init__(self, expr, vars_, display=None, unit="",
-                 range=None, bin_width=None, trans=None):
+                 range=None, bin_width=None, trans=None, name=None):
         self.expr = expr
         self.vars = dict(vars_)
+        self._name = name
         self._code = compile(expr, "<plot expr>", "eval")
         super().__init__(display=display, unit=unit, range=range,
                          bin_width=bin_width, trans=trans)
 
     @property
     def name(self):
+        if self._name:
+            return self._name
         return "expr(" + self.expr + ")"
 
     def read(self, data):
@@ -311,6 +314,7 @@ def vars_from_config(cfg, section="plot"):
         expr = _meta(entry).get("expr")
         if expr is None:
             continue
-        v = ExprVar(expr, mass_vars, display=_meta(entry).get("display", name))
+        v = ExprVar(expr, mass_vars, display=_meta(entry).get("display", name),
+                    name=name)
         out.append((name, v))
     return out
