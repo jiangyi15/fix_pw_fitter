@@ -252,7 +252,17 @@ def build_pwa_kernel_config(cfg):
         "variables": variables,          # [(vertex, 'phi'|'theta'), …]
         "wave_names": [pw[1].__str__() + str(pw[0]) for pw in waves_iter],
         "top_states": top_states,
+        # Fitter-facing names (single flavour block, one ck per wave)
+        "m0_names": list(m0_phys),
+        "g0_names": list(g0_phys),
     }
+    # one ck per partial wave, ordered as in full_decay.get_partial_waves
+    pw_params = list(cfg.full_decay.get_partial_waves_params())
+    if len(pw_params) != N:
+        raise ValueError(
+            f"pwa_build: partial-wave params ({len(pw_params)}) != waves "
+            f"({N})")
+    ret["ck_map"] = pw_params
     return ret
 
 

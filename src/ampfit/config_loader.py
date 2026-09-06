@@ -595,14 +595,32 @@ class Config:
 
         return ret
 
+    def _build_pwa_index(self):
+        """Pure-PWA kernel arrays (C == 1, helicity mode) via pwa_build.
+
+        Also syncs the Fitter-facing Config attributes (m0/g0 parameter-name
+        lists) that are normally populated by ``build_single_index``.
+        """
+        from ampfit.pwa_build import build_pwa_kernel_config
+        kc = build_pwa_kernel_config(self)
+        self.m0_phys_name = list(kc.get("m0_names", self.m0_phys_name))
+        self.g0_phys_name = list(kc.get("g0_names", self.g0_phys_name))
+        return kc
+
     def build_all_index(self):
-        # loop and shift based on block
-        base = self.build_single_index()
-        ck = self.full_decay.get_partial_waves_params()
         # identical-particle × CP row blocks, from the config declarations
         # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
         # declarations → 1).
         n_perm, n_cp, C = row_block_factors(self.dic)
+        if C == 1 and getattr(self, "angle_formula_mode", "helicity") \
+                == "helicity":
+            # pure-PWA single-block model (no identical/CP partners): the
+            # kernel arrays come from the helicity engine in the canonical
+            # phi-first layout — any top J, any n_proj, any angle count.
+            return self._build_pwa_index()
+        # loop and shift based on block
+        base = self.build_single_index()
+        ck = self.full_decay.get_partial_waves_params()
 
         def _repeat(arr, count=C):
             return np.concatenate([arr]*count, axis=0)
