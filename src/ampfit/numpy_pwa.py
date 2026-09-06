@@ -1,60 +1,62 @@
 """
-numpy_pwa — pure-PWA reference kernel derived from the original NumPy kernel.
+numpy_pwa — pure-PWA NumPy kernel: P(e) = Σ_p |A_p(e)|², shared ck.
 
-The PWA model is the original ``ampfit.numpy_kernel.NumpyKernel._compute``
-**with the time / D0-D0bar-mixing / scalar parts removed** and the two
-flavour blocks promoted to an incoherent *sum over projections*:
+Derived from the original ``ampfit.numpy_kernel.NumpyKernel`` amplitude
+chain (running width g0·γ(m), per-resonance BW denominators, per-decay
+Blatt-Weisskopf form factors, matrix_angle angular basis) with the time /
+D0-D0bar-mixing / scalar parts removed, and replaced by a generic sum over
+``n_proj`` incoherent projections.
 
-    P(e) = Σ_p |A_p(e)|² ,   A_p(e) = Σ_k  ck_k · a_{p,k}(e)
+Layout (identical to ``cuda_v4_pwa``):
 
-exactly the same amplitude chain as the original kernel (BW/gamma running
-width, per-decay Blatt-Weisskopf form factors, matrix_angle angular basis)
-and the same gradient back-propagation for ``ck`` / ``m0`` / ``g0`` — the
-only structural change is the projection sum.
+    n_wave = n_proj · N        entries are p-major, w = p·N + k
+    A_p(e) = Σ_k  ck_k · a_{p,k}(e)      all projections SHARE ck (len N)
+    P(e)   = Σ_p |A_p(e)|²
 
-Wave-block / projection layout follows the original kernel convention:
-the first half of the wave space (blocks 0-3, ``g_ls``) is projection 0 and
-the second half (blocks 4-7, ``g_lsbar``) is projection 1:
+``n_proj`` is taken directly from the kernel config; ``cp_block=False`` by
+default.  When ``cp_block=True`` the charge-conjugate (flavour-partner)
+block is counted as an additional set of projections, doubling the
+projection count:
 
-    a = ck * common_amp_factor
-    a.reshape(n_events, P, n_wave // P)   with P = 2
-    A_p  = Σ_k a[e, p, k]
-    P(e) = |A_0|² + |A_1|²                (no time, no scalars)
+    n_proj_eff = n_proj · (2 if cp_block else 1)
 
-Gradients use the original Wirtinger convention:
-``∂Q/∂Re(ck) = 2·Re(grad_ck)``, ``∂Q/∂Im(ck) = −2·Im(grad_ck)`` and for real
-``m0``/``g0`` ``dQ/dx = 2·Re(∂Q/∂z·∂z/∂x)``.
+(the angular rows for the CP partner must already be present in the
+p-major-duplicated per-wave arrays — as with the flavour halves of the
+legacy 8-block layout, blocks 0-3 vs 4-7).
+
+Gradients keep the original kernel's Wirtinger convention:
+``∂Q/∂Re(ck) = 2·Re(grad_ck)``, ``∂Q/∂Im(ck) = −2·Im(grad_ck)`` and for
+real m0/g0 ``dQ/dx = 2·Re(∂Q/∂z · ∂z/∂x)``.
 """
 
 import numpy as np
 
 
 class NumpyPWA:
-    """PWA (projection-sum) variant of the original NumPy kernel.
+    """PWA (projection-sum, shared-ck) variant of the original NumPy kernel.
 
-    Drop-in for ``NumpyKernel`` on the forward/backward path, but:
+    API mirrors ``NumpyKernel``/``cuda_v4_pwa.CUDAKernelV4PWA``:
 
-    * no ``scalar`` parameters (Gamma/ΔΓ/Δm/A_p/poq),
-    * no event ``time`` / ``frac`` / mixing evolution,
-    * ``P(e) = Σ_p |A_p(e)|²`` over the two flavour projections.
-
-    ``compute(params, data, norm=None, return_p=True) -> (Q, grads, P)``
-    with ``params = {"ck", "m0", "g0"}`` and ``grads = {"ck", "m0", "g0"}``.
+    * ``load_data(data) -> handle``  (CPU: no cache, data stored as handle)
+    * ``compute(params, handle, norm=None, return_p=True)
+        -> (Q, grads, P)``
+      with ``params = {"ck", "m0", "g0"}`` (ck length N = n_wave/n_proj_eff)
+      and ``grads = {"ck", "m0", "g0"}``.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, cp_block=False):
         from ampfit.numpy_kernel import NumpyKernel
         self.config = config
+        self.cp_block = bool(cp_block)
         self.n_wave = config["matrix_angle"].shape[1]
-        # Number of incoherent projections (flavour blocks, 0-3 vs 4-7).
-        self.n_proj = int(config.get("n_proj", 1) or 1)
-        if self.n_wave % 2 != 0:
-            raise ValueError("numpy_pwa: n_wave must be even (two flavour "
-                             "projection halves)")
-        if self.n_proj == 1:
-            # Original layout is already block-paired; force the 2-flavour
-            # projection split used by the amplitude model.
-            self.n_proj = 2
+        self.n_proj_base = int(config.get("n_proj", 1) or 1)
+        self.n_proj = self.n_proj_base * (2 if self.cp_block else 1)
+        if self.n_wave % self.n_proj != 0:
+            raise ValueError(
+                f"numpy_pwa: n_wave={self.n_wave} not divisible by "
+                f"n_proj_eff={self.n_proj} (n_proj={self.n_proj_base}, "
+                f"cp_block={self.cp_block})")
+        self.n_wave_base = self.n_wave // self.n_proj    # N (shared ck length)
         self._kernel = NumpyKernel(config)
         self._nk = self._kernel
 
@@ -69,17 +71,18 @@ class NumpyPWA:
     def __del__(self):
         self.free()
 
-    # -- forward ----------------------------------------------------------
+    # -- forward + gradients ----------------------------------------------
     def compute(self, params, data_handle, norm=None, return_p=True):
         k = self._nk
         n_wave = self.n_wave
         P = self.n_proj
-        M = n_wave // P
+        N = self.n_wave_base
 
         ck = np.asarray(params["ck"], dtype=complex)
-        if len(ck) != n_wave:
+        if len(ck) != N:
             raise ValueError(
-                f"numpy_pwa: ck length {len(ck)} != n_wave {n_wave}")
+                f"numpy_pwa: ck length {len(ck)} != n_wave/n_proj_eff = "
+                f"{N} ({n_wave}/{P})")
         m0 = np.asarray(params["m0"])
         g0 = np.asarray(params["g0"])
 
@@ -112,11 +115,10 @@ class NumpyPWA:
         fa = ka @ k.matrix_angle
 
         one_over_bw = 1.0 / bw_p
-        common = one_over_bw * (fa * fl_p)                # (ne, n_wave)
+        common = one_over_bw * (fa * fl_p)               # (ne, n_wave) p-major
 
-        a = ck * common
-        ar = a.reshape(ne, P, M)
-        A = ar.sum(axis=-1)                               # (ne, P) = A_p
+        cm = common.reshape(ne, P, N)
+        A = cm @ ck                                      # (ne, P) = A_p
         P_e = np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
 
         weight = data.get("weight", np.ones(ne))
@@ -129,17 +131,18 @@ class NumpyPWA:
             dQ_dP = -weight / (P_e + bkg * norm)
 
         # ── back-prop through the projection sum ──────────────────────────
-        # ∂Q/∂A_p = dQ/dP · conj(A_p)   (Wirtinger, cf. the original kernel)
-        dQ_dA = dQ_dP[:, None] * np.conj(A)               # (ne, P)
-        dQ_da = np.repeat(dQ_dA, M, axis=-1)              # (ne, n_wave)
+        # ∂Q/∂A_p = dQ/dP · conj(A_p);  entry w=(p,k) takes the A_p gradient
+        dQ_dA = dQ_dP[:, None] * np.conj(A)              # (ne, P)
+        dQ_da = np.repeat(dQ_dA, N, axis=-1)            # (ne, n_wave)
 
-        grad_ck = np.sum(dQ_da * common, axis=0)
+        grad_ck = np.einsum("ep,epk->k", dQ_dA, cm)
 
-        # BW chain gradients — verbatim formulas of the original kernel.
-        dQ_dbw_p = dQ_da * (-ck * one_over_bw * common)
-        # d(bw_p)/d(bw_dom_r) = bw_p / bw_dom_r  (product rule, any n_res)
+        # BW chain gradients — verbatim formulas of the original kernel,
+        # with the shared ck tiled to per-entry values.
+        ck_w = np.tile(ck, P)                            # ck[entry % N]
+        dQ_dbw_p = dQ_da * (-ck_w * one_over_bw * common)
         dQ_dbw_dom_all = dQ_dbw_p[:, :, None] * (
-            bw_p[:, :, None] / bw_dom_r)          # (ne, n_wave, n_res)
+            bw_p[:, :, None] / bw_dom_r)                 # (ne, n_wave, n_res)
         dQ_dbw_dom = (dQ_dbw_dom_all.reshape(ne, -1)
                       @ k._bw_scatter)
 
