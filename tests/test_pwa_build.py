@@ -209,7 +209,23 @@ def test_load_all_data_prefix_momenta(tmp_path):
     assert pn["mass"].shape == (300, 1)
     assert dn["angle"].shape == (100, 1, 4)     # canonical, any n_comps
     assert dn["q"].shape == (100, 2)
-    # single-block ck reused via kc['ck_map']; NLL finite from defaults
-    nll, grad = f.get_nll(f.initial_values())
+    # single-block ck uses the legacy ck-index construction; normalization
+    # and coupling (r, theta) starts come from the constraint layer, exactly
+    # as in the legacy flow (apply_constrains + starting values)
+    f.apply_constrains()
+    start = {}
+    for comb in f.all_comb:
+        for p in comb:
+            if not isinstance(p, str):
+                continue
+            if "_total_0" in p:
+                start[p] = 1.0
+            else:
+                start.setdefault(p + "r", 1.0)
+                start.setdefault(p + "i", 0.0)
+    x0 = f.values_from_dict(start)
+    params, _ = f.build_params(x0)
+    assert not np.allclose(params["ck"], 0)
+    nll, grad = f.get_nll(x0)
     assert np.isfinite(nll)
     assert np.all(np.isfinite(np.asarray(grad)))
