@@ -526,27 +526,34 @@ class Fitter:
             data: dict with keys 'mass', 'q', 'angle', 'frac', 'time',
                   'weight', 'bkg' (optional).
         """
-        # Read purity from config
+        # Read purity from config (default 1 → pure signal, no background)
         purity = self.config.dic.get('purity')
         if purity is None:
             purity = self.config.dic.get('data', {}).get('purity',
-                     self.config.dic.get('data', {}).get('bg_frac', None))
-        self._purity = float(purity) if purity is not None else None
+                     self.config.dic.get('data', {}).get('bg_frac', 1.0))
+        self._purity = 1.0 if purity is None else float(purity)
 
         # Copy data and scale bkg if we have purity + phsp background
         data = dict(data)
-        if self._purity is not None and self._N_b is not None and self._N_b > 0:
+        n_data = data["mass"].shape[0]
+        weight = data.get("weight", np.ones(n_data))
+        if self._purity >= 1.0:
+            # pure signal: no background contribution, no purity constant
+            self._bkg_scale = 0.0
+            data["bkg"] = np.zeros(n_data)
+            self._log_purity_const = 0.0
+        elif self._purity > 0 and self._N_b is not None and self._N_b > 0:
             bkg_raw = data.get("bkg", 1.0)
             if np.isscalar(bkg_raw):
-                bkg_raw = np.full(data["mass"].shape[0], bkg_raw, dtype=np.float64)
+                bkg_raw = np.full(n_data, bkg_raw, dtype=np.float64)
             p = self._purity
             self._bkg_scale = (1.0 - p) / p / self._N_b
             data["bkg"] = bkg_raw * self._bkg_scale
-            self._log_purity_const = -np.log(p) * np.sum(data.get("weight", np.ones(data["mass"].shape[0])))
+            self._log_purity_const = -np.log(p) * np.sum(weight)
         else:
             self._bkg_scale = None
             self._log_purity_const = 0.0
-            if self._purity is not None and self._N_b is None:
+            if self._purity > 0 and self._N_b is None:
                 import warnings
                 warnings.warn(
                     "set_data() called before set_phsp(): purity correction skipped. "
