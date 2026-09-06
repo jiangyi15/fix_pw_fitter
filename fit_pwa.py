@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""End-to-end pure-PWA fit: same YAML config + backend family.
+"""End-to-end pure-PWA fit through the standard Fitter pipeline.
 
-Demonstrates the full pipeline for a single-block projection-sum PWA
-(e.g. config_pwa.yml, J/ψ → π⁺π⁻η):
+Same YAML config + backend family as any legacy model.  All gradients are
+ANALYTIC — kernel backward (numpy_pwa / cuda_v4_pwa) → norm chain
+(integrated_pwa Gram) → CKProduct (r, θ) → ConstraintManager transform.
+No numerical Jacobian anywhere.
 
-    Config -> build_all_index()           (generic, any J/proj/angles)
-    momenta -> pwa_event_data()           (canonical kernel buffers)
-    norm      -> integrated_pwa backend   (Gram matrix)
-    data NLL  -> base backend             (cuda_v4_pwa or numpy_pwa)
-    BFGS      -> recovers the ck used to generate the toy data
+Data: flat phase space generated on the fly with the config masses
+(generate_pwa_phsp); toy events drawn without replacement from an
+independent proposal sample weighted by the model density at a seed ck.
 
 Usage:
-    python fit_pwa.py [--config config_pwa.yml] [--cuda]
+    python fit_pwa.py [--cuda] [--nph 8000] [--ndata 8000]
 """
 import argparse
 import os
@@ -23,45 +23,40 @@ import numpy as np
 from ampfit.config_loader import Config
 from ampfit.pwa_build import pwa_event_data, generate_pwa_phsp
 from ampfit.numpy_pwa import NumpyPWA
+from ampfit import Fitter
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config_pwa.yml")
     ap.add_argument("--cuda", action="store_true",
-                    help="use cuda_v4_pwa as the data base backend")
-    ap.add_argument("--nph", type=int, default=4000)
-    ap.add_argument("--nprop", type=int, default=10000)
-    ap.add_argument("--ndata", type=int, default=300)
+                    help="use cuda_v4_pwa (default numpy_pwa)")
+    ap.add_argument("--nph", type=int, default=8000)
+    ap.add_argument("--nprop", type=int, default=40000)
+    ap.add_argument("--ndata", type=int, default=8000)
     ap.add_argument("--maxiter", type=int, default=60)
-    ap.add_argument("--method", default="L-BFGS-B")
     args = ap.parse_args()
 
     cfg = Config(args.config)
     kc = cfg.build_all_index()
-    N = kc["matrix_angle"].shape[1] // kc["n_proj"]   # shared ck length
-    print(f"model {cfg.top} n_wave {kc['matrix_angle'].shape[1]} "
-          f"n_proj {kc['n_proj']}  N {N}")
+    N = kc["matrix_angle"].shape[1] // kc["n_proj"]
+    print(f"model {cfg.top}  n_wave {kc['matrix_angle'].shape[1]}  "
+          f"n_proj {kc['n_proj']}  N(ck) {N}")
 
-    # ── phsp / data buffers (canonical layout) ────────────────────────────
-    # Correct phase space: generated on the fly with the config masses via
-    # the product of two-body decays + an inverse boost chain (flat in the
-    # final invariants).  Two independent samples — block 1 integrates the
-    # norm, block 2 is the proposal set for the toy data.
+    # ── independent flat samples: norm phsp + toy proposal ────────────────
     chain = cfg.full_decay.get_partial_waves()[0][1]
     phsp = pwa_event_data(cfg, kc,
                           generate_pwa_phsp(cfg, chain, args.nph, seed=11))
+    prop = pwa_event_data(cfg, kc,
+                          generate_pwa_phsp(cfg, chain, args.nprop, seed=22))
 
-    # toy data: events importance-sampled (without replacement) from the
-    # model density on the independent proposal sample
     rng = np.random.RandomState(42)
     n_m0 = int(np.max(kc["m0_index"])) + 1
     n_g0 = int(np.max(kc["g0_index"])) + 1
     ck0 = rng.normal(size=N) + 1j * rng.normal(size=N)
     m0 = np.full(n_m0, 0.769)
     g0 = np.full(n_g0, 0.10)
-    prop = pwa_event_data(cfg, kc,
-                          generate_pwa_phsp(cfg, chain, args.nprop, seed=22))
+
     npw = NumpyPWA(kc)
     _, _, P0 = npw.compute({"ck": ck0, "m0": m0, "g0": g0},
                            npw.load_data(prop))
@@ -69,53 +64,39 @@ def main():
         raise SystemExit("model compute returned no P")
     prob = np.clip(np.asarray(P0, dtype=float), 0, None)
     if prob.sum() <= 0:
-        raise SystemExit("model probability zero on proposal sample")
+        raise SystemExit("zero model probability on the proposal sample")
     prob /= prob.sum()
     idx = rng.choice(args.nprop, size=args.ndata, replace=False, p=prob)
     data = {kk: vv[idx] for kk, vv in prop.items()}
 
-    # ── backend: integrated_pwa (Gram norm) + base ────────────────────────
-    from ampfit.backends import create_backend
-    base = "cuda_v4_pwa" if args.cuda else "numpy_pwa"
-    be = create_backend({"name": "integrated_pwa", "base": base}, kc)
-    ph = be.load_data(phsp)
-    dh = be.load_data(data)
-    phsp_wsum = float(phsp["weight"].sum())
-    phsp_n = dict(phsp)
-    phsp_n["weight"] = phsp["weight"] / phsp_wsum   # weights sum to 1
-    del ph
-    ph = be.load_data(phsp_n)
+    # ── standard Fitter: analytic gradients end to end ────────────────────
+    backend = "cuda_v4_pwa" if args.cuda else "numpy_pwa"
+    fitter = Fitter(args.config, backend=backend)
+    fitter.set_phsp(phsp)
+    fitter.set_data(data)
+    fitter.apply_constrains()
 
-    # ── loss over the ck RATIOS (NLL invariant under a global complex ck
-    # scale, so ck[0] is anchored to 1: 4 free real params for N=3) ─
-    M = N - 1
+    # normalization terms fixed to 1; couplings start at (r=1, θ=0)
+    start = {}
+    for comb in fitter.all_comb:
+        for p in comb:
+            if not isinstance(p, str):
+                continue
+            if "_total_0" in p:
+                start[p] = 1.0
+            else:
+                start.setdefault(p + "r", 1.0)
+                start.setdefault(p + "i", 0.0)
+    x0 = fitter.values_from_dict(start)
 
-    def params_from(x):
-        ck = np.concatenate([[1 + 0j], x[:M] + 1j * x[M:]])
-        return {"ck": ck, "m0": m0, "g0": g0}
-
-    def loss(x):
-        params = params_from(x)
-        norm, _, _ = be.compute(params, ph, norm=None, return_p=False)
-        Q, _, P = be.compute(params, dh, norm=norm)
-        return float(Q)
-
-    from scipy.optimize import minimize
-    rng0 = np.random.RandomState(0)
-    x0 = rng0.normal(scale=0.3, size=2 * M)
-
-    f0 = loss(x0)
-    print(f"start NLL {f0:.3f}   (true ck used for toy data)")
-    kw = {} if args.method == "Powell" else {"jac": "2-point"}
-    res = minimize(loss, x0, method=args.method, options={"maxiter": args.maxiter}, **kw)
-    ck_fit = params_from(res.x)["ck"]
-    print(f"fit  NLL {res.fun:.3f}  success={res.success}  "
-          f"nit={res.nit}  msg={res.message}")
-    z_true = ck0 / ck0[0]
-    print("ck_true (rel to ck0[0])", np.round(z_true, 3))
-    print("ck_fit  (ck[0]=1)      ", np.round(ck_fit, 3))
-    print("ck corr", float(np.abs(np.vdot(z_true, ck_fit))
-                           / (np.linalg.norm(z_true) * np.linalg.norm(ck_fit))))
+    nll0, _ = fitter.get_nll(x0)
+    print(f"start NLL {nll0:.3f}")
+    res = fitter.fit(x0, maxiter=args.maxiter)
+    nll1 = res.fun if hasattr(res, "fun") and res.fun is not None else \
+        fitter.get_nll(res.x)[0]
+    print(f"fit  NLL {nll1:.3f}  success={res.success}  nit={res.nit}")
+    print(f"analytic-gradient fit via Fitter (kernel → norm → CKProduct → "
+          f"constraints); no numerical Jacobian used.")
 
 
 if __name__ == "__main__":
