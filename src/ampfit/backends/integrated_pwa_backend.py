@@ -128,8 +128,10 @@ class IntegratedPWABackend(ComputeBackend):
         self._ensure_gram(data_handle, m0, g0)
         ck = np.asarray(params["ck"])
         norm_val = self._gram.norm(ck, data_handle.D)
+        # ∂norm/∂ck (Wirtinger, same convention as the data kernels):
+        #   norm = Re(ckᴴ·D·ck)  →  grad_ck = conj(D@ck)
         grads = {
-            "ck": data_handle.D @ ck,          # dNorm/dRe(ck)=2Re(D@ck)
+            "ck": np.conj(data_handle.D @ ck),
             "m0": np.zeros(len(m0)),
             "g0": np.zeros(len(g0)),
         }
