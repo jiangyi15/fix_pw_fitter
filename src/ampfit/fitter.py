@@ -533,32 +533,23 @@ class Fitter:
                      self.config.dic.get('data', {}).get('bg_frac', 1.0))
         self._purity = 1.0 if purity is None else float(purity)
 
-        # Copy data and scale bkg if we have purity + phsp background
+        # Copy data and scale bkg — ONE formula for every purity:
+        #   bkg_scaled = raw * (1-p)/p/N_b ,  log_purity_const = -log(p)·Σw
+        # (p = 1 gives scale 0 / constant 0 automatically, no special case).
         data = dict(data)
         n_data = data["mass"].shape[0]
         weight = data.get("weight", np.ones(n_data))
-        if self._purity >= 1.0:
-            # pure signal: no background contribution, no purity constant
-            self._bkg_scale = 0.0
-            data["bkg"] = np.zeros(n_data)
-            self._log_purity_const = 0.0
-        elif self._purity > 0 and self._N_b is not None and self._N_b > 0:
-            bkg_raw = data.get("bkg", 1.0)
-            if np.isscalar(bkg_raw):
-                bkg_raw = np.full(n_data, bkg_raw, dtype=np.float64)
-            p = self._purity
-            self._bkg_scale = (1.0 - p) / p / self._N_b
-            data["bkg"] = bkg_raw * self._bkg_scale
-            self._log_purity_const = -np.log(p) * np.sum(weight)
-        else:
-            self._bkg_scale = None
-            self._log_purity_const = 0.0
-            if self._purity > 0 and self._N_b is None:
-                import warnings
-                warnings.warn(
-                    "set_data() called before set_phsp(): purity correction skipped. "
-                    "Call set_phsp() first for correct background scaling."
-                )
+        p = self._purity
+        if self._N_b is None or not (self._N_b > 0):
+            raise RuntimeError(
+                "set_data() requires set_phsp() first (N_b is needed by the "
+                "background scaling (1-p)/p/N_b for every purity).")
+        bkg_raw = data.get("bkg", 1.0)
+        if np.isscalar(bkg_raw):
+            bkg_raw = np.full(n_data, bkg_raw, dtype=np.float64)
+        self._bkg_scale = (1.0 - p) / p / self._N_b
+        data["bkg"] = bkg_raw * self._bkg_scale
+        self._log_purity_const = -np.log(p) * np.sum(weight)
 
         self._data_np = data
         self._data_holder = self.backend.load_data(data)
