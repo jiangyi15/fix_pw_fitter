@@ -32,6 +32,10 @@ def main():
                         help="phsp .npz (default: config-driven)")
     parser.add_argument("--check-grad", action="store_true", help="Verify gradient")
     parser.add_argument("--fit", action="store_true", help="Run BFGS minimization")
+    parser.add_argument("-l", "--loop", type=int, default=1,
+                        help="Run N independent BFGS fits, each from a fresh "
+                             "random start (initial_values(seed=None)); "
+                             "requires --fit")
     parser.add_argument("--maxiter", type=int, default=200, help="Max fit iterations")
     parser.add_argument("--save", type=str, default=None, help="Save fit results to JSON")
     parser.add_argument("--plot", type=str, nargs='?', const='plots/',
@@ -39,6 +43,9 @@ def main():
     parser.add_argument("--init", type=str, default=None,
                         help="Initial parameters JSON file (from save_params output)")
     args = parser.parse_args()
+
+    if args.loop > 1 and not args.fit:
+        parser.error("--loop requires --fit (loop over random-start fits)")
 
     # ==================================================================
     # 1. Create fitter with constraints
@@ -157,59 +164,91 @@ def main():
             print(f"  x[{k:2d}]: ana={grad_x[k]:+.4e} num={num:+.4e} rel_err={err:.2e} {status}")
 
     # ==================================================================
-    # 5. Fit (optional)
+    # 5. Fit (optional) — optionally a loop over fresh random starts
     # ==================================================================
     result = None
     fit_time = 0.0
     if args.fit:
+        if args.loop > 1 and args.init:
+            print("note: --loop ignores --init (each loop run starts from "
+                  "a fresh random initial_values(seed=None))")
+        n_runs = max(1, args.loop)
         print("\n" + "=" * 70)
-        print("FITTING")
+        print(f"FITTING  ({n_runs} run{'s' if n_runs > 1 else ''}, fresh "
+              "random start each)")
         print("=" * 70)
 
-        t0 = time.time()
-        try:
-            result = fitter.fit(x0, maxiter=args.maxiter, disp=True)
-        except KeyboardInterrupt:
-            pass
-        fit_time = time.time() - t0
+        def _default_save():
+            prefix = os.path.splitext(os.path.basename(args.config))[0]
+            return f"{prefix}_fit_results.json"
 
-        if result is None or not hasattr(result, 'fun'):
-            if fitter._last_xk is not None:
-                ckpt_path = args.save if args.save else f"{os.path.splitext(os.path.basename(args.config))[0]}_fit_results.json"
-                ckpt_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else '.'
-                save_path = os.path.join(ckpt_dir, "checkpoint.json")
-                fitter.save_params(fitter._last_xk, save_path)
-                print(f"\n  Fit interrupted after {fit_time:.1f}s")
-                print(f"  Checkpoint saved to {save_path}")
-                print(f"  Resume with: --init {save_path}")
+        base_save = args.save if args.save else _default_save()
+        results, fits = [], []
+        best = None
+        for i in range(n_runs):
+            run_id = i + 1
+            if not (args.init and i == 0):
+                # fresh random start each run (loop) or by default
+                x0 = fitter.initial_values(seed=None)
+            t0 = time.time()
+            try:
+                res = fitter.fit(x0, maxiter=args.maxiter, disp=True)
+            except KeyboardInterrupt:
+                res = None
+            dt = time.time() - t0
+
+            if res is None or not hasattr(res, 'fun'):
+                if fitter._last_xk is not None:
+                    ckpt_path = base_save
+                    ckpt_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else '.'
+                    save_path = os.path.join(ckpt_dir, "checkpoint.json")
+                    fitter.save_params(fitter._last_xk, save_path)
+                    print(f"\n  Run {run_id}/{n_runs} interrupted after {dt:.1f}s")
+                    print(f"  Checkpoint saved to {save_path}")
+                    print(f"  Resume with: --init {save_path}")
+                else:
+                    print(f"\n  Run {run_id}/{n_runs} interrupted after "
+                          f"{dt:.1f}s - no iterations completed")
+                sys.exit(1)
+
+            fits.append(dt)
+            results.append(res)
+            if best is None or res.fun < best.fun:
+                best = res
+
+            # per-run save (numbered when looping)
+            if n_runs > 1:
+                rp = os.path.splitext(base_save)[0] + f"_fit{run_id}.json"
             else:
-                print(f"\n  Fit interrupted after {fit_time:.1f}s - no iterations completed")
-            sys.exit(1)
+                rp = base_save
+            fitter.save_params(res, rp)
+            fitter.save_constraints(os.path.splitext(rp)[0] + "_constraints.json")
+            print(f"\n  Run {run_id}/{n_runs}: NLL = {res.fun:.6f}  "
+                  f"time = {dt:.2f}s  nfev = {res.nfev}  nit = {res.nit}  "
+                  f"success = {res.success}")
+            if n_runs > 1:
+                print(f"    saved to {rp}")
 
-        print(f"\n  Fit time: {fit_time:.2f}s")
-        print(f"  Final NLL: {result.fun:.6f}")
-        print(f"  nfev: {result.nfev}, nit: {result.nit}")
-        print(f"  success: {result.success}")
+        result = best
+        fit_time = float(np.mean(fits)) if fits else 0.0
+        if n_runs > 1:
+            print(f"\n  Loop summary: best NLL {best.fun:.6f} over "
+                  f"{n_runs} runs "
+                  f"(mean run time {fit_time:.2f}s)")
+        else:
+            print(f"\n  Final NLL: {result.fun:.6f}")
 
-        # Print uncertainties for all free parameters
+        # Print uncertainties for the best result
         uncert = fitter.get_uncertainties(result)
         names = list(uncert.keys())
         vals_err = [(n, uncert[n][0], uncert[n][1]) for n in names]
-        print(f"\n  Fitted parameters:")
+        print(f"\n  Fitted parameters (best run):")
         for name, val, err in vals_err:
             print(f"    {name:50s} = {val:+.6f} +/- {err:.6f}")
 
-        # Save results
-        save_path = args.save
-        if save_path is None:
-            prefix = os.path.splitext(os.path.basename(args.config))[0]
-            save_path = f"{prefix}_fit_results.json"
-        fitter.save_params(result, save_path)
-        print(f"  Results saved to {save_path}")
-
-        # Save constraints alongside results
-        constraints_path = os.path.splitext(save_path)[0] + "_constraints.json"
-        fitter.save_constraints(constraints_path)
+        # Save the best result to the default (single) path
+        fitter.save_params(result, base_save)
+        print(f"  Results saved to {base_save}")
 
         # Plot post-fit distributions
         if args.plot:
