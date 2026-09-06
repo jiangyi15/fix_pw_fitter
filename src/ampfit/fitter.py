@@ -1313,12 +1313,13 @@ class Fitter:
         plt.tight_layout()
         _save_figure(fig, "angles.png")
 
-        # ---- Time ----
-        fig, ax = plt.subplots(1, 1, figsize=(figsize[0], 3))
-        _make_hist(ax, "time", data_np["time"], phsp_np["time"])
-        ax.legend(fontsize=8)
-        plt.tight_layout()
-        _save_figure(fig, "time.png")
+        # ---- Time (only when the datasets carry time, e.g. legacy mixing) ----
+        if "time" in data_np and "time" in phsp_np:
+            fig, ax = plt.subplots(1, 1, figsize=(figsize[0], 3))
+            _make_hist(ax, "time", data_np["time"], phsp_np["time"])
+            ax.legend(fontsize=8)
+            plt.tight_layout()
+            _save_figure(fig, "time.png")
 
         if show:
             plt.show()
