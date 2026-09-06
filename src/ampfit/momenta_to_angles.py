@@ -322,3 +322,152 @@ def chain_original_triplet(v):
 
 def wrap_angle(x):
     return (x + math.pi) % (2 * math.pi) - math.pi
+
+
+# ---------------------------------------------------------------------------
+# Vectorized momenta → per-vertex angles (batch over events)
+# ---------------------------------------------------------------------------
+def _boost4_vec(p, beta):
+    """Vectorized _boost_4vector for p4 shape (N,4), beta (N,3)."""
+    p = np.asarray(p, dtype=float)
+    beta = np.asarray(beta, dtype=float)
+    b2 = np.sum(beta * beta, axis=-1)
+    ok = b2 > 1e-14
+    out = np.empty_like(p)
+    g = np.sqrt(np.maximum(1.0 - b2, 1e-30))
+    gamma = np.divide(1.0, g, out=np.ones_like(b2), where=ok)
+    bp = np.einsum('ni,ni->n', beta, p[:, 1:])
+    E2 = gamma * (p[:, 0] - bp)
+    coef = np.where(ok, (gamma - 1.0) / np.where(ok, b2, 1.0), 0.0)
+    p_par = beta * coef[:, None] * bp[:, None]
+    p2 = p[:, 1:] + p_par - (gamma * p[:, 0])[:, None] * beta
+    p2 = np.where(ok[:, None], p2, p[:, 1:])
+    E2 = np.where(ok, E2, p[:, 0])
+    out[:, 0] = E2
+    out[:, 1:] = p2
+    return out
+
+
+def _unit3_vec(v):
+    """Unit vectors for (N,3); zero rows stay zero."""
+    n = np.linalg.norm(v, axis=-1)
+    out = np.zeros_like(v)
+    ok = n > 1e-12
+    out[ok] = v[ok] / n[ok][:, None]
+    return out
+
+
+def _cross_vec(a, b):
+    return np.cross(a, b)
+
+
+def decay_angles_vectorized(chain, momenta):
+    """Vectorized :func:`decay_angles_from_momenta`.
+
+    *momenta*: per-final-particle 4-vectors in the chain's leaf order — either
+    an ``(n_events, n_finals, 4)`` array or a list of ``n_finals`` arrays each
+    of shape ``(n_events, 4)`` (E,px,py,pz in the top rest frame).  Works for
+    any number of final particles.  Returns ``(phi, theta)`` arrays of shape
+    ``(n_events, n_vertices)`` in ``chain.decays`` order.
+    """
+    # leaf names in pre-order
+    from ampfit.helicity_angle import decay_chain_leaves
+    leaves = decay_chain_leaves(chain)
+    names = [o.name for o in leaves]
+    if isinstance(momenta, np.ndarray) and momenta.ndim == 3:
+        assert momenta.shape[1] == len(names)
+        arrs = [np.asarray(momenta[:, j], dtype=float) for j in range(momenta.shape[1])]
+    else:
+        arrs = [np.asarray(m, dtype=float) for m in momenta]
+        assert len(arrs) == len(names)
+        N = arrs[0].shape[0]
+        for a in arrs:
+            assert a.shape == (N, 4)
+    mom = {nm: arrs[j] for j, nm in enumerate(names)}
+    decays = chain.decays
+    vmap = {d.core.name: i for i, d in enumerate(decays)}
+
+    # inner node momenta = sum of descendant leaves (vectorized)
+    subtree = {}
+
+    def collect(name):
+        if name in subtree:
+            return subtree[name]
+        out = {name}
+        for d in decays:
+            if d.core.name == name:
+                for o in d.outs:
+                    out |= collect(o.name)
+        subtree[name] = out
+        return out
+
+    for d in decays:
+        collect(d.core.name)
+    for name in subtree:
+        if name in mom:
+            continue
+        tot = None
+        for nm in subtree[name]:
+            if nm == name:
+                continue
+            m = mom[nm]
+            tot = m if tot is None else tot + m
+        mom[name] = tot
+    N = arrs[0].shape[0]
+
+    def child_xz(zc, x0, z0):
+        dot = np.einsum('ni,ni->n', z0, zc)
+        xv = zc * dot[:, None] - z0      # rotation image of parent x
+        n = np.linalg.norm(xv, axis=-1)
+        ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
+                       np.tile([1.0, 0.0, 0.0], (N, 1)),
+                       np.tile([0.0, 1.0, 0.0], (N, 1)))
+        fcross = _cross_vec(z0, ref)
+        fn = np.linalg.norm(fcross, axis=-1)
+        fallback = np.where((fn > 1e-12)[:, None], fcross / np.maximum(fn, 1e-12)[:, None],
+                            np.tile([0.0, 1.0, 0.0], (N, 1)))
+        xc = np.where((n > 1e-9)[:, None], xv / np.maximum(n, 1e-12)[:, None], fallback)
+        return np.stack([xc, zc], axis=1)          # (N,2,3)
+
+    phi = np.zeros((N, len(decays)))
+    theta = np.zeros((N, len(decays)))
+    top_triad = np.stack([np.tile([1.0, 0.0, 0.0], (N, 1)),
+                          np.tile([0.0, 0.0, 1.0], (N, 1))], axis=1)  # (N,2,3)
+
+    def rec(name, p4, T):
+        i = vmap[name]
+        d = decays[i]
+        c0, c1 = d.outs[0].name, d.outs[1].name
+        q0 = p4[c0]
+        q1 = p4[c1]
+        x0 = T[:, 0]
+        z0 = T[:, 1]
+        y0 = _cross_vec(z0, x0)
+        z1 = _unit3_vec(q0[:, 1:])
+        bad = np.linalg.norm(z1, axis=-1) < 1e-12
+        z1 = np.where(bad[:, None], _unit3_vec(q1[:, 1:]), z1)
+        z1 = np.where((np.linalg.norm(z1, axis=-1) < 1e-12)[:, None],
+                      np.tile([0.0, 0.0, 1.0], (N, 1)), z1)
+        cosv = np.clip(np.einsum('ni,ni->n', z0, z1), -1.0, 1.0)
+        theta[:, i] = np.arccos(cosv)
+        phi[:, i] = np.arctan2(np.einsum('ni,ni->n', z1, y0),
+                               np.einsum('ni,ni->n', z1, x0))
+        z1b = _unit3_vec(q1[:, 1:])
+        badb = np.linalg.norm(z1b, axis=-1) < 1e-12
+        z1b = np.where(badb[:, None], -z1, z1b)
+        t0 = child_xz(z1, x0, z0)
+        t1 = child_xz(z1b, x0, z0)
+        for c, tc in ((c0, t0), (c1, t1)):
+            if c in vmap:
+                qc = p4[c]
+                Ec = qc[:, 0]
+                beta = np.zeros_like(qc[:, 1:])
+                ok = np.abs(Ec) > 1e-12
+                beta[ok] = qc[ok, 1:] / Ec[ok][:, None]
+                sub = {}
+                for nm in subtree[c]:
+                    sub[nm] = _boost4_vec(p4[nm], beta)
+                rec(c, sub, tc)
+
+    rec(decays[0].core.name, mom, top_triad)
+    return phi, theta

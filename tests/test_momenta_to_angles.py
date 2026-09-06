@@ -205,3 +205,25 @@ def test_chain_topology_original_rows_match_all_perm_blocks():
             assert abs(_wrap(got[0] - ref[0])) < 1e-9
             assert abs(got[1] - ref[1]) < 1e-9
             assert abs(got[2] - ref[2]) < 1e-9
+
+
+def test_decay_angles_vectorized_matches_scalar():
+    """Vectorized batch angle extraction equals the scalar per-event loop."""
+    from ampfit.momenta_to_angles import decay_angles_vectorized
+
+    cfg = Config('config_pwa.yml')
+    ch = [cc for cc in cfg.full_decay.chains if 'MI1m' in str(cc)][0]
+    names = [o.name for o in decay_chain_leaves(ch)]
+    mom = np.load('data/phsp.npy')[:300]
+    ph, th = decay_angles_vectorized(ch, mom)
+    # also list-of-arrays input form
+    ph2, th2 = decay_angles_vectorized(ch, [mom[:, j] for j in range(3)])
+    worst = 0.0
+    for i in range(300):
+        fin = {names[j]: mom[i][j] for j in range(3)}
+        a = decay_angles_from_momenta(ch, fin)
+        for v, av in enumerate(a):
+            worst = max(worst, abs(_wrap(av[0] - ph[i, v])),
+                        abs(av[1] - th[i, v]),
+                        abs(_wrap(ph2[i, v] - ph[i, v])))
+    assert worst < 1e-9
