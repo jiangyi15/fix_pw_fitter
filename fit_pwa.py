@@ -31,6 +31,7 @@ def main():
     ap.add_argument("--cuda", action="store_true",
                     help="use cuda_v4_pwa as the data base backend")
     ap.add_argument("--nph", type=int, default=4000)
+    ap.add_argument("--nprop", type=int, default=10000)
     ap.add_argument("--ndata", type=int, default=300)
     ap.add_argument("--maxiter", type=int, default=60)
     ap.add_argument("--method", default="L-BFGS-B")
