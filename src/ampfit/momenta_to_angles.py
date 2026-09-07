@@ -429,6 +429,15 @@ def _rotation_matrix_to_su2(M):
     return U
 
 
+def _massless_mask(p4, tol=1e-6):
+    """Per-event mask for massless particles: m/E < tol (no rest frame)."""
+    p4 = np.asarray(p4, dtype=float)
+    E = np.abs(p4[..., 0])
+    m2 = np.clip(E * E - np.sum(p4[..., 1:] ** 2, axis=-1), 0.0, None)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return (np.sqrt(m2) / np.maximum(E, 1e-300)) < tol
+
+
 def _chain_su2_frames(chain, mom_name_arrays):
     """tf-pwa-style per-particle SU(2) frame matrices for one chain.
 
@@ -518,7 +527,11 @@ def _chain_su2_frames(chain, mom_name_arrays):
             rp = r_matrix[name]
             bp = b_matrix[name]
             r_matrix[c] = _mul(_mul(Uv, bp), rp)
-            b_matrix[c] = Boost_z_from_p(qc)
+            bm = Boost_z_from_p(qc)
+            ml = _massless_mask(qc)
+            if np.any(ml):
+                bm = np.where(ml[..., None, None], Identity(qc.shape[0]), bm)
+            b_matrix[c] = bm
             if c in vmap:
                 Ec = qc[:, 0]
                 beta = np.zeros_like(qc[:, 1:])
@@ -563,7 +576,11 @@ def _cm_reference_frames(mom_name_arrays, spinful_names):
         Rv = np.matmul(Mc, np.swapaxes(M0, -1, -2))
         r = _rotation_matrix_to_su2(Rv)
         Bp = Boost_z_from_p(p)
-        r_ref[nm] = _mul(_mul(su2_inv(r), Bp), r)
+        rr = _mul(_mul(su2_inv(r), Bp), r)
+        ml = _massless_mask(p)
+        if np.any(ml):
+            rr = np.where(ml[..., None, None], Identity(p.shape[0]), rr)
+        r_ref[nm] = rr
     return r_ref
 
 
