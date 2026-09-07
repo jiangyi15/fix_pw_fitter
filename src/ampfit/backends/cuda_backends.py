@@ -121,6 +121,19 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda32_v4_pwa_cache")
+class CUDABackendV4PWACache32(_CUDABackend):
+    """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
+
+    The cached amplitude matrix is stored as float2, halving the
+    steady-state memory traffic of the fp64 cache (~2x per-call speed at
+    large wave counts); arithmetic stays fp64.
+    """
+    def _make_kernel(self, kc, bs):
+        from ampfit.cuda._v4_pwa_cache32 import CUDAKernelV4PWACache32 as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v4_pwa_cache")
 class CUDABackendV4PWACache(_CUDABackend):
     """CUDA v4 PWA cache — full-amplitude cache for the fixed m0/g0 case.
