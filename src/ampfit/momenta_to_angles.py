@@ -343,16 +343,19 @@ def _chain_total_rotations(chain, mom_name_arrays):
 
     for d in decays:
         collect(d.core.name)
+    core_names = {d.core.name for d in decays}
+    leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
         if name in mom:
             continue
         tot = None
         for nm in subtree[name]:
-            if nm == name:
+            if nm == name or nm not in leaves_set:
                 continue
             m = mom[nm]
             tot = m if tot is None else tot + m
-        mom[name] = tot
+        if tot is not None:
+            mom[name] = tot
 
     def child_xz(zc, x0, z0):
         dot = np.einsum('ni,ni->n', z0, zc)
@@ -472,16 +475,19 @@ def _chain_su2_frames(chain, mom_name_arrays):
 
     for d in decays:
         collect(d.core.name)
+    core_names = {d.core.name for d in decays}
+    leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
         if name in mom:
             continue
         tot = None
         for nm in subtree[name]:
-            if nm == name:
+            if nm == name or nm not in leaves_set:
                 continue
             m = mom[nm]
             tot = m if tot is None else tot + m
-        mom[name] = tot
+        if tot is not None:
+            mom[name] = tot
 
     I = Identity(N)
     r_matrix = {decays[0].core.name: I}
@@ -797,16 +803,19 @@ def decay_angles_vectorized(chain, momenta):
 
     for d in decays:
         collect(d.core.name)
+    core_names = {d.core.name for d in decays}
+    leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
         if name in mom:
             continue
         tot = None
         for nm in subtree[name]:
-            if nm == name:
+            if nm == name or nm not in leaves_set:
                 continue
             m = mom[nm]
             tot = m if tot is None else tot + m
-        mom[name] = tot
+        if tot is not None:
+            mom[name] = tot
     N = arrs[0].shape[0]
 
     def child_xz(zc, x0, z0):
@@ -874,10 +883,11 @@ def _frames_from_angles(chain, ph, th, q, m_node):
     """Per-particle SU(2) frame matrices built ONLY from the already computed
     per-vertex angles and per-decay two-body |p| (+ masses).
 
-    The child triad of the engine equals ``Rz(phi) Ry(theta)`` acting on the
-    parent triad (verified against the triad geometry), so the vertex
-    rotation for child slot 0 is ``Uz(phi) Uy(theta)`` and for slot 1 (the
-    antipodal daughter) ``Uz(phi-pi) Uy(pi-theta)``.  Boost magnitudes come
+    The vertex rotation reproduces tf-pwa exactly (cal_helicity_angle):
+    slot 0 ``Ry(theta) Rz(phi)`` and slot 1 (antipodal daughter)
+    ``Ry(pi-theta) Rz(phi-pi)`` - confirmed to match tf-pwa's per-vertex SU2
+    to machine precision on shared events (no sign canonicalization; the
+    slot-1 phi in [-2pi, 0) must keep its sign).  Boost magnitudes come
     from ``q`` (the per-decay |p| already in the event data) with the child's
     own mass (leaf: rest mass; resonance: its event invariant mass), i.e.
     ``omega = asinh(q/m)`` - the same numbers the 4-momentum path derives.
@@ -909,14 +919,13 @@ def _frames_from_angles(chain, ph, th, q, m_node):
         for s, c in enumerate(d.outs):
             nm = c.name
             if s == 0:
-                Uv = _mul(Rotation_z(phi), Rotation_y(theta))
+                # tf-pwa per-vertex order: Rotation_y(theta)*Rotation_z(phi)
+                Uv = _mul(Rotation_y(theta), Rotation_z(phi))
             else:
-                Uv = _mul(Rotation_z(phi - np.pi),
-                          Rotation_y(np.pi - theta))
-            # canonical SU(2) sign (q0 >= 0) - same branch the SO(3)-to-SU2
-            # conversion uses in the 4-momentum path
-            flip = (np.real(Uv[..., 0, 0] + Uv[..., 1, 1]) < 0)
-            Uv = np.where(flip[..., None, None], -Uv, Uv)
+                Uv = _mul(Rotation_y(np.pi - theta),
+                          Rotation_z(phi - np.pi))
+            # NOTE: no SU(2) sign canonicalization - tf-pwa stores r exactly
+            # as Ry(beta)*Rz(alpha) (slot-1 phi in [-2pi,0) must keep its sign)
             r_matrix[nm] = _mul(_mul(Uv, b_core), r_core)
             mc = m_child(nm)
             q_d = q[:, idx_of[d.core.name]]
