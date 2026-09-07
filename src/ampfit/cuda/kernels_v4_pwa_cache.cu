@@ -880,51 +880,56 @@ __global__ void pwa_fpwf_forward_kernel(
     }
 }
 
-// ck-gradient reduction replacing the cuBLAS ZGEMV.  F is column-per-k
-// (column k at F + (long)k*total, contiguous).  Grid is (row segments) x
-// (columns handled per pass); a block reduces its row segment of a column
-// and atomicAdds into out[k].  Columns are strided over gridDim.y so ANY
-// N is supported (gridDim.y stays small); each column stream is read
-// coalesced.
+// ck-gradient reduction, shared-G single-pass design.
+// out[k] = Σ_row F[k*total + row] * G[row].  Grid is 1D over row segments;
+// each block loads its G segment into shared memory ONCE and then loops over
+// all N columns reading only F (coalesced) — G is read from DRAM exactly
+// once (the old (segment,column) 2D grid re-read the same G rows once per
+// column, i.e. N times).
 __global__ void fpwf_gradreduce_kernel(
     const double2* __restrict__ F,
     const double2* __restrict__ G,
     double2* __restrict__ out,
     int N, int total, int seg_len
 ) {
+    extern __shared__ double2 sG[];
+    __shared__ double2 red[256];
     int tid = threadIdx.x;
     int bd = blockDim.x;
     long start = (long)blockIdx.x * seg_len;
     long end = start + seg_len;
     if (end > total) end = total;
-    __shared__ double2 sh[256];
-    for (int k = blockIdx.y; k < N; k += gridDim.y) {
+    long len = end - start;
+
+    // G segment into shared memory (single DRAM read of G)
+    for (long i = start + tid; i < end; i += bd) sG[i - start] = G[i];
+    __syncthreads();
+
+    for (int k = 0; k < N; k++) {
         const double2* Fc = F + (long)k * total;
         double ar = 0.0, ai = 0.0;
-        for (long r = start + tid; r < end; r += bd) {
-            double2 f = Fc[r];
-            double2 g = G[r];
+        for (long i = tid; i < len; i += bd) {
+            double2 f = Fc[start + i];
+            double2 g = sG[i];
             ar += f.x * g.x - f.y * g.y;
             ai += f.x * g.y + f.y * g.x;
         }
-        sh[tid] = make_double2(ar, ai);
+        red[tid] = make_double2(ar, ai);
         __syncthreads();
         for (int st = bd / 2; st > 0; st >>= 1) {
             if (tid < st) {
-                sh[tid].x += sh[tid + st].x;
-                sh[tid].y += sh[tid + st].y;
+                red[tid].x += red[tid + st].x;
+                red[tid].y += red[tid + st].y;
             }
             __syncthreads();
         }
         if (tid == 0) {
-            atomicAdd(&out[k].x, sh[0].x);
-            atomicAdd(&out[k].y, sh[0].y);
+            atomicAdd(&out[k].x, red[0].x);
+            atomicAdd(&out[k].y, red[0].y);
         }
-        __syncthreads();  // protect sh reuse across k iterations
+        __syncthreads();
     }
 }
-
-
 
 // event-major common_cache -> coalesced [k][p][e] layout:
 //   dst[k * neP + p * ne + e] = src[e*n_wave + p*N + k] (fpwf col-per-k)
@@ -1614,9 +1619,10 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
 
     // graph/launch shared declarations (kept above the goto guards)
     int thr = (int)(((size_t)ne + 255) / 256);
-    int segrows = 2048;
+    int segrows = 1024;                       // rows per block -> 16 KB shared G
+    int shbytes = segrows * (int)sizeof(double2);
     int nseg = (int)((np_rows + segrows - 1) / segrows);
-    dim3 grid((unsigned)nseg, (unsigned)N);
+    dim3 grid((unsigned)nseg);                 // 1D over row segments
 
     ComputeParams p;
     p.ck_real = (double*)_up_dbl(ck_r, N);
@@ -1689,7 +1695,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             nw, P, ne, use_norm, c->d_norm,
             h->dQ, h->dP, h->dG,
             use_norm ? c->dacc : NULL, c->qacc);
-        fpwf_gradreduce_kernel<<<grid, 256, 0, c->gstream>>>(
+        fpwf_gradreduce_kernel<<<grid, 256, shbytes, c->gstream>>>(
             h->common_T, h->dG, c->dgck, N, (int)np_rows, segrows);
         if (cudaStreamEndCapture(c->gstream, &c->graph) == cudaSuccess &&
             cudaGraphInstantiate(&c->gexec, c->graph, 0) == cudaSuccess) {
@@ -1712,7 +1718,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
                 nw, P, ne, use_norm, c->d_norm,
                 h->dQ, h->dP, h->dG,
                 use_norm ? c->dacc : NULL, c->qacc);
-            fpwf_gradreduce_kernel<<<grid, 256>>>(
+            fpwf_gradreduce_kernel<<<grid, 256, shbytes>>>(
                 h->common_T, h->dG, c->dgck, N, (int)np_rows, segrows);
             CUDA_CHECK(cudaGetLastError());
         }
