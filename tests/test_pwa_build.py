@@ -205,10 +205,13 @@ def test_load_all_data_prefix_momenta(tmp_path):
 
     f = Fitter(str(cfgp), backend="numpy_pwa")
     dn, pn = f.load_all_data()
-    assert dn["mass"].shape == (100, 1)
-    assert pn["mass"].shape == (300, 1)
-    assert dn["angle"].shape == (100, 1, 4)     # canonical, any n_comps
-    assert dn["q"].shape == (100, 2)
+    # tree-based fill: full cfg topology rows (inactive rows stay zero)
+    assert dn["mass"].shape == (100, 3)
+    assert pn["mass"].shape == (300, 3)
+    assert dn["angle"].shape == (100, 3, 4)     # canonical, any n_comps
+    assert dn["q"].shape == (100, 6)
+    assert not np.allclose(dn["mass"][:, 0], 0)      # active row filled
+    assert np.allclose(dn["angle"][:, 1:, :], 0)     # inactive rows zero
     # single-block ck uses the legacy ck-index construction; normalization
     # and coupling (r, theta) starts come from the constraint layer, exactly
     # as in the legacy flow (apply_constrains + starting values)

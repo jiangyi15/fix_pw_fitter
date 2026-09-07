@@ -66,7 +66,7 @@ class BuildKernelParams:
 
     @property
     def pc(self):
-        """The :class:`~ampfit.param_constraint.CKProduct\` for CK."""
+        """The :class:`~ampfit.param_constraint.CKProduct` for CK."""
         return self._pc
 
     def forward(self, resolved):
