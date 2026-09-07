@@ -152,3 +152,49 @@ def test_rule1_chain_reference_zero(tmp_path):
     a = out["Lambda"]
     assert np.allclose(a[:, ref, :], 0.0, atol=1e-12)
     assert np.any(np.abs(a[:, 1 - ref, :]) > 1e-6)
+
+
+def test_pwa_event_data_tree_fill(tmp_path):
+    """Tree-shape event fill: only angles need the tree (already tree-based
+    decay_angles_vectorized); mass/q/angle columns come from FLAT per-decay
+    loops and match independent physics for every topology row."""
+    from ampfit.pwa_build import pwa_event_data_tree, _two_body_p
+    from ampfit.momenta_to_angles import decay_angles_vectorized
+    from ampfit.helicity_angle import decay_chain_leaves
+    c = _cfg(tmp_path)
+    kc = c.build_all_index()
+    byt, chains = {}, []
+    for _, dc in c.full_decay.get_partial_waves():
+        tid = c.topo_index[dc.topo_id()]
+        byt[tid] = dc
+        chains.append(dc)
+    mom_d = _cm_momenta(n_events=5)
+    names = ["Lambda", "pip", "eta"]
+    mom = np.stack([mom_d[nm] for nm in names], axis=1)
+    d = pwa_event_data_tree(c, kc, byt, mom, spinful_names=["Lambda"])
+    assert d["mass"].shape == (5, c.n_topo * c.n_res)
+    assert d["q"].shape == (5, c.n_topo * c.n_decay)
+    nv = c.n_decay
+    assert d["angle"].shape == (5, c.n_topo, 2 * nv + 3)
+    for tid in sorted(byt):
+        ch = byt[tid]
+        lm = [o.name for o in decay_chain_leaves(ch)]
+        mm = np.stack([mom[:, names.index(x)] for x in lm], axis=1)
+        ph, th = decay_angles_vectorized(ch, mm)
+        assert np.allclose(d["angle"][:, tid, :nv], ph, atol=1e-12)
+        assert np.allclose(d["angle"][:, tid, nv:2 * nv], th, atol=1e-12)
+        outs = [o.name for o in ch.decays[1].outs]
+        s4 = np.zeros((5, 4))
+        for o in outs:
+            s4 = s4 + mom_d[o]
+        mi = np.sqrt(np.clip((s4 ** 2) @ np.array([1, -1, -1, -1.]), 0, None))
+        assert np.allclose(d["mass"][:, tid], mi, atol=1e-9)
+        m0 = float(c.dic["particle"][outs[0]]["mass"])
+        m1 = float(c.dic["particle"][outs[1]]["mass"])
+        assert np.allclose(d["q"][:, c.n_decay * tid + 1],
+                           _two_body_p(mi, m0, m1), atol=1e-9)
+        # alignment slice equals the standalone aligned function per row
+        ao = aligned_euler_from_momenta(chains, mom_d, ["Lambda"])
+        j = chains.index(ch)
+        assert np.allclose(d["angle"][:, tid, 2 * nv:2 * nv + 3],
+                           ao["Lambda"][:, j, :], atol=1e-12)

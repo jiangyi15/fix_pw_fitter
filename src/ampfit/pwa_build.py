@@ -483,3 +483,118 @@ def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
     if weights_out:
         return mom, np.ones(n_events)
     return mom
+
+
+
+def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
+                        cm_boost=True):
+    """Tree-shape event buffers (mass/q/angle [+alignment]) by FLAT loops.
+
+    Only the angles need a tree walk, and ``decay_angles_vectorized``
+    already does it.  Everything else is plain per-decay list arithmetic
+    over ``chain.decays``:
+
+    * ``mass`` (n, n_topo*n_res): slot ``n_res*tid + (idx-1)`` <- invariant
+      mass of decay ``idx>0`` (sum of its descendant leaves),
+    * ``q``    (n, n_topo*n_decay): slot ``n_decay*tid + idx`` <- two-body
+      |p| of decay *idx* from its parent/child masses,
+    * ``angle``(n, n_topo, n_base [+3*len(spinful_names)]): canonical
+      phi-first vertex columns; plus per-row alignment euler columns when
+      the spinful finals are shared by >1 active topology.
+
+    Rows with no chain stay zero.  *momenta*: (n_events, n_finals, 4) in
+    ``cfg.finals`` order.
+    """
+    from ampfit.helicity_angle import decay_chain_leaves
+    from ampfit.momenta_to_angles import decay_angles_vectorized
+
+    if not list(cfg.full_decay.get_partial_waves()):
+        raise ValueError("no partial waves in config")
+    n_decay, n_res, n_topo = cfg.n_decay, cfg.n_res, cfg.n_topo
+    finals = list(cfg.finals)
+    n = momenta.shape[0]
+
+    mom0 = np.asarray(momenta, dtype=float)
+    if cm_boost:
+        tot0 = mom0.sum(axis=1)
+        mom0 = np.stack([_boost_vec(mom0[:, j], -(tot0[:, 1:] / tot0[:, 0:1]))
+                         for j in range(mom0.shape[1])], axis=1)
+    leaf_of_name = {finals[j]: mom0[:, j] for j in range(len(finals))}
+
+    rows = [chains_by_topo.get(t) for t in range(n_topo)]
+    active = [ch for ch in rows if ch is not None]
+    need_align = len(active) > 1 and bool(spinful_names)
+    nv = len(active[0].decays)
+
+    mass = np.zeros((n, n_topo * n_res))
+    q = np.zeros((n, n_topo * n_decay))
+    vars_ = list(kc.get("variables") or [])
+    n_base = len(vars_) if vars_ else 2 * nv
+    ang = np.zeros((n, n_topo, n_base + (3 * len(spinful_names)
+                                         if need_align else 0)))
+
+    align_out = None
+    if need_align:
+        from ampfit.momenta_to_angles import aligned_euler_from_momenta
+        align_out = aligned_euler_from_momenta(active, leaf_of_name,
+                                               list(spinful_names))
+
+    for tid, chain in enumerate(rows):
+        if chain is None:
+            continue
+        # angles already tree-based; this is a flat call per topology row
+        leaves = decay_chain_leaves(chain)
+        names = [o.name for o in leaves]
+        mom = np.stack([leaf_of_name[nm] for nm in names], axis=1)
+        ph, th = decay_angles_vectorized(chain, mom)
+        if vars_:
+            for j, (v, kind) in enumerate(vars_):
+                ang[:, tid, j] = ph[:, v] if kind == 'phi' else th[:, v]
+        else:
+            ang[:, tid, :nv] = ph
+            ang[:, tid, nv:2 * nv] = th
+
+        # ── flat fill over the decays list ────────────────────────────────
+        # leaf positions of every decay core (single stack pass per chain)
+        cmap = {d.core.name: d for d in chain.decays}
+        core_leaves = []
+        for d in chain.decays:
+            stack, seen, acc = [d.core.name], set(), []
+            while stack:
+                x = stack.pop()
+                if x in seen:
+                    continue
+                seen.add(x)
+                dd = cmap.get(x)
+                if dd is None:
+                    acc.append(names.index(x))
+                else:
+                    stack += [o.name for o in dd.outs]
+            core_leaves.append(acc)
+
+        # core invariant masses (idx in decays order)
+        inv_m = []
+        for acc in core_leaves:
+            cm = np.zeros((n, 4))
+            for li in acc:
+                cm = cm + mom[:, li]
+            e2 = cm[..., 0] * cm[..., 0]
+            p2 = np.sum(cm[..., 1:] * cm[..., 1:], axis=-1)
+            inv_m.append(np.sqrt(np.clip(e2 - p2, 0., None)))
+        idx_of = {d.core.name: i for i, d in enumerate(chain.decays)}
+        leaf_m = {nm: float(cfg.dic["particle"][nm]["mass"]) for nm in names}
+        for idx, d in enumerate(chain.decays):
+            if idx > 0:
+                mass[:, n_res * tid + idx - 1] = inv_m[idx]
+            mm = [(inv_m[idx_of[o.name]] if o.name in idx_of
+                   else np.full(n, leaf_m[o.name])) for o in d.outs]
+            q[:, n_decay * tid + idx] = _two_body_p(inv_m[idx], mm[0], mm[1])
+
+        if need_align:
+            j = active.index(chain)
+            for f, nm in enumerate(spinful_names):
+                ang[:, tid, n_base + 3 * f:n_base + 3 * f + 3] = \
+                    align_out[nm][:, j, :]
+    return {"mass": mass, "q": q, "angle": ang,
+            "weight": np.ones(n), "bkg": np.ones(n)}
+
