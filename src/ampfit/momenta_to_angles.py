@@ -877,7 +877,7 @@ def _frames_from_angles(chain, ph, th, q, m_node):
     The child triad of the engine equals ``Rz(phi) Ry(theta)`` acting on the
     parent triad (verified against the triad geometry), so the vertex
     rotation for child slot 0 is ``Uz(phi) Uy(theta)`` and for slot 1 (the
-    antipodal daughter) ``Uz(phi+pi) Uy(pi-theta)``.  Boost magnitudes come
+    antipodal daughter) ``Uz(phi-pi) Uy(pi-theta)``.  Boost magnitudes come
     from ``q`` (the per-decay |p| already in the event data) with the child's
     own mass (leaf: rest mass; resonance: its event invariant mass), i.e.
     ``omega = asinh(q/m)`` - the same numbers the 4-momentum path derives.
@@ -911,7 +911,7 @@ def _frames_from_angles(chain, ph, th, q, m_node):
             if s == 0:
                 Uv = _mul(Rotation_z(phi), Rotation_y(theta))
             else:
-                Uv = _mul(Rotation_z(phi + np.pi),
+                Uv = _mul(Rotation_z(phi - np.pi),
                           Rotation_y(np.pi - theta))
             # canonical SU(2) sign (q0 >= 0) - same branch the SO(3)-to-SU2
             # conversion uses in the 4-momentum path
