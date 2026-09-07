@@ -346,6 +346,7 @@ def test_spinful_final_states_build(tmp_path):
     N = n_wave // nproj
     assert N == 2                          # Sig1385p + a098 waves
     assert len(kc["angle_k"]) > 0          # non-empty angular basis
+    assert kc["angle_k"].shape[1] == 7     # 4 vertex angles + 3 alignment (Lambda)
     assert kc["matrix_angle"].shape[0] == len(kc["angle_k"])
     assert np.all(np.isfinite(kc["matrix_angle"]))
 
@@ -439,3 +440,5 @@ def test_cascade_two_decaying_daughters_spinful_finals(tmp_path):
     assert nproj == 12 and n_wave == 24 and n_wave % nproj == 0
     assert n_wave // nproj == 2            # Lambda-Lambdabar S,D waves
     assert len(kc["angle_k"]) > 0
+    # 6 vertex angles + 3 alignment each for the two spinful finals (p, pbar)
+    assert kc["angle_k"].shape[1] == 12

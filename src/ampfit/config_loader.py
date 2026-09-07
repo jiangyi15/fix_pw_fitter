@@ -610,43 +610,122 @@ class Config:
         phi-first layout (n_angles columns).  Gauge drops the top-J=0
         rotation; a spinful top keeps all 2·n_vertices columns and uses
         the requested external helicity *lam*.
+
+        When the process has SPINFUL FINAL states, each spinful final
+        additionally contributes three alignment variables and the wave is
+        rotated to a common final axis:
+
+            A_{lambda'} = Sum_{lambda} A_tree(lambda) * D^{j*}_{lambda',lambda}
+
+        (identical to the un-aligned amplitude for alpha=beta=gamma=0).
+        Spin-0-final processes take the original code path unchanged.
         """
         if getattr(self, "angle_formula_mode", "helicity") != "helicity":
             return get_angle_formula(decaychain, ls)
+        from itertools import product
+        from fractions import Fraction
         from ampfit.helicity_angle import (
-            to_spin, decay_chain_to_tree, tree_vertices,
-            decay_chain_leaves, amplitude_monomials, _reduce_layout)
+            to_spin, helicity_values, decay_chain_to_tree, tree_vertices,
+            decay_chain_leaves, amplitude_monomials, _reduce_layout,
+            alignment_D_parts)
+        fin_names = self._final_names()
+        finJ = [to_spin(self.dic["particle"].get(nm, {}).get("J", 0))
+                for nm in fin_names]
+        aligned_idx = [i for i, J in enumerate(finJ) if J != 0]
+
         top = decaychain.decays[0].core
         leaves = decay_chain_leaves(decaychain)
-        # lam: int (legacy top lambda, spinless finals) or a projection state
-        # (lam_top, leaf-lambdas in canonical final order).
-        if isinstance(lam, tuple):
-            lam_top_in, canon = lam
-        else:
-            lam_top_in, canon = lam, None
         top_j0 = to_spin(top.J) == 0
         tree = decay_chain_to_tree(decaychain)
         nv = len(tree_vertices(tree))
-        lam_top = 0 if top_j0 else to_spin(lam_top_in)
-        if canon is None or all(x == 0 for x in canon):
-            leaf_lams = tuple(0 for _ in leaves)   # spinless finals
+
+        if isinstance(lam, tuple):
+            lam_top_in, new_canon = lam
         else:
-            want = dict(zip(self._final_names(),
-                            (to_spin(x) for x in canon)))
-            leaf_lams = tuple(to_spin(want[o.name]) if o.name in want
-                              else to_spin(0) for o in leaves)
-        _, mono = amplitude_monomials(tree, tuple(ls), lam_top, leaf_lams)
-        _, mono = _reduce_layout(mono, nv, (0, 1, 2) if top_j0 else (),
-                                 phi_first=True)
+            lam_top_in, new_canon = lam, None
+        lam_top = 0 if top_j0 else to_spin(lam_top_in)
+
+        def _mono(canon):
+            """Reduced monomial dict for one canonical leaf-lambda tuple."""
+            if canon is None:
+                leaf_lams = tuple(0 for _ in leaves)
+            else:
+                want = dict(zip(fin_names, (to_spin(x) for x in canon)))
+                leaf_lams = tuple(to_spin(want[o.name]) if o.name in want
+                                  else to_spin(0) for o in leaves)
+            _, m = amplitude_monomials(tree, tuple(ls), lam_top, leaf_lams)
+            _, m = _reduce_layout(m, nv, (0, 1, 2) if top_j0 else (),
+                                  phi_first=True)
+            return m
+
+        # ---- spinless finals (or legacy int lam): original path ----
+        if not aligned_idx or new_canon is None:
+            mono = _mono(new_canon if new_canon is not None else
+                         None if lam_top_in is not None else None)
+            # legacy: leaf lambdas zero unless a canonical state was given
+            if new_canon is None and not aligned_idx:
+                mono = _mono(None)
+            terms = []
+            for key, coef in mono.items():
+                if abs(coef) < 1e-12:
+                    continue
+                k = []
+                b = []
+                for (kind, f) in key:
+                    fr = float(f)
+                    k.append(int(round(fr)) if abs(fr - round(fr)) < 1e-9
+                             else fr)
+                    b.append('cos' if kind == 'c' else 'sin')
+                terms.append({'coeffs': complex(round(coef.real, 14),
+                                                round(coef.imag, 14)),
+                              'k': k, 'b': b})
+            return terms
+
+        # ---- spinful finals: rotate to the common final axis ------------
+        base_len = None
+        align_terms = []          # per aligned final: list of (coef, 3 entries)
+        for g, pos in enumerate(aligned_idx):
+            jf = finJ[pos]
+            lam_new = to_spin(new_canon[pos])
+            per = []
+            for lam_old in helicity_values(jf):
+                a, b, g3 = alignment_D_parts(jf, lam_new, lam_old)
+                for ca, (ka, fa) in a:
+                    for cb, (kb, fb) in b:
+                        for cg, (kg, fg) in g3:
+                            per.append((lam_old,
+                                        ca * cb * cg,
+                                        ((ka, fa), (kb, fb), (kg, fg))))
+            align_terms.append(per)
+
+        acc = {}
+        for combo in product(*align_terms):
+            old_leaf = tuple(it[0] for it in combo)
+            coef_align = 1.0
+            entries = []
+            for (_, cf, ent) in combo:
+                coef_align *= cf
+                entries.extend(ent)
+            old_canon = list(new_canon)
+            for pos, val in zip(aligned_idx, old_leaf):
+                old_canon[pos] = val
+            mono = _mono(tuple(old_canon))
+            if base_len is None:
+                base_len = len(next(iter(mono)))
+            for key, cv in mono.items():
+                extkey = key + tuple(entries)
+                acc[extkey] = acc.get(extkey, 0.0) + coef_align * cv
+
         terms = []
-        for key, coef in mono.items():
+        for key, coef in acc.items():
             if abs(coef) < 1e-12:
                 continue
             k = []
             b = []
             for (kind, f) in key:
                 fr = float(f)
-                k.append(int(round(fr)) if abs(fr - round(fr)) < 1e-9 else fr)
+                k.append(int(round(fr)) if abs(fr - round(fr)) < 1e-9
+                         else fr)
                 b.append('cos' if kind == 'c' else 'sin')
             terms.append({'coeffs': complex(round(coef.real, 14),
                                             round(coef.imag, 14)),
