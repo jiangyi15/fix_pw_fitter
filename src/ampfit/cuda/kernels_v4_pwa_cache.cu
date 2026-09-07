@@ -1041,6 +1041,10 @@ typedef struct {
     int n_proj;                // P — number of incoherent projections
     ComputeData* scratch;
     double* Q_red_gpu;
+    // persistent fpwf evaluate scratch (allocated once, reused every call)
+    double2* dgck;   // [N]  gradient-reduction output
+    double*  qacc;   // [1]  total-Q device accumulator
+    double*  dacc;   // [1]  d(NLL)/d(norm) device accumulator
 } ComputeContext;
 
 typedef struct {
@@ -1297,6 +1301,16 @@ void* cuda_create_context_v4(
         c->scratch = NULL;
         c->Q_red_gpu = NULL;
     }
+    c->dgck = NULL; c->qacc = NULL; c->dacc = NULL;
+    {
+        int N = c->n_wave / c->n_proj;
+        if (cudaMalloc(&c->dgck, (size_t)N * sizeof(double2)) != cudaSuccess ||
+            cudaMalloc(&c->qacc, sizeof(double)) != cudaSuccess ||
+            cudaMalloc(&c->dacc, sizeof(double)) != cudaSuccess) {
+            cuda_free_context_v4(c);
+            return NULL;
+        }
+    }
     return c;
 }
 
@@ -1325,6 +1339,9 @@ void cuda_free_context_v4(void* vctx) {
         #undef SF
         free(c->scratch);
     }
+    if (c->dgck) cudaFree(c->dgck);
+    if (c->qacc) cudaFree(c->qacc);
+    if (c->dacc) cudaFree(c->dacc);
     if (c->Q_red_gpu) cudaFree(c->Q_red_gpu);
     free(c);
 }
@@ -1561,8 +1578,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     int P = c->n_proj, N = nw / P;
     size_t np_rows = (size_t)ne * P;
 
-    double* dsum = NULL;
-    double* dqsum = NULL;
     int want_dn = (odn != NULL && use_norm != 0);
     if (odn) *odn = 0.0;
 
@@ -1603,28 +1618,23 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     memset(ogm0, 0, (size_t)nu * sizeof(double));
     memset(ogg0, 0, (size_t)ng * sizeof(double));
 
-    if (want_dn) {
-        CUDA_CHECK(cudaMalloc(&dsum, sizeof(double)));
-        CUDA_CHECK(cudaMemset(dsum, 0, sizeof(double)));
-    }
-    CUDA_CHECK(cudaMalloc(&dqsum, sizeof(double)));
-    CUDA_CHECK(cudaMemset(dqsum, 0, sizeof(double)));
+    // persistent accumulators, zeroed per call (no per-call alloc/free)
+    if (want_dn) CUDA_CHECK(cudaMemset(c->dacc, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemset(c->qacc, 0, sizeof(double)));
     // ---- one fused forward over the whole dataset ----
     {
         int thr = (int)(((size_t)ne + 255) / 256);
         pwa_fpwf_forward_kernel<<<thr, 256>>>(
             h->common_T, p.ck_real, p.ck_imag,
             h->w, h->b, nw, P, ne, use_norm, nv,
-            h->dQ, h->dP, h->dG, dsum, dqsum);
+            h->dQ, h->dP, h->dG,
+            want_dn ? c->dacc : NULL, c->qacc);
         CUDA_CHECK(cudaGetLastError());
     }
     // total Q: single scalar accumulated in the kernel (no whole-array D2H)
-    cudaMemcpy(oQ, dqsum, sizeof(double), cudaMemcpyDeviceToHost);
-    cudaFree(dqsum);
-    if (want_dn) {
-        cudaMemcpy(odn, dsum, sizeof(double), cudaMemcpyDeviceToHost);
-        cudaFree(dsum);
-    }
+    cudaMemcpy(oQ, c->qacc, sizeof(double), cudaMemcpyDeviceToHost);
+    if (want_dn)
+        cudaMemcpy(odn, c->dacc, sizeof(double), cudaMemcpyDeviceToHost);
 
     // ---- per-event P (only when explicitly requested) ----
     if (oP) cudaMemcpy(oP, h->dP, (size_t)ne * sizeof(double),
@@ -1634,29 +1644,25 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     // ogck[k] = Σ_{row=0}^{ne*P-1} F[k*total + row] * G[row]
     // Grid = (row-segments) x (N columns); column-contiguous coalesced reads.
     {
-        double2* dg = NULL;
         int total = (int)np_rows;
-        if (cudaMalloc(&dg, (size_t)N * sizeof(double2)) == cudaSuccess) {
-            cudaMemset(dg, 0, (size_t)N * sizeof(double2));
-            int seg = 2048;
-            int nseg = (total + seg - 1) / seg;
-            // gridDim.y = N: one block per (row segment, column) gives enough
-            // blocks to saturate; G re-reads are L2-served.
-            dim3 grid((unsigned)nseg, (unsigned)N);
-            fpwf_gradreduce_kernel<<<grid, 256>>>(
-                h->common_T, h->dG, dg, N, total, seg);
-            CUDA_CHECK(cudaGetLastError());
-            double2* zh = (double2*)malloc((size_t)N * sizeof(double2));
-            if (zh) {
-                cudaMemcpy(zh, dg, (size_t)N * sizeof(double2),
-                           cudaMemcpyDeviceToHost);
-                for (int j = 0; j < N; j++) {
-                    ogck_r[j] = zh[j].x;
-                    ogck_i[j] = zh[j].y;
-                }
-                free(zh);
+        cudaMemset(c->dgck, 0, (size_t)N * sizeof(double2));
+        int seg = 2048;
+        int nseg = (total + seg - 1) / seg;
+        // gridDim.y = N: one block per (row segment, column) gives enough
+        // blocks to saturate; G re-reads are L2-served.
+        dim3 grid((unsigned)nseg, (unsigned)N);
+        fpwf_gradreduce_kernel<<<grid, 256>>>(
+            h->common_T, h->dG, c->dgck, N, total, seg);
+        CUDA_CHECK(cudaGetLastError());
+        double2* zh = (double2*)malloc((size_t)N * sizeof(double2));
+        if (zh) {
+            cudaMemcpy(zh, c->dgck, (size_t)N * sizeof(double2),
+                       cudaMemcpyDeviceToHost);
+            for (int j = 0; j < N; j++) {
+                ogck_r[j] = zh[j].x;
+                ogck_i[j] = zh[j].y;
             }
-            cudaFree(dg);
+            free(zh);
         }
     }
 
