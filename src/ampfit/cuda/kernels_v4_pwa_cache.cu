@@ -34,6 +34,7 @@
  */
 
 #include <cuda_runtime.h>
+#include <time.h>
 #include <device_launch_parameters.h>
 #include <thrust/complex.h>
 #include <cstdio>
@@ -829,13 +830,14 @@ __global__ void pwa_fpwf_forward_kernel(
     const double* __restrict__ ck_real, const double* __restrict__ ck_imag,
     const double* __restrict__ weight, const double* __restrict__ bkg,
     int n_wave, int n_proj, int ne,
-    int use_norm, double norm,
+    int use_norm, const double* __restrict__ norm_d,
     double* __restrict__ Q_out, double* __restrict__ P_out,
     double2* __restrict__ G,
     double* __restrict__ dnsum, double* __restrict__ qsum
 ) {
     int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= ne) return;
+    const double norm = norm_d[0];
     const int P = n_proj;
     const int N = n_wave / P;
     const size_t neP = (size_t)ne * P;
@@ -1045,6 +1047,20 @@ typedef struct {
     double2* dgck;   // [N]  gradient-reduction output
     double*  qacc;   // [1]  total-Q device accumulator
     double*  dacc;   // [1]  d(NLL)/d(norm) device accumulator
+    // per-call graph inputs (contents updated by memcpy; pointers stable)
+    double*  d_norm;  // [1]  norm value
+    double*  dck_r;   // [N]  ck real
+    double*  dck_i;   // [N]  ck imag
+    // CUDA graph experiment (whole fixed-cache evaluation, replayed per call)
+    cudaStream_t gstream;
+    cudaGraph_t graph;
+    cudaGraphExec_t gexec;
+    void* graph_handle;    // DataHandle the graph was captured for
+    int graph_mode;        // use_norm value the graph was captured with
+    int graph_ne;          // ne the graph was captured with (addr-reuse guard)
+    const double2* graph_ct;  // common_T the graph was captured with
+    int graph_valid;
+    int graph_attempted;
 } ComputeContext;
 
 typedef struct {
@@ -1302,14 +1318,24 @@ void* cuda_create_context_v4(
         c->Q_red_gpu = NULL;
     }
     c->dgck = NULL; c->qacc = NULL; c->dacc = NULL;
+    c->d_norm = NULL; c->dck_r = NULL; c->dck_i = NULL;
+    c->gstream = NULL; c->graph = NULL; c->gexec = NULL;
+    c->graph_handle = NULL; c->graph_mode = -1; c->graph_ne = 0;
+    c->graph_ct = NULL;
+    c->graph_valid = 0; c->graph_attempted = 0;
     {
         int N = c->n_wave / c->n_proj;
         if (cudaMalloc(&c->dgck, (size_t)N * sizeof(double2)) != cudaSuccess ||
             cudaMalloc(&c->qacc, sizeof(double)) != cudaSuccess ||
-            cudaMalloc(&c->dacc, sizeof(double)) != cudaSuccess) {
+            cudaMalloc(&c->dacc, sizeof(double)) != cudaSuccess ||
+            cudaMalloc(&c->d_norm, sizeof(double)) != cudaSuccess ||
+            cudaMalloc(&c->dck_r, (size_t)N * sizeof(double)) != cudaSuccess ||
+            cudaMalloc(&c->dck_i, (size_t)N * sizeof(double)) != cudaSuccess) {
             cuda_free_context_v4(c);
             return NULL;
         }
+        if (cudaStreamCreateWithFlags(&c->gstream, cudaStreamNonBlocking)
+                != cudaSuccess) c->gstream = NULL;
     }
     return c;
 }
@@ -1339,9 +1365,15 @@ void cuda_free_context_v4(void* vctx) {
         #undef SF
         free(c->scratch);
     }
+    if (c->gexec) { cudaGraphExecDestroy(c->gexec); c->gexec = NULL; }
+    if (c->graph) { cudaGraphDestroy(c->graph); c->graph = NULL; }
+    if (c->gstream) { cudaStreamDestroy(c->gstream); c->gstream = NULL; }
     if (c->dgck) cudaFree(c->dgck);
     if (c->qacc) cudaFree(c->qacc);
     if (c->dacc) cudaFree(c->dacc);
+    if (c->d_norm) cudaFree(c->d_norm);
+    if (c->dck_r) cudaFree(c->dck_r);
+    if (c->dck_i) cudaFree(c->dck_i);
     if (c->Q_red_gpu) cudaFree(c->Q_red_gpu);
     free(c);
 }
@@ -1581,6 +1613,15 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     int want_dn = (odn != NULL && use_norm != 0);
     if (odn) *odn = 0.0;
 
+    // graph/launch shared declarations (kept above the goto guards)
+    struct timespec _ts;
+    double _hs, _he;
+    int _graph_hit;
+    int thr = (int)(((size_t)ne + 255) / 256);
+    int segrows = 2048;
+    int nseg = (int)((np_rows + segrows - 1) / segrows);
+    dim3 grid((unsigned)nseg, (unsigned)N);
+
     ComputeParams p;
     p.ck_real = (double*)_up_dbl(ck_r, N);
     p.ck_imag = (double*)_up_dbl(ck_i, N);
@@ -1618,42 +1659,82 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     memset(ogm0, 0, (size_t)nu * sizeof(double));
     memset(ogg0, 0, (size_t)ng * sizeof(double));
 
-    // persistent accumulators, zeroed per call (no per-call alloc/free)
-    if (want_dn) CUDA_CHECK(cudaMemset(c->dacc, 0, sizeof(double)));
-    CUDA_CHECK(cudaMemset(c->qacc, 0, sizeof(double)));
-    // ---- one fused forward over the whole dataset ----
-    {
-        int thr = (int)(((size_t)ne + 255) / 256);
-        pwa_fpwf_forward_kernel<<<thr, 256>>>(
-            h->common_T, p.ck_real, p.ck_imag,
-            h->w, h->b, nw, P, ne, use_norm, nv,
+    // ── fixed-cache evaluation: CUDA-graph replay when available, else
+    // plain per-call launches.  norm + ck live in stable device buffers so
+    // the captured kernels only ever see fixed pointers.
+    clock_gettime(CLOCK_MONOTONIC, &_ts);
+    _hs = 1e3 * _ts.tv_sec + _ts.tv_nsec / 1e6;
+    _graph_hit = 0;
+
+    #define _UPLOAD_INPUTS(STREAM)                                          \
+        do {                                                               \
+            cudaMemcpyAsync(c->d_norm, &nv, sizeof(double),                 \
+                            cudaMemcpyHostToDevice, STREAM);               \
+            cudaMemcpyAsync(c->dck_r, p.ck_real, (size_t)N*sizeof(double), \
+                            cudaMemcpyDeviceToDevice, STREAM);             \
+            cudaMemcpyAsync(c->dck_i, p.ck_imag, (size_t)N*sizeof(double), \
+                            cudaMemcpyDeviceToDevice, STREAM);             \
+        } while (0)
+
+    if (c->gstream && c->gexec && c->graph_handle == (void*)h &&
+        c->graph_mode == use_norm && c->graph_ne == ne &&
+        c->graph_ct == h->common_T) {
+        // replay the captured memset+forward+memset+gradreduce graph
+        _UPLOAD_INPUTS(c->gstream);
+        cudaGraphLaunch(c->gexec, c->gstream);
+        cudaStreamSynchronize(c->gstream);
+        _graph_hit = 1;
+    } else {
+        // (re)capture for this (handle, use_norm) pair
+        if (c->gexec) { cudaGraphExecDestroy(c->gexec); c->gexec = NULL; }
+        if (c->graph) { cudaGraphDestroy(c->graph); c->graph = NULL; }
+        cudaStreamBeginCapture(c->gstream, cudaStreamCaptureModeThreadLocal);
+        cudaMemsetAsync(c->qacc, 0, sizeof(double), c->gstream);
+        cudaMemsetAsync(c->dgck, 0, (size_t)N * sizeof(double2), c->gstream);
+        if (use_norm) cudaMemsetAsync(c->dacc, 0, sizeof(double), c->gstream);
+        pwa_fpwf_forward_kernel<<<thr, 256, 0, c->gstream>>>(
+            h->common_T, c->dck_r, c->dck_i, h->w, h->b,
+            nw, P, ne, use_norm, c->d_norm,
             h->dQ, h->dP, h->dG,
-            want_dn ? c->dacc : NULL, c->qacc);
-        CUDA_CHECK(cudaGetLastError());
+            use_norm ? c->dacc : NULL, c->qacc);
+        fpwf_gradreduce_kernel<<<grid, 256, 0, c->gstream>>>(
+            h->common_T, h->dG, c->dgck, N, (int)np_rows, segrows);
+        if (cudaStreamEndCapture(c->gstream, &c->graph) == cudaSuccess &&
+            cudaGraphInstantiate(&c->gexec, c->graph, 0) == cudaSuccess) {
+            c->graph_handle = h;
+            c->graph_mode = use_norm;
+            c->graph_ne = ne;
+            c->graph_ct = h->common_T;
+            _UPLOAD_INPUTS(c->gstream);
+            cudaGraphLaunch(c->gexec, c->gstream);
+            cudaStreamSynchronize(c->gstream);
+            _graph_hit = 1;
+        } else {
+            // capture unsupported -> plain launches (default stream)
+            if (c->graph) { cudaGraphDestroy(c->graph); c->graph = NULL; }
+            _UPLOAD_INPUTS(0);   // stream 0 = legacy default stream
+            cudaMemset(c->qacc, 0, sizeof(double));
+            cudaMemset(c->dgck, 0, (size_t)N * sizeof(double2));
+            if (use_norm) cudaMemset(c->dacc, 0, sizeof(double));
+            pwa_fpwf_forward_kernel<<<thr, 256>>>(
+                h->common_T, c->dck_r, c->dck_i, h->w, h->b,
+                nw, P, ne, use_norm, c->d_norm,
+                h->dQ, h->dP, h->dG,
+                use_norm ? c->dacc : NULL, c->qacc);
+            fpwf_gradreduce_kernel<<<grid, 256>>>(
+                h->common_T, h->dG, c->dgck, N, (int)np_rows, segrows);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
-    // total Q: single scalar accumulated in the kernel (no whole-array D2H)
+    #undef _UPLOAD_INPUTS
+
+    // ---- host-side scalar/array copies, all AFTER the GPU kernels ----
     cudaMemcpy(oQ, c->qacc, sizeof(double), cudaMemcpyDeviceToHost);
     if (want_dn)
         cudaMemcpy(odn, c->dacc, sizeof(double), cudaMemcpyDeviceToHost);
-
-    // ---- per-event P (only when explicitly requested) ----
     if (oP) cudaMemcpy(oP, h->dP, (size_t)ne * sizeof(double),
                        cudaMemcpyDeviceToHost);
-
-    // ---- ck gradient: reduction kernel over F (no cuBLAS) ----
-    // ogck[k] = Σ_{row=0}^{ne*P-1} F[k*total + row] * G[row]
-    // Grid = (row-segments) x (N columns); column-contiguous coalesced reads.
     {
-        int total = (int)np_rows;
-        cudaMemset(c->dgck, 0, (size_t)N * sizeof(double2));
-        int seg = 2048;
-        int nseg = (total + seg - 1) / seg;
-        // gridDim.y = N: one block per (row segment, column) gives enough
-        // blocks to saturate; G re-reads are L2-served.
-        dim3 grid((unsigned)nseg, (unsigned)N);
-        fpwf_gradreduce_kernel<<<grid, 256>>>(
-            h->common_T, h->dG, c->dgck, N, total, seg);
-        CUDA_CHECK(cudaGetLastError());
         double2* zh = (double2*)malloc((size_t)N * sizeof(double2));
         if (zh) {
             cudaMemcpy(zh, c->dgck, (size_t)N * sizeof(double2),
@@ -1666,6 +1747,10 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         }
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &_ts);
+    _he = 1e3 * _ts.tv_sec + _ts.tv_nsec / 1e6;
+    fprintf(stderr, "[ampfit timing] %s host-core %.3f ms\n",
+            _graph_hit ? "graph" : "launch", _he - _hs);
 out:
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
