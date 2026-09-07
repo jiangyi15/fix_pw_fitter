@@ -419,7 +419,7 @@ class Fitter:
           ``data: ./data_slice.npy`` (N, n_finals, 4), ``data_weight``
           per-event weights, and analogously for ``phsp``.  The momenta
           are converted on the fly to the kernel-array format with the
-          model-matched converter (``pwa_event_data`` for single-block
+          model-matched converter (``pwa_event_data_tree`` for single-block
           pure-PWA models, ``momenta_to_data`` for the legacy block models).
           ``data.dat_order`` names the per-column final particles (default:
           ``cfg.finals``).  An optional per-event ``{prefix}_bg_value``
@@ -504,8 +504,21 @@ class Fitter:
         from ampfit.config_loader import row_block_factors
         C = row_block_factors(self.config.dic)[2]
         if C == 1:
-            from ampfit.pwa_build import pwa_event_data
-            out = pwa_event_data(self.config, self.kernel_config, momenta)
+            # generic tree-based event fill (arbitrary chain depth; appends
+            # +3 alignment columns per spinful final shared by >1 active
+            # topology).  Replaces the former 2-decay-only pwa_event_data
+            # (NLL shift on the real 609k pi+pi-eta fit < 0.03).
+            from ampfit.pwa_build import pwa_event_data_tree
+            chains_by_topo = {}
+            for _, chain in self.config.full_decay.get_partial_waves():
+                tid = self.config.topo_index[chain.topo_id()]
+                chains_by_topo[tid] = chain
+            spinful = [nm for nm in self.config.finals
+                       if float(self.config.dic["particle"][nm].get("J", 0))
+                       != 0]
+            out = pwa_event_data_tree(self.config, self.kernel_config,
+                                      chains_by_topo, momenta,
+                                      spinful_names=spinful)
             out["weight"] = np.asarray(weight, dtype=float)
             if bg is not None:
                 out["bkg"] = bg
