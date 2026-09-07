@@ -200,6 +200,43 @@ def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
 
 
 
+
+def _duck_chain_from_struct(cfg, tid):
+    """A pure-geometry chain-like object for a DECLARED topology slot.
+
+    Built from the decay structure path (pairing tree), with no partial
+    waves / resonance replacement - used to fill REAL mass/q/angle rows for
+    pairings that declare no resonances.  The object only needs
+    ``decays[*].core.name`` / ``.outs[*].name`` and a ``.decays`` list for
+    ``decay_chain_leaves`` / ``decay_angles_vectorized``.
+    """
+    from types import SimpleNamespace
+    for path in cfg.decay_struct:
+        outs_all = {}
+        for p, outs, _kw in path:
+            outs_all[p] = list(outs)
+
+        def _leaves(n):
+            if n not in outs_all:
+                return [n]
+            out = []
+            for o in outs_all[n]:
+                out += _leaves(o)
+            return out
+
+        cores = [p for p in outs_all if p != cfg.top]
+        key = tuple(sorted(tuple(sorted(_leaves(c))) for c in cores))
+        if cfg.topo_index.get(key) != tid:
+            continue
+        decays = []
+        for p, outs, _kw in path:
+            core = SimpleNamespace(name=p)
+            outs_p = [SimpleNamespace(name=o) for o in outs]
+            decays.append(SimpleNamespace(core=core, outs=outs_p))
+        return SimpleNamespace(decays=decays, top=cfg.top)
+    return None
+
+
 def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
                         cm_boost=True):
     """Tree-shape event buffers (mass/q/angle [+alignment]) by FLAT loops.
@@ -216,7 +253,10 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
       phi-first vertex columns; plus per-row alignment euler columns when
       the spinful finals are shared by >1 active topology.
 
-    Rows with no chain stay zero.  *momenta*: (n_events, n_finals, 4) in
+    Every DECLARED topology row is filled with real values: active rows use
+    their partial-wave chain, rows whose pairing declares no resonances are
+    filled from the pairing's pure-geometry tree (``_duck_chain_from_struct``,
+    no partial waves needed).  *momenta*: (n_events, n_finals, 4) in
     ``cfg.finals`` order.
     """
     from ampfit.helicity_angle import decay_chain_leaves
@@ -235,10 +275,12 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
                          for j in range(mom0.shape[1])], axis=1)
     leaf_of_name = {finals[j]: mom0[:, j] for j in range(len(finals))}
 
-    rows = [chains_by_topo.get(t) for t in range(n_topo)]
-    active = [ch for ch in rows if ch is not None]
+    real = [chains_by_topo.get(t) for t in range(n_topo)]
+    rows = [ch if ch is not None else _duck_chain_from_struct(cfg, t)
+            for t, ch in enumerate(real)]
+    active = [ch for ch in real if ch is not None]
     need_align = len(active) > 1 and bool(spinful_names)
-    nv = len(active[0].decays)
+    nv = len(rows[0].decays)
 
     mass = np.zeros((n, n_topo * n_res))
     q = np.zeros((n, n_topo * n_decay))
@@ -308,7 +350,7 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
             Mp = np.maximum(inv_m[idx], mm[0] + mm[1])
             q[:, n_decay * tid + idx] = _two_body_p(Mp, mm[0], mm[1])
 
-        if need_align:
+        if need_align and chain in active:
             from ampfit.momenta_to_angles import aligned_euler_from_chain
             m_node = {nm: np.full(n, float(cfg.dic["particle"][nm]["mass"]))
                       for nm in names}
