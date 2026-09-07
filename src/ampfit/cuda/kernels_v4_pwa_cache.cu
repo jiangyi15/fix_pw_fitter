@@ -34,7 +34,6 @@
  */
 
 #include <cuda_runtime.h>
-#include <time.h>
 #include <device_launch_parameters.h>
 #include <thrust/complex.h>
 #include <cstdio>
@@ -1614,9 +1613,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     if (odn) *odn = 0.0;
 
     // graph/launch shared declarations (kept above the goto guards)
-    struct timespec _ts;
-    double _hs, _he;
-    int _graph_hit;
     int thr = (int)(((size_t)ne + 255) / 256);
     int segrows = 2048;
     int nseg = (int)((np_rows + segrows - 1) / segrows);
@@ -1662,9 +1658,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     // ── fixed-cache evaluation: CUDA-graph replay when available, else
     // plain per-call launches.  norm + ck live in stable device buffers so
     // the captured kernels only ever see fixed pointers.
-    clock_gettime(CLOCK_MONOTONIC, &_ts);
-    _hs = 1e3 * _ts.tv_sec + _ts.tv_nsec / 1e6;
-    _graph_hit = 0;
 
     #define _UPLOAD_INPUTS(STREAM)                                          \
         do {                                                               \
@@ -1683,7 +1676,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         _UPLOAD_INPUTS(c->gstream);
         cudaGraphLaunch(c->gexec, c->gstream);
         cudaStreamSynchronize(c->gstream);
-        _graph_hit = 1;
     } else {
         // (re)capture for this (handle, use_norm) pair
         if (c->gexec) { cudaGraphExecDestroy(c->gexec); c->gexec = NULL; }
@@ -1708,7 +1700,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             _UPLOAD_INPUTS(c->gstream);
             cudaGraphLaunch(c->gexec, c->gstream);
             cudaStreamSynchronize(c->gstream);
-            _graph_hit = 1;
         } else {
             // capture unsupported -> plain launches (default stream)
             if (c->graph) { cudaGraphDestroy(c->graph); c->graph = NULL; }
@@ -1747,10 +1738,6 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
         }
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &_ts);
-    _he = 1e3 * _ts.tv_sec + _ts.tv_nsec / 1e6;
-    fprintf(stderr, "[ampfit timing] %s host-core %.3f ms\n",
-            _graph_hit ? "graph" : "launch", _he - _hs);
 out:
     cudaFree((void*)p.ck_real); cudaFree((void*)p.ck_imag);
     cudaFree((void*)p.m0); cudaFree((void*)p.g0);
