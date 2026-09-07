@@ -436,6 +436,47 @@ def _d_single_freq_parts(J, m, mp):
             if abs(c) > 1e-10]
 
 
+def _euler_phase_parts(m, phi_kind_angle_name=("c", 0.0)):
+    """Parts of e^{+i·m·x}: (coef, (kind, freq)) with freq=|m|.
+
+    e^{+imx} = cos(mx) + i·sin(mx); for negative m the sin term flips sign.
+    """
+    m = to_spin(m)
+    mf = float(m)
+    if mf == 0.0:
+        return [(1.0, ("c", 0.0))]
+    parts = [(1.0, ("c", abs(mf)))]
+    parts.append((1j if mf > 0 else -1j, ("s", abs(mf))))
+    return parts
+
+
+def alignment_D_parts(j, m, mp):
+    """Conjugate Wigner-D over three alignment angles.
+
+    ``D^{j*}_{m,mp}(alpha, beta, gamma) = e^{+im·alpha} · d^j_{m,mp}(beta)
+                                          · e^{+i·mp·gamma}``
+    (same conjugate convention as ``wigner_D_conj`` used by the vertex
+    amplitudes, extended with the third Euler angle).  Returns
+    ``(alpha_parts, beta_parts, gamma_parts)`` where each is a list of
+    ``(coef, (kind, freq))`` monomial factors, so the whole factor is
+
+        Σ_{a} Σ_{b} Σ_{g} coef_a·coef_b·coef_g
+                              · trig_a(alpha) · trig_b(beta) · trig_g(gamma)
+
+    with ``trig`` = cos(freq·x) / sin(freq·x).  At alpha=beta=gamma=0 the
+    factor reduces to ``δ_{m,mp}`` (identity), so setting the alignment
+    angles to zero reproduces the un-aligned amplitude.
+    """
+    j = to_spin(j)
+    m, mp = to_spin(m), to_spin(mp)
+    if abs(float(m)) > float(j) or abs(float(mp)) > float(j)             or (int(2 * j) - int(2 * m)) % 2 or (int(2 * j) - int(2 * mp)) % 2:
+        return [], [], []
+    alpha_parts = _euler_phase_parts(m)
+    beta_parts = [(c, (k, fr)) for fr, k, c in _d_single_freq_parts(j, m, mp)]
+    gamma_parts = _euler_phase_parts(mp)
+    return alpha_parts, beta_parts, gamma_parts
+
+
 def _vertex_monomials(Ja, Jb, Jc, lam, lb, lc, l, s):
     """Sparse monomials of one vertex factor (only its φ,θ variables set).
 
