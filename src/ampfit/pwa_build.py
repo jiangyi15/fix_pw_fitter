@@ -410,7 +410,10 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
                 mass[:, n_res * tid + idx - 1] = inv_m[idx]
             mm = [(inv_m[idx_of[o.name]] if o.name in idx_of
                    else inv_leaf[o.name]) for o in d.outs]
-            q[:, n_decay * tid + idx] = _two_body_p(inv_m[idx], mm[0], mm[1])
+            # two-body |p| with a data-only threshold clamp (mirrors the
+            # legacy pwa_event_data convention of np.maximum(M, m1+m2))
+            Mp = np.maximum(inv_m[idx], mm[0] + mm[1])
+            q[:, n_decay * tid + idx] = _two_body_p(Mp, mm[0], mm[1])
 
         if need_align:
             from ampfit.momenta_to_angles import aligned_euler_from_chain
