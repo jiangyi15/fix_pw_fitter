@@ -6,7 +6,7 @@ from ampfit.momenta_to_angles import (
     aligned_euler_from_momenta, _chain_total_rotations,
 )
 
-LC_CONFIG = """data_order:
+LC_CONFIG = """data:
     dat_order: [Lambda, pip, eta]
     data: /tmp/does-not-exist.npy
     phsp: /tmp/does-not-exist.npy

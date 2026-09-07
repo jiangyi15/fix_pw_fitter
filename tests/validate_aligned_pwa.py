@@ -30,7 +30,7 @@ from ampfit.config_loader import Config
 from ampfit.pwa_build import pwa_event_data_tree
 from ampfit.momenta_to_angles import aligned_euler_from_momenta
 
-CONFIG = """data_order:
+CONFIG = """data:
     dat_order: [p, pim, pip, eta]
     data: /tmp/does-not-exist.npy
     phsp: /tmp/does-not-exist.npy
