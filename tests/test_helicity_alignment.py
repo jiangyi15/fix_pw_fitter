@@ -58,3 +58,22 @@ def test_matches_numeric_at_random_angles(J):
         mono = _D_mono(J, m, mp, alpha, beta, gamma)
         num = _D_num(J, m, mp, alpha, beta, gamma)
         assert abs(mono - num) < 1e-6, (J, m, mp, alpha, beta, gamma)
+
+
+@pytest.mark.parametrize("J", [0.5, 1, 1.5, 2])
+def test_alignment_is_unitary_invariant_single_top(J):
+    """Summing |A|^2 over the aligned helicity index is invariant under any
+    random alignment rotation (D is unitary), i.e. the random alignment
+    angles cannot change the amplitude square of a single topology.
+    """
+    rng = np.random.RandomState(7)
+    ms = helicity_values(J)
+    for _ in range(30):
+        # amplitude over the final helicity of one topology (fixed wave/angles)
+        A = np.array([complex(rng.randn(), rng.randn()) for _ in ms])
+        alpha, beta, gamma = rng.uniform(0, 2 * np.pi, 3)
+        # unitary T[m',m] = D^{j*}_{m',m}(alpha,beta,gamma)
+        T = np.array([[_D_mono(J, mp, m, alpha, beta, gamma)
+                       for m in ms] for mp in ms])
+        B = T @ A
+        assert abs(np.sum(np.abs(B) ** 2) - np.sum(np.abs(A) ** 2)) < 1e-6
