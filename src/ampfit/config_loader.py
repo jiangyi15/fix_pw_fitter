@@ -603,6 +603,13 @@ class Config:
         return out
 
 
+    def _n_active_topologies(self):
+        """Number of topologies that actually produce partial waves."""
+        if getattr(self, "_active_topo_cache", None) is None:
+            pw = list(self.full_decay.get_partial_waves())
+            self._active_topo_cache = len({dc.topo_id() for _, dc in pw})
+        return self._active_topo_cache
+
     def _wave_angle_terms(self, decaychain, ls, lam):
         """Angular terms of one partial wave for one projection lambda.
 
@@ -658,13 +665,12 @@ class Config:
                                   phi_first=True)
             return m
 
-        # ---- spinless finals (or legacy int lam): original path ----
-        if not aligned_idx or new_canon is None:
-            mono = _mono(new_canon if new_canon is not None else
-                         None if lam_top_in is not None else None)
-            # legacy: leaf lambdas zero unless a canonical state was given
-            if new_canon is None and not aligned_idx:
-                mono = _mono(None)
+        # ---- no alignment needed (spinless finals, legacy int lam, or a
+        # ---- single active topology): original per-state tree monomial ----
+        need_align = (aligned_idx and new_canon is not None
+                      and self._n_active_topologies() > 1)
+        if not need_align:
+            mono = _mono(new_canon)
             terms = []
             for key, coef in mono.items():
                 if abs(coef) < 1e-12:
