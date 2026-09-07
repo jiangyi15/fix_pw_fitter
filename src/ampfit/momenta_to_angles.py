@@ -572,7 +572,8 @@ def _cm_reference_frames(mom_name_arrays, spinful_names):
     (``aligned_angle_ref_rule2`` in tf-pwa/cal_angle.py); the reference
     boost matrix is the identity.
     """
-    from ampfit.su2 import Identity, _mul, inv as su2_inv, Boost_z_from_p
+    from ampfit.su2 import (Identity, _mul, Rotation_y, Rotation_z, Boost_z,
+                            Boost_z_from_p, inv as su2_inv)
     r_ref = {}
     for nm in spinful_names:
         p = np.asarray(mom_name_arrays[nm], dtype=float)      # (N,4) in CM
@@ -584,13 +585,13 @@ def _cm_reference_frames(mom_name_arrays, spinful_names):
         z0 = np.tile([0.0, 0.0, 1.0], (N, 1))
         x0 = np.tile([1.0, 0.0, 0.0], (N, 1))
         y0 = _cross_vec(z0, x0)
-        # triad (xc, p3) with the same x convention as the chain geometry
-        xc = child_xz_cm(p3, x0, z0)
-        yc = _cross_vec(p3, xc)
-        Mc = np.stack([xc, yc, p3], axis=-1)
-        M0 = np.tile(np.eye(3), (N, 1, 1))
-        Rv = np.matmul(Mc, np.swapaxes(M0, -1, -2))
-        r = _rotation_matrix_to_su2(Rv)
+        # tf-pwa rule2: r = Ry(beta) Rz(alpha) with the final momentum
+        # direction in the lab (their angle_zx_z_getx convention; no sign
+        # canonicalization - matches aligned_angle_ref_rule2 exactly)
+        beta = np.arccos(np.clip(np.einsum('ni,ni->n', p3, z0), -1.0, 1.0))
+        alpha = np.arctan2(np.einsum('ni,ni->n', p3, y0),
+                           np.einsum('ni,ni->n', p3, x0))
+        r = _mul(Rotation_y(beta), Rotation_z(alpha))
         Bp = Boost_z_from_p(p)
         rr = _mul(_mul(su2_inv(r), Bp), r)
         ml = _massless_mask(p)
