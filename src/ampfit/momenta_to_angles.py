@@ -587,7 +587,7 @@ def child_xz_cm(zc, x0, z0):
 
 
 def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
-                               final_rest=True, align_ref="center_mass"):
+                               final_rest=False, align_ref="center_mass"):
     """Alignment euler angles for spinful finals shared by >1 topology.
 
     Mirrors ``cal_angle_from_particle`` in tf-pwa/cal_angle.py with either
@@ -613,7 +613,7 @@ def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
         chains: list of ampfit DecayChain (active topologies).
         mom_name_arrays: dict final-name -> (n_events, 4) momentum in CM.
         spinful_names: canonical-order list of spinful final names.
-        final_rest: wrap R with the final-rest boosts (default True).
+        final_rest: wrap R with the final-rest boosts (default False).
         align_ref: "center_mass" or "chain".
 
     Returns:
