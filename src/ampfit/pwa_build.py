@@ -56,214 +56,35 @@ def pwa_duplication_factors(cfg):
 
 
 def build_pwa_kernel_config(cfg):
-    """Kernel-config dict for a pure-PWA Config (single flavour block).
+    """Pure-PWA kernel config as a thin view over the generic loader index.
 
-    Returns the same keys as ``Config.build_all_index()`` plus ``n_proj``
-    and ``wave_names``.  Wave ordering = ``full_decay.get_partial_waves()``
-    (chain-major).  One ck per partial wave (length N), shared across the
-    n_proj spin projections.
+    The multi-topology-capable kernel arrays come from
+    ``Config.build_all_index()`` (proved numerically identical to the former
+    duplicated builder on config_pwa.yml); this wrapper only adds the few
+    meta keys the pure-PWA consumers/tests use (wave names, external
+    helicity states, identical-particle count, BW/gamma parameter names).
     """
-    n_id, n_cp, (id_groups, cp_groups) = pwa_duplication_factors(cfg)
-    if n_id != 1 or n_cp != 1:
-        raise NotImplementedError(
-            "pwa_build: identical-particle/cp row-block expansion not yet "
-            f"implemented (n_id={n_id}, n_cp={n_cp}); use a single-flavour "
-            "config without identical/CP partners for now")
-
-    from ampfit.helicity_angle import (
-        decay_chain_to_tree, tree_vertices, tree_leaves,
-        amplitude_monomials, _reduce_layout, canonical_variables, to_spin)
-
-    waves_iter = cfg.full_decay.get_partial_waves()       # [(ls, chain), …]
-    if not waves_iter:
-        raise ValueError("no partial waves in config")
-    N = len(waves_iter)
-    n_decay = len(waves_iter[0][1].decays)
-    n_res = n_decay - 1
-    # single topology block (assumed identical for all active chains)
-    topo_id_map = cfg.topo_index
-    topo = 0
-    if len(topo_id_map) > 1:
-        # all wave-active chains must share one topology for this builder
-        topos = {topo_id_map[ch.topo_id()] for _, ch in waves_iter}
-        if len(topos) != 1:
-            raise NotImplementedError(
-                "pwa_build: multiple topologies not yet supported")
-        topo = next(iter(topos))
-
-    # external spin projections (helicities) of the top
-    top_core = waves_iter[0][1].decays[0].core
-    top_spins = getattr(top_core, "spins", None)
-    if top_spins is None:
-        top_states = [to_spin(m)
-                      for m in range(-to_spin(top_core.J), to_spin(top_core.J) + 1)]
-    else:
-        top_states = [to_spin(m) for m in top_spins]
-    P = cfg.n_proj if getattr(cfg, "n_proj", None) else len(top_states)
-    if P != len(top_states):
-        raise ValueError(
-            f"config n_proj={P} != number of top helicity states "
-            f"{len(top_states)}")
-
-    # ── resonance / width / form-factor unique tables (single block) ───────
-    m0_phys, g0_phys, unique_l = [], [], []
-    unique_bw, unique_gamma, unique_fl = [], [], []
-    bw_gamma = {}
-    for ls, chain in waves_iter:
-        for li in ls:
-            lv = int(li[0])
-            if lv not in unique_l:
-                unique_l.append(lv)
-        for idx, decay in enumerate(chain.decays):
-            if idx != 0:                       # sub-decay resonance
-                m_name = decay.core.name + "_mass"
-                if m_name not in m0_phys:
-                    m0_phys.append(m_name)
-                m_idx = n_res * topo + idx - 1
-                bw_id = (m_name, m_idx)
-                if bw_id not in unique_bw:
-                    unique_bw.append(bw_id)
-                tmp = []
-                for g0 in decay.core._model.get_gamma_name():
-                    if g0 not in g0_phys:
-                        g0_phys.append(g0)
-                    g_id = (g0, m_idx)
-                    if g_id not in unique_gamma:
-                        unique_gamma.append(g_id)
-                    tmp.append(g_id)
-                bw_gamma[bw_id] = tmp
-            fl_id = (int(ls[idx][0]), n_decay * topo + idx)
-            if fl_id not in unique_fl:
-                unique_fl.append(fl_id)
-
-    # matrix_gamma (gamma rows → unique bw columns)
-    matrix_gamma = np.zeros((len(unique_gamma), len(unique_bw)))
-    for bi, k in enumerate(unique_bw):
-        for j in bw_gamma[k]:
-            matrix_gamma[unique_gamma.index(j), bi] = 1.0
-
-    # ── per-wave angular columns: (proj p, base wave k), entries p-major ──
-    # canonical variable columns of each chain (full 2·nv phi-first layout)
-    nv_list = []
-    for _, chain in waves_iter:
-        tree = decay_chain_to_tree(chain)
-        nv_list.append(len(tree_vertices(tree)))
-    nv = nv_list[0]
-    if any(v != nv for v in nv_list):
-        raise NotImplementedError(
-            "pwa_build: chains with different vertex counts not supported")
-    variables = canonical_variables(nv, top_j0=False)     # 2·nv columns
-
-    key_set = {}                       # mono key → matrix row
-    bw_order = []
-    fl_order = []
-    cols = {}                          # (p, k) -> [(row, coeff), …]
-    for kk, (ls, chain) in enumerate(waves_iter):
-        for idx in range(n_decay):     # bw/fl rows mirror build_single_index
+    kc = cfg.build_all_index()
+    n_id, n_cp, _ = pwa_duplication_factors(cfg)
+    kc["n_identical"] = n_id
+    kc["n_cp"] = n_cp
+    kc["top_states"] = [int(x) for x in (cfg._helicity_top_states()
+                                          if hasattr(cfg, "_helicity_top_states")
+                                          else [])] or None
+    kc["wave_names"] = [str(ls) for ls, _ in cfg.full_decay.get_partial_waves()]
+    m0, g0 = [], []
+    for _, ch in cfg.full_decay.get_partial_waves():
+        for idx, d in enumerate(ch.decays):
             if idx != 0:
-                m_name = chain.decays[idx].core.name + "_mass"
-                bw_order.append(unique_bw.index((m_name,
-                                                 n_res * topo + idx - 1)))
-            fl_id = (int(ls[idx][0]), n_decay * topo + idx)
-            fl_order.append(unique_fl.index(fl_id))
-        tree = decay_chain_to_tree(chain)
-        leaves = tree_leaves(tree)
-        n_leaves = len(leaves)
-        for p, lam_top in enumerate(top_states):
-            _, mono = amplitude_monomials(
-                tree, tuple(ls), lam_top, tuple(0 for _ in range(n_leaves)))
-            _, mono = _reduce_layout(mono, nv, (), phi_first=True)
-            row_list = []
-            for key, coef in mono.items():
-                if abs(coef) < 1e-12:
-                    continue
-                if key not in key_set:
-                    key_set[key] = len(key_set)
-                row_list.append((key_set[key], coef))
-            cols[(p, kk)] = row_list
-
-    basis = [None] * len(key_set)
-    for key, i in key_set.items():
-        basis[i] = key
-
-    nac = len(variables)
-    angle_k = np.zeros((len(basis), nac))
-    angle_b = np.zeros((len(basis), nac))
-    angle_index = np.zeros(len(basis), dtype=np.int32)
-    for i, key in enumerate(basis):
-        for j, (kind, f) in enumerate(key):
-            fr = float(f)
-            angle_k[i, j] = (round(fr) if abs(fr - round(fr)) < 1e-9 else fr)
-            angle_b[i, j] = 0.0 if kind == 'c' else -math.pi / 2.0
-
-    matrix_angle = np.zeros((len(basis), P * N), dtype=complex)
-    for (p, kk), row_list in cols.items():
-        col = p * N + kk
-        for (r, c) in row_list:
-            matrix_angle[r, col] += c
-
-    # per-entry row arrays are stored p-major too: duplicate the base-wave
-    # bw_order / fl_order rows P times (entry w = p*N + k owns the rows of
-    # base wave k).  Index/unique arrays (m0/mass/g0/fl_q/gamma) stay shared.
-    bw_order = np.concatenate([np.array(bw_order, dtype=np.int32)] * P)
-    fl_order = np.concatenate([np.array(fl_order, dtype=np.int32)] * P)
-
-    # ── mass / q / gamma / fl index arrays ────────────────────────────────
-    m0_index = np.array([m0_phys.index(k[0]) for k in unique_bw], dtype=np.int32)
-    mass_index = np.array([k[1] for k in unique_bw], dtype=np.int32)
-    g0_index = np.array([g0_phys.index(k[0]) for k in unique_gamma],
-                        dtype=np.int32)
-    g0_mass_index = np.array([k[1] for k in unique_gamma], dtype=np.int32)
-    fl_type = np.array([unique_l.index(k[0]) for k in unique_fl],
-                       dtype=np.int32)
-    fl_q_index = np.array([k[1] for k in unique_fl], dtype=np.int32)
-
-    gamma_table_d, g_min, g_delta = cfg.build_gamma_table()
-    gamma_table = np.stack([gamma_table_d[name] for name in g0_phys], axis=0)
-    fl_table, fl_min, fl_delta = cfg.build_fl_table(unique_l)
-
-    n_m0_params = len(m0_phys)
-    n_g0_params = len(g0_phys)
-
-    ret = {
-        "m0_index": m0_index,
-        "g0_index": g0_index,
-        "g0_mass_index": g0_mass_index,
-        "mass_index": mass_index,
-        "fl_type": fl_type,
-        "fl_q_index": fl_q_index,
-        "bw_order": bw_order,
-        "fl_order": fl_order,
-        "angle_index": angle_index,
-        "angle_k": angle_k,
-        "angle_b": angle_b,
-        "matrix_angle": matrix_angle,
-        "gamma_table": gamma_table,
-        "gamma_min": g_min,
-        "gamma_delta": g_delta,
-        "matrix_gamma": matrix_gamma,
-        "fl_table": fl_table,
-        "fl_min": fl_min,
-        "fl_delta": fl_delta,
-        "n_proj": P,
-        # metadata for data building / later block expansion
-        "n_identical": n_id,
-        "n_cp": n_cp,
-        "variables": variables,          # [(vertex, 'phi'|'theta'), …]
-        "wave_names": [pw[1].__str__() + str(pw[0]) for pw in waves_iter],
-        "top_states": top_states,
-        # Fitter-facing names (single flavour block, one ck per wave)
-        "m0_names": list(m0_phys),
-        "g0_names": list(g0_phys),
-    }
-    # one ck per partial wave, ordered as in full_decay.get_partial_waves
-    pw_params = list(cfg.full_decay.get_partial_waves_params())
-    if len(pw_params) != N:
-        raise ValueError(
-            f"pwa_build: partial-wave params ({len(pw_params)}) != waves "
-            f"({N})")
-    ret["ck_map"] = pw_params
-    return ret
+                nm = d.core.name + "_mass"
+                if nm not in m0:
+                    m0.append(nm)
+                for gn in d.core._model.get_gamma_name():
+                    if gn not in g0:
+                        g0.append(gn)
+    kc["m0_names"] = m0
+    kc["g0_names"] = g0
+    return kc
 
 
 def _two_body_q(M, m1, m2):
