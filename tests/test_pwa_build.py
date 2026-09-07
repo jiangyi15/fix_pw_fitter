@@ -362,3 +362,80 @@ def test_spinless_finals_projection_unchanged(tmp_path):
     assert all(t == 0 for _, leaves in states for t in leaves)
     kc = c.build_all_index()
     assert int(kc.get("n_proj", 1)) == 2
+
+
+JPSI_LAMBDA_CASCADE = """
+# J/psi -> Lambda Lambdabar -> (p pi-)(pbar pi+): two decaying daughters
+# (B->rho rho style cascade) with spinful final nucleons.
+data:
+    dat_order: [p, pim, pbar, pip]
+    data: /tmp/does-not-exist.npy
+    phsp: /tmp/does-not-exist.npy
+
+decay:
+    Jpsi:
+    - [Lambda, Lb]
+    Lambda: [p, pim]
+    Lb: [pbar, pip]
+
+particle:
+    $top: Jpsi
+    $finals: [p, pim, pbar, pip]
+    Jpsi:
+        J: 1
+        P: -1
+        spins: [-1, 0, 1]
+        mass: 3.0969
+    Lambda:
+        J: 0.5
+        P: +1
+        spins: [-0.5, 0.5]
+        mass: 1.11568
+        width: 2.5e-9
+        model: BW
+    Lb:
+        J: 0.5
+        P: -1
+        spins: [-0.5, 0.5]
+        mass: 1.11568
+        width: 2.5e-9
+        model: BW
+    p:
+        J: 0.5
+        P: +1
+        spins: [-0.5, 0.5]
+        mass: 0.93827
+    pim:
+        J: 0
+        P: -1
+        mass: 0.13957
+    pbar:
+        J: 0.5
+        P: -1
+        spins: [-0.5, 0.5]
+        mass: 0.93827
+    pip:
+        J: 0
+        P: -1
+        mass: 0.13957
+"""
+
+
+def test_cascade_two_decaying_daughters_spinful_finals(tmp_path):
+    """B->rho rho style cascade: both top daughters decay; spinful final
+    nucleons enter the projections.
+
+    J/psi(1) -> Lambda(1/2) + Lambdabar(1/2), each -> p(1/2) + pi.
+    Expect: 2 waves (Lambdabar S,D), P = 3 (top) x 2 (p) x 2 (pbar) = 12,
+    n_wave = 24.
+    """
+    cfg = tmp_path / "cascade.yml"
+    cfg.write_text(JPSI_LAMBDA_CASCADE)
+    c = Config(str(cfg))
+    assert len(c._helicity_external_states()) == 12
+    kc = c.build_all_index()
+    nproj = int(kc.get("n_proj", 1))
+    n_wave = kc["matrix_angle"].shape[1]
+    assert nproj == 12 and n_wave == 24 and n_wave % nproj == 0
+    assert n_wave // nproj == 2            # Lambda-Lambdabar S,D waves
+    assert len(kc["angle_k"]) > 0
