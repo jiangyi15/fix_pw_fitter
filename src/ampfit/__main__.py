@@ -74,11 +74,22 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="python -m ampfit",
-        description="Run ampfit scripts/fits from the current module tree.")
+        description="Run ampfit scripts/fits from the current module tree.",
+        add_help=False)
     parser.add_argument("command", nargs="?", help="script name, e.g. run_fit")
     parser.add_argument("--list", action="store_true", dest="list_",
                         help="list available commands")
+    # -h/--help is intentionally NOT a known option here: when a command is
+    # given it must stay in *rest* and be forwarded to the target script
+    # (e.g. `python -m ampfit run_fit --help` -> run_fit's own usage).
     args, rest = parser.parse_known_args(argv)
+    top_help = (args.command is None
+                and any(t in ("-h", "--help") for t in argv))
+
+    # top-level --help only makes sense without a command
+    if top_help:
+        parser.print_help()
+        return 0
 
     if args.list_ or args.command is None:
         avail = _available()
