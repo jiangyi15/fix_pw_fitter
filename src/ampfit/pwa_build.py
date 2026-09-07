@@ -572,22 +572,26 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
                     stack += [o.name for o in dd.outs]
             core_leaves.append(acc)
 
-        # core invariant masses (idx in decays order)
+        # invariant masses always from the DATA: a core from its descendant
+        # leaves, a leaf from its own momentum (E^2 - |p|^2) - no table mass
+        def _inv(m4):
+            e2 = m4[..., 0] * m4[..., 0]
+            p2 = np.sum(m4[..., 1:] * m4[..., 1:], axis=-1)
+            return np.sqrt(np.clip(e2 - p2, 0., None))
+
         inv_m = []
         for acc in core_leaves:
             cm = np.zeros((n, 4))
             for li in acc:
                 cm = cm + mom[:, li]
-            e2 = cm[..., 0] * cm[..., 0]
-            p2 = np.sum(cm[..., 1:] * cm[..., 1:], axis=-1)
-            inv_m.append(np.sqrt(np.clip(e2 - p2, 0., None)))
+            inv_m.append(_inv(cm))
         idx_of = {d.core.name: i for i, d in enumerate(chain.decays)}
-        leaf_m = {nm: float(cfg.dic["particle"][nm]["mass"]) for nm in names}
+        inv_leaf = {nm: _inv(mom[:, names.index(nm)]) for nm in names}
         for idx, d in enumerate(chain.decays):
             if idx > 0:
                 mass[:, n_res * tid + idx - 1] = inv_m[idx]
             mm = [(inv_m[idx_of[o.name]] if o.name in idx_of
-                   else np.full(n, leaf_m[o.name])) for o in d.outs]
+                   else inv_leaf[o.name]) for o in d.outs]
             q[:, n_decay * tid + idx] = _two_body_p(inv_m[idx], mm[0], mm[1])
 
         if need_align:
