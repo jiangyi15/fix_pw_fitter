@@ -152,3 +152,22 @@ def get_euler_angle(A):
     neg = np.real(overlap) < 0
     gamma = np.where(neg, gamma + 2.0 * np.pi, gamma)
     return alpha, beta, gamma
+
+
+def Identity(shape):
+    """(...,2,2) identity SU(2) for batch shape *shape* (numpy broadcast)."""
+    sh = tuple(np.atleast_1d(np.asarray(shape, dtype=int))) + (2, 2)
+    I = np.zeros(sh, dtype=np.complex128)
+    I[..., 0, 0] = 1.0
+    I[..., 1, 1] = 1.0
+    return I
+
+
+def product(seq):
+    """Product of a sequence of (...,2,2) SU(2) arrays, left applied first."""
+    out = None
+    for U in seq:
+        U = _c(U)
+        out = U if out is None else _mul(out, U)
+    return out
+

@@ -92,8 +92,8 @@ def test_multi_topo_returns_columns(tmp_path):
     out = aligned_euler_from_momenta(chains, mom, ["Lambda"])
     assert out is not None
     a = out["Lambda"]
-    assert a.shape == (3, 3)
-    assert np.all(a[:, 1] >= -1e-12) and np.all(a[:, 1] <= np.pi + 1e-12)
+    assert a.shape == (3, 2, 3)                 # (n_events, n_chains, euler)
+    assert np.all(a[:, :, 1] >= -1e-12) and np.all(a[:, :, 1] <= np.pi + 1e-12)
 
 
 def test_single_topo_returns_none(tmp_path):
@@ -129,6 +129,10 @@ def test_reference_chain_zero(tmp_path):
         if any(o.name == "Lambda" for o in dc.decays[0].outs):
             ref = i
     assert ref is not None
-    # reference column is not returned separately; the chain array aggregates
-    # (reference rows are identically zero by construction of the function).
-    assert out["Lambda"].shape == (3, 3)
+    # reference-chain slice is identically zero; the other chain carries the
+    # real alignment euler.
+    a = out["Lambda"]
+    assert np.allclose(a[:, ref, :], 0.0, atol=1e-12)
+    other = a[:, 1 - ref, :]
+    assert np.all(np.abs(other[:, 0]) > 1e-6) or np.all(
+        np.abs(other[:, 2]) > 1e-6)

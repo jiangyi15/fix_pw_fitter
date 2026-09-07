@@ -429,52 +429,169 @@ def _rotation_matrix_to_su2(M):
     return U
 
 
-def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names):
-    """Alignment euler angles for spinful finals shared by >1 topology.
+def _chain_su2_frames(chain, mom_name_arrays):
+    """tf-pwa-style per-particle SU(2) frame matrices for one chain.
+
+    Returns ``(r_matrix, b_matrix)`` dicts name -> (n_events,2,2) where
+
+      * ``b_matrix[j]`` = Boost_z_from_p(p_rest[j])  (j in its parent rest)
+      * ``r_matrix[j]`` = U_vertex . b_matrix[parent] . r_matrix[parent]
+                          (U_vertex = SU(2) of the vertex triad rotation),
+      reproducing ``cal_helicity_angle`` in tf-pwa/cal_angle.py.
+    """
+    from ampfit.helicity_angle import decay_chain_leaves
+    from ampfit.su2 import Identity, _mul, Boost_z_from_p
+    leaves = decay_chain_leaves(chain)
+    names = [o.name for o in leaves]
+    arrs = [np.asarray(mom_name_arrays[nm], dtype=float) for nm in names]
+    N = arrs[0].shape[0]
+    mom = dict(zip(names, arrs))
+    decays = chain.decays
+    vmap = {d.core.name: i for i, d in enumerate(decays)}
+    subtree = {}
+
+    def collect(name):
+        if name in subtree:
+            return subtree[name]
+        out = {name}
+        for d in decays:
+            if d.core.name == name:
+                for o in d.outs:
+                    out |= collect(o.name)
+        subtree[name] = out
+        return out
+
+    for d in decays:
+        collect(d.core.name)
+    for name in subtree:
+        if name in mom:
+            continue
+        tot = None
+        for nm in subtree[name]:
+            if nm == name:
+                continue
+            m = mom[nm]
+            tot = m if tot is None else tot + m
+        mom[name] = tot
+
+    I = Identity(N)
+    r_matrix = {decays[0].core.name: I}
+    b_matrix = {decays[0].core.name: I}
+
+    def child_xz(zc, x0, z0):
+        dot = np.einsum('ni,ni->n', z0, zc)
+        xv = zc * dot[:, None] - z0
+        n = np.linalg.norm(xv, axis=-1)
+        ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
+                       np.tile([1.0, 0.0, 0.0], (N, 1)),
+                       np.tile([0.0, 1.0, 0.0], (N, 1)))
+        fcross = _cross_vec(z0, ref)
+        fn = np.linalg.norm(fcross, axis=-1)
+        fallback = np.where((fn > 1e-12)[:, None],
+                            fcross / np.maximum(fn, 1e-12)[:, None],
+                            np.tile([0.0, 1.0, 0.0], (N, 1)))
+        xc = np.where((n > 1e-9)[:, None],
+                      xv / np.maximum(n, 1e-12)[:, None], fallback)
+        return np.stack([xc, zc], axis=1)          # (N,2,3)
+
+    top_T = np.stack([np.tile([1.0, 0.0, 0.0], (N, 1)),
+                      np.tile([0.0, 0.0, 1.0], (N, 1))], axis=1)
+
+    def rec(name, p4, T):
+        d = decays[vmap[name]]
+        c0, c1 = d.outs[0].name, d.outs[1].name
+        q0, q1 = p4[c0], p4[c1]
+        x0, z0 = T[:, 0], T[:, 1]
+        z1 = _unit3_vec(q0[:, 1:])
+        bad = np.linalg.norm(z1, axis=-1) < 1e-12
+        z1 = np.where(bad[:, None], _unit3_vec(q1[:, 1:]), z1)
+        z1 = np.where((np.linalg.norm(z1, axis=-1) < 1e-12)[:, None],
+                      np.tile([0.0, 0.0, 1.0], (N, 1)), z1)
+        z1b = _unit3_vec(q1[:, 1:])
+        badb = np.linalg.norm(z1b, axis=-1) < 1e-12
+        z1b = np.where(badb[:, None], -z1, z1b)
+        M0 = _triad_to_matrix(T)
+        for c, qc, zc in ((c0, q0, z1), (c1, q1, z1b)):
+            tc = child_xz(zc, x0, z0)
+            Rv = np.matmul(_triad_to_matrix(tc), np.swapaxes(M0, -1, -2))
+            Uv = _rotation_matrix_to_su2(Rv)
+            rp = r_matrix[name]
+            bp = b_matrix[name]
+            r_matrix[c] = _mul(_mul(Uv, bp), rp)
+            b_matrix[c] = Boost_z_from_p(qc)
+            if c in vmap:
+                Ec = qc[:, 0]
+                beta = np.zeros_like(qc[:, 1:])
+                ok = np.abs(Ec) > 1e-12
+                beta[ok] = qc[ok, 1:] / Ec[ok][:, None]
+                sub = {}
+                for nm in subtree[c]:
+                    sub[nm] = _boost4_vec(p4[nm], beta)
+                rec(c, sub, tc)
+
+    rec(decays[0].core.name, mom, top_T)
+    return r_matrix, b_matrix
+
+
+def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
+                             final_rest=True):
+    """REAL alignment euler angles for spinful finals shared by >1 topology.
+
+    Mirrors ``cal_angle_from_particle`` (align_ref, rule1) in
+    tf-pwa/cal_angle.py: every chain carries per-particle SU(2) frame
+    matrices (rotation *and* boost).  For a non-reference chain the aligned
+    rotation of final *f* is
+
+        R = r_matrix_ref[f] * inv(r_matrix_chain[f])
+        (final_rest) R = b_matrix_ref[f] * R * inv(b_matrix_chain[f])
+
+    and (alpha, beta, gamma) = euler(R) with exact SU(2) sign.  The
+    reference chain itself contributes zero (identity rotation).
 
     Args:
         chains: list of ampfit DecayChain (active topologies).
         mom_name_arrays: dict final-name -> (n_events, 4) momentum in CM.
         spinful_names: canonical-order list of spinful final names.
+        final_rest: wrap R with the final-rest boosts (default True).
 
     Returns:
-        dict name -> (n_events, 3) columns (alpha, beta, gamma) or None when
-        the process has a single active topology (no alignment needed).
+        dict name -> (n_events, n_chains, 3) euler columns ordered like
+        *chains* (reference-chain slice is zero) or None for a single
+        active topology.
     """
     if len(chains) <= 1:
         return None
-    from ampfit.su2 import get_euler_angle
-    # rule1 reference: the first chain where the particle is a direct child
-    # of the top; otherwise the first chain.
+    from ampfit.su2 import _mul, inv as su2_inv, get_euler_angle
+    # rule1 reference: first chain with the final as a direct top child,
+    # else the first chain (tf-pwa aligned_angle_ref_rule1).
     ref_of = {}
     for nm in spinful_names:
-        ref = None
-        for dc in chains:
-            if any(o.name == nm for o in dc.decays[0].outs):
-                ref = dc
-                break
+        ref = next((dc for dc in chains
+                    if any(o.name == nm for o in dc.decays[0].outs)),
+                   None)
         ref_of[nm] = ref if ref is not None else chains[0]
-    totals = [(_chain_total_rotations(dc, mom_name_arrays)) for dc in chains]
+
+    frames = [_chain_su2_frames(dc, mom_name_arrays) for dc in chains]
     out = {}
+    n_chains = len(chains)
     for nm in spinful_names:
-        Rref = None
-        for dc, tot in zip(chains, totals):
-            if dc is ref_of[nm]:
-                Rref = tot[nm]
-        if Rref is None:
-            Rref = totals[0][nm]
+        ref_i = chains.index(ref_of[nm])
         cols = []
-        for dc, tot in zip(chains, totals):
-            if dc is ref_of[nm]:
-                a = np.zeros(Rref.shape[0])
-                b = np.zeros(Rref.shape[0])
-                g = np.zeros(Rref.shape[0])
+        for i, (rm, bm) in enumerate(frames):
+            if i == ref_i:
+                a = np.zeros(bm[nm].shape[0])
+                b = np.zeros(bm[nm].shape[0])
+                g = np.zeros(bm[nm].shape[0])
             else:
-                Ralign = np.matmul(tot[nm], np.swapaxes(Rref, -1, -2))
-                a, b, g = get_euler_angle(_rotation_matrix_to_su2(Ralign))
+                rr, br = frames[ref_i]
+                R = _mul(rr[nm], su2_inv(rm[nm]))
+                if final_rest:
+                    R = _mul(_mul(br[nm], R), su2_inv(bm[nm]))
+                a, b, g = get_euler_angle(R)
             cols.append(np.stack([a, b, g], axis=-1))
-        out[nm] = cols[0] if len(cols) == 1 else cols[0]
+        out[nm] = np.stack(cols, axis=1)            # (N, n_chains, 3)
     return out
+
 
 def momenta_to_data_angles(momenta, weight=None, frac=None, time=None):
     """B→4π data dict identical to ``ampfit.momenta_to_data``.
