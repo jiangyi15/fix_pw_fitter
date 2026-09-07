@@ -533,11 +533,8 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     ang = np.zeros((n, n_topo, n_base + (3 * len(spinful_names)
                                          if need_align else 0)))
 
-    align_out = None
-    if need_align:
-        from ampfit.momenta_to_angles import aligned_euler_from_momenta
-        align_out = aligned_euler_from_momenta(active, leaf_of_name,
-                                               list(spinful_names))
+    cm_p4 = {nm: leaf_of_name[nm] for nm in spinful_names} if need_align \
+        else None
 
     for tid, chain in enumerate(rows):
         if chain is None:
@@ -595,10 +592,18 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
             q[:, n_decay * tid + idx] = _two_body_p(inv_m[idx], mm[0], mm[1])
 
         if need_align:
-            j = active.index(chain)
+            from ampfit.momenta_to_angles import aligned_euler_from_chain
+            m_node = {nm: np.full(n, float(cfg.dic["particle"][nm]["mass"]))
+                      for nm in names}
+            for idx in range(n_decay):
+                if idx > 0:
+                    m_node[chain.decays[idx].core.name] = inv_m[idx]
+            eul = aligned_euler_from_chain(
+                chain, ph, th,
+                q[:, n_decay * tid:n_decay * (tid + 1)], m_node,
+                cm_p4, list(spinful_names))
             for f, nm in enumerate(spinful_names):
-                ang[:, tid, n_base + 3 * f:n_base + 3 * f + 3] = \
-                    align_out[nm][:, j, :]
+                ang[:, tid, n_base + 3 * f:n_base + 3 * f + 3] = eul[nm]
     return {"mass": mass, "q": q, "angle": ang,
             "weight": np.ones(n), "bkg": np.ones(n)}
 

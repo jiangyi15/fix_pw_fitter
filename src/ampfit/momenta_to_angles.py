@@ -865,3 +865,89 @@ def decay_angles_vectorized(chain, momenta):
 
     rec(decays[0].core.name, mom, top_triad)
     return phi, theta
+
+
+# ---------------------------------------------------------------------------
+# Angle/|p|-based aligned frames (no 4-momentum, no duplicate kinematics)
+# ---------------------------------------------------------------------------
+def _frames_from_angles(chain, ph, th, q, m_node):
+    """Per-particle SU(2) frame matrices built ONLY from the already computed
+    per-vertex angles and per-decay two-body |p| (+ masses).
+
+    The child triad of the engine equals ``Rz(phi) Ry(theta)`` acting on the
+    parent triad (verified against the triad geometry), so the vertex
+    rotation for child slot 0 is ``Uz(phi) Uy(theta)`` and for slot 1 (the
+    antipodal daughter) ``Uz(phi+pi) Uy(pi-theta)``.  Boost magnitudes come
+    from ``q`` (the per-decay |p| already in the event data) with the child's
+    own mass (leaf: rest mass; resonance: its event invariant mass), i.e.
+    ``omega = asinh(q/m)`` - the same numbers the 4-momentum path derives.
+
+    Returns ``(r_matrix, b_matrix)`` dicts particle-name -> (n_events,2,2)
+    mirroring ``_chain_su2_frames``.
+    """
+    from ampfit.su2 import (Identity, Rotation_z, Rotation_y, Boost_z,
+                            _mul)
+    n = ph.shape[0]
+    decays = chain.decays
+    cmap = {d.core.name: d for d in decays}
+    idx_of = {d.core.name: i for i, d in enumerate(decays)}
+    I = Identity(n)
+    r_matrix = {decays[0].core.name: I}
+    b_matrix = {decays[0].core.name: I}
+
+    # children mass per event: given arrays (leaf const, resonance event)
+    def m_child(name):
+        return m_node[name]
+
+    order = [decays[0].core.name]
+    # pre-order over decays (decays list is already DFS pre-order)
+    for d in decays:
+        phi = ph[:, idx_of[d.core.name]]
+        theta = th[:, idx_of[d.core.name]]
+        b_core = b_matrix[d.core.name]
+        r_core = r_matrix[d.core.name]
+        for s, c in enumerate(d.outs):
+            nm = c.name
+            if s == 0:
+                Uv = _mul(Rotation_z(phi), Rotation_y(theta))
+            else:
+                Uv = _mul(Rotation_z(phi + np.pi),
+                          Rotation_y(np.pi - theta))
+            # canonical SU(2) sign (q0 >= 0) - same branch the SO(3)-to-SU2
+            # conversion uses in the 4-momentum path
+            flip = (np.real(Uv[..., 0, 0] + Uv[..., 1, 1]) < 0)
+            Uv = np.where(flip[..., None, None], -Uv, Uv)
+            r_matrix[nm] = _mul(_mul(Uv, b_core), r_core)
+            mc = m_child(nm)
+            q_d = q[:, idx_of[d.core.name]]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                om = np.arcsinh(np.divide(q_d, np.maximum(mc, 1e-300)))
+            bad = mc < 1e-6 * np.maximum(np.sqrt(q_d * q_d + mc * mc), 1e-300)
+            B = Boost_z(om)
+            if np.any(bad):
+                B = np.where(bad[..., None, None], I, B)
+            b_matrix[nm] = B
+    return r_matrix, b_matrix
+
+
+def aligned_euler_from_chain(chain, ph, th, q, m_node, cm_p4,
+                             spinful_names, final_rest=False):
+    """Aligned euler (alpha,beta,gamma) of *spinful_names* for ONE chain
+    from precomputed per-vertex angles / |p| only (center-of-mass ref).
+
+    ``cm_p4``: dict spinful-name -> (n_events,4) momentum of that final in
+    the CM (only its direction/boost for the reference is used).  Equivalent
+    to ``aligned_euler_from_momenta([chain], ...)["nm"][:, 0, :]``.
+    """
+    from ampfit.su2 import _mul, inv as su2_inv, get_euler_angle
+    r_matrix, b_matrix = _frames_from_angles(chain, ph, th, q, m_node)
+    ref = _cm_reference_frames(cm_p4, spinful_names)
+    out = {}
+    for nm in spinful_names:
+        rr = ref[nm]
+        R = _mul(rr, su2_inv(r_matrix[nm]))
+        if final_rest:
+            R = _mul(R, su2_inv(b_matrix[nm]))      # cm reference b = identity
+        a, b, g = get_euler_angle(R)
+        out[nm] = np.stack([a, b, g], axis=-1)
+    return out

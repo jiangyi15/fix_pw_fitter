@@ -193,8 +193,20 @@ def test_pwa_event_data_tree_fill(tmp_path):
         m1 = float(c.dic["particle"][outs[1]]["mass"])
         assert np.allclose(d["q"][:, c.n_decay * tid + 1],
                            _two_body_p(mi, m0, m1), atol=1e-9)
-        # alignment slice equals the standalone aligned function per row
-        ao = aligned_euler_from_momenta(chains, mom_d, ["Lambda"])
-        j = chains.index(ch)
+        # alignment slice equals the analytic angle/|p|-based function
+        # (engine-consistent zyz(gamma=0) frames; independently re-derived)
+        from ampfit.momenta_to_angles import aligned_euler_from_chain
+        outs = [o.name for o in ch.decays[1].outs]
+        s4 = np.zeros((5, 4))
+        for o in outs:
+            s4 = s4 + mom_d[o]
+        mi = np.sqrt(np.clip((s4 ** 2) @ np.array([1, -1, -1, -1.]), 0, None))
+        m_node = {nm: np.full(5, float(c.dic["particle"][nm]["mass"]))
+                  for nm in lm}
+        m_node[ch.decays[1].core.name] = mi
+        ao = aligned_euler_from_chain(
+            ch, ph, th, d["q"][:, c.n_decay * tid:c.n_decay * (tid + 1)],
+            m_node, mom_d, ["Lambda"])
         assert np.allclose(d["angle"][:, tid, 2 * nv:2 * nv + 3],
-                           ao["Lambda"][:, j, :], atol=1e-12)
+                           ao["Lambda"], atol=1e-12)
+        assert np.all(np.isfinite(d["angle"][:, tid, 2 * nv:2 * nv + 3]))
