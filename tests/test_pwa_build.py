@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import (build_pwa_kernel_config, pwa_event_data,
-                              pwa_duplication_factors)
+from ampfit.pwa_build import (build_pwa_kernel_config,
+                              pwa_event_data_tree, pwa_duplication_factors)
 from ampfit.numpy_pwa import NumpyPWA
 from ampfit.helicity_angle import (decay_chain_to_tree, tree_vertices,
                                    amplitude)
@@ -34,8 +34,11 @@ def kc(cfg):
 
 @pytest.fixture(scope="module")
 def data(kc):
+    cfg = Config("config_pwa.yml")
     mom = np.load("data/phsp.npy")[:100]
-    return pwa_event_data(Config("config_pwa.yml"), kc, mom)
+    byt = {cfg.topo_index[ch.topo_id()]: ch
+           for _, ch in cfg.full_decay.get_partial_waves()}
+    return pwa_event_data_tree(cfg, kc, byt, mom)
 
 
 def test_duplication_factors(cfg):
@@ -183,7 +186,7 @@ def test_generate_pwa_phsp_conserves_four_momentum(cfg):
 
 
 def test_load_all_data_prefix_momenta(tmp_path):
-    """load_all_data converts data/phsp 4-momentum files via pwa_event_data."""
+    """load_all_data converts data/phsp 4-momentum files (tree-based fill)."""
     import yaml
     from ampfit import Fitter
     from ampfit.pwa_build import generate_pwa_phsp

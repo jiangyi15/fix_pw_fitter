@@ -12,14 +12,20 @@ import numpy as np
 import pytest
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import build_pwa_kernel_config, pwa_event_data
+from ampfit.pwa_build import build_pwa_kernel_config, pwa_event_data_tree
 from ampfit.integrated_pwa import IntegratedPWA
+
+
+def _tree_data(cfg, kc, mom):
+    byt = {cfg.topo_index[ch.topo_id()]: ch
+           for _, ch in cfg.full_decay.get_partial_waves()}
+    return pwa_event_data_tree(cfg, kc, byt, mom)
 
 
 def _pwa_setup(n_events=1500):
     cfg = Config("config_pwa.yml")
     kc = build_pwa_kernel_config(cfg)
-    data = pwa_event_data(cfg, kc, np.load("data/phsp.npy")[:n_events])
+    data = _tree_data(cfg, kc, np.load("data/phsp.npy")[:n_events])
     return kc, data
 
 
@@ -78,7 +84,7 @@ def test_integrated_pwa_backend():
     kc, phsp = _pwa_setup(n_events=1500)
     mom = np.load("data/phsp.npy")
     cfg = Config("config_pwa.yml")
-    dt = pwa_event_data(cfg, kc, mom[3000:3500])
+    dt = _tree_data(cfg, kc, mom[3000:3500])
 
     rng = np.random.RandomState(4)
     n_m0 = int(np.max(kc["m0_index"])) + 1
