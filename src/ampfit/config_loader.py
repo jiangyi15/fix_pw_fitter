@@ -570,6 +570,39 @@ class Config:
             return [to_spin(0)]
         return [to_spin(m) for m in range(-int(J), int(J) + 1)]
 
+    def _final_names(self):
+        """Final-state particle names in canonical (config $finals) order."""
+        return list(self.dic.get("particle", {}).get("$finals", []) or [])
+
+    def _helicity_external_states(self):
+        """Projection states = top helicity x each final's helicity.
+
+        Each state is ``(lam_top, leaf_lams_in_final_order)``; the
+        incoherent |A|^2 sum runs over all of them (spin-averaged finals).
+        With spin-0 finals this is exactly the old top-only list.
+        """
+        from fractions import Fraction
+        from ampfit.helicity_angle import to_spin
+        tops = self._helicity_top_states()
+        per_fin = []
+        for nm in self._final_names():
+            d = self.dic["particle"].get(nm, {})
+            sp = d.get("spins")
+            if sp is not None:
+                per_fin.append([to_spin(x) for x in sp])
+            else:
+                j = to_spin(d.get("J", 0))
+                j2 = int(2 * j)
+                per_fin.append([to_spin(Fraction(v, 1))
+                                for v in range(-j2, j2 + 1)])
+        import itertools
+        out = []
+        for lt in tops:
+            for leaf in (itertools.product(*per_fin) if per_fin else [()]):
+                out.append((lt, leaf))
+        return out
+
+
     def _wave_angle_terms(self, decaychain, ls, lam):
         """Angular terms of one partial wave for one projection lambda.
 
@@ -585,15 +618,24 @@ class Config:
             decay_chain_leaves, amplitude_monomials, _reduce_layout)
         top = decaychain.decays[0].core
         leaves = decay_chain_leaves(decaychain)
+        # lam: int (legacy top lambda, spinless finals) or a projection state
+        # (lam_top, leaf-lambdas in canonical final order).
+        if isinstance(lam, tuple):
+            lam_top_in, canon = lam
+        else:
+            lam_top_in, canon = lam, None
         top_j0 = to_spin(top.J) == 0
-        if not top_j0 and any(to_spin(o.J) != 0 for o in leaves):
-            raise NotImplementedError(
-                "helicity mode: spinful final states not supported")
         tree = decay_chain_to_tree(decaychain)
         nv = len(tree_vertices(tree))
-        lam_top = 0 if top_j0 else to_spin(lam)
-        _, mono = amplitude_monomials(tree, tuple(ls), lam_top,
-                                      tuple(0 for _ in leaves))
+        lam_top = 0 if top_j0 else to_spin(lam_top_in)
+        if canon is None or all(x == 0 for x in canon):
+            leaf_lams = tuple(0 for _ in leaves)   # spinless finals
+        else:
+            want = dict(zip(self._final_names(),
+                            (to_spin(x) for x in canon)))
+            leaf_lams = tuple(to_spin(want[o.name]) if o.name in want
+                              else to_spin(0) for o in leaves)
+        _, mono = amplitude_monomials(tree, tuple(ls), lam_top, leaf_lams)
         _, mono = _reduce_layout(mono, nv, (0, 1, 2) if top_j0 else (),
                                  phi_first=True)
         terms = []
@@ -624,7 +666,7 @@ class Config:
         bw_gamma = {}
         waves = list(self.full_decay.get_partial_waves())
         N = len(waves)
-        states = self._helicity_top_states()
+        states = self._helicity_external_states()
         P = len(states)
         helicity = getattr(self, "angle_formula_mode", "helicity") == "helicity"
 

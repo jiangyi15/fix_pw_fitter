@@ -268,3 +268,97 @@ def test_topo_index_from_name_list(cfg):
     assert a.topo_index_from_name(["pipi1", "pipi2"]) == 0      # rho-rho-like
     assert a.topo_index_from_name(["pipi1", "pipipi"]) == 1     # chain
     assert a.topo_index_from_name(["pipi1", "pipipi2"]) == 2    # mirror
+
+
+LC_CONFIG = """
+# Lambda_c+ -> Lambda pi eta : spinful TOP (1/2) and spinful FINAL Lambda (1/2).
+data:
+    dat_order: [Lambda, pip, eta]
+    data: /tmp/does-not-exist.npy
+    phsp: /tmp/does-not-exist.npy
+
+decay:
+    Lc:
+    - [Sigmapi, eta]
+    - [pieta, Lambda]
+    Sigmapi: [Lambda, pip]
+    pieta: [pip, eta]
+
+particle:
+    $top: Lc
+    $finals: [Lambda, pip, eta]
+    Sigmapi: [ Sig1385p ]
+    pieta: [ a098 ]
+    Lc:
+        J: 0.5
+        P: +1
+        spins: [-0.5, 0.5]
+        mass: 2.28646
+    Lambda:
+        J: 0.5
+        P: +1
+        spins: [-0.5, 0.5]
+        mass: 1.11568
+    pip:
+        J: 0
+        P: -1
+        mass: 0.13957
+    eta:
+        J: 0
+        P: -1
+        mass: 0.54786
+    Sig1385p:
+        J: 1.5
+        P: +1
+        mass: 1.3828
+        width: 0.037
+        model: BW
+    a098:
+        J: 0
+        P: +1
+        mass: 0.98
+        width: 0.075
+        model: BW
+"""
+
+
+def test_spinful_final_states_build(tmp_path):
+    """Half-integer spinful finals are supported via the generalized
+    (top x finals) external-helicity projections.
+
+    Lambda_c(1/2) -> Lambda(1/2) + pi + eta must build with
+        P = 2 (top) x 2 (Lambda) = 4   and   n_wave = P * N  (N = 2 waves),
+    and produce a non-empty angular basis (regression for the former
+    'helicity mode: spinful final states not supported' guard).
+    """
+    cfg = tmp_path / "lc.yml"
+    cfg.write_text(LC_CONFIG)
+    c = Config(str(cfg))
+
+    states = c._helicity_external_states()
+    assert len(states) == 4               # top(2) x Lambda(2) x pi(1) x eta(1)
+
+    kc = c.build_all_index()
+    nproj = int(kc.get("n_proj", 1))
+    n_wave = kc["matrix_angle"].shape[1]
+    assert nproj == 4
+    assert n_wave == 8 and n_wave % nproj == 0
+    N = n_wave // nproj
+    assert N == 2                          # Sig1385p + a098 waves
+    assert len(kc["angle_k"]) > 0          # non-empty angular basis
+    assert kc["matrix_angle"].shape[0] == len(kc["angle_k"])
+    assert np.all(np.isfinite(kc["matrix_angle"]))
+
+
+def test_spinless_finals_projection_unchanged(tmp_path):
+    """Spin-0 finals must reproduce the old top-only projection count and
+    ordering exactly (config_pwa.yml: J=1 top -> n_proj=2, identical build).
+    """
+    c = Config("config_pwa.yml")
+    states = c._helicity_external_states()
+    tops = c._helicity_top_states()
+    assert len(states) == len(tops) == 2
+    # each projection is (top_lambda, zero leaf lambdas)
+    assert all(t == 0 for _, leaves in states for t in leaves)
+    kc = c.build_all_index()
+    assert int(kc.get("n_proj", 1)) == 2
