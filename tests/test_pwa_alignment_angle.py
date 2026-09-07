@@ -116,23 +116,39 @@ def test_total_rotation_unit(tmp_path):
         assert np.allclose(det, 1.0, atol=1e-9), name
 
 
-def test_reference_chain_zero(tmp_path):
-    """The reference chain (Lambda produced directly from the top in chain
-    ``Lc -> [pieta, Lambda]``) contributes zero alignment for itself."""
+def test_center_mass_default_independent_of_chain(tmp_path):
+    """center_mass (default): reference from lab axes + the final's own CM
+    momentum, so both chains carry real alignment and swapping the chain
+    order leaves each chain's euler unchanged."""
     c = _cfg(tmp_path)
     chains = _chains(c)
     mom = _cm_momenta()
     out = aligned_euler_from_momenta(chains, mom, ["Lambda"])
-    # find which chain has Lambda as a direct top child
+    a = out["Lambda"]
+    assert a.shape == (3, 2, 3)
+    # both chains non-trivial
+    assert np.any(np.abs(a[:, 0, :]) > 1e-6)
+    assert np.any(np.abs(a[:, 1, :]) > 1e-6)
+    # chain-order independence (each slice determined by its own chain only)
+    rev = aligned_euler_from_momenta([chains[1], chains[0]], mom,
+                                     ["Lambda"])["Lambda"]
+    assert np.allclose(a[:, 0, :], rev[:, 1, :], atol=1e-9)
+    assert np.allclose(a[:, 1, :], rev[:, 0, :], atol=1e-9)
+
+
+def test_rule1_chain_reference_zero(tmp_path):
+    """align_ref="chain" (rule1): the chain where Lambda is a direct top
+    child gives a zero slice, the other one the real alignment."""
+    c = _cfg(tmp_path)
+    chains = _chains(c)
+    mom = _cm_momenta()
+    out = aligned_euler_from_momenta(chains, mom, ["Lambda"],
+                                     align_ref="chain")
     ref = None
     for i, dc in enumerate(chains):
         if any(o.name == "Lambda" for o in dc.decays[0].outs):
             ref = i
     assert ref is not None
-    # reference-chain slice is identically zero; the other chain carries the
-    # real alignment euler.
     a = out["Lambda"]
     assert np.allclose(a[:, ref, :], 0.0, atol=1e-12)
-    other = a[:, 1 - ref, :]
-    assert np.all(np.abs(other[:, 0]) > 1e-6) or np.all(
-        np.abs(other[:, 2]) > 1e-6)
+    assert np.any(np.abs(a[:, 1 - ref, :]) > 1e-6)

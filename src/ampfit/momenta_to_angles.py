@@ -533,64 +533,137 @@ def _chain_su2_frames(chain, mom_name_arrays):
     return r_matrix, b_matrix
 
 
+def _cm_reference_frames(mom_name_arrays, spinful_names):
+    """Center-of-mass alignment reference per spinful final (tf-pwa rule2).
+
+    For each final the reference frame is built from the LAB axes and the
+    particle's own CM momentum only - completely independent of any decay
+    chain.  ``r_ref = inv(r) Bp r`` with r the rotation taking the lab z
+    axis onto the momentum direction and Bp the boost along it
+    (``aligned_angle_ref_rule2`` in tf-pwa/cal_angle.py); the reference
+    boost matrix is the identity.
+    """
+    from ampfit.su2 import Identity, _mul, inv as su2_inv, Boost_z_from_p
+    r_ref = {}
+    for nm in spinful_names:
+        p = np.asarray(mom_name_arrays[nm], dtype=float)      # (N,4) in CM
+        N = p.shape[0]
+        p3 = _unit3_vec(p[:, 1:])
+        bad = np.linalg.norm(p3, axis=-1) < 1e-12
+        p3 = np.where(bad[:, None],
+                      np.tile([0.0, 0.0, 1.0], (N, 1)), p3)
+        z0 = np.tile([0.0, 0.0, 1.0], (N, 1))
+        x0 = np.tile([1.0, 0.0, 0.0], (N, 1))
+        y0 = _cross_vec(z0, x0)
+        # triad (xc, p3) with the same x convention as the chain geometry
+        xc = child_xz_cm(p3, x0, z0)
+        yc = _cross_vec(p3, xc)
+        Mc = np.stack([xc, yc, p3], axis=-1)
+        M0 = np.tile(np.eye(3), (N, 1, 1))
+        Rv = np.matmul(Mc, np.swapaxes(M0, -1, -2))
+        r = _rotation_matrix_to_su2(Rv)
+        Bp = Boost_z_from_p(p)
+        r_ref[nm] = _mul(_mul(su2_inv(r), Bp), r)
+    return r_ref
+
+
+def child_xz_cm(zc, x0, z0):
+    """child_xz triad (xc, zc) used by _cm_reference_frames (batch)."""
+    N = zc.shape[0]
+    dot = np.einsum('ni,ni->n', z0, zc)
+    xv = zc * dot[:, None] - z0
+    n = np.linalg.norm(xv, axis=-1)
+    ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
+                   np.tile([1.0, 0.0, 0.0], (N, 1)),
+                   np.tile([0.0, 1.0, 0.0], (N, 1)))
+    fcross = _cross_vec(z0, ref)
+    fn = np.linalg.norm(fcross, axis=-1)
+    fallback = np.where((fn > 1e-12)[:, None],
+                        fcross / np.maximum(fn, 1e-12)[:, None],
+                        np.tile([0.0, 1.0, 0.0], (N, 1)))
+    xc = np.where((n > 1e-9)[:, None],
+                  xv / np.maximum(n, 1e-12)[:, None], fallback)
+    return xc
+
+
 def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
-                             final_rest=True):
-    """REAL alignment euler angles for spinful finals shared by >1 topology.
+                               final_rest=True, align_ref="center_mass"):
+    """Alignment euler angles for spinful finals shared by >1 topology.
 
-    Mirrors ``cal_angle_from_particle`` (align_ref, rule1) in
-    tf-pwa/cal_angle.py: every chain carries per-particle SU(2) frame
-    matrices (rotation *and* boost).  For a non-reference chain the aligned
-    rotation of final *f* is
+    Mirrors ``cal_angle_from_particle`` in tf-pwa/cal_angle.py with either
+    alignment reference:
 
-        R = r_matrix_ref[f] * inv(r_matrix_chain[f])
-        (final_rest) R = b_matrix_ref[f] * R * inv(b_matrix_chain[f])
+    * ``align_ref="center_mass"`` (default): each spinful final is aligned to
+      the LAB/center-of-mass axes built from its own CM momentum only, so the
+      result is INDEPENDENT of the decay chains (rule2).  Every chain gets a
+      real alignment.
+    * ``align_ref="chain"``: rule1 - the reference is the chain where the
+      final is a direct top child (else the first chain) and its slice is
+      zero.
 
-    and (alpha, beta, gamma) = euler(R) with exact SU(2) sign.  The
-    reference chain itself contributes zero (identity rotation).
+    Every chain carries per-particle SU(2) frame matrices (rotation AND
+    boost).  For chain *C* the aligned rotation of final *f* is
+
+        R = r_ref[f] . inv(r_chain[f])
+        (final_rest)  R = b_ref[f] . R . inv(b_chain[f])
+
+    with ``(alpha, beta, gamma) = euler(R)`` (exact SU(2) sign, full 4pi).
 
     Args:
         chains: list of ampfit DecayChain (active topologies).
         mom_name_arrays: dict final-name -> (n_events, 4) momentum in CM.
         spinful_names: canonical-order list of spinful final names.
         final_rest: wrap R with the final-rest boosts (default True).
+        align_ref: "center_mass" or "chain".
 
     Returns:
         dict name -> (n_events, n_chains, 3) euler columns ordered like
-        *chains* (reference-chain slice is zero) or None for a single
-        active topology.
+        *chains*, or None for a single active topology.
     """
     if len(chains) <= 1:
         return None
-    from ampfit.su2 import _mul, inv as su2_inv, get_euler_angle
-    # rule1 reference: first chain with the final as a direct top child,
-    # else the first chain (tf-pwa aligned_angle_ref_rule1).
-    ref_of = {}
-    for nm in spinful_names:
-        ref = next((dc for dc in chains
-                    if any(o.name == nm for o in dc.decays[0].outs)),
-                   None)
-        ref_of[nm] = ref if ref is not None else chains[0]
-
+    from ampfit.su2 import Identity, _mul, inv as su2_inv, get_euler_angle
     frames = [_chain_su2_frames(dc, mom_name_arrays) for dc in chains]
+    if align_ref == "center_mass":
+        ref_r = _cm_reference_frames(mom_name_arrays, spinful_names)
+        ref_b = {nm: Identity(mom_name_arrays[spinful_names[0]].shape[0])
+                 for nm in spinful_names}
+        ref_index = {nm: -1 for nm in spinful_names}    # no chain slice is zero
+    else:
+        ref_r = {}
+        ref_b = {}
+        for nm in spinful_names:
+            dc = next((c for c in chains
+                       if any(o.name == nm for o in c.decays[0].outs)),
+                      None)
+            dc = dc if dc is not None else chains[0]
+            i = chains.index(dc)
+            ref_r[nm] = frames[i][0][nm]
+            ref_b[nm] = frames[i][1][nm]
+        ref_index = {nm: chains.index(
+            next((c for c in chains
+                  if any(o.name == nm for o in c.decays[0].outs)), chains[0]))
+            for nm in spinful_names}
     out = {}
     n_chains = len(chains)
     for nm in spinful_names:
-        ref_i = chains.index(ref_of[nm])
+        N = mom_name_arrays[spinful_names[0]].shape[0]
         cols = []
+        rr, br = ref_r[nm], ref_b[nm]
         for i, (rm, bm) in enumerate(frames):
-            if i == ref_i:
-                a = np.zeros(bm[nm].shape[0])
-                b = np.zeros(bm[nm].shape[0])
-                g = np.zeros(bm[nm].shape[0])
+            if align_ref != "center_mass" and i == ref_index[nm]:
+                a = np.zeros(N)
+                b = np.zeros(N)
+                g = np.zeros(N)
             else:
-                rr, br = frames[ref_i]
-                R = _mul(rr[nm], su2_inv(rm[nm]))
+                R = _mul(rr, su2_inv(rm[nm]))
                 if final_rest:
-                    R = _mul(_mul(br[nm], R), su2_inv(bm[nm]))
+                    R = _mul(_mul(br, R), su2_inv(bm[nm]))
                 a, b, g = get_euler_angle(R)
             cols.append(np.stack([a, b, g], axis=-1))
-        out[nm] = np.stack(cols, axis=1)            # (N, n_chains, 3)
+        out[nm] = np.stack(cols, axis=1)                # (N, n_chains, 3)
     return out
+
 
 
 def momenta_to_data_angles(momenta, weight=None, frac=None, time=None):
