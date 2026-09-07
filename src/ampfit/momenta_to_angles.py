@@ -452,7 +452,8 @@ def _chain_su2_frames(chain, mom_name_arrays):
       reproducing ``cal_helicity_angle`` in tf-pwa/cal_angle.py.
     """
     from ampfit.helicity_angle import decay_chain_leaves
-    from ampfit.su2 import Identity, _mul, Boost_z_from_p
+    from ampfit.su2 import (Identity, _mul, Boost_z_from_p, Rotation_y,
+                            Rotation_z)
     leaves = decay_chain_leaves(chain)
     names = [o.name for o in leaves]
     arrs = [np.asarray(mom_name_arrays[nm], dtype=float) for nm in names]
@@ -525,11 +526,20 @@ def _chain_su2_frames(chain, mom_name_arrays):
         z1b = _unit3_vec(q1[:, 1:])
         badb = np.linalg.norm(z1b, axis=-1) < 1e-12
         z1b = np.where(badb[:, None], -z1, z1b)
-        M0 = _triad_to_matrix(T)
-        for c, qc, zc in ((c0, q0, z1), (c1, q1, z1b)):
-            tc = child_xz(zc, x0, z0)
-            Rv = np.matmul(_triad_to_matrix(tc), np.swapaxes(M0, -1, -2))
-            Uv = _rotation_matrix_to_su2(Rv)
+        y0 = _cross_vec(z0, x0)
+        # slot-0 daughter angles measured from the parent axes
+        cos_t0 = np.clip(np.einsum('ni,ni->n', z0, z1), -1.0, 1.0)
+        theta0 = np.arccos(cos_t0)
+        phi0 = np.arctan2(np.einsum('ni,ni->n', z1, y0),
+                          np.einsum('ni,ni->n', z1, x0))
+        for c, qc, slot in ((c0, q0, 0), (c1, q1, 1)):
+            tc = child_xz(-z1 if slot else z1, x0, z0)
+            # tf-pwa per-vertex SU2 from the daughter's helicity angles
+            # (slot 1 uses phi0 - pi UNWRAPPED: wrapping would flip the
+            #  SU(2) sign and break the tf-pwa branch)
+            theta_c = theta0 if slot == 0 else (np.pi - theta0)
+            phi_c = phi0 if slot == 0 else (phi0 - np.pi)
+            Uv = _mul(Rotation_y(theta_c), Rotation_z(phi_c))
             rp = r_matrix[name]
             bp = b_matrix[name]
             r_matrix[c] = _mul(_mul(Uv, bp), rp)
