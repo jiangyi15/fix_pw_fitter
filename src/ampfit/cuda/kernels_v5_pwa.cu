@@ -3,7 +3,7 @@
  *
  * Identical model and per-event forward as cuda_v4_pwa, but the data NLL
  * does NOT log per event.  With ``use_norm == 1`` events are grouped into
- * ``nll``-sized chunks and one log is taken per group:
+ * ``resolution_size``-sized chunks and one log is taken per group:
  *
  *     pdf_e = P_e/norm + bkg_e
  *     Q     = -Σ_groups log( Σ_{e∈group} w_e · pdf_e )
@@ -417,20 +417,20 @@ __global__ void pwa_amp_reduce_kernel(
 
 //=============================================================================
 // KERNEL 3b (cuda_v5): per-group sums  Pb = Σ w·P,  Bb = Σ w·bkg.
-// Group g covers chunk events [g·nll, min((g+1)·nll, n_events)).
+// Group g covers chunk events [g·rsize, min((g+1)·rsize, n_events)).
 //=============================================================================
 __global__ void grp_sum_kernel_v5(
     const double* __restrict__ P_out,
     const double* __restrict__ weight,
     const double* __restrict__ bkg,
     double* __restrict__ gP, double* __restrict__ gB,
-    int n_events, int nll
+    int n_events, int rsize
 ) {
     int g = blockIdx.x;
     int tid = threadIdx.x;
     int bs = blockDim.x;
-    int e0 = g * nll;
-    int n = (e0 + nll < n_events) ? nll : (n_events - e0);
+    int e0 = g * rsize;
+    int n = (e0 + rsize < n_events) ? rsize : (n_events - e0);
     if (n <= 0) return;
 
     extern __shared__ double sdyn[];
@@ -459,13 +459,13 @@ __global__ void grp_scale_kernel_v5(
     double* __restrict__ dar, double* __restrict__ dai,
     const double* __restrict__ weight,
     const double* __restrict__ gP, const double* __restrict__ gB,
-    double norm, int nll, int n_proj, int n_events
+    double norm, int rsize, int n_proj, int n_events
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_events * n_proj;
     if (idx >= total) return;
     int e = idx / n_proj;
-    int g = e / nll;
+    int g = e / rsize;
     double Pb = gP[g];
     double c = -1.0 / (Pb + norm * gB[g]);
     double w = weight[e] * c;
@@ -846,7 +846,8 @@ typedef struct {
     const int* rep_of_slot;    // [n_uniq]  slot → representative entry
     int n_uniq;
     int n_proj;                // P — number of incoherent projections
-    int nll;                   // cuda_v5: events per log-sum group (~20)
+    int rsize;                   // cuda_v5: events per log-sum group
+                                 // (resolution_size, python default 1)
     ComputeData* scratch;
     double* Q_red_gpu;
 } ComputeContext;
@@ -982,13 +983,13 @@ void launch_compute_all_v5(
 
     //── K3b/3c (cuda_v5, data NLL only): per-group log-sum + rescale ──
     if (use_norm == 1) {
-        int nll = ctx->nll;
-        if (nll < 1) nll = 1;
-        int ng = (ne + nll - 1) / nll;
+        int rsize = ctx->rsize;
+        if (rsize < 1) rsize = 1;
+        int ng = (ne + rsize - 1) / rsize;
         size_t gsh = 2 * BLOCK_SIZE * sizeof(double);
         grp_sum_kernel_v5<<<ng, BLOCK_SIZE, gsh>>>(
             data->P_out, data->weight, data->bkg,
-            data->grpP, data->grpB, ne, nll);
+            data->grpP, data->grpB, ne, rsize);
         CUDA_CHECK(cudaGetLastError());
 
         // host-side per-group NLL + d(NLL)/d(norm) accumulation
@@ -1010,7 +1011,7 @@ void launch_compute_all_v5(
                               BLOCK_SIZE>>>(
             data->dQ_dA_real, data->dQ_dA_imag,
             data->weight, data->grpP, data->grpB,
-            norm, nll, P, ne);
+            norm, rsize, P, ne);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1079,7 +1080,7 @@ void* cuda_create_context_v5(
     int batch_size,
     const int* slot_of_wave,int n_slot,
     const int* rep_of_slot,int n_rep,
-    int n_uniq, int n_proj, int nll
+    int n_uniq, int n_proj, int rsize
 ) {
     ComputeContext* c = (ComputeContext*)calloc(1, sizeof(ComputeContext));
     c->m0_index = (int*)_up_int(m0_i, n1); c->g0_index = (int*)_up_int(g0_i, n2);
@@ -1103,7 +1104,7 @@ void* cuda_create_context_v5(
     c->rep_of_slot = (n_rep > 0) ? (int*)_up_int(rep_of_slot, n_rep) : NULL;
     c->n_uniq = (n_uniq > 0) ? n_uniq : 0;
     c->n_proj = n_proj > 0 ? n_proj : 1;
-    c->nll = nll > 0 ? nll : 1;
+    c->rsize = rsize > 0 ? rsize : 1;
     if (c->n_wave % c->n_proj != 0) {
         fprintf(stderr, "cuda_v5_pwa: n_wave %d must be divisible by n_proj %d\n",
                 c->n_wave, c->n_proj);
@@ -1277,14 +1278,14 @@ void cuda_compute_v5(void* vctx, void* vdh,
     DataHandle2* h = (DataHandle2*)vdh;
     int ne = h->ne;
     // cuda_v5: log-sum groups are aligned to the EVENT INDEX (group g covers
-    // events [g·nll, (g+1)·nll)); the per-chunk stride is rounded DOWN to a
-    // multiple of nll so group boundaries never straddle a chunk cut and the
+    // events [g·rsize, (g+1)·rsize)); the per-chunk stride is rounded DOWN to a
+    // multiple of rsize so group boundaries never straddle a chunk cut and the
     // partition does not depend on batch_size.  Chunk buffers are sized to
     // c->batch_size, which is >= this aligned stride.
     int cap = c->batch_size;
     int bs = cap;
-    if (c->nll > 0) {
-        int aligned = (cap / c->nll) * c->nll;
+    if (c->rsize > 0) {
+        int aligned = (cap / c->rsize) * c->rsize;
         if (aligned > 0) bs = aligned;
     }
     if (ne < bs) bs = ne;

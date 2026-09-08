@@ -49,7 +49,7 @@ void* cuda_create_context_v5(
     int batch_size,
     const int* slot_of_wave,int n_slot,
     const int* rep_of_slot,int n_rep,
-    int n_uniq,int n_proj,int nll);
+    int n_uniq,int n_proj,int rsize);
 void cuda_free_context_v5(void*);
 void* cuda_load_data_v5(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
