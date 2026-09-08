@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import numpy as np
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data, generate_pwa_phsp
+from ampfit.pwa_build import pwa_event_data_tree, generate_pwa_phsp
 from ampfit.numpy_pwa import NumpyPWA
 
 
@@ -53,12 +53,15 @@ def main():
     cfg = Config(args.config)
     kc = cfg.build_all_index()
     chain = cfg.full_decay.get_partial_waves()[0][1]
+    byt = {cfg.topo_index[ch.topo_id()]: ch
+           for _, ch in cfg.full_decay.get_partial_waves()}
 
     # ── independent flat samples ───────────────────────────────────────────
-    phsp = pwa_event_data(cfg, kc,
-                          generate_pwa_phsp(cfg, chain, args.nph, seed=11))
-    prop = pwa_event_data(cfg, kc,
-                          generate_pwa_phsp(cfg, chain, args.nprop, seed=22))
+    phsp = pwa_event_data_tree(cfg, kc, byt,
+                               generate_pwa_phsp(cfg, chain, args.nph, seed=11))
+    prop = pwa_event_data_tree(cfg, kc, byt,
+                               generate_pwa_phsp(cfg, chain, args.nprop,
+                                                 seed=22))
 
     rng = np.random.RandomState(42)
     n_ck = kc["matrix_angle"].shape[1] // kc["n_proj"]
