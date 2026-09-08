@@ -124,7 +124,7 @@ class CUDABackendV4PWA(_CUDABackend):
 @register_backend("cuda_v5_pwa")
 class CUDABackendV5PWA(_CUDABackend):
     """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
-    NLL does not log per event: events are grouped into ``nll_batch``-sized
+    NLL does not log per event: events are grouped into ``resolution_size``-sized
     chunks and one log is taken per group,
 
         Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)
@@ -134,14 +134,14 @@ class CUDABackendV5PWA(_CUDABackend):
     their gradients are bit-comparable.  ``dNLL/dnorm`` is accumulated per
     group on the GPU/C path and exposed to the fitter (``dnorm_on_gpu``).
     """
-    def __init__(self, kernel_config, batch_size=50000, nll_batch=20):
-        self._nll_batch = int(nll_batch)
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
         self._last_dnorm = None
         super().__init__(kernel_config, batch_size=batch_size)
 
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as K
-        return K(kc, batch_size=bs, nll_batch=self._nll_batch)
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
 
     @property
     def dnorm_on_gpu(self):

@@ -2,12 +2,12 @@
 
 v5 is the v4 projection-sum PWA with ONE difference: in the data-NLL branch
 (``norm`` is not None) the per-event ``-log`` is replaced by one log per
-``nll_batch``-sized group of events,
+``resolution_size``-sized group of events,
 
     Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)
 
 The phase-space path (``norm=None``) stays the linear Σ w·P, and the
-per-event returned P stays P_sig = Σ_p |A_p|².  ``nll_batch=1`` with unit
+per-event returned P stays P_sig = Σ_p |A_p|².  ``resolution_size=1`` with unit
 weights reproduces v4 exactly; the gradients (including ``d(NLL)/d(norm)``,
 exposed through ``_last_dnorm``) follow the per-group chain rule.
 """
@@ -51,10 +51,10 @@ def _make(kernel_cls, kc, **kw):
         pytest.skip(f"no CUDA device: {e}")
 
 
-def _numpy_group_nll(P, w, bkg, norm, nll_batch):
+def _numpy_group_nll(P, w, bkg, norm, resolution_size):
     """Reference: Q = -Σ_g log Σ_{e∈g} w_e·(P_e/norm + bkg_e)."""
-    ng = len(P) // nll_batch
-    Pb = (w * P / norm + w * bkg).reshape(ng, nll_batch).sum(axis=1)
+    ng = len(P) // resolution_size
+    Pb = (w * P / norm + w * bkg).reshape(ng, resolution_size).sum(axis=1)
     return -float(np.sum(np.log(Pb)))
 
 
@@ -63,7 +63,7 @@ def test_v5_batch1_equals_v4(pwa_small):
     from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
 
-    kv, k5 = _make(KV4, kc), _make(KV5, kc, nll_batch=1)
+    kv, k5 = _make(KV4, kc), _make(KV5, kc, resolution_size=1)
     hv, h5 = kv.load_data(data), k5.load_data(data)
     hp = kv.load_data(phsp)
     try:
@@ -89,9 +89,9 @@ def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
     from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
     from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
-    nll_batch = 12
+    resolution_size = 12
 
-    kv, k5 = _make(KV4, kc), _make(KV5, kc, nll_batch=nll_batch)
+    kv, k5 = _make(KV4, kc), _make(KV5, kc, resolution_size=resolution_size)
     h5 = k5.load_data(data)
     hp5, hpv = k5.load_data(phsp), kv.load_data(phsp)
     try:
@@ -105,7 +105,7 @@ def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
         norm = float(Qnv)
         Q, _g, P = k5.compute(params, h5, norm=norm)
         ref = _numpy_group_nll(P, data["weight"], data["bkg"], norm,
-                               nll_batch)
+                               resolution_size)
         assert Q == pytest.approx(ref, abs=1e-6)
     finally:
         h5.free(); hp5.free(); hpv.free()
@@ -115,11 +115,11 @@ def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
 def test_v5_group_grads_match_finite_difference(pwa_small):
     from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
-    nll_batch = 15
+    resolution_size = 15
     ne = data["mass"].shape[0]
-    assert ne % nll_batch == 0
+    assert ne % resolution_size == 0
 
-    k5 = _make(KV5, kc, nll_batch=nll_batch)
+    k5 = _make(KV5, kc, resolution_size=resolution_size)
     h5 = k5.load_data(data)
     hp = k5.load_data(phsp)
     try:
@@ -158,14 +158,14 @@ def test_v5_group_grads_match_finite_difference(pwa_small):
 
 def test_v5_weights_inside_group_sum(pwa_small):
     """Non-unit weights enter the group sum (Σ w·(P/norm+bkg)), not a
-    per-event log factor — nll_batch=1 with w≠1 therefore differs from v4."""
+    per-event log factor — resolution_size=1 with w≠1 therefore differs from v4."""
     from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
     from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, _phsp, params, _p = pwa_small
 
     wdata = dict(data, weight=0.5 + 0.5 * np.abs(
         np.random.RandomState(3).randn(data["mass"].shape[0])))
-    kv, k5 = _make(KV4, kc), _make(KV5, kc, nll_batch=1)
+    kv, k5 = _make(KV4, kc), _make(KV5, kc, resolution_size=1)
     hv, h5 = kv.load_data(wdata), k5.load_data(wdata)
     try:
         norm = 10.0

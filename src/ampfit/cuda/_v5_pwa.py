@@ -100,17 +100,17 @@ class CUDAKernelV5PWA:
     ``m0`` and ``g0``.  Gradients returned for ``ck``/``m0``/``g0`` only.
 
     Data NLL (``norm`` is not None) does not log per event: events are
-    grouped into ``nll_batch``-sized chunks and one log is taken per group,
+    grouped into ``resolution_size``-sized chunks and one log is taken per group,
     ``Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)``.  Groups are aligned
     to the event index (the internal chunk stride is rounded down to a
-    multiple of ``nll_batch``), so the partition does not depend on the GPU
-    ``batch_size``.  ``nll_batch=1``
+    multiple of ``resolution_size``), so the partition does not depend on the GPU
+    ``batch_size``.  ``resolution_size=1``
     reproduces the per-event v4 NLL when every weight is 1.  The per-event
     returned ``P`` stays the raw signal density ``P_sig = Σ_p |A_p|²``.
     The phase-space path (``norm=None``) is unchanged (linear Σ w·P).
     """
 
-    def __init__(self, config, batch_size=50000, nll_batch=20, lib_path=None):
+    def __init__(self, config, batch_size=50000, resolution_size=1, lib_path=None):
         self._lib = _load_lib()
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
@@ -146,7 +146,7 @@ class CUDAKernelV5PWA:
         self.n_uniq, self.slot_of_wave, self.rep_of_slot = \
             build_amp_cache_layout(c)
         self._ka = []
-        self.nll_batch = int(nll_batch)
+        self.resolution_size = int(resolution_size)
         self._last_dnorm = None      # d(NLL)/d(norm) from the last norm call
         self.dnorm_on_gpu = True
 
@@ -195,7 +195,7 @@ class CUDAKernelV5PWA:
             self.n_m0_params, self.n_g0_params, batch_size,
             _ib(self.slot_of_wave), len(self.slot_of_wave),
             _ib(self.rep_of_slot), len(self.rep_of_slot),
-            self.n_uniq, self.n_proj, self.nll_batch)
+            self.n_uniq, self.n_proj, self.resolution_size)
 
     def load_data(self, data):
         ka = []

@@ -22,7 +22,7 @@ Pipeline (three scripts):
 
     3. ``scripts/chain_groups_to_momenta.py``  (rebuild)  smeared canonical
        sets -> final 4-momenta (n×copies, n_finals, 4), the group layout
-       for ``cuda_v5_pwa`` with ``nll_batch=copies``.
+       for ``cuda_v5_pwa`` with ``resolution_size=copies``.
 
 Example:
     python scripts/save_chain_data.py --config config.yml --chain pipeta \\

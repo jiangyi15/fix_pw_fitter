@@ -12,7 +12,7 @@ the vectorised two-body inverse boost chain and writes
     (n_events × copies, n_finals, 4)
 
 event-major / copy-minor — exactly the layout for ``cuda_v5_pwa`` with
-``nll_batch=copies`` (each group = the resolution cloud of one original
+``resolution_size=copies`` (each group = the resolution cloud of one original
 event).  The decay-tree structure and the fixed top mass are re-derived
 from ``--config`` + ``--chain`` (the same selector save_chain_data.py /
 smear_chain_groups.py use).
