@@ -121,6 +121,38 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v5_pwa")
+class CUDABackendV5PWA(_CUDABackend):
+    """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
+    NLL does not log per event: events are grouped into ``nll_batch``-sized
+    chunks and one log is taken per group,
+
+        Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)
+
+    ``P_e = Σ_p |A_p|²`` is unchanged (returned per event).  The phase-space
+    path (``norm=None``) is identical to v4, so normalization integrals and
+    their gradients are bit-comparable.  ``dNLL/dnorm`` is accumulated per
+    group on the GPU/C path and exposed to the fitter (``dnorm_on_gpu``).
+    """
+    def __init__(self, kernel_config, batch_size=50000, nll_batch=20):
+        self._nll_batch = int(nll_batch)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as K
+        return K(kc, batch_size=bs, nll_batch=self._nll_batch)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        res = self.kernel.compute(params, data_handle, norm=norm)
+        self._last_dnorm = getattr(self.kernel, "_last_dnorm", None)
+        return res
+
+
 @register_backend("cuda32_v4_pwa_cache")
 class CUDABackendV4PWACache32(_CUDABackend):
     """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
