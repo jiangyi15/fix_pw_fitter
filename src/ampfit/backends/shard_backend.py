@@ -38,11 +38,68 @@ Usage::
         "backends": ["cpu_v3", "cuda_v3_sparse"],
         "weights": [1, 3],     # CPU gets 25%, GPU gets 75%
     }, kc)
+
+    # Aligned split for cuda_v5_pwa resolution groups (chunks start/end on
+    # resolution_size-aligned rows so the group log never straddles a cut):
+    create_backend({
+        "name": "shard",
+        "align": 20,
+        "backends": [
+            {"name": "cuda_v5_pwa", "resolution_size": 20},
+            {"name": "cuda_v5_pwa", "resolution_size": 20},
+        ],
+    }, kc)
 """
 import os
 import numpy as np
 import multiprocessing
 from .core import ComputeBackend, register_backend
+
+
+def split_offsets(ne, weights, align=None):
+    """Row boundaries of the weighted data split (len(weights)+1 entries).
+
+    ``bounds[0] = 0``, ``bounds[-1] = ne``, worker *i* gets the contiguous
+    rows ``[bounds[i], bounds[i+1])``.
+
+    With ``align > 1`` every interior boundary is rounded down to a multiple
+    of *align* (so each worker except possibly the last starts and ends on an
+    ``align``-aligned row boundary — exactly what ``cuda_v5_pwa`` needs when
+    its log-sum groups of ``resolution_size == align`` must never straddle a
+    worker cut); the ``ne % align`` leftover rows stay with the last worker
+    as the partial tail group.
+    """
+    weights = np.asarray(list(weights), dtype=float)
+    n = len(weights)
+    if n == 0:
+        return [0, ne]
+    wsum = float(weights.sum())
+    if wsum <= 0:
+        raise ValueError("weights must be positive")
+    # cumulative fraction after each of the FIRST n-1 workers (the last
+    # worker gets whatever is left, up to ne)
+    cum = np.cumsum(weights / wsum)[:-1]
+
+    if align is not None and int(align) > 1:
+        a = int(align)
+        blocks = ne // a                      # full aligned rows to distribute
+        pos = [i for i, c in enumerate(cum) if weights[i] > 0]
+        if blocks < len(pos):
+            raise ValueError(
+                f"align={a}: {ne} rows give only {blocks} aligned blocks for "
+                f"{len(pos) + (1 if weights[-1] > 0 else 0)} workers — "
+                f"reduce n_workers/align or use fewer, larger weights")
+        edges = (cum * blocks).astype(np.int64)      # cumulative blocks
+        for j in range(1, len(pos)):                 # floor can collide
+            if edges[pos[j]] <= edges[pos[j - 1]]:
+                raise ValueError(
+                    f"align={a}: worker split cannot give every worker >=1 "
+                    f"aligned block; use a smaller weights spread")
+        return [0] + [int(e) * a for e in edges] + [ne]
+
+    offs = (cum * ne).astype(np.int64)
+    offs = np.maximum.accumulate(offs).clip(0, ne)
+    return [0] + [int(o) for o in offs] + [ne]
 
 
 def _worker_main(kernel_config, backend_spec, data_chunk,
@@ -96,11 +153,20 @@ class ShardBackend(ComputeBackend):
         Split ratio per worker.  Default equal.  E.g. ``[1, 3]`` gives
         worker 1 one quarter and worker 2 three quarters of the data.
         Useful when mixing fast (GPU) and slow (CPU) backends.
+    align : int, optional
+        Round every interior split boundary down to a multiple of *align*
+        (worker chunks then start/end on ``align``-aligned rows, except the
+        final partial-tail worker).  Combine with a worker backend of
+        ``cuda_v5_pwa`` whose ``resolution_size == align`` so the log-sum
+        groups never straddle a worker cut.
     """
 
     def __init__(self, kernel_config, backends=None, n_workers=None,
-                 weights=None):
+                 weights=None, align=None):
         self.kernel_config = kernel_config
+        self._align = int(align) if align else None
+        if self._align is not None and self._align < 2:
+            raise ValueError("align must be >= 2 (or None)")
         self._workers = []
         self._task_queues = []
         self._result_queues = []
@@ -139,16 +205,17 @@ class ShardBackend(ComputeBackend):
         if nw == 0:
             return ShardDataHandle(ne)
 
-        # Compute weighted split offsets
-        wsum = sum(self._weights)
-        frac = np.cumsum([0.0] + [w / wsum for w in self._weights])
-        frac[-1] = 1.0  # pin to exact end
-        offsets = (frac * ne).astype(np.intp)
+        # Compute weighted split offsets (aligned to multiples of --align)
+        bounds = split_offsets(ne, self._weights, self._align)
+        if len(bounds) != nw + 1:
+            raise ValueError(
+                f"internal split error: got {len(bounds) - 1} chunks for "
+                f"{nw} workers")
 
         chunks = []
         for i in range(nw):
-            st = int(offsets[i])
-            en = int(offsets[i + 1])
+            st = int(bounds[i])
+            en = int(bounds[i + 1])
             chunk = {k: (v[st:en] if isinstance(v, np.ndarray) else v)
                      for k, v in data_np.items()}
             chunks.append(chunk)
