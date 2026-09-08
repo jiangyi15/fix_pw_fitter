@@ -77,7 +77,8 @@ class AmplitudeFractions:
             "ck": grads["ck"].copy(),
             "m0": grads["m0"],
             "g0": grads["g0"],
-            "scalar": grads["scalar"],
+            # pure-PWA models have no scalar couplings
+            "scalar": grads.get("scalar", 0.0),
         }
         if mask is not None:
             for i in range(self._n_ck):
