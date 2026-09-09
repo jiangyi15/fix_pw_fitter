@@ -147,9 +147,8 @@ def main():
         pr = dc.get("phsp_rec")
         if pr:
             pv = _load_event_arrays(f.config, kc, pr, n_comp)
-            if pv["weight"].shape[0] != f._phsp_np["weight"].shape[0]:
-                sys.exit("phsp_rec rows must equal the weight phsp rows "
-                         "(phsp may carry no resolution size)")
+            # rows may differ by a resolution factor; plot_var group-sums
+            # the computed weights to the variable rows automatically
         plotter.use_rec(data_rec_np=f._data_np, phsp_rec_np=pv)
     plotter.compute()
     print(f"  {len(plotter.labels)} groups ({args.by}): {plotter.labels}")

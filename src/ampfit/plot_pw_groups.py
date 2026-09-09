@@ -443,11 +443,25 @@ class PWGroupPlotter:
         f = self.fitter
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        if pv["weight"].shape[0] != self._P_total.shape[0]:
-            raise RuntimeError(
-                f"phsp_var rows ({pv['weight'].shape[0]}) must match the "
-                f"computed phsp rows ({self._P_total.shape[0]}) — rec arrays "
-                f"must be the original rows the weights were computed on")
+        n_p = self._P_total.shape[0]          # rows the amplitude was computed on
+        n_v = pv["weight"].shape[0]           # rows the variables are read from
+        if n_v != n_p:
+            # resolution-copy wrap: the computed (weight) rows are an integer
+            # multiple of the variable rows — group-sum the model back to
+            # every variable (original) event, W[e] = Σ_j pw·P[e·s+j]
+            if n_p < n_v or n_p % n_v:
+                raise RuntimeError(
+                    f"weight rows ({n_p}) must equal or be an integer "
+                    f"multiple of the variable rows ({n_v})")
+            s = n_p // n_v
+            pw0 = np.asarray(f._phsp_np["weight"], dtype=float)
+
+            def _grp(x):
+                return (pw0 * x).reshape(n_v, s).sum(axis=1)
+
+            self._P_total = _grp(self._P_total)
+            self._P_groups = [_grp(g) for g in self._P_groups]
+            n_p = n_v
         dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
         pw = pv["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
