@@ -23,26 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import argparse
 
-import numpy as np
-
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
-from ampfit.pwa_build import pwa_event_data_tree
 from ampfit.plot_pwa_groups import (
     config_plot_items, discover_pwa_groups, pwa_mass_varfun,
     pwa_angle_varfun, angle_variable_labels, var_ranges)
-
-
-def _load_event_arrays(cfg, kc, path, n_comp):
-    """Kernel event arrays from an .npz (kernel arrays) or a 4-momentum .npy."""
-    if str(path).endswith(".npz"):
-        ev, _ = Fitter.load_npz(path, n_angle_comp=n_comp)
-    else:
-        pws = list(cfg.full_decay.get_partial_waves())
-        byt = {cfg.topo_index[ch.topo_id()]: ch for _, ch in pws}
-        mom = np.load(path)
-        ev = pwa_event_data_tree(cfg, kc, byt, mom)
-    return ev
 
 
 def main():
@@ -135,12 +120,14 @@ def main():
     groups = discover_pwa_groups(f.config, by=args.by, merge=merge)
     plotter = PWGroupPlotter(f, r, groups)
     if rec_used:
-        # original rows are ADDITIONAL variable sources; nothing in the
-        # config / fitter arrays is replaced
-        recd = _load_event_arrays(f.config, kc, dc["data_rec"], n_comp)
-        recp = None
-        if dc.get("phsp_rec"):
-            recp = _load_event_arrays(f.config, kc, dc["phsp_rec"], n_comp)
+        # ORIGINAL-event arrays are loaded with the SAME generic prefix
+        # loader as data/phsp — {prefix} + {prefix}_weight + {prefix}_bg_value
+        # work identically when prefix is "data_rec"/"phsp_rec"
+        recd = f._load_momenta_conf("data_rec")
+        recp = f._load_momenta_conf("phsp_rec") if dc.get("phsp_rec") else None
+        if recd is None:
+            sys.exit("rec mode: could not load 'data_rec' via the config "
+                     "prefix loader")
         plotter.use_rec(data_rec_np=recd, phsp_rec_np=recp)
         print(f"  rec variables: data_rec {recd['mass'].shape[0]:,} rows"
               f"{', phsp_rec ' + str(recp['mass'].shape[0]) + ' rows' if recp is not None else ''}")
