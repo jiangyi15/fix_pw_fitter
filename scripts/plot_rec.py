@@ -23,8 +23,7 @@ Model curve:
 Like a normal (unbinned) PWA projection plot, the model curve is scaled so
 its total area equals the data_rec event count: ``model *= n_data / Σ w``
 (the standard data/phsp count normalisation; with ``Σ w = 1`` this is just
-``model * n_data``).  Pass ``--no-area-scale`` to draw the unnormalised
-weighted curve (area ~ 1) instead.
+``model * n_data``).
 
 ``phsp_rec`` only supplies the bin variable; if it is resolution-smeared
 rows, no weights are available for them and the model side is meaningless —
@@ -69,8 +68,6 @@ def main():
     ap.add_argument("--prefix", default="plots",
                     help="output dir becomes {prefix}_rec/")
     ap.add_argument("--bins", type=int, default=100)
-    ap.add_argument("--no-area-scale", action="store_true",
-                    help="draw the weighted curve without scaling (area ~1)")
     ap.add_argument("--skip-plot", action="store_true",
                     help="only write the weighted histograms (.npy)")
     args = ap.parse_args()
@@ -152,11 +149,11 @@ def main():
         edges = np.linspace(lo, hi, args.bins + 1)
         ndat, _ = np.histogram(dv, bins=edges)
         nmodel, _ = np.histogram(pv, bins=edges, weights=w)
-        if not args.no_area_scale and nmodel.sum() > 0:
+        if nmodel.sum() > 0:
             nmodel = nmodel * (n_data / nmodel.sum())   # normal-plot scale
         np.savez(os.path.join(outdir, f"hist_{lab}.npz"),
                  edges=edges, data=ndat, model=nmodel, weight=w,
-                 area_scaled=not args.no_area_scale)
+                 area_scaled=True)
         if args.skip_plot:
             continue
         fig, ax = plt.subplots(figsize=(7, 5))
