@@ -321,12 +321,12 @@ class PWGroupPlotter:
 
         # ── resolution wrap: reduce weight rows to the variable rows ──
         # W[e] = Σ_{j<s} pw·P[e·s+j]  — with s = 1 this is just pw·P.
-        pw_w = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
+        phsp_weight = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
         pv = self.phsp_var_np if self.phsp_var_np is not None \
             else self.fitter._phsp_np
-        pw_v = np.asarray(pv["weight"], dtype=float)
-        n_w = int(pw_w.shape[0])
-        n_v = int(pw_v.shape[0])
+        phsp_var_weight = np.asarray(pv["weight"], dtype=float)
+        n_w = int(phsp_weight.shape[0])
+        n_v = int(phsp_var_weight.shape[0])
         if n_w < n_v or n_w % n_v:
             raise ValueError(
                 f"weight phsp rows ({n_w}) must equal or be an integer "
@@ -334,19 +334,23 @@ class PWGroupPlotter:
         s = n_w // n_v
 
         def _sum_copies(x):
-            return (pw_w * x).reshape(n_v, s).sum(axis=1)
+            return (phsp_weight * x).reshape(n_v, s).sum(axis=1)
 
         # normalisation over the FULL weight sample (before the group-sum)
-        total_sum = float(np.sum(pw_w * raw_total))
+        total_sum = float(np.sum(phsp_weight * raw_total))
         self._P_total = _sum_copies(raw_total)      # weighted per var row
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
-        # background, reduced exactly like the signal — pw·bkg from the phsp
-        # (weight) rows, group-summed to the variable rows (no extra loads)
+        # background: the phsp 'bkg' column is its own per-event weight —
+        # reduced/group-summed WITHOUT multiplying the signal phsp weight pw
         bkg_raw = np.asarray(self.fitter._phsp_np.get(
             "bkg", np.zeros(n_w)), dtype=float)
-        self._bkg_norm = float(np.sum(pw_w * bkg_raw))   # full sample ∫bkg
-        self._bkg_var = _sum_copies(bkg_raw)             # per variable row
+
+        def _sum_bkg(x):
+            return x.reshape(n_v, s).sum(axis=1)
+
+        self._bkg_norm = float(np.sum(bkg_raw))     # full sample ∫bkg
+        self._bkg_var = _sum_bkg(bkg_raw)           # per variable row
 
         # Store zorder for plotting: smallest |weight| → highest zorder (on top)
         pw_abs = np.array([float(np.sum(np.abs(Pg)))
