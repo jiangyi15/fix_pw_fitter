@@ -338,11 +338,18 @@ class PWGroupPlotter:
 
         # normalisation over the FULL weight sample (before the group-sum)
         total_sum = float(np.sum(pw_w * raw_total))
-        self._P_total = _sum_copies(raw_total)
+        self._P_total = _sum_copies(raw_total)      # weighted per var row
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
+        # background, reduced exactly like the signal: pw·bkg on the phsp
+        # (weight) rows, group-summed to the variable rows
+        bkg_raw = np.asarray(self.fitter._phsp_np.get(
+            "bkg", np.zeros(n_w)), dtype=float)
+        self._bkg_norm = float(np.sum(pw_w * bkg_raw))   # full sample ∫bkg
+        self._bkg_var = _sum_copies(bkg_raw)             # per variable row
+
         # Store zorder for plotting: smallest |weight| → highest zorder (on top)
-        pw_abs = np.array([float(np.sum(np.abs(pw_v * Pg)))
+        pw_abs = np.array([float(np.sum(np.abs(Pg)))
                            for Pg in self._P_groups])
         rank = np.argsort(np.argsort(pw_abs))  # 0 = smallest
         n = len(rank)
@@ -471,21 +478,18 @@ class PWGroupPlotter:
         f = self.fitter
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        # _P_total/_P_groups were already reduced to pv's rows by compute()
         dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        pw = pv["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
-
-        # Extra weights are multiplicative per-event — they do NOT change the
-        # overall normalisation scale (determined by base weights in compute()).
+        extra = np.asarray(1.0 if phsp_weight_extra is None
+                           else phsp_weight_extra, dtype=float)
         colors = colors or plt.cm.tab20(np.linspace(0, 1, len(self.labels)))
         glabels = group_labels or self.labels
 
-        # Background normalisation (constant across subplots)
-        bkg = pv.get("bkg", np.zeros(len(pw)))
-        bkg_norm = float(np.sum(pw * bkg))
+        # Background normalisation (constant across subplots) — computed on
+        # the phsp (weight) rows in compute() and scaled from there.
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
-        bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
+        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
+                     if self._bkg_norm > 0 else 0.0)
 
         var_data = varfun(dn)
         var_phsp = varfun(pv)
@@ -525,12 +529,16 @@ class PWGroupPlotter:
             dy, _ = np.histogram(d, bins=bins, weights=dw)
             dw2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
 
-            # Signal
+            # Signal — self._P_total/_P_groups are already pw-weighted
+            # (and group-summed to the variable rows) by compute()
             sig, _ = np.histogram(p, bins=bins,
-                                  weights=pw * self._P_total * self._scale)
+                                  weights=self._P_total * extra
+                                  * self._scale)
 
-            # Background (filled area)
-            bkg_y, _ = np.histogram(p, bins=bins, weights=pw * bkg * bkg_scale)
+            # Background (filled area) — pw·bkg reduced from the phsp rows
+            bkg_y, _ = np.histogram(p, bins=bins,
+                                    weights=self._bkg_var * extra
+                                    * bkg_scale)
 
             # Total fit = signal + background
             tot = sig + bkg_y
@@ -541,14 +549,16 @@ class PWGroupPlotter:
             pull_var = dw2.copy()
             if mc_uncert:
                 sig2, _ = np.histogram(
-                    p, bins=bins, weights=(pw * self._P_total * self._scale) ** 2)
+                    p, bins=bins,
+                    weights=(self._P_total * extra * self._scale) ** 2)
                 bkg2, _ = np.histogram(
-                    p, bins=bins, weights=(pw * bkg * bkg_scale) ** 2)
+                    p, bins=bins,
+                    weights=(self._bkg_var * extra * bkg_scale) ** 2)
                 pull_var = pull_var + sig2 + bkg2
 
             # Partial waves (signal only)
             gys = [np.histogram(p, bins=bins,
-                                weights=pw * Pg * self._scale)[0]
+                                weights=Pg * extra * self._scale)[0]
                    for Pg in self._P_groups]
 
             # Pull = (data - model) / sqrt(var)
