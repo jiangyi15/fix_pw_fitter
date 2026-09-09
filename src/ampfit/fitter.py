@@ -447,8 +447,8 @@ class Fitter:
             data_np, _ = self.load_npz(data_path, n_angle_comp=n_comp)
             phsp_np, _ = self.load_npz(phsp_path, n_angle_comp=n_comp)
         else:
-            data_np = self._load_momenta_conf("data")
-            phsp_np = self._load_momenta_conf("phsp")
+            data_np = self.load_momenta_conf("data")
+            phsp_np = self.load_momenta_conf("phsp")
             if data_np is None or phsp_np is None:
                 raise ValueError(
                     "Config 'data' must provide either data_arr/phsp_arr "
@@ -458,9 +458,14 @@ class Fitter:
         self.set_data(data_np)
         return data_np, phsp_np
 
-    def _load_momenta_conf(self, prefix):
-        """Convert a ``prefix`` + ``prefix_weight`` 4-momentum config pair
-        into kernel-ready arrays (or None if not configured)."""
+    def load_momenta_conf(self, prefix):
+        """Generic prefix loader: ``{prefix}`` (+ optional ``{prefix}_weight``
+        and ``{prefix}_bg_value`` keys under the config ``data`` section)
+        -> kernel-ready arrays, or None if the prefix is not configured.
+
+        The exact same routine serves ``data`` / ``phsp`` and any other
+        prefix (e.g. ``data_rec`` / ``phsp_rec``).
+        """
         import os
         cfg_dir = os.path.dirname(os.path.abspath(
             self.config._config_path))
@@ -535,6 +540,8 @@ class Fitter:
                 "weight": np.asarray(d["weight"], dtype=float),
             }
         return out
+
+    _load_momenta_conf = load_momenta_conf   # backward-compatible alias
 
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
