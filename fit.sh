@@ -24,8 +24,9 @@ python run_fit.py \
     --backend "cuda32_v3" \
     --init fit_output11/results.json \
     --save "$PREFIX/results.json" \
-    --plot "$PREFIX/plots/" \
-    --fix-mass-width
+    --plot "$PREFIX/plots/"
+# (--fix-mass-width was moved into the constraint file:
+#  fix_mass_width_default: true in the config's constraints section)
 
 echo ""
 echo "=== done ==="
