@@ -383,9 +383,10 @@ class Fitter:
 
         n_events = data["mass"].shape[0]
         if max_events is not None and max_events < n_events:
+            # take the FIRST rows, keeping the row order — resolution-group
+            # datasets rely on contiguous event-major/copy-minor blocks
             n_events = max_events
-            idx = np.random.RandomState(0).choice(
-                data["mass"].shape[0], n_events, replace=False)
+            idx = slice(0, max_events)
         else:
             idx = slice(None)
 
