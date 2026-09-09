@@ -27,9 +27,85 @@ import numpy as np
 
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
+from ampfit.pwa_build import pwa_event_data_tree
 from ampfit.plot_pwa_groups import (
     config_plot_items, discover_pwa_groups, pwa_mass_varfun,
     pwa_angle_varfun, angle_variable_labels, var_ranges)
+
+
+def _resolution_phsp_weights(f, plotter, r, smeared_phsp, kc, n_comp):
+    """Fill the plotter with resolution-convolved phsp weights.
+
+    The amplitude P is evaluated on the SMEARED phase space (config
+    ``phsp``, the one used by the fit) and the per-row weights are
+    group-summed back to every ORIGINAL phsp event (the ``phsp_rec`` rows
+    the plotter histograms), ``W[e] = Σ_j pw·P[e·s + j]`` with
+    ``s = len(phsp) / len(phsp_rec)`` (s = 1 → plain per-row weights).
+    This mirrors ``PWGroupPlotter.compute`` (scale/purity/zorder) but keeps
+    the weights on the resolution-smeared sample.
+    """
+    import numpy as np
+
+    from ampfit import Fitter as _F
+
+    cfg = f.config
+    if str(smeared_phsp).endswith(".npz"):
+        ev, _ = _F.load_npz(smeared_phsp, n_angle_comp=n_comp)
+    else:
+        pws = list(cfg.full_decay.get_partial_waves())
+        byt = {cfg.topo_index[ch.topo_id()]: ch for _, ch in pws}
+        mom = np.load(smeared_phsp)
+        ev = pwa_event_data_tree(cfg, kc, byt, mom)
+
+    n_s = ev["mass"].shape[0]
+    pw_s = ev.get("weight", np.ones(n_s))
+    n_r = f._phsp_np["weight"].shape[0]
+    if n_s < n_r or n_s % n_r:
+        raise SystemExit(
+            f"smeared phsp rows {n_s} must be an integer multiple of the "
+            f"phsp_rec rows {n_r} for resolution weights")
+    s = n_s // n_r
+
+    def group_sum(x):
+        return (pw_s * x).reshape(n_r, s).sum(axis=1)
+
+    params, _ = f.build_params(r.x)
+    hs = f.backend.load_data(ev)
+    try:
+        _, _, P_total = f.backend.compute(params, hs, norm=None)
+        W_total = group_sum(P_total)
+
+        W_groups = []
+        for label in plotter.labels:
+            p_group = dict(params)
+            ck = params["ck"].copy()
+            mask = plotter.groups[label]
+            for i in range(len(ck)):
+                if i not in mask:
+                    ck[i] = 0.0j
+            p_group["ck"] = ck
+            _, _, Pg = f.backend.compute(p_group, hs, norm=None)
+            W_groups.append(group_sum(Pg))
+    finally:
+        if hasattr(hs, "free"):
+            hs.free()
+
+    # zorder (same ranking convention as PWGroupPlotter.compute)
+    pw_r = f._phsp_np["weight"]
+    w_abs = np.array([float(np.sum(np.abs(pw_r * Wg)))
+                      for Wg in W_groups])
+    rank = np.argsort(np.argsort(w_abs))
+    n = len(rank)
+    plotter._zorders = [5 + (n - 1 - rr) * 2 for rr in rank]
+
+    purity = f._purity if f._purity is not None else 1.0
+    target = float(np.sum(f._data_np["weight"])) * purity
+    total_sum = float(np.sum(pw_s * P_total))
+    plotter._P_total = W_total
+    plotter._P_groups = W_groups
+    plotter._scale = target / total_sum if total_sum > 0 else 0.0
+    print(f"  resolution weights: {n_s} smeared phsp rows -> {n_r} "
+          f"original events (s={s}), scale = {plotter._scale:.4g}")
 
 
 def main():
@@ -89,12 +165,15 @@ def main():
     # config's ``data`` / ``phsp`` section (npz arrays or 4-momentum
     # prefix + _weight[/_bg_value] files) is used via load_all_data().
     # When no explicit files are given AND the config declares data_rec /
-    # phsp_rec, those ORIGINAL-event rows are used instead (rec mode).
+    # phsp_rec (rec mode), the VARIABLES come from those original-event
+    # rows while the amplitude WEIGHTS stay on the smeared ``phsp`` (see
+    # _resolution_phsp_weights below) — group-summed back per original row.
     if bool(args.data) != bool(args.phsp):
         sys.exit("give both --data and --phsp, or neither (falls back to "
                  "the config data section)")
     rec_used = False
     dc = f.config.dic["data"]
+    orig_phsp = dc.get("phsp")
     if not args.data and dc.get("data_rec") and dc.get("phsp_rec"):
         rec_used = True
         dc["data"] = dc["data_rec"]     # keep *_weight / *_bg_value sidecars
@@ -113,7 +192,7 @@ def main():
         data_np, phsp_np = f.load_all_data()
         print(f"  Loaded {len(data_np['weight']):,} data + "
               f"{len(phsp_np['weight']):,} phsp events from config "
-              f"{'(rec/original rows)' if rec_used else ''}")
+              f"{'(rec/original variable rows)' if rec_used else ''}")
 
     r = f.load_results(args.fit_json)
     if r.x is None or len(r.x) == 0:
@@ -123,7 +202,12 @@ def main():
                  "(pure-PWA mode)")
 
     groups = discover_pwa_groups(f.config, by=args.by, merge=merge)
-    plotter = PWGroupPlotter(f, r, groups).compute()
+    plotter = PWGroupPlotter(f, r, groups)
+    if rec_used:
+        # amplitude weights on the SMEARED phsp, group-summed to original
+        _resolution_phsp_weights(f, plotter, r, orig_phsp, kc, n_comp)
+    else:
+        plotter.compute()
     print(f"  {len(plotter.labels)} groups ({args.by}): {plotter.labels}")
 
     args.output = args.output or ("plots_pwa_rec/" if rec_used
