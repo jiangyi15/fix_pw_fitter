@@ -1,5 +1,5 @@
 """
-CUDA kernel v4 PWA — projection-sum PWA (derived from cuda_v3_ampcache).
+CUDA kernel v5 PWA — projection-sum PWA (derived from cuda_v3_ampcache).
 
 No time evolution / no D0-D0bar mixing / no scalar (Gamma, DeltaGamma, ...)
 parameters.  The event probability is an incoherent sum over *projections*:
@@ -147,6 +147,11 @@ class CUDAKernelV5PWA:
             build_amp_cache_layout(c)
         self._ka = []
         self.resolution_size = int(resolution_size)
+        if self.resolution_size > 1 and batch_size < self.resolution_size:
+            raise ValueError(
+                f"cuda_v5_pwa: batch_size ({batch_size}) must be >= "
+                f"resolution_size ({self.resolution_size}) so the chunk "
+                f"stride can stay resolution-aligned")
         self._last_dnorm = None      # d(NLL)/d(norm) from the last norm call
         self.dnorm_on_gpu = True
 

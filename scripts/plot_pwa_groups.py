@@ -94,6 +94,9 @@ def main():
         sys.exit("give both --data and --phsp, or neither (falls back to "
                  "the config data section)")
     dc = f.config.dic["data"]
+    if (not args.data and bool(dc.get("data_rec")) != bool(dc.get("phsp_rec"))):
+        sys.exit("rec mode needs data_rec AND phsp_rec together "
+                 "(both original-row arrays)")
     rec_used = bool(not args.data and dc.get("data_rec"))
     if args.data:
         data_np, nd = Fitter.load_npz(args.data,

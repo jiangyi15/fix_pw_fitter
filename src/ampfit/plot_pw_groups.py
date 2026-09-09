@@ -372,6 +372,11 @@ class PWGroupPlotter:
     def _ready(self):
         return self._P_total is not None
 
+    @property
+    def _rec_active(self):
+        """True when rec (original-row) arrays were supplied via use_rec."""
+        return self.data_var_np is not None or self.phsp_var_np is not None
+
     # ── accessors (for reuse outside plotting) ────────────────────
 
     @property
@@ -685,12 +690,16 @@ class PWGroupPlotter:
 
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_asymmetry()")
+        if self._rec_active:
+            raise NotImplementedError(
+                "rec/original-row mode is supported by plot_var only")
 
         import matplotlib.pyplot as plt
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        extra = np.asarray(1.0 if phsp_weight_extra is None
+                           else phsp_weight_extra, dtype=float)
 
         # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
         # frac = P(B0) in data → tag = frac - 0.5
@@ -740,9 +749,9 @@ class PWGroupPlotter:
             pm2 = tag_phsp < 0
 
             N1m, _ = np.histogram(p[pm1], bins=bins,
-                                  weights=phsp_w[pm1] * self._P_total[pm1] * self._scale)
+                                  weights=extra[pm1] * self._P_total[pm1] * self._scale)
             N2m, _ = np.histogram(p[pm2], bins=bins,
-                                  weights=phsp_w[pm2] * self._P_total[pm2] * self._scale)
+                                  weights=extra[pm2] * self._P_total[pm2] * self._scale)
             denom_m = N1m + N2m
             Am = np.divide(N1m - N2m, denom_m, where=denom_m > 0,
                            out=np.zeros_like(denom_m))
@@ -905,7 +914,8 @@ class PWGroupPlotter:
 
             pull = (sum w_data - sum w_fit) / sqrt(sum w_fit)
 
-        where ``w_fit = phsp_w * P_total * scale`` (+ bkg if present).
+        where ``w_fit = P_total * scale`` (P_total already phsp_w-weighted
+        by compute()) (+ bkg if present).
         A data scatter overlay and a colorbar are drawn.
 
         Args:
@@ -921,13 +931,17 @@ class PWGroupPlotter:
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_2d()")
+        if self._rec_active:
+            raise NotImplementedError(
+                "rec/original-row mode is supported by plot_var only")
         import matplotlib.pyplot as plt
         import matplotlib as mpl
         import matplotlib.patches as mpatches
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        extra = np.asarray(1.0 if phsp_weight_extra is None
+                           else phsp_weight_extra, dtype=float)
 
         d1, d2 = varfun(f._data_np)
         p1, p2 = varfun(f._phsp_np)
@@ -937,15 +951,13 @@ class PWGroupPlotter:
         x, y = d1[cut], d2[cut]
         w = dw[cut]
 
-        # Phsp total fit weight
-        w_fit = phsp_w * self._P_total * self._scale
-        bkg = f._phsp_np.get("bkg", np.zeros(len(phsp_w)))
-        bkg_norm = float(np.sum(phsp_w * bkg))
-        if bkg_norm > 0:
+        # Total-fit weight (already phsp_w-weighted per row by compute())
+        w_fit = extra * self._P_total * self._scale
+        if self._bkg_norm > 0:
             purity = f._purity if f._purity is not None else 1.0
             data_total = float(np.sum(dw))
-            bkg_scale = data_total * (1.0 - purity) / bkg_norm
-            w_fit = w_fit + phsp_w * bkg * bkg_scale
+            bkg_scale = data_total * (1.0 - purity) / self._bkg_norm
+            w_fit = w_fit + extra * self._bkg_var * bkg_scale
 
         xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
         ylo0, yhi0 = y_range if y_range is not None else (np.min(p2), np.max(p2))
@@ -1029,13 +1041,17 @@ class PWGroupPlotter:
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_stacked_perm()")
+        if self._rec_active:
+            raise NotImplementedError(
+                "rec/original-row mode is supported by plot_var only")
 
         import matplotlib.pyplot as plt
         from scipy.interpolate import CubicSpline
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        extra = np.asarray(1.0 if phsp_weight_extra is None
+                           else phsp_weight_extra, dtype=float)
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
@@ -1065,19 +1081,20 @@ class PWGroupPlotter:
 
         # ── model histograms (with per-perm scales) ───────────────
         p_all = np.concatenate(var_phsp)
-        pw_all_sig = np.concatenate([phsp_w * self._P_total * self._scale * s for s in scl])
+        pw_all_sig = np.concatenate([extra * self._P_total * self._scale * s
+                                     for s in scl])
 
-        bkg = f._phsp_np.get("bkg", np.zeros(len(phsp_w)))
-        bkg_norm = float(np.sum(phsp_w * bkg))
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
-        bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
-        pw_all_bkg = np.concatenate([phsp_w * bkg * bkg_scale * s for s in scl])
+        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
+                     if self._bkg_norm > 0 else 0.0)
+        pw_all_bkg = np.concatenate([extra * self._bkg_var * bkg_scale * s
+                                     for s in scl])
 
         glabels = self.labels
         gcolors = plt.cm.tab20(np.linspace(0, 1, len(glabels)))
         pw_all_groups = [
-            np.concatenate([phsp_w * Pg * self._scale * s for s in scl])
+            np.concatenate([extra * Pg * self._scale * s for s in scl])
             for Pg in self._P_groups
         ]
 
