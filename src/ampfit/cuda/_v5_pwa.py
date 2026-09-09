@@ -108,6 +108,14 @@ class CUDAKernelV5PWA:
     reproduces the per-event v4 NLL when every weight is 1.  The per-event
     returned ``P`` stays the raw signal density ``P_sig = Σ_p |A_p|²``.
     The phase-space path (``norm=None``) is unchanged (linear Σ w·P).
+
+    NOTE on comparing with cuda_v4_pwa: the group term sums ``Σ_{e∈g} w·pdf``
+    with ONE log per group.  When the group rows are resolution copies of an
+    original event, their weights must be group-normalised (``w = 1 /
+    resolution_size`` per copy, so each group total is 1) for the v5 NLL
+    magnitude to be comparable with the per-event v4 NLL; with per-row unit
+    weights the group sum carries an extra ``resolution_size`` factor
+    (scale + ``log`` offsets).
     """
 
     def __init__(self, config, batch_size=50000, resolution_size=1, lib_path=None):
