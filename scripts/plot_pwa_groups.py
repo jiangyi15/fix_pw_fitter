@@ -64,7 +64,9 @@ def main():
     ap.add_argument("--no-pull", action="store_true",
                     help="do not draw the (data-model)/sigma pull row "
                          "below every variable panel")
-    ap.add_argument("-o", "--output", default="plots_pwa/")
+    ap.add_argument("-o", "--output", default=None,
+                    help="output dir (default plots_pwa/, or plots_pwa_rec/ "
+                         "when rec sources are used)")
     ap.add_argument("--format", default="png")
     args = ap.parse_args()
 
@@ -86,9 +88,17 @@ def main():
     # Provide --data/--phsp npz files explicitly, or omit both and the
     # config's ``data`` / ``phsp`` section (npz arrays or 4-momentum
     # prefix + _weight[/_bg_value] files) is used via load_all_data().
+    # When no explicit files are given AND the config declares data_rec /
+    # phsp_rec, those ORIGINAL-event rows are used instead (rec mode).
     if bool(args.data) != bool(args.phsp):
         sys.exit("give both --data and --phsp, or neither (falls back to "
                  "the config data section)")
+    rec_used = False
+    dc = f.config.dic["data"]
+    if not args.data and dc.get("data_rec") and dc.get("phsp_rec"):
+        rec_used = True
+        dc["data"] = dc["data_rec"]     # keep *_weight / *_bg_value sidecars
+        dc["phsp"] = dc["phsp_rec"]
     if args.data:
         data_np, nd = Fitter.load_npz(args.data,
                                       max_events=args.max_events,
@@ -102,7 +112,8 @@ def main():
     else:
         data_np, phsp_np = f.load_all_data()
         print(f"  Loaded {len(data_np['weight']):,} data + "
-              f"{len(phsp_np['weight']):,} phsp events from config")
+              f"{len(phsp_np['weight']):,} phsp events from config "
+              f"{'(rec/original rows)' if rec_used else ''}")
 
     r = f.load_results(args.fit_json)
     if r.x is None or len(r.x) == 0:
@@ -115,6 +126,8 @@ def main():
     plotter = PWGroupPlotter(f, r, groups).compute()
     print(f"  {len(plotter.labels)} groups ({args.by}): {plotter.labels}")
 
+    args.output = args.output or ("plots_pwa_rec/" if rec_used
+                                  else "plots_pwa/")
     os.makedirs(args.output, exist_ok=True)
 
     # ── one figure per config-plot variable (ReadVar items) ─────────
