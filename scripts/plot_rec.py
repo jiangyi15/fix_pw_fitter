@@ -14,10 +14,15 @@ entry per original event.
 Model curve:
 * each ``phsp`` row carries the fitted amplitude weight  w_i = P_i / norm
   (``norm`` = Σ w·P over the whole ``phsp``),
-* the model histogram is built over the ``phsp_rec`` variable with ``w`` —
-  the weight rows and the variable rows must be ONE-TO-ONE (same event
-  count), so ``phsp`` must be the resolution-free phase space,
-* the curve is then scaled so Σ weights MATCHES the data_rec event count.
+* when ``phsp`` carries the resolution copies (``phsp : phsp_rec = n : 1``)
+  the per-row weights are summed back to their original phsp event:
+  ``w = w.reshape(-1, n).sum(axis=-1)`` (``n = len(phsp)/len(phsp_rec)``);
+  with ``n = 1`` the weights are used as they are,
+* the model histogram is built over the ``phsp_rec`` variable with ``w``.
+
+The model curve is drawn WITHOUT any count-ratio scaling (its total area is
+1); pass ``--area-scale`` to additionally scale Σ weights to the data_rec
+event count when the heights should match.
 
 ``phsp_rec`` only supplies the bin variable; if it is resolution-smeared
 rows, no weights are available for them and the model side is meaningless —
@@ -62,6 +67,8 @@ def main():
     ap.add_argument("--prefix", default="plots",
                     help="output dir becomes {prefix}_rec/")
     ap.add_argument("--bins", type=int, default=100)
+    ap.add_argument("--area-scale", action="store_true",
+                    help="scale Σ(model weights) up to the data_rec count")
     ap.add_argument("--skip-plot", action="store_true",
                     help="only write the weighted histograms (.npy)")
     args = ap.parse_args()
@@ -89,13 +96,15 @@ def main():
     else:
         mom_phsp_rec = mom_p
 
-    if mom_p.shape[0] != mom_phsp_rec.shape[0]:
+    n_w = mom_p.shape[0]                 # weight rows (possibly smeared)
+    n_v = mom_phsp_rec.shape[0]          # original variable rows
+    if n_w < n_v or n_w % n_v:
         raise SystemExit(
-            f"weight rows ({keys['phsp']}: {mom_p.shape[0]}) and variable "
-            f"rows ({p_rec_path or keys['phsp']}: {mom_phsp_rec.shape[0]}) "
-            f"must be one-to-one — pass a resolution-free 'phsp' (sum each "
-            f"copy group of the smeared file beforehand)")
-    n_phsp = mom_p.shape[0]
+            f"phsp rows ({keys['phsp']}: {n_w}) must be 1:1 with or an "
+            f"integer multiple (resolution copies) of the phsp_rec rows "
+            f"({p_rec_path or keys['phsp']}: {n_v})")
+    n_res = n_w // n_v                   # 1 = no resolution copies
+    n_phsp = n_v
     n_data = mom_data_rec.shape[0]
 
     # ── fitted amplitude on the phase space → per-row weights ──
@@ -111,10 +120,13 @@ def main():
     hp = f.backend.load_data(ev_phsp)
     try:
         norm, _g, Pp = f.backend.compute(params, hp, norm=None)
-        w = Pp / norm                       # pdf per phase-space row
+        w = Pp / norm                       # pdf per (smeared) phsp row
     finally:
         hp.free()
-    print(f"weights: {n_phsp} phsp rows, norm=Σ P = {float(norm):.4g}, "
+    if n_res > 1:
+        w = w.reshape(n_phsp, n_res).sum(axis=-1)   # sum copies of event
+    print(f"weights: {n_w} phsp rows -> {n_phsp} original events "
+          f"(resolution {n_res}), norm=Σ P = {float(norm):.4g}, "
           f"Σ w = {float(w.sum()):.4g}")
 
     # ── projections: invariant masses of every final pair ──
@@ -138,10 +150,11 @@ def main():
         edges = np.linspace(lo, hi, args.bins + 1)
         ndat, _ = np.histogram(dv, bins=edges)
         nmodel, _ = np.histogram(pv, bins=edges, weights=w)
-        scale = n_data / nmodel.sum() if nmodel.sum() > 0 else 1.0
-        nmodel = nmodel * scale             # sum weights -> match data size
+        if args.area_scale and nmodel.sum() > 0:
+            nmodel = nmodel * (n_data / nmodel.sum())
         np.savez(os.path.join(outdir, f"hist_{lab}.npz"),
-                 edges=edges, data=ndat, model=nmodel, weight=w)
+                 edges=edges, data=ndat, model=nmodel, weight=w,
+                 area_scaled=bool(args.area_scale))
         if args.skip_plot:
             continue
         fig, ax = plt.subplots(figsize=(7, 5))
