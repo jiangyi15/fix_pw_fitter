@@ -341,16 +341,13 @@ class PWGroupPlotter:
         self._P_total = _sum_copies(raw_total)      # weighted per var row
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
-        # background: the phsp 'bkg' column is its own per-event weight —
-        # reduced/group-summed WITHOUT multiplying the signal phsp weight phsp_w
+        # background, reduced exactly like the signal — phsp_w·bkg on the
+        # phsp (weight) rows, group-summed to the variable rows (the same
+        # measure as the fit pdf and N_b = Σ phsp_w·bkg)
         bkg_raw = np.asarray(self.fitter._phsp_np.get(
             "bkg", np.zeros(n_w)), dtype=float)
-
-        def _sum_bkg(x):
-            return x.reshape(n_v, s).sum(axis=1)
-
-        self._bkg_norm = float(np.sum(bkg_raw))     # full sample ∫bkg
-        self._bkg_var = _sum_bkg(bkg_raw)           # per variable row
+        self._bkg_norm = float(np.sum(phsp_w * bkg_raw))   # full sample ∫bkg
+        self._bkg_var = _sum_copies(bkg_raw)               # per variable row
 
         # Store zorder for plotting: smallest |weight| → highest zorder (on top)
         pw_abs = np.array([float(np.sum(np.abs(Pg)))
