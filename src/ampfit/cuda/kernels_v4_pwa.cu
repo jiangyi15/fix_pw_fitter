@@ -14,6 +14,12 @@
  *       Amp_{p,k} = fa_{p,k} · fl_k        (angular × form-factor)
  *       bw_k      = ∏_r Breit–Wigner denominator (m0/g0, same for all p)
  *
+ * NOTE on g0: the fitted `g0` parameter is the width at the reference
+ * defined by the resonance mass FIXED in the config particle table (which
+ * builds the running-width gamma_table/fl_table).  It is not the nominal
+ * width at the `m0` fit parameter — when the fitted mass differs from that
+ * fixed reference mass the physical width runs via g0·γ(m).
+ *
  * Wave entries are stored p-major: entry index w = p·N + k,  N = n_wave/P.
  * All per-event/per-wave arrays (common_amp, bw_p, …) therefore have
  * n_wave = P·N entries per event, while the coupling array ck has length N
