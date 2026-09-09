@@ -1,31 +1,30 @@
-"""Plot resolution-fit results at the ORIGINAL-event level.
+"""Plot resolution-fit results: projection distribution vs model curve.
 
 Config convention (extra keys under ``data:``):
 
-    data:      data_momenta_smeared.npy   (n_events x res_size, 4)  → v5_pwa
-    data_rec:  data_momenta_orig.npy      (n_events, 4)  original data rows
-    phsp:      mc_momenta.npy              phase space used for the weights
-    phsp_rec:  (optional) smeared phase-space rows IF phsp itself carries
-               the resolution copies
+    data_rec:  original (unexpanded) data rows     (n_data, 4)   — histogram
+    phsp:      phase space used to build the model weights  (n_phsp, 4)
+    phsp_rec:  (optional) phase-space rows whose VARIABLE enters the model
+               histogram — when absent it is ``phsp`` itself
 
-The DATA file is the one fed to cuda_v5_pwa, so it carries the resolution
-size (original event ``e`` owns rows ``[e*s, (e+1)*s)``).  The phase space
-does NOT have to carry a resolution size: by default ``phsp`` is a plain
-per-event sample and the weights are its normalised amplitude directly.  If
-``phsp`` IS smeared (len(phsp) is an integer multiple of len(phsp_rec)),
-the per-row pdf is first group-summed back to each original phsp event.
+The smeared ``data`` file fed to cuda_v5_pwa is NOT used here: every
+variable comes from the original ``data_rec`` / ``phsp_rec`` rows, one
+entry per original event.
 
-Everything is plotted at ORIGINAL-event level ({prefix}_rec):
+Model curve:
+* each ``phsp`` row carries the fitted amplitude weight  w_i = P_i / norm
+  (``norm`` = Σ w·P over the whole ``phsp``),
+* the model histogram is built over the ``phsp_rec`` variable with ``w`` —
+  the weight rows and the variable rows must be ONE-TO-ONE (same event
+  count), so ``phsp`` must be the resolution-free phase space,
+* the curve is then scaled so Σ weights MATCHES the data_rec event count.
 
-* weights  : fitted pdf on the phase space, P_i/norm (smeared rows are
-             group-summed to their original event when present);
-* variable : taken from the ORIGINAL rows of ``phsp_rec`` (falls back to
-             ``phsp``) and ``data_rec`` — one entry per original event, so
-             no resolution-size factor appears in the counts.
+``phsp_rec`` only supplies the bin variable; if it is resolution-smeared
+rows, no weights are available for them and the model side is meaningless —
+use the original phase space here.
 
-Per projection (final-state invariant masses) the data_rec histogram is
-compared with the phsp histogram weighted by ``w`` (area-normalised to the
-data).  Plots are written into ``{prefix}_rec/``.
+Per projection (invariant masses of every final pair) the script writes
+``{prefix}_rec/m_<pair>.png`` and ``{prefix}_rec/hist_<pair>.npz``.
 
 Usage:
     python scripts/plot_rec.py --config config.yml \\
@@ -50,10 +49,9 @@ def _inv_mass(p4):
     return np.sqrt(np.clip(e2 - p2, 0.0, None))
 
 
-def _load_event_arrays(cfg, kc, byt, mom_path):
+def _load_events(cfg, kc, byt, mom_path):
     mom = np.load(mom_path)
-    d = pwa_event_data_tree(cfg, kc, byt, mom)
-    return d, mom
+    return pwa_event_data_tree(cfg, kc, byt, mom), mom
 
 
 def main():
@@ -74,7 +72,7 @@ def main():
 
     cfg = Config(args.config)
     keys = cfg.dic["data"]
-    for k in ("data", "phsp", "data_rec"):
+    for k in ("data_rec", "phsp"):
         if k not in keys:
             raise SystemExit(f"config data: lacks '{k}' (see script docstring)")
 
@@ -82,28 +80,25 @@ def main():
     pws = list(cfg.full_decay.get_partial_waves())
     byt = {cfg.topo_index[ch.topo_id()]: ch for _, ch in pws}
 
-    # smeared (resolution) data + original rows; smeared/original phase space
-    _d_smear, mom_smear = _load_event_arrays(cfg, kc, byt, keys["data"])
-    _p_smear, mom_p = _load_event_arrays(cfg, kc, byt, keys["phsp"])
-    _d_rec, mom_data_rec = _load_event_arrays(cfg, kc, byt, keys["data_rec"])
+    ev_phsp, mom_p = _load_events(cfg, kc, byt, keys["phsp"])
+    _ev_drec, mom_data_rec = _load_events(cfg, kc, byt, keys["data_rec"])
 
     p_rec_path = keys.get("phsp_rec")
-    phsp_is_smeared = bool(p_rec_path) and os.path.isfile(p_rec_path)
-    if phsp_is_smeared:
-        _p_rec, mom_phsp_rec = _load_event_arrays(cfg, kc, byt, p_rec_path)
+    if p_rec_path and os.path.isfile(p_rec_path):
+        _ev_prec, mom_phsp_rec = _load_events(cfg, kc, byt, p_rec_path)
     else:
-        mom_phsp_rec = mom_p           # phsp has no resolution size
+        mom_phsp_rec = mom_p
 
-    nd_s, nd_r = mom_smear.shape[0], mom_data_rec.shape[0]
-    np_s, np_r = mom_p.shape[0], mom_phsp_rec.shape[0]
-    if nd_s % nd_r or nd_s < nd_r:
-        raise SystemExit("data size must be data_rec size x resolution_size")
-    s_data = nd_s // nd_r
-    s_phsp = np_s // np_r if np_s % np_r == 0 and phsp_is_smeared else 1
-    print(f"resolution copies: data {nd_s}/{nd_r} = {s_data}, "
-          f"phsp {'smeared ' + str(np_s) + '/' + str(np_r) + ' = ' + str(s_phsp) if phsp_is_smeared else '(none)'}")
+    if mom_p.shape[0] != mom_phsp_rec.shape[0]:
+        raise SystemExit(
+            f"weight rows ({keys['phsp']}: {mom_p.shape[0]}) and variable "
+            f"rows ({p_rec_path or keys['phsp']}: {mom_phsp_rec.shape[0]}) "
+            f"must be one-to-one — pass a resolution-free 'phsp' (sum each "
+            f"copy group of the smeared file beforehand)")
+    n_phsp = mom_p.shape[0]
+    n_data = mom_data_rec.shape[0]
 
-    # ── fitted amplitude on the phase space → weights ──
+    # ── fitted amplitude on the phase space → per-row weights ──
     from ampfit import Fitter
     f = Fitter(args.config, backend=args.backend)
     f.apply_constrains()
@@ -113,16 +108,14 @@ def main():
     f.load_fixed_from_dict(res)
     params, _ = f.build_params(x0)
 
-    hp = f.backend.load_data(_p_smear)
+    hp = f.backend.load_data(ev_phsp)
     try:
         norm, _g, Pp = f.backend.compute(params, hp, norm=None)
-        pdf = Pp / norm
-        if s_phsp > 1:
-            w_orig = pdf.reshape(np_r, s_phsp).sum(axis=1)
-        else:
-            w_orig = pdf
+        w = Pp / norm                       # pdf per phase-space row
     finally:
         hp.free()
+    print(f"weights: {n_phsp} phsp rows, norm=Σ P = {float(norm):.4g}, "
+          f"Σ w = {float(w.sum()):.4g}")
 
     # ── projections: invariant masses of every final pair ──
     finals = list(cfg.finals)
@@ -144,27 +137,26 @@ def main():
         hi = max(float(dv.max()), float(pv.max()))
         edges = np.linspace(lo, hi, args.bins + 1)
         ndat, _ = np.histogram(dv, bins=edges)
-        nmodel, _ = np.histogram(pv, bins=edges, weights=w_orig)
-        scale = ndat.sum() / nmodel.sum() if nmodel.sum() > 0 else 1.0
-        nmodel = nmodel * scale
+        nmodel, _ = np.histogram(pv, bins=edges, weights=w)
+        scale = n_data / nmodel.sum() if nmodel.sum() > 0 else 1.0
+        nmodel = nmodel * scale             # sum weights -> match data size
         np.savez(os.path.join(outdir, f"hist_{lab}.npz"),
-                 edges=edges, data=ndat, model=nmodel, weight=w_orig)
+                 edges=edges, data=ndat, model=nmodel, weight=w)
         if args.skip_plot:
             continue
         fig, ax = plt.subplots(figsize=(7, 5))
         cx = 0.5 * (edges[:-1] + edges[1:])
         ax.errorbar(cx, ndat, fmt="o", ms=3, lw=1, label="data_rec")
-        ax.step(cx, nmodel, where="mid", label="model (phsp_rec weighted)")
+        ax.step(cx, nmodel, where="mid", label="model (weighted phsp)")
         ax.set_xlabel(f"m({lab}) [GeV]")
-        ax.set_ylabel("counts / original event")
+        ax.set_ylabel("counts")
         ax.legend()
         fig.tight_layout()
         fig.savefig(os.path.join(outdir, f"m_{lab}.png"), dpi=130)
         plt.close(fig)
         n_plot += 1
 
-    print(f"wrote {n_plot} projections into {outdir}/  "
-          f"(norm=Σ P over smeared phsp = {float(norm):.4g})")
+    print(f"wrote {n_plot} projections into {outdir}/")
 
 
 if __name__ == "__main__":
