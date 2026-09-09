@@ -188,8 +188,12 @@ def main():
 
     out = args.out if args.out.endswith(".npy") else args.out + ".npy"
     np.save(out, np.concatenate([mass, phi, theta], axis=-1))
+    # group-normalised weights decided HERE (the smear step knows copies)
+    w_path = os.path.splitext(out)[0] + "_weight.npy"
+    np.save(w_path, np.full(N, 1.0 / copies))
     print(f"tid {tid} ({chain.decays[0].core.name}): "
           f"{n} events x {copies} copies -> {out}  {N} x {want}")
+    print(f"weights: {w_path}  (1/{copies} per row, group-normalised)")
     if n_res >= 1:
         mm = mass[:, 0].reshape(n, copies)
         print("resonance mass original / group mean / group std (first 5):",
