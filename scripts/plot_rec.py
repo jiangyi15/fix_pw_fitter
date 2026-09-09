@@ -20,9 +20,11 @@ Model curve:
   with ``n = 1`` the weights are used as they are,
 * the model histogram is built over the ``phsp_rec`` variable with ``w``.
 
-The model curve is drawn WITHOUT any count-ratio scaling (its total area is
-1); pass ``--area-scale`` to additionally scale Σ weights to the data_rec
-event count when the heights should match.
+Like a normal (unbinned) PWA projection plot, the model curve is scaled so
+its total area equals the data_rec event count: ``model *= n_data / Σ w``
+(the standard data/phsp count normalisation; with ``Σ w = 1`` this is just
+``model * n_data``).  Pass ``--no-area-scale`` to draw the unnormalised
+weighted curve (area ~ 1) instead.
 
 ``phsp_rec`` only supplies the bin variable; if it is resolution-smeared
 rows, no weights are available for them and the model side is meaningless —
@@ -67,8 +69,8 @@ def main():
     ap.add_argument("--prefix", default="plots",
                     help="output dir becomes {prefix}_rec/")
     ap.add_argument("--bins", type=int, default=100)
-    ap.add_argument("--area-scale", action="store_true",
-                    help="scale Σ(model weights) up to the data_rec count")
+    ap.add_argument("--no-area-scale", action="store_true",
+                    help="draw the weighted curve without scaling (area ~1)")
     ap.add_argument("--skip-plot", action="store_true",
                     help="only write the weighted histograms (.npy)")
     args = ap.parse_args()
@@ -150,11 +152,11 @@ def main():
         edges = np.linspace(lo, hi, args.bins + 1)
         ndat, _ = np.histogram(dv, bins=edges)
         nmodel, _ = np.histogram(pv, bins=edges, weights=w)
-        if args.area_scale and nmodel.sum() > 0:
-            nmodel = nmodel * (n_data / nmodel.sum())
+        if not args.no_area_scale and nmodel.sum() > 0:
+            nmodel = nmodel * (n_data / nmodel.sum())   # normal-plot scale
         np.savez(os.path.join(outdir, f"hist_{lab}.npz"),
                  edges=edges, data=ndat, model=nmodel, weight=w,
-                 area_scaled=bool(args.area_scale))
+                 area_scaled=not args.no_area_scale)
         if args.skip_plot:
             continue
         fig, ax = plt.subplots(figsize=(7, 5))
