@@ -4,6 +4,27 @@ import numpy as np
 ALL_BACKENDS = {}
 
 
+def per_event_dnorm(norm, P, weight, bkg=None):
+    """d(NLL)/d(norm) for the per-event NLL  NLL = -Σ w·log(P/norm + bkg).
+
+    ``dNLL/dnorm = Σ w·P / (norm·(P + bkg·norm))``.
+
+    This is the *analytical reference* a per-event backend reports as its
+    native ``_last_dnorm``.  Backends whose objective is NOT the per-event
+    log (e.g. cuda_v5_pwa group-log) must supply the value from their own
+    kernel instead — never from this helper.
+    """
+    w = np.asarray(weight, dtype=np.float64)
+    P = np.asarray(P, dtype=np.float64)
+    if bkg is None or np.isscalar(bkg):
+        b = np.full_like(w, 1.0 if bkg is None else float(bkg))
+    else:
+        b = np.asarray(bkg, dtype=np.float64)
+    if b.shape != w.shape:
+        b = np.full_like(w, float(np.ravel(b)[0]))
+    return float(np.sum(w * P / (norm * (P + b * norm))))
+
+
 def register_backend(name):
     """Decorator: register a backend class under *name*."""
     def _f(cls):
@@ -89,6 +110,14 @@ class ComputeBackend:
       load_data(self, data_np) -> DataHandle
       compute(self, params, data_handle, norm, return_p) -> (Q, grads_dict, P)
       free(self)
+
+    dNLL/dnorm contract: whenever ``compute(..., norm is not None)`` runs,
+    the returned ``grads_dict`` MUST contain ``grads["norm"]`` — the native
+    d(NLL)/d(norm) of the backend's OWN objective (per-event NLL or the
+    v5 group-log).  The fitter reads it from the returned gradient dict; it
+    is never derived from P.  Per-event backends may use
+    :func:`per_event_dnorm`; group-log/other objectives must provide the
+    value from their kernel.
     """
     dtype = np.float64
 

@@ -122,6 +122,10 @@ def _worker_main(kernel_config, backend_spec, data_chunk,
     for task in iter(task_queue.get, None):
         params, norm, return_p = task
         Q, grads, P = be.compute(params, dh, norm=norm, return_p=return_p)
+        if norm is not None and "norm" not in grads:
+            raise RuntimeError(
+                f"shard worker ({type(be).__name__}) did not return "
+                f"grads['norm'] for a normed compute")
         result_queue.put((Q, grads, P))
 
     be.free()

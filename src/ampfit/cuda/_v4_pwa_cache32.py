@@ -157,6 +157,7 @@ class CUDAKernelV4PWACache32:
             build_amp_cache_layout(c)
         self._ka = []
         self._dnorm = None            # d(NLL)/d(norm) from the last norm compute
+        self._last_dnorm = None        # canonical name (kernel-native dnorm)
         self.dnorm_on_gpu = True
 
         def _db(a):
@@ -362,6 +363,7 @@ class CUDAKernelV4PWACache32:
         data_handle._keep += ka
         # d(NLL)/d(norm) accumulated on device; None when unnormalized
         self._dnorm = odn[0] if use_norm else None
+        self._last_dnorm = self._dnorm
 
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]

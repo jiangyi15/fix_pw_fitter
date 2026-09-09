@@ -1,22 +1,55 @@
 """CUDA backends — GPU-accelerated computation (f64 and f32)."""
 import numpy as np
-from .core import ComputeBackend, register_backend
+from .core import ComputeBackend, per_event_dnorm, register_backend
 
 
 class _CUDABackend(ComputeBackend):
-    """Common base for all CUDA backends — delegates to a kernel."""
+    """Common base for all CUDA backends — delegates to a kernel.
+
+    Every compute with a norm sets ``_last_dnorm``: kernels that provide a
+    native value (caches, cuda_v5_pwa group-log) are trusted; other
+    (per-event NLL) kernels fall back to ``per_event_dnorm`` from the P the
+    kernel returns and the weight/bkg arrays retained at load_data.
+    """
 
     def __init__(self, kernel_config, batch_size=50000):
         self.kernel = self._make_kernel(kernel_config, batch_size)
+        self._host_arrays = {}
 
     def _make_kernel(self, kernel_config, batch_size):
         raise NotImplementedError
 
     def load_data(self, data_np):
-        return self.kernel.load_data(data_np)
+        h = self.kernel.load_data(data_np)
+        self._host_arrays[id(h)] = (
+            np.asarray(data_np.get(
+                "weight", np.ones(data_np["mass"].shape[0])),
+                dtype=np.float64),
+            (None if data_np.get("bkg") is None
+             else np.asarray(data_np["bkg"], dtype=np.float64)))
+        return h
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        return self.kernel.compute(params, data_handle, norm=norm)
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm)
+        if norm is not None:
+            native = getattr(self.kernel, "_last_dnorm", None)
+            if native is not None:
+                dnorm = float(native)
+            elif P is not None:
+                w, b = self._host_arrays.get(id(data_handle),
+                                             (None, None))
+                if w is None:
+                    raise RuntimeError(
+                        f"{type(self).__name__}: handle not loaded through "
+                        f"this backend")
+                dnorm = per_event_dnorm(norm, P, w, b)
+            else:
+                raise RuntimeError(
+                    f"{type(self).__name__}: kernel returned neither a "
+                    f"native dNLL/dnorm nor per-event P")
+            grads = dict(grads)
+            grads["norm"] = dnorm
+        return Q, grads, P
 
     def free(self):
         self.kernel.free()
@@ -148,9 +181,15 @@ class CUDABackendV5PWA(_CUDABackend):
         return True
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        res = self.kernel.compute(params, data_handle, norm=norm)
-        self._last_dnorm = getattr(self.kernel, "_last_dnorm", None)
-        return res
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm)
+        if norm is not None:
+            dn = getattr(self.kernel, "_last_dnorm", None)
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
 
 
 @register_backend("cuda32_v4_pwa_cache")

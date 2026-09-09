@@ -136,6 +136,10 @@ class _ONNXBackendBase(ComputeBackend):
                 for k in grads: total_grads[k] += grads[k]
             all_P.append(P_batch[:n_valid])
         P_all = all_P[0] if len(all_P) == 1 else np.concatenate(all_P, axis=0)
+        if norm is not None:
+            from .core import per_event_dnorm
+            total_grads["norm"] = per_event_dnorm(
+                norm, P_all, data_handle["weight"], data_handle.get("bkg"))
         return total_Q, total_grads, P_all
 
 

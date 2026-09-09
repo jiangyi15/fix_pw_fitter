@@ -767,24 +767,6 @@ class Fitter:
     # ------------------------------------------------------------------
     # Compute
     # ------------------------------------------------------------------
-    def _compute_norm_derivative(self, norm, P, data):
-        """Compute d(NLL)/d(norm) from kernel forward outputs.
-        
-        NLL = -sum(weight * log(P/norm + bkg))
-        
-        d(NLL)/d(norm) = sum(weight * P / (norm * (P + bkg * norm)))
-        """
-        weight = data["weight"]
-        bkg = data.get("bkg", 1.0)
-        if np.isscalar(bkg):
-            bkg = np.full_like(weight, bkg)
-        # Use float64 to avoid overflow with f32 backends
-        P = np.asarray(P, dtype=np.float64)
-        weight = np.asarray(weight, dtype=np.float64)
-        bkg = np.asarray(bkg, dtype=np.float64)
-        denom = norm * (P + bkg * norm)
-        return np.sum(weight * P / denom)
-
     def _compute_norm_batched(self, params):
         """Compute norm over ALL phsp events."""
         norm, grads, _ = self.backend.compute(params, self._phsp_scratch,
@@ -793,10 +775,10 @@ class Fitter:
 
     def get_nll_raw(self, params):
         """Compute NLL from full params dict (no constraint transformation).
-        
+
         Args:
             params: dict with keys 'ck', 'm0', 'g0', 'scalar'.
-        
+
         Returns:
             (nll, grads) where grads is a dict with the same keys containing
             the total gradient including the norm contribution.
@@ -812,19 +794,18 @@ class Fitter:
             if norm_grads[key] is not None:
                 norm_grads[key] = np.asarray(norm_grads[key])
 
-        # 2. NLL from data (with norm).  When the backend computes
-        # d(NLL)/d(norm) on the GPU (fixed-cache CUDA path) the per-event P
-        # is not needed for the gradient chain and is not round-tripped.
-        gpu_dn = bool(getattr(self.backend, "dnorm_on_gpu", False))
-        nll, grads, P = self.backend.compute(
-            params, self._data_holder, norm=norm, return_p=not gpu_dn
-        )
+        # 2. NLL from data (with norm).  The backend returns d(NLL)/d(norm)
+        # for ITS OWN objective as ``grads["norm"]`` (native; the fitter never
+        # derives it from P).
+        nll, grads, _ = self.backend.compute(
+            params, self._data_holder, norm=norm, return_p=False)
 
-        # 3. dNLL/dnorm (GPU scalar when available, else numpy from P)
-        if gpu_dn and getattr(self.backend, "_last_dnorm", None) is not None:
-            dNLL_dnorm = self.backend._last_dnorm
-        else:
-            dNLL_dnorm = self._compute_norm_derivative(norm, P, self._data_np)
+        # 3. dNLL/dnorm comes through the returned gradient dict
+        dNLL_dnorm = grads.pop("norm", None)
+        if dNLL_dnorm is None:
+            raise RuntimeError(
+                f"backend {type(self.backend).__name__} did not return "
+                f"grads['norm'] for a normed compute")
 
         # 4. Add purity constant: -log(purity) * sum(weight)
         # Kernel computes -w*log(P/norm + bkg_scaled).

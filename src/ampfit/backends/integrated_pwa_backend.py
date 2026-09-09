@@ -127,14 +127,7 @@ class IntegratedPWABackend(ComputeBackend):
                                             norm=norm, return_p=return_p)
             grads["m0"] = np.zeros_like(grads["m0"])
             grads["g0"] = np.zeros_like(grads["g0"])
-            # GPU dnorm scalar (avoids the per-event P host round-trip that
-            # the numpy dnorm fallback in the fitter would otherwise need)
-            if norm is not None and self.dnorm_on_gpu:
-                self._last_dnorm = float(
-                    getattr(getattr(self.base, "kernel", None),
-                            "_dnorm", None) or 0.0)
-            else:
-                self._last_dnorm = None
+            # dNLL/dnorm travels inside the base's returned grads['norm']
             return Q, grads, P
 
         # fast Gram norm over the phsp bundle

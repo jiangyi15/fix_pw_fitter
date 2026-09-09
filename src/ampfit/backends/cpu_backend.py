@@ -1,6 +1,6 @@
 """CPU backend — C + OpenMP + AVX2 accelerated (float64)."""
 import numpy as np
-from .core import ComputeBackend, register_backend
+from .core import ComputeBackend, per_event_dnorm, register_backend
 
 
 @register_backend("cpu64_v3")
@@ -18,11 +18,16 @@ class CPUBackendV3(ComputeBackend):
         self.kernel = K(kernel_config, batch_size=batch_size)
 
     def load_data(self, data_np):
+        self._data_np = data_np
         return self.kernel.load_data(data_np)
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        return self.kernel.compute(params, data_handle, norm=norm,
-                                   return_p=return_p)
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=True)
+        if norm is not None:
+            grads["norm"] = per_event_dnorm(
+                norm, P, self._data_np["weight"], self._data_np.get("bkg"))
+        return Q, grads, (P if return_p else None)
 
     def free(self):
         self.kernel.free()

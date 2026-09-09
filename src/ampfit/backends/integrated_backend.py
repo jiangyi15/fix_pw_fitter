@@ -402,6 +402,7 @@ class IntegratedBackend(ComputeBackend):
                                             return_p=return_p)
             grads["m0"] = np.zeros_like(grads["m0"])
             grads["g0"] = np.zeros_like(grads["g0"])
+            # dNLL/dnorm travels inside the base's returned grads['norm']
             return Q, grads, P
 
         # ── Fast norm from pre‑integrated Gram matrices ──────────
