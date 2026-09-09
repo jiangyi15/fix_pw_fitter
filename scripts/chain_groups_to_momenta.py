@@ -61,6 +61,11 @@ def main():
     ap.add_argument("--groups", required=True,
                     help=".npy from smear_chain_groups.py")
     ap.add_argument("--out", default="data_momenta_groups.npy")
+    ap.add_argument("--copies", type=int, default=None,
+                    help="resolution copies per original event; when given a "
+                         "companion weight file {out_stem}_weight.npy is "
+                         "written with 1/copies per row (group-normalised "
+                         "weights, comparable with cuda_v4_pwa NLL)")
     args = ap.parse_args()
 
     cfg = Config(args.config)
@@ -86,6 +91,11 @@ def main():
 
     mom = reconstruct_from_canonical(meta, M, phi, theta)
     np.save(args.out, mom)
+    if args.copies:
+        w_path = os.path.splitext(args.out)[0] + "_weight.npy"
+        np.save(w_path, np.full(N, 1.0 / args.copies))
+        print(f"weights: {w_path}  (1/{args.copies} per row, "
+              f"group-normalised)")
     print(f"tid {tid}: {N} group events -> {args.out} {mom.shape}")
     print(f"chain top: {chain.decays[0].core.name}; "
           f"finals (columns): {meta['finals']}")

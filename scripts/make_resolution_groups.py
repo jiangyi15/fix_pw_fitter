@@ -69,7 +69,8 @@ def main():
          + (["--sigma-theta", args.sigma_theta] if args.sigma_theta else [])
          + ["--out", os.path.splitext(groups_npy)[0]])
     _run("chain_groups_to_momenta.py",
-         common + ["--groups", groups_npy, "--out", args.out])
+         common + ["--groups", groups_npy, "--out", args.out,
+                   "--copies", str(args.copies)])
 
     print(f"\nfinal group momenta: {os.path.abspath(args.out)}")
     if not keep:
