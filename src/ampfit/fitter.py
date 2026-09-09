@@ -445,6 +445,10 @@ class Fitter:
           ``{prefix}_bg_value``, ``dat_order`` reordering, on-the-fly
           conversion to kernel arrays).
 
+        An optional per-event ``{prefix}_bg_weight`` file is loaded into
+        ``ev["bg_weight"]`` (used as the background-only group weight by the
+        resolution plotter; defaults to the signal phsp weight otherwise).
+
         Returns the kernel-array dict, or ``None`` if the prefix is not
         configured.
         """
@@ -461,14 +465,28 @@ class Fitter:
 
         n_comp = int(self.kernel_config["angle_k"].shape[1])
         arr = _resolve(f"{prefix}_arr")
+        ev = None
         if arr:
-            return self.load_npz(arr, n_angle_comp=n_comp)[0]
-        mom = _resolve(prefix)
-        if mom is None:
+            ev = self.load_npz(arr, n_angle_comp=n_comp)[0]
+        else:
+            mom = _resolve(prefix)
+            if mom is None:
+                return None
+            if str(mom).endswith(".npz"):
+                ev = self.load_npz(mom, n_angle_comp=n_comp)[0]
+            else:
+                ev = self.load_momenta_conf(prefix)
+        if ev is None:
             return None
-        if str(mom).endswith(".npz"):
-            return self.load_npz(mom, n_angle_comp=n_comp)[0]
-        return self.load_momenta_conf(prefix)
+        bw_path = _resolve(f"{prefix}_bg_weight")
+        if bw_path:
+            bgw = np.load(bw_path).astype(np.float64).ravel()
+            if bgw.shape[0] != ev["weight"].shape[0]:
+                raise ValueError(
+                    f"{prefix}_bg_weight: {bgw.shape[0]} entries but "
+                    f"{ev['weight'].shape[0]} events")
+            ev["bg_weight"] = bgw
+        return ev
 
     def load_momenta_conf(self, prefix):
         """Generic prefix loader: ``{prefix}`` (+ optional ``{prefix}_weight``

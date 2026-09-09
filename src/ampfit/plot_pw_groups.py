@@ -341,12 +341,20 @@ class PWGroupPlotter:
         self._P_total = _sum_copies(raw_total)      # weighted per var row
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
-        # background, reduced exactly like the signal: pw·bkg on the phsp
-        # (weight) rows, group-summed to the variable rows
+        # background, reduced like the signal but with its OWN per-row weight
+        # (bg_weight in the phsp arrays; defaults to the phsp weight pw) —
+        # so adding a background weight never changes the signal pw path
+        bgw_raw = np.asarray(self.fitter._phsp_np.get(
+            "bg_weight", self.fitter._phsp_np.get(
+                "weight", np.ones(n_w))), dtype=float)
         bkg_raw = np.asarray(self.fitter._phsp_np.get(
             "bkg", np.zeros(n_w)), dtype=float)
-        self._bkg_norm = float(np.sum(pw_w * bkg_raw))   # full sample ∫bkg
-        self._bkg_var = _sum_copies(bkg_raw)             # per variable row
+
+        def _sum_bg(x):
+            return (bgw_raw * x).reshape(n_v, s).sum(axis=1)
+
+        self._bkg_norm = float(np.sum(bgw_raw * bkg_raw))  # full sample ∫bkg
+        self._bkg_var = _sum_bg(bkg_raw)                   # per variable row
 
         # Store zorder for plotting: smallest |weight| → highest zorder (on top)
         pw_abs = np.array([float(np.sum(np.abs(Pg)))

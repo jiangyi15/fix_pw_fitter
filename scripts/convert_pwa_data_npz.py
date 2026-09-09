@@ -44,6 +44,9 @@ def main():
                     help="optional per-event weight .npy (n,)")
     ap.add_argument("--bkg", default=None,
                     help="optional per-event background .npy (n,)")
+    ap.add_argument("--bg-weight", default=None,
+                    help="optional per-event background weight .npy (n,) "
+                         "(stored as 'bg_weight', independent of weight)")
     ap.add_argument("--dat-order", default=None,
                     help="comma list of final names in the momenta columns "
                          "(default cfg.finals order)")
@@ -80,6 +83,11 @@ def main():
         if b.shape[0] != mom.shape[0]:
             raise SystemExit("--bkg length != events")
         arr["bkg"] = b
+    if args.bg_weight:
+        bw = np.load(args.bg_weight).astype(float).ravel()
+        if bw.shape[0] != mom.shape[0]:
+            raise SystemExit("--bg-weight length != events")
+        arr["bg_weight"] = bw
 
     np.savez(args.out, **arr)
     print(f"wrote {args.out}  ({mom.shape[0]} events) keys="
