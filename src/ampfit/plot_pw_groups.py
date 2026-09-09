@@ -320,24 +320,21 @@ class PWGroupPlotter:
             raw_groups.append(Pg)
 
         # ── resolution wrap: reduce weight rows to the variable rows ──
+        # W[e] = Σ_{j<s} pw·P[e·s+j]  — with s = 1 this is just pw·P.
         pw_w = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
         pv = self.phsp_var_np if self.phsp_var_np is not None \
             else self.fitter._phsp_np
         pw_v = np.asarray(pv["weight"], dtype=float)
         n_w = int(pw_w.shape[0])
         n_v = int(pw_v.shape[0])
-        if n_w == n_v:
-            def _sum_copies(x):
-                return pw_w * x
-        else:
-            if n_w < n_v or n_w % n_v:
-                raise ValueError(
-                    f"weight phsp rows ({n_w}) must equal or be an integer "
-                    f"multiple of the variable rows ({n_v})")
-            s = n_w // n_v
+        if n_w < n_v or n_w % n_v:
+            raise ValueError(
+                f"weight phsp rows ({n_w}) must equal or be an integer "
+                f"multiple of the variable rows ({n_v})")
+        s = n_w // n_v
 
-            def _sum_copies(x):
-                return (pw_w * x).reshape(n_v, s).sum(axis=1)
+        def _sum_copies(x):
+            return (pw_w * x).reshape(n_v, s).sum(axis=1)
 
         # normalisation over the FULL weight sample (before the group-sum)
         total_sum = float(np.sum(pw_w * raw_total))
