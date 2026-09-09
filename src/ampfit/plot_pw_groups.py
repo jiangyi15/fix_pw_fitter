@@ -321,11 +321,11 @@ class PWGroupPlotter:
 
         # ── resolution wrap: reduce weight rows to the variable rows ──
         # W[e] = Σ_{j<s} phsp_w·P[e·s+j]  — with s = 1 this is just phsp_w·P.
-        phsp_weight = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
+        phsp_w = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
         pv = self.phsp_var_np if self.phsp_var_np is not None \
             else self.fitter._phsp_np
         phsp_var_weight = np.asarray(pv["weight"], dtype=float)
-        n_w = int(phsp_weight.shape[0])
+        n_w = int(phsp_w.shape[0])
         n_v = int(phsp_var_weight.shape[0])
         if n_w < n_v or n_w % n_v:
             raise ValueError(
@@ -334,10 +334,10 @@ class PWGroupPlotter:
         s = n_w // n_v
 
         def _sum_copies(x):
-            return (phsp_weight * x).reshape(n_v, s).sum(axis=1)
+            return (phsp_w * x).reshape(n_v, s).sum(axis=1)
 
         # normalisation over the FULL weight sample (before the group-sum)
-        total_sum = float(np.sum(phsp_weight * raw_total))
+        total_sum = float(np.sum(phsp_w * raw_total))
         self._P_total = _sum_copies(raw_total)      # weighted per var row
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
