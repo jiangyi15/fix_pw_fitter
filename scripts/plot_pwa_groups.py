@@ -100,20 +100,16 @@ def main():
     # ── data / phsp sources ────────────────────────────────────────
     # Provide --data/--phsp npz files explicitly, or omit both and the
     # config's ``data`` / ``phsp`` section (npz arrays or 4-momentum
-    # prefix + _weight[/_bg_value] files) is used via load_all_data().
-    # Rec mode (no explicit files + config declares data_rec): the loader
-    # data comes from ``data_rec`` (original rows, *_weight/*_bg sidecars
-    # kept) while the phsp stays the config ``phsp`` — the WEIGHT source.
-    # The ``phsp_rec`` rows (when declared) are only handed to plot_var as
-    # the VARIABLE source through ``PWGroupPlotter.use_rec``.
+    # prefix + _weight[/_bg_value] files) is used via load_all_data() —
+    # config keys are NEVER replaced.
+    # Rec mode additionally loads the ORIGINAL-event arrays declared under
+    # ``data_rec`` / ``phsp_rec`` and hands them to ``PWGroupPlotter.use_rec``
+    # as the VARIABLE/data source only (weights stay on the config phsp).
     if bool(args.data) != bool(args.phsp):
         sys.exit("give both --data and --phsp, or neither (falls back to "
                  "the config data section)")
-    rec_used = False
     dc = f.config.dic["data"]
-    if not args.data and dc.get("data_rec"):
-        rec_used = True
-        dc["data"] = dc["data_rec"]     # keep *_weight / *_bg_value sidecars
+    rec_used = bool(not args.data and dc.get("data_rec"))
     if args.data:
         data_np, nd = Fitter.load_npz(args.data,
                                       max_events=args.max_events,
@@ -127,8 +123,7 @@ def main():
     else:
         data_np, phsp_np = f.load_all_data()
         print(f"  Loaded {len(data_np['weight']):,} data + "
-              f"{len(phsp_np['weight']):,} phsp events from config "
-              f"{'(rec data rows)' if rec_used else ''}")
+              f"{len(phsp_np['weight']):,} phsp events from config")
 
     r = f.load_results(args.fit_json)
     if r.x is None or len(r.x) == 0:
@@ -140,16 +135,15 @@ def main():
     groups = discover_pwa_groups(f.config, by=args.by, merge=merge)
     plotter = PWGroupPlotter(f, r, groups)
     if rec_used:
-        # weights stay on the config phsp (f._phsp_np); the ORIGINAL rows
-        # (phsp_rec, or phsp itself when absent) are only the VARIABLE
-        # source read by plot_var via use_rec.
-        pv = f._phsp_np
-        pr = dc.get("phsp_rec")
-        if pr:
-            pv = _load_event_arrays(f.config, kc, pr, n_comp)
-            # rows may differ by a resolution factor; plot_var group-sums
-            # the computed weights to the variable rows automatically
-        plotter.use_rec(data_rec_np=f._data_np, phsp_rec_np=pv)
+        # original rows are ADDITIONAL variable sources; nothing in the
+        # config / fitter arrays is replaced
+        recd = _load_event_arrays(f.config, kc, dc["data_rec"], n_comp)
+        recp = None
+        if dc.get("phsp_rec"):
+            recp = _load_event_arrays(f.config, kc, dc["phsp_rec"], n_comp)
+        plotter.use_rec(data_rec_np=recd, phsp_rec_np=recp)
+        print(f"  rec variables: data_rec {recd['mass'].shape[0]:,} rows"
+              f"{', phsp_rec ' + str(recp['mass'].shape[0]) + ' rows' if recp is not None else ''}")
     plotter.compute()
     print(f"  {len(plotter.labels)} groups ({args.by}): {plotter.labels}")
 

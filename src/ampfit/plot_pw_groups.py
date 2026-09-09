@@ -349,7 +349,11 @@ class PWGroupPlotter:
         self._zorders = [5 + (n - 1 - r) * 2 for r in rank]  # smallest → highest zorder
 
         purity = self.fitter._purity if self.fitter._purity is not None else 1.0
-        target = float(np.sum(self.fitter._data_np["weight"])) * purity
+        # normalisation target: the ORIGINAL (rec) data rows when use_rec was
+        # called, otherwise the fitter's own data
+        dw_target = self.data_var_np["weight"] if self.data_var_np is not None \
+            else self.fitter._data_np["weight"]
+        target = float(np.sum(dw_target)) * purity
         self._scale = target / total_sum if total_sum > 0 else 0.0
         return self
 
