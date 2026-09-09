@@ -298,7 +298,7 @@ class PWGroupPlotter:
         When ``use_rec`` was given a ``phsp_rec`` with fewer rows than the
         fitter's phsp (resolution copies, ``len(phsp) = s * len(phsp_rec)``)
         the per-row weights are group-summed here to the ORIGINAL rows,
-        ``W[e] = Σ_{j<s} pw·P[e·s+j]``; otherwise (equal rows) they are the
+        ``W[e] = Σ_{j<s} phsp_w·P[e·s+j]``; otherwise (equal rows) they are the
         plain per-event weights.  Call once before :meth:`plot_var`.
         """
         params, _ = self.fitter.build_params(self.fit_result.x)
@@ -320,7 +320,7 @@ class PWGroupPlotter:
             raw_groups.append(Pg)
 
         # ── resolution wrap: reduce weight rows to the variable rows ──
-        # W[e] = Σ_{j<s} pw·P[e·s+j]  — with s = 1 this is just pw·P.
+        # W[e] = Σ_{j<s} phsp_w·P[e·s+j]  — with s = 1 this is just phsp_w·P.
         phsp_weight = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
         pv = self.phsp_var_np if self.phsp_var_np is not None \
             else self.fitter._phsp_np
@@ -342,7 +342,7 @@ class PWGroupPlotter:
         self._P_groups = [_sum_copies(g) for g in raw_groups]
 
         # background: the phsp 'bkg' column is its own per-event weight —
-        # reduced/group-summed WITHOUT multiplying the signal phsp weight pw
+        # reduced/group-summed WITHOUT multiplying the signal phsp weight phsp_w
         bkg_raw = np.asarray(self.fitter._phsp_np.get(
             "bkg", np.zeros(n_w)), dtype=float)
 
@@ -533,13 +533,13 @@ class PWGroupPlotter:
             dy, _ = np.histogram(d, bins=bins, weights=dw)
             dw2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
 
-            # Signal — self._P_total/_P_groups are already pw-weighted
+            # Signal — self._P_total/_P_groups are already phsp_w-weighted
             # (and group-summed to the variable rows) by compute()
             sig, _ = np.histogram(p, bins=bins,
                                   weights=self._P_total * extra
                                   * self._scale)
 
-            # Background (filled area) — pw·bkg reduced from the phsp rows
+            # Background (filled area) — phsp_w·bkg reduced from the phsp rows
             bkg_y, _ = np.histogram(p, bins=bins,
                                     weights=self._bkg_var * extra
                                     * bkg_scale)
@@ -690,7 +690,7 @@ class PWGroupPlotter:
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
         # frac = P(B0) in data → tag = frac - 0.5
@@ -740,9 +740,9 @@ class PWGroupPlotter:
             pm2 = tag_phsp < 0
 
             N1m, _ = np.histogram(p[pm1], bins=bins,
-                                  weights=pw[pm1] * self._P_total[pm1] * self._scale)
+                                  weights=phsp_w[pm1] * self._P_total[pm1] * self._scale)
             N2m, _ = np.histogram(p[pm2], bins=bins,
-                                  weights=pw[pm2] * self._P_total[pm2] * self._scale)
+                                  weights=phsp_w[pm2] * self._P_total[pm2] * self._scale)
             denom_m = N1m + N2m
             Am = np.divide(N1m - N2m, denom_m, where=denom_m > 0,
                            out=np.zeros_like(denom_m))
@@ -927,7 +927,7 @@ class PWGroupPlotter:
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         d1, d2 = varfun(f._data_np)
         p1, p2 = varfun(f._phsp_np)
@@ -938,14 +938,14 @@ class PWGroupPlotter:
         w = dw[cut]
 
         # Phsp total fit weight
-        w_fit = pw * self._P_total * self._scale
-        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
-        bkg_norm = float(np.sum(pw * bkg))
+        w_fit = phsp_w * self._P_total * self._scale
+        bkg = f._phsp_np.get("bkg", np.zeros(len(phsp_w)))
+        bkg_norm = float(np.sum(phsp_w * bkg))
         if bkg_norm > 0:
             purity = f._purity if f._purity is not None else 1.0
             data_total = float(np.sum(dw))
             bkg_scale = data_total * (1.0 - purity) / bkg_norm
-            w_fit = w_fit + pw * bkg * bkg_scale
+            w_fit = w_fit + phsp_w * bkg * bkg_scale
 
         xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
         ylo0, yhi0 = y_range if y_range is not None else (np.min(p2), np.max(p2))
@@ -1035,7 +1035,7 @@ class PWGroupPlotter:
 
         f = self.fitter
         dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        phsp_w = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
@@ -1065,19 +1065,19 @@ class PWGroupPlotter:
 
         # ── model histograms (with per-perm scales) ───────────────
         p_all = np.concatenate(var_phsp)
-        pw_all_sig = np.concatenate([pw * self._P_total * self._scale * s for s in scl])
+        pw_all_sig = np.concatenate([phsp_w * self._P_total * self._scale * s for s in scl])
 
-        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
-        bkg_norm = float(np.sum(pw * bkg))
+        bkg = f._phsp_np.get("bkg", np.zeros(len(phsp_w)))
+        bkg_norm = float(np.sum(phsp_w * bkg))
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
         bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
-        pw_all_bkg = np.concatenate([pw * bkg * bkg_scale * s for s in scl])
+        pw_all_bkg = np.concatenate([phsp_w * bkg * bkg_scale * s for s in scl])
 
         glabels = self.labels
         gcolors = plt.cm.tab20(np.linspace(0, 1, len(glabels)))
         pw_all_groups = [
-            np.concatenate([pw * Pg * self._scale * s for s in scl])
+            np.concatenate([phsp_w * Pg * self._scale * s for s in scl])
             for Pg in self._P_groups
         ]
 
