@@ -132,11 +132,29 @@ def _worker_main(kernel_config, backend_spec, data_chunk,
 
 
 class ShardDataHandle:
-    """Opaque handle — tracks total event count."""
-    def __init__(self, n_events):
+    """Per-dataset worker pool (data and phsp each get their own)."""
+
+    def __init__(self, n_events, task_queues=None, result_queues=None,
+                 procs=None):
         self.n_events = n_events
+        self.task_queues = task_queues or []
+        self.result_queues = result_queues or []
+        self.procs = procs or []
+
+    def stop(self):
+        for tq in self.task_queues:
+            tq.put(None)
+        for p in self.procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.kill()
+                p.join()
+
     def free(self):
-        pass
+        self.stop()
+        self.task_queues.clear()
+        self.result_queues.clear()
+        self.procs.clear()
 
 
 @register_backend("shard")
@@ -171,9 +189,7 @@ class ShardBackend(ComputeBackend):
         self._align = int(align) if align else None
         if self._align is not None and self._align < 2:
             raise ValueError("align must be >= 2 (or None)")
-        self._workers = []
-        self._task_queues = []
-        self._result_queues = []
+        self._handles = []
         self._specs = []
         self._weights = []
 
@@ -224,32 +240,32 @@ class ShardBackend(ComputeBackend):
                      for k, v in data_np.items()}
             chunks.append(chunk)
 
-        self._task_queues = [multiprocessing.Queue() for _ in range(nw)]
-        self._result_queues = [multiprocessing.Queue() for _ in range(nw)]
-        self._workers = []
-
+        tq = [multiprocessing.Queue() for _ in range(nw)]
+        rq = [multiprocessing.Queue() for _ in range(nw)]
+        procs = []
         for i in range(nw):
             name, device = self._specs[i]
             p = multiprocessing.Process(
                 target=_worker_main,
-                args=(self.kernel_config, name, chunks[i],
-                      self._task_queues[i], self._result_queues[i], device),
+                args=(self.kernel_config, name, chunks[i], tq[i], rq[i],
+                      device),
             )
             p.start()
-            self._workers.append(p)
-
-        return ShardDataHandle(ne)
+            procs.append(p)
+        h = ShardDataHandle(ne, tq, rq, procs)
+        self._handles.append(h)
+        return h
 
     # -- compute -------------------------------------------------------
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        nw = self._n_workers
+        nw = len(data_handle.procs)
         if nw == 0:
             if return_p:
                 return 0.0, {}, np.array([])
             return 0.0, {}, None
 
-        for tq in self._task_queues:
+        for tq in data_handle.task_queues:
             tq.put((params, norm, return_p))
 
         Q_total = 0.0
@@ -257,7 +273,7 @@ class ShardBackend(ComputeBackend):
         P_list = []
 
         for i in range(nw):
-            Q_i, grads_i, P_i = self._result_queues[i].get()
+            Q_i, grads_i, P_i = data_handle.result_queues[i].get()
             Q_total += Q_i
 
             if grads_total is None:
@@ -284,16 +300,9 @@ class ShardBackend(ComputeBackend):
     # -- cleanup -------------------------------------------------------
 
     def free(self):
-        for tq in self._task_queues:
-            tq.put(None)
-        for p in self._workers:
-            p.join(timeout=5)
-            if p.is_alive():
-                p.kill()
-                p.join()
-        self._workers.clear()
-        self._task_queues.clear()
-        self._result_queues.clear()
+        for h in self._handles:
+            h.free()
+        self._handles.clear()
 
     def __del__(self):
         self.free()
