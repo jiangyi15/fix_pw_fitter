@@ -144,6 +144,13 @@ def _child_xz(zc, x0, z0):
 def reconstruct_from_canonical(meta, M, phi, theta):
     """Inverse map: canonical variables -> final momenta in the top rest.
 
+    Boosts are applied STEP BY STEP down/up the decay chain: every vertex
+    builds its daughters in ITS OWN rest frame and boosts each inner
+    daughter's subtree by that daughter's velocity in this frame (never a
+    single direct boost to the CM), so the frames follow the same
+    successive-boost convention as the forward map and the round trip is
+    exact for chains of any depth.
+
     Args:
         meta: dict from :func:`chain_meta`.
         M, phi, theta: (n, n_vertices) arrays in ``meta["decays"]`` order.
@@ -154,14 +161,11 @@ def reconstruct_from_canonical(meta, M, phi, theta):
     decays = meta["decays"]
     inner = set(meta["inner"])
     rest = meta["rest"]
-    nv = len(decays)
     core_idx = {d[0]: i for i, d in enumerate(decays)}
 
     def leaf_mass(name):
-        m = np.full(n, rest[name])
-        return m
+        return np.full(n, rest[name])
 
-    # per-vertex two-body child masses used at each vertex (n arrays)
     child_m = {}
     for i, (core, outs) in enumerate(decays):
         cm = []
@@ -172,34 +176,42 @@ def reconstruct_from_canonical(meta, M, phi, theta):
                 cm.append(leaf_mass(o))
         child_m[i] = cm
 
-    # momenta in the CM/top rest frame
-    p4 = {decays[0][0]: np.column_stack([M[:, 0], np.zeros((n, 3))])}
-    triad = {decays[0][0]: np.tile([[[1., 0., 0.], [0., 0., 1.]]], (n, 1, 1))}
+    top_triad = np.tile([[[1., 0., 0.], [0., 0., 1.]]], (n, 1, 1))
 
-    for i, (core, outs) in enumerate(decays):
-        pname = core
-        Mp = M[:, i]
+    def rec(core, T):
+        """Return {final-name: p4} of the subtree in *core*'s rest frame."""
+        if core not in core_idx:                    # final leaf at rest
+            p = np.zeros((n, 4))
+            p[:, 0] = leaf_mass(core)
+            return {core: p}
+        i = core_idx[core]
+        outs = decays[i][1]
         ph, th = phi[:, i], theta[:, i]
-        x0, z0 = triad[pname][:, 0], triad[pname][:, 1]
+        x0, z0 = T[:, 0], T[:, 1]
         y0 = np.cross(z0, x0)
-        c0, c1 = outs[0], outs[1]
         m0, m1 = child_m[i]
-        p = _two_body_p(Mp, m0, m1)
+        p = _two_body_p(M[:, i], m0, m1)
         u = (np.sin(th)[:, None] * (np.cos(ph)[:, None] * x0
                                     + np.sin(ph)[:, None] * y0)
              + np.cos(th)[:, None] * z0)
         E0 = np.sqrt(p * p + m0 * m0)
         E1 = np.sqrt(p * p + m1 * m1)
-        rest0 = np.column_stack([E0, p[:, None] * u])
+        rest0 = np.column_stack([E0, p[:, None] * u])     # child0 in this frame
         rest1 = np.column_stack([E1, -p[:, None] * u])
-        # parent momentum in the frame everything is expressed in
-        pp = p4[pname]
-        beta = pp[:, 1:] / np.maximum(pp[:, 0:1], 1e-12)
-        p4[c0] = _boost_rest_to_lab(rest0, beta)
-        p4[c1] = _boost_rest_to_lab(rest1, beta)
-        triad[c0] = _child_xz(u, x0, z0)
-        triad[c1] = _child_xz(-u, x0, z0)
+        T0 = _child_xz(u, x0, z0)
+        T1 = _child_xz(-u, x0, z0)
 
-    out = {o: p4[o] for i, (_c, outs) in enumerate(decays) for o in outs
-           if o not in inner}
-    return np.stack([out[o] for o in meta["finals"]], axis=1)
+        out = {}
+        for child, qrest, Tc in ((outs[0], rest0, T0),
+                                 (outs[1], rest1, T1)):
+            beta = qrest[:, 1:] / np.maximum(qrest[:, 0:1], 1e-12)
+            if child in core_idx:
+                # boost the child-rest subtree ONE level into this frame
+                for nm, p4 in rec(child, Tc).items():
+                    out[nm] = _boost_rest_to_lab(p4, beta)
+            else:
+                out[child] = qrest              # final leaf already here
+        return out
+
+    leaves = rec(decays[0][0], top_triad)
+    return np.stack([leaves[o] for o in meta["finals"]], axis=1)
