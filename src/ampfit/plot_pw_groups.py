@@ -295,15 +295,19 @@ class PWGroupPlotter:
     def compute(self):
         """Compute |A|² per event for the total model and each group.
 
-        Call once before :meth:`plot_var`.  Results stay in memory for
-        subsequent calls.
+        When ``use_rec`` was given a ``phsp_rec`` with fewer rows than the
+        fitter's phsp (resolution copies, ``len(phsp) = s * len(phsp_rec)``)
+        the per-row weights are group-summed here to the ORIGINAL rows,
+        ``W[e] = Σ_{j<s} pw·P[e·s+j]``; otherwise (equal rows) they are the
+        plain per-event weights.  Call once before :meth:`plot_var`.
         """
         params, _ = self.fitter.build_params(self.fit_result.x)
 
-        _, _, self._P_total = self.fitter.backend.compute(
+        raw_total = None
+        raw_groups = []
+        _, _, raw_total = self.fitter.backend.compute(
             params, self.fitter._phsp_holder, norm=None)
 
-        self._P_groups = []
         for label in self.labels:
             p_group = dict(params)
             p_group["ck"] = params["ck"].copy()
@@ -313,19 +317,42 @@ class PWGroupPlotter:
                     p_group["ck"][i] = 0.0j
             _, _, Pg = self.fitter.backend.compute(
                 p_group, self.fitter._phsp_holder, norm=None)
-            self._P_groups.append(Pg)
+            raw_groups.append(Pg)
+
+        # ── resolution wrap: reduce weight rows to the variable rows ──
+        pw_w = np.asarray(self.fitter._phsp_np["weight"], dtype=float)
+        pv = self.phsp_var_np if self.phsp_var_np is not None \
+            else self.fitter._phsp_np
+        pw_v = np.asarray(pv["weight"], dtype=float)
+        n_w = int(pw_w.shape[0])
+        n_v = int(pw_v.shape[0])
+        if n_w == n_v:
+            def _sum_copies(x):
+                return pw_w * x
+        else:
+            if n_w < n_v or n_w % n_v:
+                raise ValueError(
+                    f"weight phsp rows ({n_w}) must equal or be an integer "
+                    f"multiple of the variable rows ({n_v})")
+            s = n_w // n_v
+
+            def _sum_copies(x):
+                return (pw_w * x).reshape(n_v, s).sum(axis=1)
+
+        # normalisation over the FULL weight sample (before the group-sum)
+        total_sum = float(np.sum(pw_w * raw_total))
+        self._P_total = _sum_copies(raw_total)
+        self._P_groups = [_sum_copies(g) for g in raw_groups]
 
         # Store zorder for plotting: smallest |weight| → highest zorder (on top)
-        pw = self.fitter._phsp_np["weight"]
-        pw_abs = np.array([float(np.sum(np.abs(pw * Pg))) for Pg in self._P_groups])
+        pw_abs = np.array([float(np.sum(np.abs(pw_v * Pg)))
+                           for Pg in self._P_groups])
         rank = np.argsort(np.argsort(pw_abs))  # 0 = smallest
         n = len(rank)
         self._zorders = [5 + (n - 1 - r) * 2 for r in rank]  # smallest → highest zorder
 
         purity = self.fitter._purity if self.fitter._purity is not None else 1.0
         target = float(np.sum(self.fitter._data_np["weight"])) * purity
-        pw = self.fitter._phsp_np["weight"]
-        total_sum = float(np.sum(pw * self._P_total))
         self._scale = target / total_sum if total_sum > 0 else 0.0
         return self
 
@@ -443,25 +470,7 @@ class PWGroupPlotter:
         f = self.fitter
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        n_p = self._P_total.shape[0]          # rows the amplitude was computed on
-        n_v = pv["weight"].shape[0]           # rows the variables are read from
-        if n_v != n_p:
-            # resolution-copy wrap: the computed (weight) rows are an integer
-            # multiple of the variable rows — group-sum the model back to
-            # every variable (original) event, W[e] = Σ_j pw·P[e·s+j]
-            if n_p < n_v or n_p % n_v:
-                raise RuntimeError(
-                    f"weight rows ({n_p}) must equal or be an integer "
-                    f"multiple of the variable rows ({n_v})")
-            s = n_p // n_v
-            pw0 = np.asarray(f._phsp_np["weight"], dtype=float)
-
-            def _grp(x):
-                return (pw0 * x).reshape(n_v, s).sum(axis=1)
-
-            self._P_total = _grp(self._P_total)
-            self._P_groups = [_grp(g) for g in self._P_groups]
-            n_p = n_v
+        # _P_total/_P_groups were already reduced to pv's rows by compute()
         dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
         pw = pv["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
