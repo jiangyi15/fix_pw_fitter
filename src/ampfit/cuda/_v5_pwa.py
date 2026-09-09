@@ -120,6 +120,7 @@ class CUDAKernelV5PWA:
 
     def __init__(self, config, batch_size=50000, resolution_size=1, lib_path=None):
         self._lib = _load_lib()
+        self._ctx = None        # set later; __del__/free must be safe
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")
