@@ -269,6 +269,26 @@ class PWGroupPlotter:
         self._P_total = None
         self._P_groups = None
         self._scale = None
+        # optional ORIGINAL-event arrays used by plot_var when present
+        # (rec mode): only the places that READ the variable/data rows pick
+        # them up; compute()/weights stay on the fitter's phsp.
+        self.data_var_np = None
+        self.phsp_var_np = None
+
+    def use_rec(self, data_rec_np=None, phsp_rec_np=None):
+        """Point plot_var's variable/data reading at the ORIGINAL rows.
+
+        When a resolution plot is requested, pass the ``data_rec`` /
+        ``phsp_rec`` event arrays here; ``plot_var`` then reads the data and
+        phsp VARIABLES (and their weight/bkg vectors) from these arrays.
+        Everything else — amplitude computation, scale, zorders — stays on
+        the fitter's own data/phsp.
+        """
+        if data_rec_np is not None:
+            self.data_var_np = data_rec_np
+        if phsp_rec_np is not None:
+            self.phsp_var_np = phsp_rec_np
+        return self
 
     # ── weight computation ────────────────────────────────────────
 
@@ -421,8 +441,15 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        pw = f._phsp_np["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
+        dn = self.data_var_np if self.data_var_np is not None else f._data_np
+        pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
+        if pv["weight"].shape[0] != self._P_total.shape[0]:
+            raise RuntimeError(
+                f"phsp_var rows ({pv['weight'].shape[0]}) must match the "
+                f"computed phsp rows ({self._P_total.shape[0]}) — rec arrays "
+                f"must be the original rows the weights were computed on")
+        dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        pw = pv["weight"] * (phsp_weight_extra if phsp_weight_extra is not None else 1.0)
 
         # Extra weights are multiplicative per-event — they do NOT change the
         # overall normalisation scale (determined by base weights in compute()).
@@ -430,14 +457,14 @@ class PWGroupPlotter:
         glabels = group_labels or self.labels
 
         # Background normalisation (constant across subplots)
-        bkg = f._phsp_np.get("bkg", np.zeros(len(pw)))
+        bkg = pv.get("bkg", np.zeros(len(pw)))
         bkg_norm = float(np.sum(pw * bkg))
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
         bkg_scale = data_total * (1.0 - purity) / bkg_norm if bkg_norm > 0 else 0.0
 
-        var_data = varfun(f._data_np)
-        var_phsp = varfun(f._phsp_np)
+        var_data = varfun(dn)
+        var_phsp = varfun(pv)
         n_var = len(var_data)
 
         n_cols = min(3, n_var)
