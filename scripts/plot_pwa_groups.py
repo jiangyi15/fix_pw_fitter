@@ -123,8 +123,8 @@ def main():
         # ORIGINAL-event arrays are loaded with the SAME generic prefix
         # loader as data/phsp — {prefix} + {prefix}_weight + {prefix}_bg_value
         # work identically when prefix is "data_rec"/"phsp_rec"
-        recd = f.load_momenta_conf("data_rec")
-        recp = f.load_momenta_conf("phsp_rec") if dc.get("phsp_rec") else None
+        recd = f.load_dataset("data_rec")
+        recp = f.load_dataset("phsp_rec") if dc.get("phsp_rec") else None
         if recd is None:
             sys.exit("rec mode: could not load 'data_rec' via the config "
                      "prefix loader")

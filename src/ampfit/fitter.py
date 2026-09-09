@@ -408,31 +408,50 @@ class Fitter:
         return out, n_events
 
     def load_all_data(self):
-        """Load data and phsp and call set_phsp()/set_data().
+        """Load data and phsp through the ONE generic loader
+        (:meth:`load_dataset`) and call set_phsp()/set_data().
 
-        Two data-source conventions are supported (in the ``data`` section
-        of the config):
-
-        * ``data_arr`` / ``phsp_arr``: precomputed ``.npz`` files with the
-          kernel-ready arrays (legacy B→4π flow);
-        * ``prefix`` / ``prefix_weight`` 4-momentum files — e.g.
-          ``data: ./data_slice.npy`` (N, n_finals, 4), ``data_weight``
-          per-event weights, and analogously for ``phsp``.  The momenta
-          are converted on the fly to the kernel-array format with the
-          model-matched converter (``pwa_event_data_tree`` for single-block
-          pure-PWA models, ``momenta_to_data`` for the legacy block models).
-          ``data.dat_order`` names the per-column final particles (default:
-          ``cfg.finals``).  An optional per-event ``{prefix}_bg_value``
-          file (shape ``(N,)``) is loaded into ``out["bkg"]``; without it
-          the converter defaults apply (pwa: ones; legacy: zeros).
+        ``load_dataset`` handles every prefix the same way, supporting both
+        source forms:
+        * ``{prefix}_arr`` — a precomputed kernel-ready ``.npz``, or
+        * ``{prefix}`` — a 4-momentum prefix (``(N, n_finals, 4)`` .npy)
+          with optional ``{prefix}_weight`` and ``{prefix}_bg_value``,
+          converted on the fly to kernel arrays.
 
         Returns:
             ``(data_np, phsp_np)`` — the loaded numpy dicts.
         """
+        data_np = self.load_dataset("data")
+        phsp_np = self.load_dataset("phsp")
+        if data_np is None or phsp_np is None:
+            raise ValueError(
+                "Config 'data' must provide data/phsp (+ optional "
+                "data_arr/phsp_arr) for the generic loader")
+        self.set_phsp(phsp_np)
+        self.set_data(data_np)
+        return data_np, phsp_np
+
+    def load_dataset(self, prefix):
+        """One generic loader for any dataset prefix.
+
+        ``prefix`` is looked up in the config ``data`` section and may be
+        ``data`` / ``phsp`` as well as e.g. ``data_rec`` / ``phsp_rec``:
+
+        * ``{prefix}_arr``  — precomputed kernel-ready ``.npz`` arrays;
+        * ``{prefix}`` whose value ends in ``.npz`` — same, loaded by
+          :meth:`load_npz`;
+        * otherwise ``{prefix}`` is a 4-momentum prefix handled by
+          :meth:`load_momenta_conf` (optional ``{prefix}_weight`` and
+          ``{prefix}_bg_value``, ``dat_order`` reordering, on-the-fly
+          conversion to kernel arrays).
+
+        Returns the kernel-array dict, or ``None`` if the prefix is not
+        configured.
+        """
         import os
+        data_conf = self.config.dic.get("data") or {}
         cfg_dir = os.path.dirname(os.path.abspath(
             self.config._config_path))
-        data_conf = self.config.dic.get("data") or {}
 
         def _resolve(key):
             val = data_conf.get(key)
@@ -440,23 +459,16 @@ class Fitter:
                 val = val[0] if val else None
             return os.path.join(cfg_dir, val) if val else None
 
-        data_path = _resolve("data_arr")
-        phsp_path = _resolve("phsp_arr")
         n_comp = int(self.kernel_config["angle_k"].shape[1])
-        if data_path and phsp_path:
-            data_np, _ = self.load_npz(data_path, n_angle_comp=n_comp)
-            phsp_np, _ = self.load_npz(phsp_path, n_angle_comp=n_comp)
-        else:
-            data_np = self.load_momenta_conf("data")
-            phsp_np = self.load_momenta_conf("phsp")
-            if data_np is None or phsp_np is None:
-                raise ValueError(
-                    "Config 'data' must provide either data_arr/phsp_arr "
-                    "(.npz) or prefix data/phsp (+ *_weight) 4-momentum "
-                    "files.")
-        self.set_phsp(phsp_np)
-        self.set_data(data_np)
-        return data_np, phsp_np
+        arr = _resolve(f"{prefix}_arr")
+        if arr:
+            return self.load_npz(arr, n_angle_comp=n_comp)[0]
+        mom = _resolve(prefix)
+        if mom is None:
+            return None
+        if str(mom).endswith(".npz"):
+            return self.load_npz(mom, n_angle_comp=n_comp)[0]
+        return self.load_momenta_conf(prefix)
 
     def load_momenta_conf(self, prefix):
         """Generic prefix loader: ``{prefix}`` (+ optional ``{prefix}_weight``
