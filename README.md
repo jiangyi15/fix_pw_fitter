@@ -121,6 +121,45 @@ dh = ck.load_data(data)
 Q, grads, P = ck.compute(params, dh)
 ```
 
+### Pure-PWA (projection-sum) kernels
+
+The pure-PWA family implements the scalar-free projection-sum model
+
+```
+P(e) = Σ_p |A_p(e)|² ,     A_p(e) = Σ_k ck_k · a_{p,k}(e)
+```
+
+— no time evolution / D-mixing / scalar (Γ, ΔΓ, …) parameters.  All
+projections share the same ``ck``; the projection changes only the angular
+part of each wave.  Wave entries are stored **p-major**
+(``n_wave = n_proj · N``, ``ck`` length ``N``); the projection count is the
+config key ``n_proj`` (default 1).
+
+| Backend | Note |
+|---------|------|
+| ``numpy_pwa`` | CPU f64 reference for the projection-sum model |
+| ``cuda_v4_pwa`` | GPU f64: one-time angular-amplitude cache + per-iteration BW propagator, so ``m0``/``g0`` keep flowing |
+| ``cuda_v4_pwa_cache`` / ``cuda32_v4_pwa_cache`` | **full-amplitude** cache for fits with every ``m0``/``g0`` FIXED (bit-equal to v4 there; returns zero m0/g0 gradients; use ``cuda_v4_pwa`` when masses/widths float). The 32 variant stores the cache as float2 |
+| ``cuda_v5_pwa`` | Same model/forward as v4, but the data NLL **does not log per event**: events are grouped into ``resolution_size``-sized chunks and one log is taken per group, ``Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)``. ``resolution_size`` defaults to 1 (≡ per-event v4 for unit weights). Groups align to the event index, independent of the GPU ``batch_size``. For NLL comparisons against v4 at ``resolution_size > 1`` the copy rows of each group must carry group-normalised weights (``w = 1/resolution_size`` each) |
+| ``integrated_pwa`` | Gram-matrix norm (O(n²)) with the data NLL delegated to a base backend (default ``cuda_v4_pwa``) |
+
+```python
+from ampfit.backends import create_backend
+
+be = create_backend("cuda_v4_pwa", kc)                 # fitted m0/g0
+be = create_backend({"name": "cuda_v5_pwa",             # group-log NLL
+                     "resolution_size": 20}, kc)
+be = create_backend({"name": "integrated_pwa",          # Gram norm
+                     "base": "cuda_v4_pwa"}, kc)
+```
+
+**dNLL/dnorm contract**: every backend whose ``compute(..., norm=<float>)``
+runs returns ``grads["norm"]`` — the native d(NLL)/d(norm) of its own
+objective (per-event backends use the closed-form per-event derivative;
+caches / ``cuda_v5_pwa`` supply the value from their kernel).  The fitter
+consumes it from the returned gradient dict, and shard/integrated wrappers
+forward it automatically.
+
 ## Performance
 
 All benchmarks on **NVIDIA GeForce RTX 3070 Ti Laptop GPU** (events/sec, higher is better).
@@ -175,7 +214,9 @@ class CUDAKernelV3:        # cuda/_v3.py
     def compute_gram(self, phsp_handle, m0, g0) → Gram matrices
 ```
 
-Implementations: **NumpyKernel** (reference), **CUDAKernelV3/V2** (f64/f32), **ONNXKernel**.
+Implementations: **NumpyKernel** (reference), **CUDAKernelV3/V2** (f64/f32),
+**ONNXKernel**, and the pure-PWA kernels **NumpyPWA**, **CUDAKernelV4PWA**,
+**CUDAKernelV4PWACache / …Cache32**, **CUDAKernelV5PWA**.
 
 ### 2. Backend — standard interface around a kernel
 
@@ -248,6 +289,13 @@ apply_bounds → to_dict → resolve → build_ck  (constraint chain)
 | `cuda32_v2` | CUDABackendV2F32 | f32 |
 | `integrated` | IntegratedBackend | base‑dependent |
 | `onnx_cpu` / `onnx_cuda` | ONNXBackend | f32 |
+| `numpy_pwa` | NumpyPWABackend | f64 |
+| `cuda_v4_pwa` | CUDABackendV4PWA | f64 |
+| `cuda_v4_pwa_cache` / `cuda32_v4_pwa_cache` | CUDABackendV4PWACache / …Cache32 | f64 (f32 cache) |
+| `cuda_v5_pwa` | CUDABackendV5PWA | f64 (group-log NLL) |
+| `integrated_pwa` | IntegratedPWABackend | base‑dependent |
+| `cpu_v3` / `cpu64_v3` | CPUBackendV3 | f64 (C + OpenMP + AVX2) |
+| `shard` | ShardBackend | multi‑process |
 
 ### Result persistence
 
