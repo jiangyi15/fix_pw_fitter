@@ -102,9 +102,14 @@ def split_offsets(ne, weights, align=None):
     return [0] + [int(o) for o in offs] + [ne]
 
 
-def _worker_main(kernel_config, backend_spec, data_chunk,
-                 task_queue, result_queue, device=None):
-    """Worker process: create backend, load data, loop on compute tasks."""
+def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
+                 device=None):
+    """Persistent worker: one backend, several datasets keyed by id.
+
+    Tasks are tuples ``("load", data_id, chunk)`` /
+    ``("compute", data_id, params, norm, return_p)`` / ``("free", data_id)``;
+    ``None`` shuts the worker down.
+    """
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
 
@@ -117,44 +122,38 @@ def _worker_main(kernel_config, backend_spec, data_chunk,
         spec = backend_spec
 
     be = create_backend(spec, kernel_config)
-    dh = be.load_data(data_chunk)
-
+    handles = {}
     for task in iter(task_queue.get, None):
-        params, norm, return_p = task
-        Q, grads, P = be.compute(params, dh, norm=norm, return_p=return_p)
-        if norm is not None and "norm" not in grads:
-            raise RuntimeError(
-                f"shard worker ({type(be).__name__}) did not return "
-                f"grads['norm'] for a normed compute")
-        result_queue.put((Q, grads, P))
+        op = task[0]
+        if op == "load":
+            _, data_id, chunk = task
+            handles[data_id] = be.load_data(chunk)
+        elif op == "compute":
+            _, data_id, params, norm, return_p = task
+            Q, grads, P = be.compute(params, handles[data_id], norm=norm,
+                                     return_p=return_p)
+            if norm is not None and "norm" not in grads:
+                raise RuntimeError(
+                    f"shard worker ({type(be).__name__}) did not return "
+                    f"grads['norm'] for a normed compute")
+            result_queue.put((Q, grads, P))
+        elif op == "free":
+            handles.pop(task[1], None)
+        else:
+            raise RuntimeError(f"unknown shard task {op!r}")
 
     be.free()
 
 
 class ShardDataHandle:
-    """Per-dataset worker pool (data and phsp each get their own)."""
+    """Dataset identifier inside the shared worker pool."""
 
-    def __init__(self, n_events, task_queues=None, result_queues=None,
-                 procs=None):
+    def __init__(self, data_id, n_events):
+        self.data_id = data_id
         self.n_events = n_events
-        self.task_queues = task_queues or []
-        self.result_queues = result_queues or []
-        self.procs = procs or []
-
-    def stop(self):
-        for tq in self.task_queues:
-            tq.put(None)
-        for p in self.procs:
-            p.join(timeout=5)
-            if p.is_alive():
-                p.kill()
-                p.join()
 
     def free(self):
-        self.stop()
-        self.task_queues.clear()
-        self.result_queues.clear()
-        self.procs.clear()
+        pass
 
 
 @register_backend("shard")
@@ -189,9 +188,13 @@ class ShardBackend(ComputeBackend):
         self._align = int(align) if align else None
         if self._align is not None and self._align < 2:
             raise ValueError("align must be >= 2 (or None)")
-        self._handles = []
         self._specs = []
         self._weights = []
+        # persistent worker pool (created lazily) + dataset id counter
+        self._task_queues = []
+        self._result_queues = []
+        self._procs = []
+        self._next_id = 0
 
         if backends is None:
             backends = []
@@ -219,11 +222,28 @@ class ShardBackend(ComputeBackend):
 
     # -- data lifecycle ------------------------------------------------
 
+    def _ensure_pool(self):
+        if self._procs:
+            return
+        nw = self._n_workers
+        self._task_queues = [multiprocessing.Queue() for _ in range(nw)]
+        self._result_queues = [multiprocessing.Queue() for _ in range(nw)]
+        for i in range(nw):
+            name, device = self._specs[i]
+            p = multiprocessing.Process(
+                target=_worker_main,
+                args=(self.kernel_config, name, self._task_queues[i],
+                      self._result_queues[i], device),
+            )
+            p.start()
+            self._procs.append(p)
+
     def load_data(self, data_np):
         ne = data_np["mass"].shape[0]
         nw = self._n_workers
         if nw == 0:
-            return ShardDataHandle(ne)
+            return ShardDataHandle(-1, ne)
+        self._ensure_pool()
 
         # Compute weighted split offsets (aligned to multiples of --align)
         bounds = split_offsets(ne, self._weights, self._align)
@@ -240,40 +260,31 @@ class ShardBackend(ComputeBackend):
                      for k, v in data_np.items()}
             chunks.append(chunk)
 
-        tq = [multiprocessing.Queue() for _ in range(nw)]
-        rq = [multiprocessing.Queue() for _ in range(nw)]
-        procs = []
+        data_id = self._next_id
+        self._next_id += 1
         for i in range(nw):
-            name, device = self._specs[i]
-            p = multiprocessing.Process(
-                target=_worker_main,
-                args=(self.kernel_config, name, chunks[i], tq[i], rq[i],
-                      device),
-            )
-            p.start()
-            procs.append(p)
-        h = ShardDataHandle(ne, tq, rq, procs)
-        self._handles.append(h)
-        return h
+            self._task_queues[i].put(("load", data_id, chunks[i]))
+        return ShardDataHandle(data_id, ne)
 
     # -- compute -------------------------------------------------------
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        nw = len(data_handle.procs)
+        nw = self._n_workers
         if nw == 0:
             if return_p:
                 return 0.0, {}, np.array([])
             return 0.0, {}, None
 
-        for tq in data_handle.task_queues:
-            tq.put((params, norm, return_p))
+        did = data_handle.data_id
+        for tq in self._task_queues:
+            tq.put(("compute", did, params, norm, return_p))
 
         Q_total = 0.0
         grads_total = None
         P_list = []
 
         for i in range(nw):
-            Q_i, grads_i, P_i = data_handle.result_queues[i].get()
+            Q_i, grads_i, P_i = self._result_queues[i].get()
             Q_total += Q_i
 
             if grads_total is None:
@@ -300,9 +311,16 @@ class ShardBackend(ComputeBackend):
     # -- cleanup -------------------------------------------------------
 
     def free(self):
-        for h in self._handles:
-            h.free()
-        self._handles.clear()
+        for tq in self._task_queues:
+            tq.put(None)
+        for p in self._procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.kill()
+                p.join()
+        self._procs.clear()
+        self._task_queues.clear()
+        self._result_queues.clear()
 
     def __del__(self):
         self.free()
