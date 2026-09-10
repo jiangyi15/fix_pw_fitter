@@ -148,12 +148,22 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
 class ShardDataHandle:
     """Dataset identifier inside the shared worker pool."""
 
-    def __init__(self, data_id, n_events):
+    def __init__(self, data_id, n_events, backend=None):
         self.data_id = data_id
         self.n_events = n_events
+        self._backend = backend
 
     def free(self):
-        pass
+        """Drop this dataset from every worker (frees its device memory).
+
+        The worker pool itself stays alive; ``ShardBackend.free()`` shuts
+        the pool down.  Idempotent.
+        """
+        if self.data_id < 0 or self._backend is None:
+            return
+        for tq in self._backend._task_queues:
+            tq.put(("free", self.data_id))
+        self.data_id = -1
 
 
 @register_backend("shard")
@@ -242,7 +252,7 @@ class ShardBackend(ComputeBackend):
         ne = data_np["mass"].shape[0]
         nw = self._n_workers
         if nw == 0:
-            return ShardDataHandle(-1, ne)
+            return ShardDataHandle(-1, ne, self)
         self._ensure_pool()
 
         # Compute weighted split offsets (aligned to multiples of --align)
@@ -264,7 +274,7 @@ class ShardBackend(ComputeBackend):
         self._next_id += 1
         for i in range(nw):
             self._task_queues[i].put(("load", data_id, chunks[i]))
-        return ShardDataHandle(data_id, ne)
+        return ShardDataHandle(data_id, ne, self)
 
     # -- compute -------------------------------------------------------
 

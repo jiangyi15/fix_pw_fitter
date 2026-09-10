@@ -61,6 +61,12 @@ def test_shard_numpy_matches_single():
                                atol=1e-8), key
         # P rows are concatenated in worker (contiguous chunk) order
         assert np.allclose(P_d, P_s, atol=1e-8)
+
+        # handle.free() drops the dataset but keeps the pool usable
+        hd.free()
+        hd2 = shard.load_data(data)
+        Q2, _g2, _P2 = shard.compute(params, hd2, norm=norm_s)
+        assert abs(Q2 - Q_s) < 1e-9
     finally:
         shard.free()
         single.free()
