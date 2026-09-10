@@ -138,10 +138,17 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
                     f"grads['norm'] for a normed compute")
             result_queue.put((Q, grads, P))
         elif op == "free":
-            handles.pop(task[1], None)
+            h = handles.pop(task[1], None)
+            if h is not None and hasattr(h, "free"):
+                h.free()
         else:
             raise RuntimeError(f"unknown shard task {op!r}")
 
+    # explicit release of every remaining dataset before the backend context
+    for h in handles.values():
+        if hasattr(h, "free"):
+            h.free()
+    handles.clear()
     be.free()
 
 
