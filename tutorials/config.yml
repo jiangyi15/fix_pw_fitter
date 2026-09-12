@@ -1,5 +1,5 @@
 config:
-    backend: numpy_pwa
+    backend: cuda_v4_pwa
 
 data:
     dat_order: [pip, pim, eta]

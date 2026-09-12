@@ -42,7 +42,7 @@ The backend is declared inside the config itself:
 
 ```yaml
 config:
-    backend: numpy_pwa        # or cuda_v4_pwa / {name: cuda_v5_pwa, resolution_size: 20}
+    backend: cuda_v4_pwa      # GPU; or numpy_pwa / {name: cuda_v5_pwa, resolution_size: 20}
 ```
 
 `Fitter` (and therefore `run_fit.py`/`fit.sh`) uses that value when no
