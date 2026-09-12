@@ -1328,7 +1328,8 @@ void cuda_compute_v5(void* vctx, void* vdh,
         #undef S2
     }
 
-    *oQ = 0; *oDn = 0; memset(oP, 0, ne * 8);
+    *oQ = 0; *oDn = 0;
+    if (oP != NULL) memset(oP, 0, ne * 8);
     memset(ogck_r, 0, N * 8); memset(ogck_i, 0, N * 8);
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
 
@@ -1364,8 +1365,10 @@ void cuda_compute_v5(void* vctx, void* vdh,
             for (int i = 0; i < nb; i++) *oQ += Ph[i];
         }
 
-        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * 8);
+        if (oP != NULL) {   // per-event P only when the caller asks for it
+            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+            memcpy(oP + st, Ph, nb * 8);
+        }
 
         launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, N);
         cudaMemcpy(gck_buf, s.g_bw_real, N * 8, cudaMemcpyDeviceToHost);

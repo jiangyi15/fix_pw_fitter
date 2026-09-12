@@ -271,7 +271,8 @@ class CUDAKernelV5PWA:
 
         oQ = _ffi.new("double*")
         oDn = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nbase, np.float64)
         ogck_i = np.zeros(nbase, np.float64)
         ogm0 = np.zeros(nu_, np.float64)
@@ -289,7 +290,7 @@ class CUDAKernelV5PWA:
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(m0), _db(g0),
             norm_val, use_norm,
-            oQ, oDn, _db(oP), _db(ogck_r), _db(ogck_i),
+            oQ, oDn, (_db(oP) if oP is not None else _ffi.NULL), _db(ogck_r), _db(ogck_i),
             _db(ogm0), _db(ogg0))
         self._last_dnorm = float(oDn[0])
 
@@ -304,7 +305,7 @@ class CUDAKernelV5PWA:
 
         grads = {"ck": ogck_r + 1j * ogck_i,
                  "m0": grad_m0, "g0": grad_g0}
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     def compute_gram(self, phsp_handle, m0, g0):
         """Wave Gram matrix D (N, N) of a loaded phsp handle at m0/g0.

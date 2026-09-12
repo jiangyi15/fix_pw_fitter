@@ -41,7 +41,7 @@ void cuda_free_data_v3_mixed(void*);
 void cuda_compute_v3_mixed(void*,void*,
     const double*,const double*,const double*,const double*,
     double,double,double,double,double,double,double,int,
-    double*,double*,double*,double*,double*,double*,double*);
+    double*,double*,double*,double*,double*,double*,double*,double*);
 void cuda_gram_matrix_v3_mixed(void*,void*,
     const double*,const double*,
     double*,double*,double*,double*,double*,double*);
@@ -131,6 +131,7 @@ class CUDAKernelV3Mixed:
         self.n_m0_params = int(np.max(c["m0_index"])) + 1
         self.n_g0_params = int(np.max(c["g0_index"])) + 1
 
+        self._last_dnorm = None
         self._ka = []
 
         def _fb(a):
@@ -235,7 +236,9 @@ class CUDAKernelV3Mixed:
 
         # All output buffers in f64 (matching f64 API)
         oQ = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oDn = _ffi.new("double*")
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nw, np.float64)
         ogck_i = np.zeros(nw, np.float64)
         ogm0 = np.zeros(nu_, np.float64)
@@ -257,11 +260,13 @@ class CUDAKernelV3Mixed:
             _db(ck_r), _db(ck_i),
             _db(m0), _db(g0),
             G, DG, DM, Ap_, pr_, pp_, norm_val, use_norm,
-            oQ, _db(oP),
+            oQ, (_db(oP) if oP is not None else _ffi.NULL),
             _db(ogck_r), _db(ogck_i),
             _db(ogm0), _db(ogg0),
-            _db(ogsc),
+            _db(ogsc), oDn,
         )
+
+        self._last_dnorm = float(oDn[0]) if use_norm else None
 
         # Reduce gradients: n_unique_bw → n_m0_params
         m0_idx = self.config["m0_index"]
@@ -280,7 +285,7 @@ class CUDAKernelV3Mixed:
             "scalar": ogsc.copy(),
         }
 
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     # -- gram matrix (phsp pre-integration) ----------------------------
 

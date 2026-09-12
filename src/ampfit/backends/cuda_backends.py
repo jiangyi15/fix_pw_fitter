@@ -30,7 +30,8 @@ class _CUDABackend(ComputeBackend):
         return h
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm)
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
         if norm is not None:
             native = getattr(self.kernel, "_last_dnorm", None)
             if native is not None:
@@ -181,7 +182,8 @@ class CUDABackendV5PWA(_CUDABackend):
         return True
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm)
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
         if norm is not None:
             dn = getattr(self.kernel, "_last_dnorm", None)
             if dn is None:

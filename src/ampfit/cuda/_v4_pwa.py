@@ -57,7 +57,7 @@ void cuda_free_data_v4(void*);
 void cuda_compute_v4(void*,void*,
     const double*,const double*,const double*,const double*,
     double,int,
-    double*,double*,double*,double*,double*,double*);
+    double*,double*,double*,double*,double*,double*,double*);
 void cuda_gram_matrix_v4(void*,void*,
     const double*,const double*,double*,double*);
 int cuda_get_device_count();
@@ -136,6 +136,7 @@ class CUDAKernelV4PWA:
         self.n_uniq, self.slot_of_wave, self.rep_of_slot = \
             build_amp_cache_layout(c)
         self._ka = []
+        self._last_dnorm = None
 
         def _db(a):
             arr = np.ascontiguousarray(a, np.float64)
@@ -243,7 +244,9 @@ class CUDAKernelV4PWA:
         g0[:len(params["g0"])] = np.asarray(params["g0"])
 
         oQ = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oDn = _ffi.new("double*")
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nbase, np.float64)
         ogck_i = np.zeros(nbase, np.float64)
         ogm0 = np.zeros(nu_, np.float64)
@@ -261,8 +264,9 @@ class CUDAKernelV4PWA:
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(m0), _db(g0),
             norm_val, use_norm,
-            oQ, _db(oP), _db(ogck_r), _db(ogck_i),
+            oQ, oDn, (_db(oP) if oP is not None else _ffi.NULL), _db(ogck_r), _db(ogck_i),
             _db(ogm0), _db(ogg0))
+        self._last_dnorm = float(oDn[0]) if use_norm else None
 
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]
@@ -275,7 +279,7 @@ class CUDAKernelV4PWA:
 
         grads = {"ck": ogck_r + 1j * ogck_i,
                  "m0": grad_m0, "g0": grad_g0}
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     def compute_gram(self, phsp_handle, m0, g0):
         """Wave Gram matrix D (N, N) of a loaded phsp handle at m0/g0.

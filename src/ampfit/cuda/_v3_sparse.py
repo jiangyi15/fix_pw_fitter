@@ -36,7 +36,7 @@ void cuda_free_data_v3(void*);
 void cuda_compute_v3(void*,void*,
     const double*,const double*,const double*,const double*,
     double,double,double,double,double,double,double,int,
-    double*,double*,double*,double*,double*,double*,double*);
+    double*,double*,double*,double*,double*,double*,double*,double*);
 void cuda_gram_matrix_v3(void*,void*,
     const double*,const double*,
     double*,double*,double*,double*,double*,double*);
@@ -102,6 +102,7 @@ class CUDAKernelV3Sparse:
         self.n_m0_params = int(np.max(c["m0_index"])) + 1
         self.n_g0_params = int(np.max(c["g0_index"])) + 1
 
+        self._last_dnorm = None
         self._ka = []
 
         def _db(a):
@@ -190,7 +191,9 @@ class CUDAKernelV3Sparse:
         G, DG, DM, Ap_, pr_, pp_ = params["scalar"]
 
         oQ = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oDn = _ffi.new("double*")
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nw, np.float64)
         ogck_i = np.zeros(nw, np.float64)
         ogm0 = np.zeros(nu_, np.float64)
@@ -208,8 +211,10 @@ class CUDAKernelV3Sparse:
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(m0), _db(g0),
             G, DG, DM, Ap_, pr_, pp_, norm_val, use_norm,
-            oQ, _db(oP), _db(ogck_r), _db(ogck_i),
-            _db(ogm0), _db(ogg0), _db(ogsc))
+            oQ, (_db(oP) if oP is not None else _ffi.NULL), _db(ogck_r), _db(ogck_i),
+            _db(ogm0), _db(ogg0), _db(ogsc), oDn)
+
+        self._last_dnorm = float(oDn[0]) if use_norm else None
 
         m0_idx = self.config["m0_index"]
         g0_idx = self.config["g0_index"]
@@ -223,7 +228,7 @@ class CUDAKernelV3Sparse:
         grads = {"ck": ogck_r + 1j * ogck_i,
                  "m0": grad_m0, "g0": grad_g0,
                  "scalar": ogsc.copy()}
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     def compute_gram(self, phsp_handle, m0, g0):
         ng2 = self.n_wave // 8

@@ -1626,7 +1626,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
 
     if (!h->cache_valid || !h->common_cache || !h->common_T) {
         *oQ = 0.0;
-        memset(oP, 0, (size_t)ne * sizeof(double));
+        if (oP != NULL) memset(oP, 0, (size_t)ne * sizeof(double));
         memset(ogck_r, 0, (size_t)N * sizeof(double));
         memset(ogck_i, 0, (size_t)N * sizeof(double));
         memset(ogm0, 0, (size_t)nu * sizeof(double));
@@ -1638,7 +1638,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
             cudaMalloc(&h->dQ, (size_t)ne * sizeof(double)) != cudaSuccess ||
             cudaMalloc(&h->dP, (size_t)ne * sizeof(double)) != cudaSuccess) {
             *oQ = 0.0;
-            memset(oP, 0, (size_t)ne * sizeof(double));
+            if (oP != NULL) memset(oP, 0, (size_t)ne * sizeof(double));
             memset(ogck_r, 0, (size_t)N * sizeof(double));
             memset(ogck_i, 0, (size_t)N * sizeof(double));
             memset(ogm0, 0, (size_t)nu * sizeof(double));
@@ -1649,7 +1649,7 @@ void cuda_compute_v4_cache(void* vctx, void* vdh,
     }
 
     *oQ = 0;
-    memset(oP, 0, (size_t)ne * sizeof(double));
+    if (oP != NULL) memset(oP, 0, (size_t)ne * sizeof(double));
     memset(ogck_r, 0, (size_t)N * sizeof(double));
     memset(ogck_i, 0, (size_t)N * sizeof(double));
     memset(ogm0, 0, (size_t)nu * sizeof(double));

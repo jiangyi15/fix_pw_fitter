@@ -336,6 +336,7 @@ __global__ void pwa_amp_reduce_kernel(
     int use_norm, double norm,
     double* __restrict__ Q_out,
     double* __restrict__ P_out,
+    double* __restrict__ dnorm_out,
     double* __restrict__ dQ_dA_r, double* __restrict__ dQ_dA_i
 ) {
     int event_idx = blockIdx.x;
@@ -392,9 +393,12 @@ __global__ void pwa_amp_reduce_kernel(
         if (use_norm == 0) {
             Q_out[event_idx] = wval * P;
             dQ_dP = wval;
+            dnorm_out[event_idx] = 0.0;
         } else {
             Q_out[event_idx] = -wval * log(P / norm + bkg_val);
             dQ_dP = -wval / (P + bkg_val * norm);
+            // native d(NLL)/d(norm) contribution of this event
+            dnorm_out[event_idx] = wval * P / (norm * (P + bkg_val * norm));
         }
         // dQ/dA_p = dQ/dP · conj(A_p)
         size_t ab = (size_t)event_idx * n_proj;
@@ -738,7 +742,7 @@ typedef struct {
     // Scratch buffers (GPU)
     double* g_interp_real; double* g_interp_imag;
     double* g_bw_real; double* g_bw_imag;
-    double* Q_out; double* P_out;
+    double* Q_out; double* P_out; double* dnorm_out;
     double* bw_p_real; double* bw_p_imag;
     double* common_amp_factor_real; double* common_amp_factor_imag;
     double* dQ_dA_real; double* dQ_dA_imag;        // [bs · n_proj]
@@ -903,7 +907,7 @@ void launch_compute_all(
             params->ck_real, params->ck_imag,
             data->weight, data->bkg,
             nw, P, ne, use_norm, norm,
-            data->Q_out, data->P_out,
+            data->Q_out, data->P_out, data->dnorm_out,
             data->dQ_dA_real, data->dQ_dA_imag);
     }
     CUDA_CHECK(cudaGetLastError());
@@ -1012,7 +1016,7 @@ void* cuda_create_context_v4(
         #define S2(f,n) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double)))
         S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
         S2(g_bw_real, nub); S2(g_bw_imag, nub);
-        S(Q_out); S(P_out);
+        S(Q_out); S(P_out); S(dnorm_out);
         S2(bw_p_real, nw); S2(bw_p_imag, nw);
         S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
         S2(bw_dom_real, nub); S2(bw_dom_imag, nub);
@@ -1044,7 +1048,7 @@ void cuda_free_context_v4(void* vctx) {
     if (c->scratch) {
         #define SF(f) cudaFree(c->scratch->f)
         SF(g_interp_real); SF(g_interp_imag); SF(g_bw_real); SF(g_bw_imag);
-        SF(Q_out); SF(P_out);
+        SF(Q_out); SF(P_out); SF(dnorm_out);
         SF(bw_p_real); SF(bw_p_imag);
         SF(common_amp_factor_real); SF(common_amp_factor_imag);
         SF(bw_dom_real); SF(bw_dom_imag);
@@ -1160,7 +1164,7 @@ void cuda_compute_v4(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* m0,const double* g0,
     double nv,int use_norm,
-    double* oQ,double* oP,
+    double* oQ,double* oDn,double* oP,
     double* ogck_r,double* ogck_i,
     double* ogm0,double* ogg0
 ) {
@@ -1188,7 +1192,7 @@ void cuda_compute_v4(void* vctx, void* vdh,
         #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
         S2(g_interp_real,ng); S2(g_interp_imag,ng);
         S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        S(Q_out); S(P_out);
+        S(Q_out); S(P_out); S(dnorm_out);
         S2(bw_p_real,nw); S2(bw_p_imag,nw);
         S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
         S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
@@ -1200,7 +1204,8 @@ void cuda_compute_v4(void* vctx, void* vdh,
         #undef S2
     }
 
-    *oQ = 0; memset(oP, 0, ne * 8);
+    *oQ = 0; *oDn = 0;
+    if (oP != NULL) memset(oP, 0, ne * 8);
     memset(ogck_r, 0, N * 8); memset(ogck_i, 0, N * 8);
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
 
@@ -1232,8 +1237,13 @@ void cuda_compute_v4(void* vctx, void* vdh,
         cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
         for (int i = 0; i < nb; i++) *oQ += Ph[i];
 
-        cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * 8);
+        cudaMemcpy(Ph, d.dnorm_out, nb * 8, cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oDn += Ph[i];
+
+        if (oP != NULL) {   // per-event P only when the caller asks for it
+            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+            memcpy(oP + st, Ph, nb * 8);
+        }
 
         launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, N);
         cudaMemcpy(gck_buf, s.g_bw_real, N * 8, cudaMemcpyDeviceToHost);
@@ -1255,7 +1265,7 @@ void cuda_compute_v4(void* vctx, void* vdh,
     if (!c->scratch) {
         #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
         F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-        F(Q_out); F(P_out);
+        F(Q_out); F(P_out); F(dnorm_out);
         F(bw_p_real); F(bw_p_imag);
         F(common_amp_factor_real); F(common_amp_factor_imag);
         F(bw_dom_real); F(bw_dom_imag);
@@ -1303,7 +1313,7 @@ void cuda_gram_matrix_v4(void* vctx, void* vdh,
         #define S2(f,n) CUDA_CHECK(cudaMalloc(&s.f, bs * (n) * sizeof(double)))
         S2(g_interp_real,ng); S2(g_interp_imag,ng);
         S2(g_bw_real,nu); S2(g_bw_imag,nu);
-        S(Q_out); S(P_out);
+        S(Q_out); S(P_out); S(dnorm_out);
         S2(bw_p_real,nw); S2(bw_p_imag,nw);
         S2(common_amp_factor_real,nw); S2(common_amp_factor_imag,nw);
         S2(bw_dom_real,nu); S2(bw_dom_imag,nu);
@@ -1374,7 +1384,7 @@ void cuda_gram_matrix_v4(void* vctx, void* vdh,
     if (!c->scratch) {
         #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
         F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-        F(Q_out); F(P_out);
+        F(Q_out); F(P_out); F(dnorm_out);
         F(bw_p_real); F(bw_p_imag);
         F(common_amp_factor_real); F(common_amp_factor_imag);
         F(bw_dom_real); F(bw_dom_imag);

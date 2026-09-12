@@ -372,6 +372,7 @@ __global__ void compute_main_kernel(
     double A_p, double poq_rho, double pop_phi,
     double* __restrict__ Q_out,
     double* __restrict__ P_out,
+    double* __restrict__ dnorm_out,
     double* __restrict__ pap_real, double* __restrict__ pap_imag,
     double* __restrict__ pam_real, double* __restrict__ pam_imag,
     double* __restrict__ gp_real, double* __restrict__ gp_imag,
@@ -563,9 +564,12 @@ __global__ void compute_main_kernel(
         if (use_norm == 0) {
             Q_out[event_idx] = weight_val * P;
             dQ_dP[event_idx] = weight_val;
+            dnorm_out[event_idx] = 0.0;
         } else {
             Q_out[event_idx] = -weight_val * log(P / norm + bkg_val);
             dQ_dP[event_idx] = -weight_val / (P + bkg_val * norm);
+            // native d(NLL)/d(norm) contribution of this event
+            dnorm_out[event_idx] = weight_val * P / (norm * (P + bkg_val * norm));
         }
     }
 }
@@ -929,6 +933,7 @@ __global__ void time_evol_kernel(
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
     double* __restrict__ Q_out, double* __restrict__ P_out,
+    double* __restrict__ dnorm_out,
     double* __restrict__ pap_real, double* __restrict__ pap_imag,
     double* __restrict__ pam_real, double* __restrict__ pam_imag,
     double* __restrict__ gp_real, double* __restrict__ gp_imag,
@@ -976,8 +981,13 @@ __global__ void time_evol_kernel(
     P_out[event_idx] = P;
 
     double wgt = weight[event_idx], bkg_v = bkg[event_idx];
-    if (use_norm == 0) { Q_out[event_idx] = wgt * P; dQ_dP[event_idx] = wgt; }
-    else { Q_out[event_idx] = -wgt * log(P / norm + bkg_v); dQ_dP[event_idx] = -wgt / (P + bkg_v * norm); }
+    if (use_norm == 0) { Q_out[event_idx] = wgt * P; dQ_dP[event_idx] = wgt; dnorm_out[event_idx] = 0.0; }
+    else {
+        Q_out[event_idx] = -wgt * log(P / norm + bkg_v);
+        dQ_dP[event_idx] = -wgt / (P + bkg_v * norm);
+        // native d(NLL)/d(norm) contribution of this event
+        dnorm_out[event_idx] = wgt * P / (norm * (P + bkg_v * norm));
+    }
 
     using thrust::conj;
     double dP_dpb = frac_val * (1.0 - A_p), dP_dbb = (1.0 - frac_val) * (1.0 + A_p);
@@ -1069,7 +1079,7 @@ void launch_time_evol(
     const double* am_real, const double* am_imag,
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
-    double* Q_out, double* P_out,
+    double* Q_out, double* P_out, double* dnorm_out,
     double* pap_real, double* pap_imag,
     double* pam_real, double* pam_imag,
     double* gp_real, double* gp_imag,
@@ -1086,7 +1096,7 @@ void launch_time_evol(
         frac, time, weight, bkg,
         ap_real, ap_imag, am_real, am_imag,
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
-        Q_out, P_out,
+        Q_out, P_out, dnorm_out,
         pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag,
         poq_real, poq_imag,
@@ -1218,7 +1228,7 @@ typedef struct {
     // Scratch buffers (GPU)
     double* g_interp_real; double* g_interp_imag;
     double* g_bw_real; double* g_bw_imag;
-    double* Q_out; double* P_out;
+    double* Q_out; double* P_out; double* dnorm_out;
     double* pap_real; double* pap_imag; double* pam_real; double* pam_imag;
     double* gp_real; double* gp_imag; double* gm_real; double* gm_imag;
     double* poq_real; double* poq_imag;
@@ -1324,7 +1334,7 @@ void launch_compute_main(
     const double* ck_real, const double* ck_imag, const double* m0,
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
-    double* Q_out, double* P_out,
+    double* Q_out, double* P_out, double* dnorm_out,
     double* pap_real, double* pap_imag, double* pam_real, double* pam_imag,
     double* gp_real, double* gp_imag, double* gm_real, double* gm_imag,
     double* poq_real, double* poq_imag,
@@ -1347,7 +1357,7 @@ void launch_compute_main(
         fl_table_bins,
         ck_real, ck_imag, m0,
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
-        Q_out, P_out,
+        Q_out, P_out, dnorm_out,
         pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag,
         poq_real, poq_imag,
@@ -1514,7 +1524,7 @@ void launch_compute_all(
         params->ck_real, params->ck_imag, params->m0,
         params->Gamma, params->Delta_Gamma, params->Delta_m,
         params->A_prod, params->poq_rho, params->pop_phi,
-        data->Q_out, data->P_out,
+        data->Q_out, data->P_out, data->dnorm_out,
         data->pap_real, data->pap_imag, data->pam_real, data->pam_imag,
         data->gp_real, data->gp_imag, data->gm_real, data->gm_imag,
         data->poq_real, data->poq_imag,
@@ -1625,7 +1635,7 @@ void* cuda_load_data(void* vctx, const double* mass, const double* mom,
 #define S2(f,n) CUDA_CHECK(cudaMalloc(&d->f, ne * (n) * sizeof(double)))
     S2(g_interp_real, ng); S2(g_interp_imag, ng);
     S2(g_bw_real, nu); S2(g_bw_imag, nu);
-    S(Q_out); S(P_out);
+    S(Q_out); S(P_out); S(dnorm_out);
     S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
     S(gp_real); S(gp_imag); S(gm_real); S(gm_imag);
     S(poq_real); S(poq_imag);
@@ -1674,7 +1684,9 @@ void cuda_compute(void* vctx, void* vdh,
 
     // Download results
     cudaMemcpy(Q_out, d->Q_out, ne * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(P_out, d->P_out, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    if (P_out != NULL) {
+        cudaMemcpy(P_out, d->P_out, ne * sizeof(double), cudaMemcpyDeviceToHost);
+    }
     cudaMemcpy(gck_r, d->grad_ck_real_partial, ne * n_wave * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(gck_i, d->grad_ck_imag_partial, ne * n_wave * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(gm0_out, d->grad_m0_partial, ne * n_unique_bw * sizeof(double), cudaMemcpyDeviceToHost);
@@ -1721,7 +1733,7 @@ void cuda_free_data(void* vdh) {
     cudaFree((void*)d->bkg);
     cudaFree(d->g_interp_real); cudaFree(d->g_interp_imag);
     cudaFree(d->g_bw_real); cudaFree(d->g_bw_imag);
-    cudaFree(d->Q_out); cudaFree(d->P_out);
+    cudaFree(d->Q_out); cudaFree(d->P_out); cudaFree(d->dnorm_out);
     cudaFree(d->pap_real); cudaFree(d->pap_imag);
     cudaFree(d->pam_real); cudaFree(d->pam_imag);
     cudaFree(d->gp_real); cudaFree(d->gp_imag);
@@ -1795,7 +1807,7 @@ void* cuda_create_context_v3(
         #define S2(f,n) CUDA_CHECK(cudaMalloc(&c->scratch->f, bs * (n) * sizeof(double)))
         S2(g_interp_real, ngr); S2(g_interp_imag, ngr);
         S2(g_bw_real, nub); S2(g_bw_imag, nub);
-        S(Q_out); S(P_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
+        S(Q_out); S(P_out); S(dnorm_out); S(pap_real); S(pap_imag); S(pam_real); S(pam_imag);
         S(gp_real); S(gp_imag); S(gm_real); S(gm_imag); S(poq_real); S(poq_imag);
         S2(bw_p_real, nw); S2(bw_p_imag, nw);
         S2(common_amp_factor_real, nw); S2(common_amp_factor_imag, nw);
@@ -1833,7 +1845,7 @@ void cuda_free_context_v3(void* vctx) {
     if (c->scratch) {
         #define SF(f) cudaFree(c->scratch->f)
         SF(g_interp_real); SF(g_interp_imag); SF(g_bw_real); SF(g_bw_imag);
-        SF(Q_out); SF(P_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
+        SF(Q_out); SF(P_out); SF(dnorm_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
         SF(gp_real); SF(gp_imag); SF(gm_real); SF(gm_imag); SF(poq_real); SF(poq_imag);
         SF(bw_p_real); SF(bw_p_imag); SF(common_amp_factor_real); SF(common_amp_factor_imag);
         SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag);
@@ -2030,7 +2042,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
     const double* m0,const double* g0,
     double G,double DG,double DM,double Ap,double pr,double pp,
     double nv,int use_norm,
-    double* oQ,double* oP,
+    double* oQ,double* oP,double* oDn,
     double* ogck_r,double* ogck_i,
     double* ogm0,double* ogg0,
     double* ogsc
@@ -2061,7 +2073,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
     // Use context-allocated scratch (pre-allocated in cuda_create_context_v3)
     ComputeData s = *c->scratch;
 
-    *oQ = 0; memset(oP, 0, ne * 8);
+    *oQ = 0; *oDn = 0; if (oP != NULL) memset(oP, 0, ne * 8);
     memset(ogck_r, 0, nw * 8); memset(ogck_i, 0, nw * 8);
     memset(ogm0, 0, nu * 8); memset(ogg0, 0, ng * 8);
     memset(ogsc, 0, N_SCALAR * sizeof(double));
@@ -2100,7 +2112,7 @@ void cuda_compute_v3(void* vctx, void* vdh,
             launch_time_evol(d.frac, d.time, d.weight, d.bkg,
                 d.ap_real, d.ap_imag, d.am_real, d.am_imag,
                 G, DG, DM, Ap, pr, pp,
-                d.Q_out, d.P_out,
+                d.Q_out, d.P_out, d.dnorm_out,
                 d.pap_real, d.pap_imag, d.pam_real, d.pam_imag,
                 d.gp_real, d.gp_imag, d.gm_real, d.gm_imag,
                 d.poq_real, d.poq_imag, d.dQ_dP,
@@ -2119,8 +2131,12 @@ void cuda_compute_v3(void* vctx, void* vdh,
             cudaGetLastError();
             cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
             for (int i = 0; i < nb; i++) *oQ += Ph[i];
-            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-            memcpy(oP + st, Ph, nb * 8);
+            cudaMemcpy(Ph, d.dnorm_out, nb * 8, cudaMemcpyDeviceToHost);
+            for (int i = 0; i < nb; i++) *oDn += Ph[i];
+            if (oP != NULL) {   // per-event P only when the caller asks for it
+                cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+                memcpy(oP + st, Ph, nb * 8);
+            }
 
             launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
             cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);
@@ -2157,8 +2173,12 @@ void cuda_compute_v3(void* vctx, void* vdh,
             cudaGetLastError();
             cudaMemcpy(Ph, d.Q_out, nb * 8, cudaMemcpyDeviceToHost);
             for (int i = 0; i < nb; i++) *oQ += Ph[i];
-            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-            memcpy(oP + st, Ph, nb * 8);
+            cudaMemcpy(Ph, d.dnorm_out, nb * 8, cudaMemcpyDeviceToHost);
+            for (int i = 0; i < nb; i++) *oDn += Ph[i];
+            if (oP != NULL) {   // per-event P only when the caller asks for it
+                cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
+                memcpy(oP + st, Ph, nb * 8);
+            }
 
             launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
             cudaMemcpy(gck_buf, s.g_bw_real, nw * 8, cudaMemcpyDeviceToHost);

@@ -45,7 +45,7 @@ void cuda_free_data_v3_f32(void*);
 void cuda_compute_v3_f32(void*,void*,
     const float*,const float*,const float*,const float*,
     float,float,float,float,float,float,float,int,
-    double*,double*,float*,float*,float*,float*,float*);
+    double*,double*,float*,float*,float*,float*,float*,double*);
 void cuda_gram_matrix_v3_f32(void*,void*,
     const float*,const float*,
     double*,double*,double*,double*,double*,double*);
@@ -106,6 +106,7 @@ class CUDAKernelV3F32:
     def __init__(self, config, batch_size=50000, lib_path=None):
         # ---- load library ----
         self._lib = _load_lib()
+        self._last_dnorm = None
 
         # ---- device info ----
         n_dev = self._lib.cuda_get_device_count()
@@ -269,7 +270,9 @@ class CUDAKernelV3F32:
 
         # CPU output buffers (double precision)
         oQ = _ffi.new("double*")
-        oP = np.zeros(data_handle.ne, np.float64)
+        oDn = _ffi.new("double*")
+        oP = (np.zeros(data_handle.ne, np.float64)
+              if return_p else None)
         ogck_r = np.zeros(nw, np.float32)
         ogck_i = np.zeros(nw, np.float32)
         ogm0 = np.zeros(nu_, np.float32)
@@ -285,8 +288,11 @@ class CUDAKernelV3F32:
             return _ffi.cast("float*", buf)
 
         # For double output buffers: use float64 numpy array and a raw pointer
-        oP_buf = _ffi.from_buffer(np.ascontiguousarray(oP))
-        ka.append(oP_buf)
+        if oP is not None:
+            oP_buf = _ffi.from_buffer(np.ascontiguousarray(oP))
+            ka.append(oP_buf)
+        else:
+            oP_buf = _ffi.NULL
 
         ne = data_handle.ne
 
@@ -295,11 +301,13 @@ class CUDAKernelV3F32:
             _fb(ck_r), _fb(ck_i),
             _fb(m0), _fb(g0),
             G, DG, DM, Ap_, pr_, pp_, norm_val, use_norm,
-            oQ, _ffi.cast("double*", oP_buf),
+            oQ, (_ffi.cast("double*", oP_buf) if oP is not None else _ffi.NULL),
             _fb(ogck_r), _fb(ogck_i),
             _fb(ogm0), _fb(ogg0),
             _fb(ogsc),
+            oDn,
         )
+        self._last_dnorm = float(oDn[0]) if use_norm else None
 
         # Reduce gradients from (n_unique_bw,) -> (n_m0_params,)
         # Use float64 for accumulation to avoid overflow
@@ -319,7 +327,7 @@ class CUDAKernelV3F32:
             "scalar": ogsc.copy(),
         }
 
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     # -- gram matrix (phsp pre-integration) -----------------------------------
 

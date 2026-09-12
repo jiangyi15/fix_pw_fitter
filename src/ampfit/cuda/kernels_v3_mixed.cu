@@ -365,6 +365,7 @@ __global__ void compute_main_kernel(
     // Output buffers
     double* __restrict__ Q_out,
     double* __restrict__ P_out,
+    double* __restrict__ dnorm_out,
     float* __restrict__ pap_real, float* __restrict__ pap_imag,
     float* __restrict__ pam_real, float* __restrict__ pam_imag,
     // f64 buffers for gp/gm/poq/dQ_dP
@@ -559,9 +560,12 @@ __global__ void compute_main_kernel(
         if (use_norm == 0) {
             Q_out[event_idx] = weight_val * P;
             dQ_dP[event_idx] = weight_val;
+            dnorm_out[event_idx] = 0.0;
         } else {
             Q_out[event_idx] = -weight_val * log(P / norm + bkg_val);
             dQ_dP[event_idx] = -weight_val / (P + bkg_val * norm);
+            // native d(NLL)/d(norm) contribution of this event
+            dnorm_out[event_idx] = weight_val * P / (norm * (P + bkg_val * norm));
         }
     }
 }
@@ -909,7 +913,7 @@ typedef struct {
     // Scratch buffers (GPU) — float (bulk compute)
     float* g_interp_real; float* g_interp_imag;
     float* g_bw_real; float* g_bw_imag;
-    double* Q_out; double* P_out;
+    double* Q_out; double* P_out; double* dnorm_out;
     float* pap_real; float* pap_imag; float* pam_real; float* pam_imag;
     // Time-evolution buffers — double (f64 precision)
     double* gp_real; double* gp_imag; double* gm_real; double* gm_imag;
@@ -1020,7 +1024,7 @@ void launch_compute_main(
     double Gamma, double Delta_Gamma, double Delta_m,
     double A_p, double poq_rho, double pop_phi,
     // Output buffers
-    double* Q_out, double* P_out,
+    double* Q_out, double* P_out, double* dnorm_out,
     float* pap_real, float* pap_imag, float* pam_real, float* pam_imag,
     double* gp_real, double* gp_imag, double* gm_real, double* gm_imag,
     double* poq_real, double* poq_imag,
@@ -1043,7 +1047,7 @@ void launch_compute_main(
         fl_table_bins,
         ck_real, ck_imag, m0,
         Gamma, Delta_Gamma, Delta_m, A_p, poq_rho, pop_phi,
-        Q_out, P_out,
+        Q_out, P_out, dnorm_out,
         pap_real, pap_imag, pam_real, pam_imag,
         gp_real, gp_imag, gm_real, gm_imag,
         poq_real, poq_imag,
@@ -1211,7 +1215,7 @@ void launch_compute_all(
         params->ck_real, params->ck_imag, params->m0,
         params->Gamma, params->Delta_Gamma, params->Delta_m,
         params->A_prod, params->poq_rho, params->pop_phi,
-        data->Q_out, data->P_out,
+        data->Q_out, data->P_out, data->dnorm_out,
         data->pap_real, data->pap_imag, data->pam_real, data->pam_imag,
         data->gp_real, data->gp_imag, data->gm_real, data->gm_imag,
         data->poq_real, data->poq_imag,
@@ -1314,6 +1318,7 @@ void* cuda_create_context_v3_mixed(
         // Double output buffers
         CUDA_CHECK(cudaMalloc(&c->scratch->Q_out, bs * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&c->scratch->P_out, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&c->scratch->dnorm_out, bs * sizeof(double)));
         // Float amplitude buffers
         CUDA_CHECK(cudaMalloc(&c->scratch->pap_real, bs * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&c->scratch->pap_imag, bs * sizeof(float)));
@@ -1373,7 +1378,7 @@ void cuda_free_context_v3_mixed(void* vctx) {
     if (c->scratch) {
         #define SF(f) cudaFree(c->scratch->f)
         SF(g_interp_real); SF(g_interp_imag); SF(g_bw_real); SF(g_bw_imag);
-        SF(Q_out); SF(P_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
+        SF(Q_out); SF(P_out); SF(dnorm_out); SF(pap_real); SF(pap_imag); SF(pam_real); SF(pam_imag);
         SF(gp_real); SF(gp_imag); SF(gm_real); SF(gm_imag); SF(poq_real); SF(poq_imag);
         SF(bw_p_real); SF(bw_p_imag); SF(common_amp_factor_real); SF(common_amp_factor_imag);
         SF(ap_real); SF(ap_imag); SF(am_real); SF(am_imag); SF(dQ_dP);
@@ -1528,7 +1533,8 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
     double* oQ,double* oP,
     double* ogck_r,double* ogck_i,
     double* ogm0,double* ogg0,
-    double* ogsc
+    double* ogsc,
+    double* oDn
 ) {
     ComputeContext* c = (ComputeContext*)vctx;
     DataHandle2* h = (DataHandle2*)vdh;
@@ -1570,6 +1576,7 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
         // Double output buffers
         CUDA_CHECK(cudaMalloc(&s.Q_out, bs * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&s.P_out, bs * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&s.dnorm_out, bs * sizeof(double)));
         // Float amplitude buffers
         CUDA_CHECK(cudaMalloc(&s.pap_real, bs * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&s.pap_imag, bs * sizeof(float)));
@@ -1608,7 +1615,8 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
         CUDA_CHECK(cudaMalloc(&s.grad_pop_phi_partial, bs * sizeof(double)));
     }
 
-    *oQ = 0.0; memset(oP, 0, ne * sizeof(double));
+    *oQ = 0.0; *oDn = 0.0;
+    if (oP != NULL) memset(oP, 0, ne * sizeof(double));
     memset(ogck_r, 0, nw * sizeof(double)); memset(ogck_i, 0, nw * sizeof(double));
     memset(ogm0, 0, nu * sizeof(double)); memset(ogg0, 0, ng * sizeof(double));
     memset(ogsc, 0, N_SCALAR * sizeof(double));
@@ -1642,8 +1650,13 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
         cudaMemcpy(Ph, d.Q_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
         for (int i = 0; i < nb; i++) *oQ += Ph[i];
 
-        cudaMemcpy(Ph, d.P_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
-        memcpy(oP + st, Ph, nb * sizeof(double));
+        cudaMemcpy(Ph, d.dnorm_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
+        for (int i = 0; i < nb; i++) *oDn += Ph[i];
+
+        if (oP != NULL) {   // per-event P only when the caller asks for it
+            cudaMemcpy(Ph, d.P_out, nb * sizeof(double), cudaMemcpyDeviceToHost);
+            memcpy(oP + st, Ph, nb * sizeof(double));
+        }
 
         // GPU reductions: sum per-event gradients across events (f32 for ck/m0/g0)
         launch_reduce_sum_features(d.grad_ck_real_partial, s.g_bw_real, nb, nw);
@@ -1695,7 +1708,7 @@ void cuda_compute_v3_mixed(void* vctx, void* vdh,
     if (!c->scratch) {
         #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
         F(g_interp_real); F(g_interp_imag); F(g_bw_real); F(g_bw_imag);
-        F(Q_out); F(P_out); F(pap_real); F(pap_imag); F(pam_real); F(pam_imag);
+        F(Q_out); F(P_out); F(dnorm_out); F(pap_real); F(pap_imag); F(pam_real); F(pam_imag);
         F(gp_real); F(gp_imag); F(gm_real); F(gm_imag); F(poq_real); F(poq_imag);
         F(bw_p_real); F(bw_p_imag); F(common_amp_factor_real); F(common_amp_factor_imag);
         F(ap_real); F(ap_imag); F(am_real); F(am_imag); F(dQ_dP);

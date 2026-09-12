@@ -368,7 +368,7 @@ class CUDAKernelV4PWACache:
 
         grads = {"ck": ogck_r + 1j * ogck_i,
                  "m0": grad_m0, "g0": grad_g0}
-        return oQ[0], grads, oP
+        return oQ[0], grads, (oP if return_p else None)
 
     def free(self):
         if self._ctx is not None:
