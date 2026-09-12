@@ -95,14 +95,6 @@ class AmplitudeModel:
                                    self.default_scalar_defaults)
 
     @property
-    def parameters(self):
-        """Kernel parameter groups of this model."""
-        params = ["ck", "m0", "g0"]
-        if self.scalar_names:
-            params.append("scalar")
-        return params
-
-    @property
     def n_proj(self):
         """Projection count: explicit ``n_proj`` else external spin states."""
         explicit = self.config.dic.get("n_proj")

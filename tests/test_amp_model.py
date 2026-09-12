@@ -28,7 +28,6 @@ def test_default_model_is_pwa():
     m = cfg.amplitude_model
     assert isinstance(m, PWA) and m.name == "pwa"
     assert m.scalar_names == []
-    assert m.parameters == ["ck", "m0", "g0"]
     assert isinstance(m.build_params_transform(), PWAKernelParams)
     assert m.angle_formula == "helicity"
     assert cfg.scalar_names == [] and cfg.n_proj == m.n_proj
@@ -40,7 +39,6 @@ def test_legacy_model_adds_scalars():
     m = cfg.amplitude_model
     assert isinstance(m, FlavourTagMix) and m.name == "flavour_tag_mix"
     assert len(m.scalar_names) == 6
-    assert m.parameters == ["ck", "m0", "g0", "scalar"]
     assert isinstance(m.build_params_transform(), FlavourTagMixKernelParams)
     assert cfg.scalar_names == m.scalar_names
 
