@@ -4,12 +4,12 @@ from .core import ComputeBackend, register_backend
 
 
 class _CUDABackend(ComputeBackend):
-    """Common base for all CUDA backends — delegates to a kernel.
+    """Common base for all CUDA backends — thin adapters around a kernel.
 
-    Every compute with a norm sets ``_last_dnorm``: kernels that provide a
-    native value (caches, cuda_v5_pwa group-log) are trusted; other
-    (per-event NLL) kernels fall back to ``per_event_dnorm`` from the P the
-    kernel returns and the weight/bkg arrays retained at load_data.
+    Each kernel is standalone and provides its own native d(NLL)/d(norm) in
+    ``self._last_dnorm`` (set during a normed compute); the backend simply
+    forwards it as ``grads["norm"]`` and passes ``return_p`` through so a
+    fit never round-trips per-event P to the host.
     """
 
     def __init__(self, kernel_config, batch_size=50000):
