@@ -93,7 +93,10 @@ def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
 
     kv, k5 = _make(KV4, kc), _make(KV5, kc, resolution_size=resolution_size)
     h5 = k5.load_data(data)
-    hp5, hpv = k5.load_data(phsp), kv.load_data(phsp)
+    # phsp count is intentionally not a multiple of resolution_size here
+    with pytest.warns(RuntimeWarning, match="not a multiple"):
+        hp5 = k5.load_data(phsp)
+    hpv = kv.load_data(phsp)
     try:
         # phase-space path must be unchanged from v4 (linear Σ w·P)
         Qn5, gn5, _ = k5.compute(params, hp5, norm=None)
@@ -121,7 +124,8 @@ def test_v5_group_grads_match_finite_difference(pwa_small):
 
     k5 = _make(KV5, kc, resolution_size=resolution_size)
     h5 = k5.load_data(data)
-    hp = k5.load_data(phsp)
+    with pytest.warns(RuntimeWarning, match="not a multiple"):
+        hp = k5.load_data(phsp)          # phsp is not a multiple of rsize
     try:
         norm = float(k5.compute(params, hp, norm=None)[0])
         _Q, g, _P = k5.compute(params, h5, norm=norm)
