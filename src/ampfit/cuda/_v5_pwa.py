@@ -117,7 +117,9 @@ class CUDAKernelV5PWA:
     resolution_size`` per copy, so each group total is 1) for the v5 NLL
     magnitude to be comparable with the per-event v4 NLL; with per-row unit
     weights the group sum carries an extra ``resolution_size`` factor
-    (scale + ``log`` offsets).
+    (scale + ``log`` offsets).  With the normalised weights ``Σw`` equals
+    the group count, so the fitter's purity constant ``−log(purity)·Σw`` is
+    exact for the group objective as well.
     """
 
     def __init__(self, config, batch_size=50000, resolution_size=1, lib_path=None):
