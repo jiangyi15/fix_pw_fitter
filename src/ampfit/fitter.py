@@ -18,8 +18,8 @@ Usage:
         d[name] = float(val)
     for name, val in zip(fitter.config.g0_phys_name, g0_arr):
         d[name] = float(val)
-    for name, val in zip(fitter.scalar_names, scalar_list):
-        d[name] = float(val)
+    for name, val in fitter.param_defaults().items():
+        d.setdefault(name, float(val))
     fitter.cm.set_defaults(d)
     
     # Compute NLL (for optimizer)
@@ -93,30 +93,16 @@ class Fitter:
         self.n_m0 = len(self.config.m0_phys_name)
         self.n_g0 = len(self.config.g0_phys_name)
 
-        # Standalone constraint manager — flat name list, no type distinction.
-        # Scalar parameters are config-driven: configs may declare
-        # ``scalar_names`` (a list, possibly empty).  Absent → legacy six
-        # mixing scalars, so old time/mixing configs keep working unchanged.
-        cfg_scalar_names = getattr(self.config, "scalar_names", None)
-        self.scalar_names = (list(cfg_scalar_names)
-                             if cfg_scalar_names is not None
-                             else list(SCALAR_NAMES))
-        all_ck_bases = {p for comb in self.all_comb for p in comb if isinstance(p, str)}
-        all_names = list(dict.fromkeys(
-            sorted([n + 'r' for n in all_ck_bases] +
-                   [n + 'i' for n in all_ck_bases]) +
-            list(self.config.m0_phys_name) +
-            list(self.config.g0_phys_name) +
-            list(self.scalar_names)
-        ))
-        self.cm = ConstraintManager(all_names)
-        # Auto-register mass/width transforms from particle models
-        self.setup_mass_width_transforms()
-
-        # Kernel parameter transform: produced by the amplitude model,
-        # which owns which parameter groups exist (ck/m0/g0[, scalar]).
+        # Kernel parameter transform — produced by the amplitude model; it
+        # owns the FULL parameter surface (ck/m0/g0 and, for legacy models,
+        # the scalars), so the fitter treats every parameter generically.
         self._kernel_builder = self.config.amplitude_model \
             .build_params_transform()
+
+        # Standalone constraint manager — flat name list, no type distinction.
+        self.cm = ConstraintManager(self._kernel_builder.param_names())
+        # Auto-register mass/width transforms from particle models
+        self.setup_mass_width_transforms()
 
         # Prior penalties (additive NLL contributions)
         self.priors = []
@@ -581,6 +567,15 @@ class Fitter:
         """Total number of flat variables: ck vars + free time params."""
         return self.cm.var_registry.n_flat
 
+    # -- parameter surface (model-provided, type-agnostic) --------------
+    def param_names(self):
+        """All resolved parameter names of the amplitude model."""
+        return self._kernel_builder.param_names()
+
+    def param_defaults(self):
+        """Default values declared by the model (e.g. legacy scalars)."""
+        return self._kernel_builder.param_defaults()
+
     def initial_values(self, seed=None):
         """Random initial guess for all free variables.
         
@@ -680,14 +675,9 @@ class Fitter:
                 seen.add(mid)
                 for k, v in model.get_defaults().items():
                     d[k] = float(v)
-        # Scalar defaults (config-driven list).  Config may provide its own
-        # ``scalar_defaults`` dict; anything else falls back to the legacy
-        # mixing values, then 0.0.
-        cfg_scalar_defaults = getattr(self.config, "scalar_defaults", None) or {}
-        for name in self.scalar_names:
-            d.setdefault(name,
-                         cfg_scalar_defaults.get(name,
-                                                SCALAR_DEFAULTS.get(name, 0.0)))
+        # Model-declared parameter defaults (generic; e.g. legacy scalars).
+        for name, val in self._kernel_builder.param_defaults().items():
+            d.setdefault(name, float(val))
         self.cm.set_defaults(d)
 
     def _check_data_loaded(self):
@@ -1382,13 +1372,10 @@ class Fitter:
                 if i_name not in out["value"]:
                     out["value"][i_name] = float(self._fixed_slots[i_name])
 
-        # Scalar parameter defaults (config-driven list; empty for scalar-free
-        # v4-PWA configs → nothing is added here).
-        cfg_scalar_defaults = getattr(self.config, "scalar_defaults", None) or {}
-        for name in self.scalar_names:
+        # Model-declared parameter defaults (generic).
+        for name, val in self._kernel_builder.param_defaults().items():
             if name not in out["value"]:
-                out["value"][name] = cfg_scalar_defaults.get(
-                    name, SCALAR_DEFAULTS.get(name, 0.0))
+                out["value"][name] = float(val)
                 out["error"][name] = 0.0
 
         # Status

@@ -28,6 +28,20 @@ class BuildKernelParams:
         """The :class:`~ampfit.param_constraint.CKProduct` for CK."""
         return self._pc
 
+    # -- parameter surface (generic: whatever the model declares) --------
+    def param_names(self):
+        """All resolved parameter names of this model."""
+        bases = sorted({p for comb in self.config.get_ck_map()
+                        for p in comb if isinstance(p, str)})
+        names = ([b + "r" for b in bases] + [b + "i" for b in bases]
+                 + list(self.config.m0_phys_name)
+                 + list(self.config.g0_phys_name))
+        return list(dict.fromkeys(names))
+
+    def param_defaults(self):
+        """Default values for the parameters this model adds (base: none)."""
+        return {}
+
     # -- forward --------------------------------------------------------
     def forward(self, resolved):
         """Resolved dict → kernel params dict (ck/m0/g0)."""
@@ -60,6 +74,14 @@ class FlavourTagMixKernelParams(BuildKernelParams):
     def __init__(self, config):
         super().__init__(config)
         self.scalar_names = list(config.scalar_names)
+
+    def param_names(self):
+        return super().param_names() + list(self.scalar_names)
+
+    def param_defaults(self):
+        cfg_defaults = self.config.scalar_defaults or {}
+        return {n: float(cfg_defaults.get(n, 0.0))
+                for n in self.scalar_names}
 
     def forward(self, resolved):
         out = super().forward(resolved)

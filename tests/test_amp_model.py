@@ -68,6 +68,8 @@ def test_pwa_params_have_no_scalar_key():
         x = f.initial_values(seed=0)
         params, _ = f.build_params(x)
         assert set(params) == {"ck", "m0", "g0"}
+        assert f.param_defaults() == {}
+        assert "scalar" not in f.param_names()
     finally:
         f.backend.free()
 
@@ -78,6 +80,8 @@ def test_legacy_params_have_scalar_key():
         x = f.initial_values(seed=0)
         params, _ = f.build_params(x)
         assert "scalar" in params and len(params["scalar"]) == 6
+        assert len(f.param_defaults()) == 6
+        assert "gamma" in f.param_names()
     finally:
         f.backend.free()
 
