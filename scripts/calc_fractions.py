@@ -119,7 +119,8 @@ def main():
     ap.add_argument("--phsp", default="data/phsp_arrays.npz", help="Phase-space NPZ")
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit phsp events (faster testing)")
-    ap.add_argument("--backend", default="cuda_v3", help="Compute backend")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("-o", "--output", default=None,
                     help="Output prefix for CSV and LaTeX (e.g. /path/to/prefix)")
     args = ap.parse_args()

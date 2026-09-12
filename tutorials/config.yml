@@ -1,3 +1,6 @@
+config:
+    backend: numpy_pwa
+
 data:
     dat_order: [pip, pim, eta]
     data: ./data_arr.npz

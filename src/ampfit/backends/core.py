@@ -33,6 +33,14 @@ def register_backend(name):
     return _f
 
 
+def resolve_backend_spec(config, spec=None, default=None):
+    """Backend spec precedence: explicit *spec* > ``config.backend_spec``
+    (the config's ``config: {backend: ...}``) > *default*."""
+    if spec is not None:
+        return spec
+    return getattr(config, "backend_spec", None) or default
+
+
 def eval_backend_spec(spec, kernel_config):
     """Recursively resolve a backend spec to an instance.
 

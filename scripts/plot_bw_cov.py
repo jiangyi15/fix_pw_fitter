@@ -18,7 +18,8 @@ def main():
     ap.add_argument("results_json")
     ap.add_argument("particle", help="Particle name, e.g. a1(1260)p")
     ap.add_argument("--config", default="config_amp.yml")
-    ap.add_argument("--backend", default="numpy")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("--scan", type=int, default=100,
                     help="Grid resolution for contour")
     ap.add_argument("-o", "--output", default=None, help="Save to file")

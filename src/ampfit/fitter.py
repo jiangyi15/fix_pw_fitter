@@ -140,10 +140,13 @@ class Fitter:
         self.config = Config(config_file)
         self.kernel_config = self.config.build_all_index()
 
-        # Resolve backend
+        # Resolve backend: explicit argument > config ``config.backend`` >
+        # built-in default ("cuda" is the alias for cuda64)
+        if backend is None:
+            backend = getattr(self.config, "backend_spec", None)
         if backend is None or backend == "cuda":
-            backend = create_backend("cuda64", self.kernel_config)
-        elif isinstance(backend, (str, dict)):
+            backend = "cuda64"
+        if isinstance(backend, (str, dict)):
             backend = create_backend(backend, self.kernel_config)
         # 'backend' is now a ComputeBackend instance
         self.backend = backend

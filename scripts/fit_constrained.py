@@ -160,7 +160,8 @@ def main():
     parser.add_argument("--config", default="config_angle.yml")
     parser.add_argument("--data", default="data/data_arrays.npz")
     parser.add_argument("--phsp", default="data/phsp_arrays.npz")
-    parser.add_argument("--backend", default="cuda_v3")
+    parser.add_argument("--backend", default=None,
+                        help="Compute backend (default: config's config.backend)")
     parser.add_argument("--constraint", default="fL",
                         help="Constraint (comma-sep list of obs[:target]). "
                              "Observables: fL (longitudinal frac), "

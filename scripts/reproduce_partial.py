@@ -98,7 +98,8 @@ def main():
     ap.add_argument("--n", type=int, default=2000000,
                     help="flat B→4π events (default 2M)")
     ap.add_argument("--batch", type=int, default=200000)
-    ap.add_argument("--backend", default="cuda_v3_sparse")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("-o", "--output", default="Validation/partial/out",
                     help="output prefix; writes {prefix}_partial.npy and "
                          "{prefix}_partial_order.json")

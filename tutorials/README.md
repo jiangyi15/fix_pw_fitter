@@ -38,8 +38,16 @@ something to converge to.
 ./fit.sh <config> <data.npz> <phsp.npz> <output-prefix> [init.json] [maxiter]
 ```
 
-Environment: `BACKEND=<name>` overrides the default `numpy_pwa` (e.g.
-`BACKEND=cuda_v4_pwa ./fit.sh`).  Results are written to
+The backend is declared inside the config itself:
+
+```yaml
+config:
+    backend: numpy_pwa        # or cuda_v4_pwa / {name: cuda_v5_pwa, resolution_size: 20}
+```
+
+`Fitter` (and therefore `run_fit.py`/`fit.sh`) uses that value when no
+explicit backend is given; the environment variable `BACKEND=<name>` (or
+`run_fit.py --backend ...`) overrides it.  Results are written to
 `<output-prefix>/results.json` and plots to `<output-prefix>/plots/`.
 
 ## 3. Inspect

@@ -26,7 +26,9 @@ def main():
     ap.add_argument("--data", default="data/data_arrays.npz")
     ap.add_argument("--phsp", default="data/phsp_arrays.npz")
     ap.add_argument("--max-events", type=int, default=None)
-    ap.add_argument("--backend", default="cuda_v3")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend, "
+                         "else cuda_v3)")
     ap.add_argument("-o", "--output", default="mass_2d.png")
     ap.add_argument("--binning", default=None,
                     help="Adaptive binning spec, e.g. [[2,2]]*3. "

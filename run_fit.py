@@ -19,12 +19,14 @@ from ampfit import Fitter
 def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
-    parser.add_argument("--backend", default="cuda_v3",
+    parser.add_argument("--backend", default=None,
                         help='Compute backend: a name like "cuda_v3", '
                              'or a YAML dict like '
                              '\'{name: integrated, base: cuda_v3}\' '
                              "(note: spaces required after colons)")
-    parser.add_argument("--config", default="config_angle.yml")
+    parser.add_argument("--config", default=None,
+                        help="config YAML (default: config.yml if present, "
+                             "else config_angle.yml)")
     parser.add_argument("--data", default=None,
                         help="data .npz (default: use the config's "
                              "data_arr / prefix files via load_all_data)")
@@ -47,6 +49,9 @@ def main():
     parser.add_argument("--init", type=str, default=None,
                         help="Initial parameters JSON file (from save_params output)")
     args = parser.parse_args()
+    if args.config is None:
+        args.config = "config.yml" if os.path.exists("config.yml") \
+            else "config_angle.yml"
 
     if args.loop > 1 and not args.fit:
         parser.error("--loop requires --fit (loop over random-start fits)")

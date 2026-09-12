@@ -76,10 +76,11 @@ def main():
                     help="fixed decay time for the amplitude (default 0)")
     ap.add_argument("--w-1m", action="store_true",
                     help="also weight by 1/m₃π")
-    ap.add_argument("--backend", default="cuda_v3_sparse",
+    ap.add_argument("--backend", default=None,
                     help="backend for the |A|² compute (default "
                          "cuda_v3_sparse, the fastest GPU kernel; "
-                         "alternatives: cuda_v3, integrated, numpy)")
+                         "alternatives: cuda_v3, integrated, numpy) "
+                         " (default: config's config.backend)")
     ap.add_argument("-o", "--output", default="plots/3pi_lineshape.png")
     args = ap.parse_args()
 

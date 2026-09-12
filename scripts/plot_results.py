@@ -22,7 +22,8 @@ def main():
     ap.add_argument("--phsp", default="data/phsp_arrays.npz", help="Phase-space NPZ")
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit events (faster testing)")
-    ap.add_argument("--backend", default="cuda_v3", help="Compute backend")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("-o", "--output", default="plots/",
                     help="Output directory for plots (default: plots/)")
     ap.add_argument("--format", default=None,

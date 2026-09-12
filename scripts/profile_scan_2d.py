@@ -132,7 +132,8 @@ def main():
     ap.add_argument("--grid", type=int, default=30)
     ap.add_argument("--max-iter", type=int, default=30)
     ap.add_argument("--output", default="profile")
-    ap.add_argument("--backend", default="cuda_v3_sparse")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     args = ap.parse_args()
 
     base = os.path.splitext(args.output)[0]

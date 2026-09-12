@@ -286,10 +286,11 @@ def main():
     ap.add_argument("--config", default=_default_path("config_angle.yml"))
     ap.add_argument("--phsp", default=_default_path("data/phsp_noeff_sym_arrays.npz"))
     ap.add_argument("--max-events", type=int, default=None)
-    ap.add_argument("--backend", default="cuda_v3_sparse",
+    ap.add_argument("--backend", default=None,
                     help="Compute backend (use an f64 backend — f32 "
                          "backends like cuda32_v3 give noisy gradients "
-                         "for fraction uncertainties)")
+                         "for fraction uncertainties) "
+                         " (default: config's config.backend)")
     ap.add_argument("-o", "--output", default=None,
                     help="Output prefix for CSV, LaTeX, and PDF (e.g. /path/to/prefix)")
     ap.add_argument("--no-merge-cp", action="store_true",

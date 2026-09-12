@@ -92,7 +92,8 @@ def main():
     ap.add_argument("--grid", type=int, default=200)
     ap.add_argument("--max-iter", type=int, default=30)
     ap.add_argument("--mle", action="store_true", help="Optimize GP hyperparameters via MLE")
-    ap.add_argument("--backend", default="cuda_v3_sparse")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("--fit-maxiter", type=int, default=200)
     ap.add_argument("--sigma-thresh", type=float, default=0.05)
     args = ap.parse_args()

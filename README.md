@@ -43,9 +43,10 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 from ampfit import Fitter
 
 # Backend selection via string shortcut (default: cuda → v3)
-fitter = Fitter("config_amp.yml")                         # CUDA f64 v3
+fitter = Fitter("config_amp.yml")                         # backend from config, else cuda64
+fitter = Fitter("config_amp.yml", backend="numpy")        # explicit override
 fitter = Fitter("config_amp.yml", backend="cuda32_v3")    # CUDA f32 v3
-fitter = Fitter("config_amp.yml", backend="numpy")        # NumPy f64
+# the config may also select it:  config: {backend: numpy}
 fitter = Fitter("config_amp.yml", backend="onnx_cuda")    # ONNX CUDA
 
 fitter.set_data(data)

@@ -41,8 +41,9 @@ def main():
     ap.add_argument("--phsp",
                     help="phsp .npz (kernel arrays); omit with --data to "
                          "use the config's data/phsp section")
-    ap.add_argument("--backend", default="numpy_pwa",
-                    help="backend computing the pwa model (default numpy_pwa)")
+    ap.add_argument("--backend", default=None,
+                    help="backend computing the pwa model (default: config's "
+                         "config.backend, else numpy_pwa)")
     ap.add_argument("--by", default="resonance",
                     choices=["chain", "resonance", "ls"],
                     help="group policy (default: resonance)")

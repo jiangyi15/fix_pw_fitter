@@ -90,7 +90,8 @@ def main():
                     help="events per fixed-m(πππ) grid point (the mean "
                          "statistics)")
     ap.add_argument("--batch", type=int, default=100000)
-    ap.add_argument("--backend", default="cuda_v3_sparse")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("-o", "--output", default="Validation/partial/out",
                     help="output prefix; writes {prefix}_partial.npy and "

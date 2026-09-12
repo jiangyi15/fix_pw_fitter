@@ -31,7 +31,8 @@ def main():
                     help="Fit result JSON (for best-fit values)")
     ap.add_argument("--config", default="config_amp.yml",
                     help="Fitter config YAML")
-    ap.add_argument("--backend", default="cuda_v3_sparse")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("-o", "--output", default=None, help="Output file")
     ap.add_argument("--grid", type=int, default=500, help="GP evaluation grid")
     ap.add_argument("--mle", action="store_true",

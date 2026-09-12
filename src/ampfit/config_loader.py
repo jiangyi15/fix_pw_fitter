@@ -212,6 +212,10 @@ class Config:
     def __init__(self, filename):
         self.dic = load_config(filename)
         self._config_path = filename if isinstance(filename, str) else ""
+        # optional ``config: {backend: ...}`` (or a top-level ``backend``)
+        # selecting the compute backend for this config; ``None`` = default
+        self.backend_spec = (self.dic.get("config") or {}).get("backend",
+                          self.dic.get("backend"))
         top = self.dic["particle"]["$top"]
         finals = list(self.dic["particle"]["$finals"])
         self.top = top

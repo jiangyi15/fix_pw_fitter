@@ -15,14 +15,14 @@ PHSP="${3:-tutorials/phsp_arr.npz}"
 PREFIX="${4:-tutorials/fit_output}"
 INIT="${5:-tutorials/init_pwa.json}"
 MAXITER="${6:-1000}"
-BACKEND="${BACKEND:-numpy_pwa}"
+BACKEND="${BACKEND:-}"
 
 echo "=== ampfit full fit ==="
 echo "config:  $CONFIG"
 echo "data:    $DATA"
 echo "phsp:    $PHSP"
 echo "init:    $INIT"
-echo "backend: $BACKEND"
+echo "backend: ${BACKEND:-<config default>}"
 echo "output:  $PREFIX/"
 echo ""
 
@@ -35,12 +35,17 @@ else
     echo "(no init file $INIT — starting from defaults)"
 fi
 
+BACKEND_ARG=""
+if [ -n "$BACKEND" ]; then
+    BACKEND_ARG="--backend $BACKEND"
+fi
+
 python run_fit.py \
     --config "$CONFIG" \
     --data "$DATA" \
     --phsp "$PHSP" \
     --fit --maxiter "$MAXITER" \
-    --backend "$BACKEND" \
+    $BACKEND_ARG \
     $INIT_ARG \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/"

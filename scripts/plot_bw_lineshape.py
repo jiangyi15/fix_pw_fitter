@@ -31,7 +31,8 @@ def main():
     ap.add_argument("-o", "--output", default="bw_lineshape.pdf")
     ap.add_argument("--format", default=None,
                     help="Image format (png, pdf, svg, …). Inferred from --output extension if omitted.")
-    ap.add_argument("--backend", default="numpy")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend)")
     ap.add_argument("--resonances", nargs="*", default=None)
     args = ap.parse_args()
 

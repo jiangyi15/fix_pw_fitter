@@ -213,12 +213,13 @@ def main():
     ap.add_argument("--config", default=_SCRIPT_DIR + "/config_amp.yml")
     ap.add_argument("--phsp", default=_SCRIPT_DIR + "/data/phsp_noeff_sym_arrays.npz")
     ap.add_argument("--max-events", type=int, default=None)
-    ap.add_argument("--backend", default="cuda_v3_sparse",
+    ap.add_argument("--backend", default=None,
                     help="Backend for fraction/error computation.  Use an "
                          "f64 backend (default cuda_v3_sparse): f32 backends "
                          "(e.g. cuda32_v3) give numerically noisy gradients "
                          "for weakly-contributing waves, inflating fraction "
-                         "uncertainties by orders of magnitude.")
+                         "uncertainties by orders of magnitude. "
+                         " (default: config's config.backend)")
     ap.add_argument("-o", "--output", default=None,
                     help="Output .tex file (default: same basename as fit_json)")
     args = ap.parse_args()

@@ -227,7 +227,9 @@ def main():
                          "dominant chain's partner-resonance mass)")
     ap.add_argument("--n", type=int, default=300,
                     help="grid points along the profiled axis (default 300)")
-    ap.add_argument("--backend", default="numpy")
+    ap.add_argument("--backend", default=None,
+                    help="Compute backend (default: config's config.backend, "
+                         "else numpy)")
     ap.add_argument("-o", "--output", default="plots/group_shape/")
     ap.add_argument("--format", default="png")
     args = ap.parse_args()
