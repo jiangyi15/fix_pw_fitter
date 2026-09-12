@@ -1,6 +1,6 @@
 """CUDA backends — GPU-accelerated computation (f64 and f32)."""
 import numpy as np
-from .core import ComputeBackend, per_event_dnorm, register_backend
+from .core import ComputeBackend, register_backend
 
 
 class _CUDABackend(ComputeBackend):
@@ -14,42 +14,24 @@ class _CUDABackend(ComputeBackend):
 
     def __init__(self, kernel_config, batch_size=50000):
         self.kernel = self._make_kernel(kernel_config, batch_size)
-        self._host_arrays = {}
 
     def _make_kernel(self, kernel_config, batch_size):
         raise NotImplementedError
 
     def load_data(self, data_np):
-        h = self.kernel.load_data(data_np)
-        self._host_arrays[id(h)] = (
-            np.asarray(data_np.get(
-                "weight", np.ones(data_np["mass"].shape[0])),
-                dtype=np.float64),
-            (None if data_np.get("bkg") is None
-             else np.asarray(data_np["bkg"], dtype=np.float64)))
-        return h
+        return self.kernel.load_data(data_np)
 
     def compute(self, params, data_handle, norm=None, return_p=True):
         Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
                                           return_p=return_p)
         if norm is not None:
             native = getattr(self.kernel, "_last_dnorm", None)
-            if native is not None:
-                dnorm = float(native)
-            elif P is not None:
-                w, b = self._host_arrays.get(id(data_handle),
-                                             (None, None))
-                if w is None:
-                    raise RuntimeError(
-                        f"{type(self).__name__}: handle not loaded through "
-                        f"this backend")
-                dnorm = per_event_dnorm(norm, P, w, b)
-            else:
+            if native is None:
                 raise RuntimeError(
-                    f"{type(self).__name__}: kernel returned neither a "
-                    f"native dNLL/dnorm nor per-event P")
+                    f"{type(self).__name__}: kernel did not provide a "
+                    f"native dNLL/dnorm")
             grads = dict(grads)
-            grads["norm"] = dnorm
+            grads["norm"] = float(native)
         return Q, grads, P
 
     def free(self):
