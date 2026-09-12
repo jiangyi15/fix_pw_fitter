@@ -94,6 +94,8 @@ _PARTICLE_NAMES = {
     "pip2":          r"\pi_{2}^{+}",
     "pim1":          r"\pi_{1}^{-}",
     "pim2":          r"\pi_{2}^{-}",
+    "pip":           r"\pi^{+}",
+    "pim":           r"\pi^{-}",
     "pi1300":        r"\pi(1300)",
     "pi1600":        r"\pi(1600)",
     "pi1800":        r"\pi(1800)",
@@ -118,21 +120,31 @@ def fmt_particle(name, full=True):
     str
         LaTeX display name.
     """
-    # Strip charge suffix
-    base = name
-    charge = ""
-    if base.endswith("p") and not base.endswith("rhoA") and not base.endswith("KMA"):
-        base = base[:-1]
-        charge = "+"
-    elif base.endswith("m") and not base.endswith("rhoB") and not base.endswith("KMB"):
-        base = base[:-1]
-        charge = "-"
-    elif base.endswith("b"):
-        base = base[:-1]
-        charge = r"\bar"
+    # Full-name entries (e.g. pip/pim) win before charge parsing.
+    if name in _PARTICLE_NAMES:
+        base = _PARTICLE_NAMES[name]
+        charge = ""
+    else:
+        # Strip charge suffix — but never when it would leave a dangling
+        # ``_`` (names like ``X_p``) or for one-character particles
+        # (``p`` = proton).
+        base = name
+        charge = ""
+        if len(base) > 1 and base[-2] != "_":
+            if (base.endswith("p") and not base.endswith("rhoA")
+                    and not base.endswith("KMA")):
+                base = base[:-1]
+                charge = "+"
+            elif (base.endswith("m") and not base.endswith("rhoB")
+                    and not base.endswith("KMB")):
+                base = base[:-1]
+                charge = "-"
+            elif base.endswith("b"):
+                base = base[:-1]
+                charge = r"\bar"
 
     # Look up base; fall back to raw
-    if base in _PARTICLE_NAMES:
+    if name not in _PARTICLE_NAMES and base in _PARTICLE_NAMES:
         display = _PARTICLE_NAMES[base]
     else:
         # Try to parse as generic name with mass: "name(MASS)"
