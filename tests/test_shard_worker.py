@@ -1,16 +1,9 @@
 """ShardBackend end-to-end worker compute (numpy_pwa workers, no GPU)."""
 
-import multiprocessing as _mp
-
 import numpy as np
 
 from ampfit.config_loader import Config
 from ampfit.backends import create_backend
-
-try:
-    _mp.set_start_method("fork", force=True)
-except (RuntimeError, ValueError):
-    pass
 
 
 def _arrays(ne, kc, seed):
@@ -41,8 +34,11 @@ def test_shard_numpy_matches_single():
     phsp = _arrays(600, kc, 2)
 
     single = create_backend("numpy_pwa", kc)
+    # spawn/forkserver are safe in multi-threaded test runners; fork is
+    # deprecated there (Python >= 3.14)
     shard = create_backend(
-        {"name": "shard", "backends": ["numpy_pwa", "numpy_pwa"]}, kc)
+        {"name": "shard", "backends": ["numpy_pwa", "numpy_pwa"],
+         "start_method": "spawn"}, kc)
     try:
         hs = single.load_data(data)
         hps = single.load_data(phsp)

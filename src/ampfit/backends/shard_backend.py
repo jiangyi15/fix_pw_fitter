@@ -191,6 +191,11 @@ class ShardBackend(ComputeBackend):
         Split ratio per worker.  Default equal.  E.g. ``[1, 3]`` gives
         worker 1 one quarter and worker 2 three quarters of the data.
         Useful when mixing fast (GPU) and slow (CPU) backends.
+    start_method : str, optional
+        ``multiprocessing`` start method for the worker pool
+        (``"fork"`` / ``"spawn"`` / ``"forkserver"``; default: the system
+        default).  Prefer ``"spawn"``/``"forkserver"`` in multi-threaded or
+        CUDA applications where ``fork`` is unsafe.
     align : int, optional
         Round every interior split boundary down to a multiple of *align*
         (worker chunks then start/end on ``align``-aligned rows, except the
@@ -200,11 +205,18 @@ class ShardBackend(ComputeBackend):
     """
 
     def __init__(self, kernel_config, backends=None, n_workers=None,
-                 weights=None, align=None):
+                 weights=None, align=None, start_method=None):
         self.kernel_config = kernel_config
         self._align = int(align) if align else None
         if self._align is not None and self._align < 2:
             raise ValueError("align must be >= 2 (or None)")
+        if start_method is not None and start_method not in (
+                "fork", "spawn", "forkserver"):
+            raise ValueError(
+                f"start_method must be fork/spawn/forkserver or None, "
+                f"got {start_method!r}")
+        self._mp = (multiprocessing.get_context(start_method)
+                    if start_method else multiprocessing.get_context())
         self._specs = []
         self._weights = []
         # persistent worker pool (created lazily) + dataset id counter
@@ -243,11 +255,11 @@ class ShardBackend(ComputeBackend):
         if self._procs:
             return
         nw = self._n_workers
-        self._task_queues = [multiprocessing.Queue() for _ in range(nw)]
-        self._result_queues = [multiprocessing.Queue() for _ in range(nw)]
+        self._task_queues = [self._mp.Queue() for _ in range(nw)]
+        self._result_queues = [self._mp.Queue() for _ in range(nw)]
         for i in range(nw):
             name, device = self._specs[i]
-            p = multiprocessing.Process(
+            p = self._mp.Process(
                 target=_worker_main,
                 args=(self.kernel_config, name, self._task_queues[i],
                       self._result_queues[i], device),
