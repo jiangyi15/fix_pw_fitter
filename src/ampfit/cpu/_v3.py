@@ -217,6 +217,8 @@ class CPUKernelV3:
             ne,
         ), self._lib, ne)
         dh._keep = ka
+        dh._weight = np.asarray(data["weight"], dtype=np.float64)
+        dh._bkg = np.asarray(data[bkg_key], dtype=np.float64)
         return dh
 
     # -- compute -------------------------------------------------------
@@ -295,6 +297,14 @@ class CPUKernelV3:
             "g0": grad_g0,
             "scalar": ogsc.copy(),
         }
+
+        if norm is not None:
+            w = data_handle._weight
+            b = data_handle._bkg
+            self._last_dnorm = float(np.sum(
+                w * oP / (norm * (oP + b * norm))))
+        else:
+            self._last_dnorm = None
 
         return oQ[0], grads, oP
 

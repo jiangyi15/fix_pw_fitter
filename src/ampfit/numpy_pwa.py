@@ -161,5 +161,12 @@ class NumpyPWA:
         grad_g0 = np.sum(2 * np.real(dQ_dg * g_interp),
                          axis=0) @ k._g0_scatter
 
+        if norm is not None:
+            b = bkg if not np.isscalar(bkg) else np.full(ne, float(bkg))
+            self._last_dnorm = float(np.sum(
+                weight * P_e / (norm * (P_e + b * norm))))
+        else:
+            self._last_dnorm = None
+
         grads = {"ck": grad_ck, "m0": grad_m0, "g0": grad_g0}
         return Q, grads, (P_e if return_p else None)
