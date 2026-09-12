@@ -7,7 +7,7 @@ from ampfit.config_loader import Config
 
 
 def pwa_cfg():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     return cfg, cfg.build_all_index()
 
 

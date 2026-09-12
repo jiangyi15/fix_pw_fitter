@@ -34,7 +34,7 @@ def _params(kc, seed=1):
 
 
 def test_shard_numpy_matches_single():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     params = _params(kc)
     data = _arrays(300, kc, 0)

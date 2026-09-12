@@ -24,7 +24,7 @@ from ampfit.helicity_angle import (decay_chain_to_tree, tree_vertices,
 
 @pytest.fixture(scope="module")
 def cfg():
-    return Config("config_pwa.yml")
+    return Config("tests/config_pwa.yml")
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +34,7 @@ def kc(cfg):
 
 @pytest.fixture(scope="module")
 def data(kc):
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     mom = np.load("data/phsp.npy")[:100]
     byt = {cfg.topo_index[ch.topo_id()]: ch
            for _, ch in cfg.full_decay.get_partial_waves()}
@@ -59,7 +59,7 @@ def test_builder_shapes(kc):
 
 def test_matrix_matches_engine(kc):
     """p-major matrix_angle columns == numeric helicity amplitude."""
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     vars_ = kc["variables"]
     rng = np.random.RandomState(7)
     waves = cfg.full_decay.get_partial_waves()
@@ -152,9 +152,9 @@ def test_build_all_index_routes_pure_pwa(cfg):
     from ampfit.config_loader import row_block_factors
 
     assert row_block_factors(cfg.dic) == (1, 1, 1)
-    c2 = Config("config_pwa.yml")
+    c2 = Config("tests/config_pwa.yml")
     kc = c2.build_all_index()                      # single generic entry point
-    kc_ref = build_pwa_kernel_config(Config("config_pwa.yml"))
+    kc_ref = build_pwa_kernel_config(Config("tests/config_pwa.yml"))
     for key in ("matrix_angle", "bw_order", "fl_order", "m0_index",
                 "mass_index", "g0_index", "g0_mass_index", "fl_type",
                 "fl_q_index", "angle_index", "angle_k", "angle_b",
@@ -191,11 +191,11 @@ def test_load_all_data_prefix_momenta(tmp_path):
     from ampfit import Fitter
     from ampfit.pwa_build import generate_pwa_phsp
 
-    cfg0 = Config("config_pwa.yml")
+    cfg0 = Config("tests/config_pwa.yml")
     chain = cfg0.full_decay.get_partial_waves()[0][1]
     mom = generate_pwa_phsp(cfg0, chain, 300, seed=7)
 
-    d = yaml.safe_load(open("config_pwa.yml"))
+    d = yaml.safe_load(open("tests/config_pwa.yml"))
     for pref in ("data", "phsp"):
         d["data"][pref] = f"{pref}.npy"
         d["data"][f"{pref}_weight"] = f"{pref}_w.npy"
@@ -244,7 +244,7 @@ def test_topo_index_from_decay_struct(cfg):
     resonances) so adding a resonance later does not renumber anything."""
     from ampfit.config_loader import Config as _C
 
-    c2 = _C("config_pwa.yml")
+    c2 = _C("tests/config_pwa.yml")
     # three declared pairings, even though only the pipi pairing has waves
     assert c2.n_topo == 3
     keys = set(c2.topo_index)
@@ -263,7 +263,7 @@ def test_topo_index_from_decay_struct(cfg):
 def test_topo_index_from_name(cfg):
     """Structural decay-section name -> stable topology slot."""
     from ampfit.config_loader import Config as _C
-    c2 = _C("config_pwa.yml")
+    c2 = _C("tests/config_pwa.yml")
     assert c2.topo_index_from_name("pipi") == 0
     assert c2.topo_index_from_name("pipeta") == 1
     assert c2.topo_index_from_name("pimeta") == 2
@@ -363,7 +363,7 @@ def test_spinless_finals_projection_unchanged(tmp_path):
     """Spin-0 finals must reproduce the old top-only projection count and
     ordering exactly (config_pwa.yml: J=1 top -> n_proj=2, identical build).
     """
-    c = Config("config_pwa.yml")
+    c = Config("tests/config_pwa.yml")
     states = c._helicity_external_states()
     tops = c._helicity_top_states()
     assert len(states) == len(tops) == 2

@@ -22,7 +22,7 @@ def _momenta(n, seed):
 
 
 def test_rec_group_sum_invariants():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     pws = list(cfg.full_decay.get_partial_waves())
     byt = {cfg.topo_index[ch.topo_id()]: ch for _, ch in pws}
@@ -34,7 +34,7 @@ def test_rec_group_sum_invariants():
     phsp_sm = {k: np.repeat(v, copies, axis=0)
                for k, v in phsp_rec.items()}
 
-    f = Fitter("config_pwa.yml", backend="numpy_pwa")
+    f = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
     f.set_phsp(phsp_sm)
     f.set_data(data_rec)
     x = f.initial_values(seed=0)

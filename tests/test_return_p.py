@@ -27,7 +27,7 @@ def _params(kc, seed=1):
 
 
 def test_numpy_pwa_return_p_false():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     params = _params(kc)
     be = create_backend("numpy_pwa", kc)
@@ -46,7 +46,7 @@ def test_numpy_pwa_return_p_false():
 
 
 def test_cuda_v4_pwa_return_p_false():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     params = _params(kc)
     try:

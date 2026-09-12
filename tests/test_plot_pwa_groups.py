@@ -11,7 +11,7 @@ from ampfit.plot_pwa_groups import (
 
 @pytest.fixture(scope="module")
 def cfg_pwa():
-    return Config("config_pwa.yml")
+    return Config("tests/config_pwa.yml")
 
 
 def test_discover_policies_covers_all_base_waves(cfg_pwa):

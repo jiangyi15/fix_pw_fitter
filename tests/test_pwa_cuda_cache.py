@@ -8,7 +8,7 @@ from ampfit.config_loader import Config
 
 @pytest.fixture(scope="module")
 def pwa_small():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     n_proj = int(kc.get("n_proj", 1))
     n_base = kc["matrix_angle"].shape[1] // n_proj

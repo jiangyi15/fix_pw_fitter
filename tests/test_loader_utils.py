@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pytest
 
-CONFIG_TEMPLATE = "config_pwa.yml"     # repo-root pure-PWA config (read-only)
+CONFIG_TEMPLATE = "tests/config_pwa.yml"     # repo-root pure-PWA config (read-only)
 F = ["pip", "pim", "eta"]
 
 

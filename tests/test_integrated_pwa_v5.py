@@ -28,7 +28,7 @@ def _params(kc, seed=1):
 
 
 def test_integrated_pwa_v5_matches_plain():
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()
     params = _params(kc)
     data = _data(300, kc, 0)

@@ -23,7 +23,7 @@ def _tree_data(cfg, kc, mom):
 
 
 def _pwa_setup(n_events=1500):
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     kc = build_pwa_kernel_config(cfg)
     data = _tree_data(cfg, kc, np.load("data/phsp.npy")[:n_events])
     return kc, data
@@ -83,7 +83,7 @@ def test_integrated_pwa_backend():
 
     kc, phsp = _pwa_setup(n_events=1500)
     mom = np.load("data/phsp.npy")
-    cfg = Config("config_pwa.yml")
+    cfg = Config("tests/config_pwa.yml")
     dt = _tree_data(cfg, kc, mom[3000:3500])
 
     rng = np.random.RandomState(4)
