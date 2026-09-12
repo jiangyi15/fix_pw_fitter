@@ -964,9 +964,6 @@ class Fitter:
 
         For constrained fits (f(x) = 0), use :meth:`fit_constrained`.
 
-        NumPy backends (``numpy`` / ``numpy_pwa``) are TEST/REFERENCE only
-        and emit a warning here — use a CUDA/CPU backend for production fits.
-
         Args:
             x0: starting point. If None, uses initial_values().
             maxiter: maximum number of iterations.
@@ -984,14 +981,6 @@ class Fitter:
             For BFGS: result.hess_inv contains the inverse Hessian.
         """
         from scipy.optimize import minimize
-
-        import warnings as _warnings
-        _mod = type(self.backend).__module__
-        if "numpy" in _mod:
-            _warnings.warn(
-                "ampfit: NumPy backends (numpy/numpy_pwa) are for tests and "
-                "reference only — use a CUDA/CPU backend for production fits.",
-                RuntimeWarning, stacklevel=2)
 
         if x0 is None:
             x0 = self.initial_values()

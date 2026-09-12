@@ -154,8 +154,9 @@ be = create_backend({"name": "integrated_pwa",          # Gram norm
                      "base": "cuda_v4_pwa"}, kc)
 ```
 
-NumPy backends (``numpy`` / ``numpy_pwa``) are **test/reference only** —
-never use them for production fits (``Fitter.fit`` warns if you do).
+NumPy backends (``numpy`` / ``numpy_pwa``) are CPU reference
+implementations, useful for tests and cross-checks; production fits
+normally use a CUDA/CPU backend.
 
 **dNLL/dnorm contract**: every backend whose ``compute(..., norm=<float>)``
 runs returns ``grads["norm"]`` — the native d(NLL)/d(norm) of its own
@@ -285,7 +286,7 @@ apply_bounds → to_dict → resolve → build_ck  (constraint chain)
 
 | Name | Backend class | Precision |
 |------|:-------------|:---------:|
-| `numpy` | NumpyBackend | f64 — **test/reference only** |
+| `numpy` | NumpyBackend | f64 CPU reference |
 | `cuda_v3` / `cuda64_v3` / `cuda` | CUDABackendV3 | f64 |
 | `cuda32_v3` | CUDABackendV3F32 | f32 |
 | `cuda_mixed_v3` | CUDABackendV3Mixed | f32+f64 |
@@ -293,7 +294,7 @@ apply_bounds → to_dict → resolve → build_ck  (constraint chain)
 | `cuda32_v2` | CUDABackendV2F32 | f32 |
 | `integrated` | IntegratedBackend | base‑dependent |
 | `onnx_cpu` / `onnx_cuda` | ONNXBackend | f32 |
-| `numpy_pwa` | NumpyPWABackend | f64 — **test/reference only** |
+| `numpy_pwa` | NumpyPWABackend | f64 CPU reference |
 | `cuda_v4_pwa` | CUDABackendV4PWA | f64 |
 | `cuda_v4_pwa_cache` / `cuda32_v4_pwa_cache` | CUDABackendV4PWACache / …Cache32 | f64 (f32 cache) |
 | `cuda_v5_pwa` | CUDABackendV5PWA | f64 (group-log NLL) |
