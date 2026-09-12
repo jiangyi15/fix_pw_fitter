@@ -2,6 +2,13 @@
 
 Separate classes for CPU and CUDA providers so each has its own
 defaults and can be registered independently.
+
+NOTE on ``grads["norm"]``: the exported ONNX graph is fixed and always
+returns the per-event ``P``; it cannot be asked to skip P.  This backend
+therefore derives ``d(NLL)/d(norm)`` in Python from the returned P (the
+per-event formula) instead of getting it natively from a kernel — correct
+for the per-event objective the graph implements.  A non-per-event
+objective would require adding a dnorm output to the graph.
 """
 import numpy as np
 from .core import ComputeBackend, register_backend
