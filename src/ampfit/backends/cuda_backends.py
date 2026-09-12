@@ -25,7 +25,7 @@ class _CUDABackend(ComputeBackend):
         Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
                                           return_p=return_p)
         if norm is not None:
-            native = getattr(self.kernel, "_last_dnorm", None)
+            native = self.kernel._last_dnorm
             if native is None:
                 raise RuntimeError(
                     f"{type(self).__name__}: kernel did not provide a "
@@ -167,7 +167,7 @@ class CUDABackendV5PWA(_CUDABackend):
         Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
                                           return_p=return_p)
         if norm is not None:
-            dn = getattr(self.kernel, "_last_dnorm", None)
+            dn = self.kernel._last_dnorm
             if dn is None:
                 raise RuntimeError(
                     "cuda_v5_pwa kernel did not provide _last_dnorm")
