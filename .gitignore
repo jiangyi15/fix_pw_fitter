@@ -21,3 +21,6 @@ kernel_meta/
 
 # deepwork state
 .slim/deepwork/
+
+# Tutorial generated samples
+/tutorials/*.npz

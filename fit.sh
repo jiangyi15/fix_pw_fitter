@@ -1,35 +1,51 @@
 #!/usr/bin/env bash
 # Full fit pipeline: NLL → BFGS optimization → results → plots
+#
+# Defaults run the self-contained tutorial (generate the samples first):
+#   python tutorials/generate_data.py
+#   ./fit.sh
+#
+# Or override positionally:
+#   ./fit.sh <config> <data.npz> <phsp.npz> <output-prefix> [init.json] [maxiter]
 set -e
 
-CONFIG="${1:-config_amp.yml}"
-DATA="${2:-data/data_arrays.npz}"
-PHSP="${3:-data/phsp_arrays.npz}"
-PREFIX="${4:-fit_output13}"
+CONFIG="${1:-tutorials/config.yml}"
+DATA="${2:-tutorials/data_arr.npz}"
+PHSP="${3:-tutorials/phsp_arr.npz}"
+PREFIX="${4:-tutorials/fit_output}"
+INIT="${5:-tutorials/init_pwa.json}"
+MAXITER="${6:-1000}"
+BACKEND="${BACKEND:-numpy_pwa}"
 
 echo "=== ampfit full fit ==="
-echo "config: $CONFIG"
-echo "data:   $DATA"
-echo "phsp:   $PHSP"
-echo "output: $PREFIX/"
+echo "config:  $CONFIG"
+echo "data:    $DATA"
+echo "phsp:    $PHSP"
+echo "init:    $INIT"
+echo "backend: $BACKEND"
+echo "output:  $PREFIX/"
 echo ""
 
 mkdir -p "$PREFIX"
+
+INIT_ARG=""
+if [ -f "$INIT" ]; then
+    INIT_ARG="--init $INIT"
+else
+    echo "(no init file $INIT — starting from defaults)"
+fi
 
 python run_fit.py \
     --config "$CONFIG" \
     --data "$DATA" \
     --phsp "$PHSP" \
-    --fit --maxiter 1000 \
-    --backend "cuda32_v3" \
-    --init fit_output11/results.json \
+    --fit --maxiter "$MAXITER" \
+    --backend "$BACKEND" \
+    $INIT_ARG \
     --save "$PREFIX/results.json" \
     --plot "$PREFIX/plots/"
-# (--fix-mass-width was moved into the constraint file:
-#  fix_mass_width_default: true in the config's constraints section)
 
 echo ""
 echo "=== done ==="
 echo "results: $PREFIX/results.json"
 echo "plots:   $PREFIX/plots/"
-

@@ -1,0 +1,256 @@
+data:
+    dat_order: [pip, pim, eta]
+    data: ./data_arr.npz
+
+    phsp: ./phsp_arr.npz
+    random_z: False
+    center_mmass: True
+
+decay:
+    jpsi:
+    - [pipi, eta]
+    - [pipeta, pim]
+    - [pimeta, pip]
+    pipi: [pip, pim]
+    pipeta: [pip, eta]
+    pimeta: [pim, eta]
+
+particle:
+    $top: jpsi
+    $finals: [pip, pim, eta]
+    pipi: [ MI0p, MI0m, MI1p, MI1m, MI2p, MI2m, MI3p, MI3m ]
+    pipeta: [ ]
+    pimeta: [ ]
+    jpsi:
+        J: 1
+        P: -1
+        spins: [-1, 1]
+        mass: 3.096813522559038
+    pip:
+        J: 0
+        P: -1
+        mass: 0.139567
+    pim:
+        J: 0
+        P: -1
+        mass: 0.139567
+    eta:
+        J: 0
+        P: -1
+        mass: 0.5478621409593663
+    testR:
+        J: 1
+        P: -1
+        mass: 0.3
+        width: 0.05
+        model: BW
+        # float: m
+    MI0p:
+        J: 0
+        P: +1
+        mass: 0.7690
+        model: one
+    MI0m:
+        J: 0
+        P: -1
+        mass: 0.7690
+        model: one
+    MI1p:
+        J: 1
+        P: +1
+        mass: 0.7690
+        model: one
+    MI1m:
+        J: 1
+        P: -1
+        mass: 0.7690
+        model: one
+    MI2p:
+        J: 2
+        P: +1
+        mass: 0.7690
+        model: one
+    MI2m:
+        J: 2
+        P: -1
+        mass: 0.7690
+        model: one
+    MI3p:
+        J: 3
+        P: +1
+        mass: 0.7690
+        model: one
+    MI3m:
+        J: 3
+        P: -1
+        mass: 0.7690
+        model: one
+    rho:
+        J: 1
+        P: -1
+        mass: 0.7690
+        width: 0.1509
+        model:  GS_rho
+    rho_omega:
+        J: 1
+        P: -1
+        mass: 0.7690
+        width: 0.1509
+        model:  GS_rho_omega
+    omega:
+        J: 1
+        P: -1
+        mass: 0.78266
+        width: 0.00868
+    sigma:
+        J: 0
+        P: +1
+        mass: 0.4
+        width: 0.1509
+    rho(1450):
+        J: 1
+        P: -1
+        mass: 1.465
+        width: 0.400
+        model:  GS_rho
+    a0(980)p:
+        J: 0
+        P: +1
+        mass: 0.98
+        width: 0.0756
+    a0(980)m:
+        J: 0
+        P: +1
+        mass: 0.98
+        width: 0.0756
+
+    NR2p:
+        J: 2
+        P: +1
+        mass: 1.3177
+        width: 0.1111
+        model: one
+    NR2m:
+        J: 2
+        P: +1
+        mass: 1.3177
+        width: 0.1111
+        model: one
+    a2(1320)p:
+        J: 2
+        P: +1
+        mass: 1.3177
+        width: 0.1111
+        # float: mg
+    a2(1320)m:
+        J: 2
+        P: +1
+        mass: 1.3177
+        width: 0.1111
+        # float: mg
+    a2(1700)p:
+        J: 2
+        P: +1
+        mass: 1.706
+        width: 0.380
+    a2(1700)m:
+        J: 2
+        P: +1
+        mass: 1.706
+        width: 0.380
+    pi1(1600)p:
+        J: 1
+        P: -1
+        mass: 1.35425
+        width: 0.330
+    pi1(1600)m:
+        J: 1
+        P: -1
+        mass: 1.35425
+        width: 0.330
+
+constrains:
+  decay:
+    fix_chain_idx: 0
+    fix_chain_val: 1
+  var_equal:
+  - [ a2(1320)p_mass, a2(1320)m_mass ]
+  - [ a2(1320)p_width, a2(1320)m_width ]
+  var_range:
+    a2(1320)p_mass: [ 1.1, 1.5 ]
+    a2(1320)p_width: [ 0.001, 0.7]
+    a2(1320)m_mass: [ 1.1, 1.5 ]
+    a2(1320)m_width: [ 0.001, 0.7]
+
+  fix_var:
+    rho_omega_fix1r: 0.0
+    rho_omega_fracr: 1.0
+    rho_omega_fix1i: 0.0
+    rho_omega_fraci: 0.0
+
+plot:
+    config:
+        nbins: 200
+    mass:
+        pipi:
+            display: "m($\\pi\\pi$)"
+        pipeta:
+            display: "m($\\pi\\eta$)"
+        pimeta:
+            display: "m($\\pi\\eta$)"
+    angle:
+        pipi:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi\\pi}$"
+            alpha:
+                display: "$\\phi^{\\pi\\pi}$"
+        pipeta:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi^{+}\\eta}$"
+            alpha:
+                display: "$\\phi^{\\pi^{+}\\eta}$"
+        pimeta:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi^{+}\\eta}$"
+            alpha:
+                display: "$\\phi^{\\pi^{+}\\eta}$"
+        pipi/pip:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi\\pi}_{\\pi}$"
+            alpha:
+                display: "$\\phi^{\\pi\\pi}_{\\pi}$"
+        pipeta/pip:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi^{+}\\eta}_{\\pi}$"
+            alpha:
+                display: "$\\phi^{\\pi^{+}\\eta}_{\\pi}$"
+        pimeta/pim:
+            cos(beta):
+                display: "$\\cos\\theta^{\\pi^{-}\\eta}_{\\pi}$"
+            alpha:
+                display: "$\\phi^{\\pi^{-}\\eta}_{\\pi}$"
+    extra_vars:
+        maxpieta:
+            expr: "max(m_pipeta,m_pimeta)"
+        minpieta:
+            expr: "min(m_pipeta,m_pimeta)"
+    2Dplot:
+        dalitz_1:
+            x: m_pipi**2
+            y: m_pipeta**2
+            add_dalitz_boundary: [pipi, pipeta]
+            adaptive_binning: [[2,2],[2,2],[2,2],[2,2]]
+            "pull_scatter_style": {"c": "black", "s": 1, "alpha": 0.0}
+            plot_figs: [data_hist, fitted, pull]
+        dalitz_2:
+            x: m_pipeta**2
+            y: m_pimeta**2
+            adaptive_binning: [[2,2],[2,2],[2,2],[2,2]]
+            add_dalitz_boundary: [pipeta, pimeta]
+            "pull_scatter_style": {"c": "black", "s": 1, "alpha": 0.0}
+            plot_figs: [data_hist, fitted, pull]
+
+
+
+
+
