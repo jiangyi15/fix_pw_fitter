@@ -50,6 +50,16 @@ Auto-detection priority:
 1. `nvidia-smi` → exact `-arch=sm_XY` for the installed GPU
 2. `nvcc --version` → fat binary: `sm_70+sm_86` (CUDA < 13) or `sm_86` only (CUDA ≥ 13)
 
+## Amplitude models
+
+`amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
+`AmplitudeModel(config)` object (`ampfit/amp_model.py`) that owns the model
+purpose: `build_kernel_config()` produces the kernel config and
+`build_params_transform()` returns the model's own `BuildKernelParams`
+(`ampfit/kernel_params.py`) — e.g. `pwa` = ck/m0/g0 only, `flavour_tag_mix`
+(`p4_directly`) adds the six time/mixing scalars.  Register custom models with
+`@register_amplitude_model("name")`.
+
 ## Three-Layer Architecture
 
 ```

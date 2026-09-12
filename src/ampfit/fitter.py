@@ -41,77 +41,6 @@ SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
                    "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
 
 
-class BuildKernelParams:
-    """Build kernel parameter arrays from a resolved dict and backprop gradients.
-
-    Forward:  ``resolved`` dict → ``{"ck": ..., "m0": ..., "g0": ..., "scalar": ...}``
-    Backward: ``total_grads`` (kernel grads) → per-resolved-name gradient dict.
-
-    Encapsulates the structural knowledge (CK combinatorics, m0/g0/scalar name
-    lists) so the Fitter doesn't need to repeat this logic.
-
-    ``scalar_names`` is config-driven: a config may declare ``scalar_names: []``
-    (or omit the key and get the legacy six mixing scalars).  Empty scalar list
-    → ``params`` has no scalar entries and backprop skips the scalar slice
-    (used by the scalar-free ``cuda_v4_pwa`` backend).
-    """
-
-    def __init__(self, config, all_comb, scalar_names=None):
-        from ampfit.param_constraint import CKProduct
-        self._pc = CKProduct(all_comb)
-        self._m0_names = list(config.m0_phys_name)
-        self._g0_names = list(config.g0_phys_name)
-        self.scalar_names = (list(scalar_names) if scalar_names is not None
-                             else list(SCALAR_NAMES))
-
-    @property
-    def pc(self):
-        """The :class:`~ampfit.param_constraint.CKProduct` for CK."""
-        return self._pc
-
-    def forward(self, resolved):
-        """Resolved dict → kernel params dict."""
-        ck = self._pc.build_ck(resolved)
-        m0 = np.array([resolved[n] for n in self._m0_names])
-        g0 = np.array([resolved[n] for n in self._g0_names])
-        scalar = np.array([resolved[n] for n in self.scalar_names])
-        return {"ck": ck, "m0": m0, "g0": g0, "scalar": scalar}
-
-    def backward(self, total_grads, resolved):
-        """Kernel grads dict → per-resolved-name gradient dict.
-
-        Args:
-            total_grads: dict with keys ``ck``, ``m0``, ``g0`` and (if the
-                config declares scalars) ``scalar``.
-            resolved: resolved param dict (for Wirtinger backprop).
-
-        Returns:
-            ``{name: gradient}`` for every resolved parameter.
-        """
-        # CK Wirtinger backprop
-        grad_dict = self._pc.backprop_grad(resolved, total_grads["ck"])
-
-        # m0, g0 → per-name (by position in name list)
-        for names_list, key in [
-            (self._m0_names, "m0"),
-            (self._g0_names, "g0"),
-        ]:
-            arr = np.asarray(total_grads[key])
-            for i, name in enumerate(names_list):
-                if i < len(arr):
-                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
-
-        # scalar → per-name (config-driven; skip if none declared)
-        scalar_g = total_grads.get("scalar")
-        if scalar_g is not None and self.scalar_names:
-            arr = np.asarray(scalar_g)
-            for i, name in enumerate(self.scalar_names):
-                if i < len(arr):
-                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
-
-        return grad_dict
-
-
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
@@ -184,9 +113,10 @@ class Fitter:
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
 
-        # Kernel parameter builder (resolved ↔ kernel arrays)
-        self._kernel_builder = BuildKernelParams(
-            self.config, self.all_comb, scalar_names=self.scalar_names)
+        # Kernel parameter transform: produced by the amplitude model,
+        # which owns which parameter groups exist (ck/m0/g0[, scalar]).
+        self._kernel_builder = self.config.amplitude_model \
+            .build_params_transform()
 
         # Prior penalties (additive NLL contributions)
         self.priors = []

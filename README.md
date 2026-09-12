@@ -122,6 +122,23 @@ dh = ck.load_data(data)
 Q, grads, P = ck.compute(params, dh)
 ```
 
+### Amplitude models (what the config builds)
+
+The config's ``amp_model`` selects the amplitude model, which owns the
+kernel-config content and the parameter transform (so there is no runtime
+"has scalars?" branching):
+
+```yaml
+amp_model: pwa               # default: ck/m0/g0 only (no time/mixing/scalars)
+# amp_model: flavour_tag_mix # legacy time/mixing model: adds 6 scalars
+#                            # (aliases: flour_tag_mix, p4_directly)
+```
+
+Legacy ``data.amp_model:`` is still honoured.  Custom models subclass
+``ampfit.amp_model.AmplitudeModel(config)``, register with
+``@register_amplitude_model("name")`` and override
+``build_kernel_config()`` / ``build_params_transform()``.
+
 ### Pure-PWA (projection-sum) kernels
 
 The pure-PWA family implements the scalar-free projection-sum model

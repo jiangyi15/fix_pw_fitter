@@ -65,15 +65,9 @@ def _projection_duplicate(ret, n_proj):
     return ret
 
 
-# Legacy time/mixing scalar parameters (D0-D0bar flavour-tagged mixing).
-LEGACY_SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod",
-                       "poqr", "poqi"]
-LEGACY_SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-                          "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
-# data.amp_model values that imply the flavour-tag mixing model ⇒ the legacy
-# six scalars are used.  ``flavour_tag_mix`` is the canonical tag-mix model
-# (configs may also spell it ``flour_tag_mix``); ``p4_directly`` kept for
-# backward compatibility of the old B→4π configs.
+from ampfit.amp_model import (          # noqa: E402  (amplitude models)
+    LEGACY_SCALAR_NAMES, LEGACY_SCALAR_DEFAULTS, build_amplitude_model)
+# kept for backward compatibility of imports from this module
 MIXING_AMP_MODELS = ("flavour_tag_mix", "flour_tag_mix", "p4_directly")
 
 
@@ -242,92 +236,15 @@ class Config:
         self.n_interp_gamma = 2000  # gamma table interpolation points
         self._param_display_map = None
 
-        # ── cuda_v4_pwa / scalar-free extensions ───────────────────────
-        # n_proj: number of incoherent projections (helicity / spin
-        # projections of the EXTERNAL particles).  Every projection shares
-        # the same ck; wave entries are stored p-major (n_wave = n_proj·N).
-        # Explicit ``n_proj`` in the config wins; otherwise auto-computed as
-        #   n_proj = ∏_i n_i   over i ∈ {top} ∪ {finals}
-        #   n_i    = len(spins) if the particle declares ``spins`` else 2J+1
-        # (intermediate resonances are NOT counted — they only shape the
-        # per-wave angular formula).
-        if self.dic.get("n_proj") is not None:
-            self.n_proj = int(self.dic["n_proj"])
-        else:
-            self.n_proj = self._auto_n_proj()
-        # scalar_names / scalar_defaults: config-driven fit scalars.  Absent
-        # → legacy six mixing scalars (kept so old time/mixing configs work);
-        # ``scalar_names: []`` removes scalars entirely (v4 PWA model).
-        self.scalar_names = self._resolve_scalar_names()
-        self.scalar_defaults = self.dic.get("scalar_defaults")
-        # ── angular-formula implementation switch ──────────────────────
-        # 'helicity' (default) → the numeric helicity-angle engine
-        #   (amplitude_monomials / chain_angular_table).
-        # 'cache' → the predefined angular_formula.cache_formula tables
-        #   (kept for cross-checking the two implementations).
-        mode = self.dic.get("angle_formula", "helicity")
-        if mode not in ("helicity", "cache"):
-            raise ValueError(
-                f"angle_formula must be 'helicity' or 'cache', got {mode!r}")
-        self.angle_formula_mode = mode
-
-    # ── scalar decision (data.amp_model) ──────────────────────────────
-    def _data_amp_model(self):
-        """The ``data.amp_model`` model name (string).
-
-        The YAML value may be a plain string (legacy, e.g. ``p4_directly``)
-        or a dict keyed by the model name, e.g.
-        ``{'flavour_tag_mix': {base_model: time_dep_cp, ...}}`` — in that
-        case the single dict key is the model name.  Returns None if unset.
-        """
-        data_d = self.dic.get("data") or {}
-        m = data_d.get("amp_model")
-        if isinstance(m, dict):
-            m = next(iter(m)) if len(m) else None
-        elif isinstance(m, (list, tuple)):
-            m = m[0] if len(m) else None
-        if isinstance(m, str):
-            m = m.strip() or None
-        return m
-
-    def _resolve_scalar_names(self):
-        """Config-driven scalar list (legacy time/mixing scalars or none).
-
-        Decided by ``data.amp_model`` (see :meth:`_data_amp_model`):
-          * explicit top-level ``scalar_names:`` list → used as-is
-          * ``data.amp_model`` in ``MIXING_AMP_MODELS`` (e.g.
-            ``flavour_tag_mix``) → the legacy six mixing scalars
-          * anything else (incl. no amp_model) → ``[]`` — scalar-free,
-            i.e. the pure-PWA / non-tag-mixing models get no scalars.
-        """
-        explicit = self.dic.get("scalar_names")
-        if explicit is not None:
-            return list(explicit)
-        amp_model = self._data_amp_model()
-        if amp_model in MIXING_AMP_MODELS:
-            return list(LEGACY_SCALAR_NAMES)
-        return []
-
-    def _spin_state_count(self, name):
-        """Number of spin states of an external particle.
-
-        ``n_i = len(spins)`` when the particle declares a ``spins`` list
-        (e.g. ``[-1, 1]`` = transverse-only spin-1), else ``2J+1``.
-        """
-        d = self.dic["particle"].get(name)
-        if not isinstance(d, dict):
-            return 1            # composite / non-dict entry — not external
-        spins = d.get("spins")
-        if spins is not None:
-            return max(1, len(list(spins)))
-        return int(2 * d.get("J", 0)) + 1
-
-    def _auto_n_proj(self):
-        """n_proj from the spin multiplicities of top + final particles."""
-        n = self._spin_state_count(self.top)
-        for f in self.finals:
-            n *= self._spin_state_count(f)
-        return max(1, n)
+        # ── amplitude model (owns kernel config & parameter transform) ─
+        # The model is constructed with THIS Config, so it has full access
+        # and its build_* methods need no extra arguments.  Legacy views
+        # (scalar_names / n_proj / angle_formula_mode) delegate to it.
+        self.amplitude_model = build_amplitude_model(self)
+        self.n_proj = self.amplitude_model.n_proj
+        self.scalar_names = list(self.amplitude_model.scalar_names)
+        self.scalar_defaults = self.amplitude_model.scalar_defaults
+        self.angle_formula_mode = self.amplitude_model.angle_formula
 
     def _build_topo_from_struct(self):
         """Stable topology index over ``decay_struct`` structural paths.
@@ -887,6 +804,10 @@ class Config:
         return ret
 
     def build_all_index(self):
+        """Kernel config produced by the config's amplitude model."""
+        return self.amplitude_model.build_kernel_config()
+
+    def _build_base_kernel_config(self):
         # identical-particle × CP row blocks, from the config declarations
         # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
         # declarations → 1).
