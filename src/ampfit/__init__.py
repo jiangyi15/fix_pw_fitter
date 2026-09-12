@@ -19,8 +19,8 @@ from .param_constraint import (
     prior_from_dict,
 )
 
-try:
-    from ._cuda import CUDAKernel
+try:                       # public alias for the CUDA v3 kernel
+    from .cuda._v3 import CUDAKernelV3 as CUDAKernel
 except Exception:
     CUDAKernel = None
 

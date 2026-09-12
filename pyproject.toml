@@ -39,5 +39,4 @@ where = ["src"]
 include = ["ampfit*"]
 
 [tool.setuptools.package-data]
-ampfit = ["cuda/kernels_v2.cu", "cuda/kernels_v2_f32.cu", 
-          "cuda/kernels_v3.cu", "cuda/kernels_v3_f32.cu"]
+ampfit = ["cuda/*.cu", "cuda/*.cuh", "cuda/*.hash", "cpu/*.c"]
