@@ -55,7 +55,8 @@ def test_v5_partial_tail_group_matches_reference():
     ne, rsize, norm = 300, 32, 5.0
     assert ne % rsize != 0                  # partial final group of 12
     k = _kernel(kc, batch_size=256, rsize=rsize)
-    h = k.load_data(_data(ne, nang=int(kc["angle_k"].shape[-1])))
+    with pytest.warns(RuntimeWarning, match="not a multiple"):
+        h = k.load_data(_data(ne, nang=int(kc["angle_k"].shape[-1])))
     try:
         params = _params(kc)
         Q, _g, P = k.compute(params, h, norm=norm)

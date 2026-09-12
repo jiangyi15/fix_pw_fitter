@@ -25,6 +25,8 @@ times).  ``params["ck"]`` has length N = n_wave / n_proj.
 """
 
 import os
+import warnings
+
 import numpy as np
 from cffi import FFI
 
@@ -221,6 +223,14 @@ class CUDAKernelV5PWA:
             return _ffi.cast("double*", buf)
 
         ne = data["mass"].shape[0]
+        if (self.resolution_size > 1
+                and ne % self.resolution_size != 0):
+            warnings.warn(
+                f"cuda_v5_pwa: {ne} events are not a multiple of "
+                f"resolution_size={self.resolution_size}; the final log-sum "
+                f"group is partial.  Resolution-cloud data should contain "
+                f"n_original x resolution_size rows.", RuntimeWarning,
+                stacklevel=2)
         mass = data["mass"].reshape(ne, -1)
         mom = data["q"].reshape(ne, -1)
         ang = data["angle"].reshape(ne, -1)
