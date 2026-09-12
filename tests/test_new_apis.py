@@ -525,6 +525,7 @@ def test_values_from_dict_ignores_absent_k_param(tmp_path):
     cfg = yaml.safe_load(open('config_amp.yml'))
     cfg['particle']['NR0'].update({'model': 'ExpSpline', 'k': 0.3,
                                    'k_range': [-1.0, 1.0], 'n_interp': 21,
+                                   'pure_exp': True,
                                    'float': ['k']})
     cfg_path = tmp_path / 'config.yml'
     cfg_path.write_text(yaml.dump(cfg))
