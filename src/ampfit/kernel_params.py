@@ -15,13 +15,18 @@ from ampfit.param_constraint import CKProduct
 
 
 class BuildKernelParams:
-    """Resolved dict ↔ kernel params for ck/m0/g0 (base class)."""
+    """Resolved dict ↔ kernel params for ck/m0/g0 (base class).
 
-    def __init__(self, config):
-        self.config = config
-        self._pc = CKProduct(config.get_ck_map())
-        self._m0_names = list(config.m0_phys_name)
-        self._g0_names = list(config.g0_phys_name)
+    Constructed by the amplitude model (``model.build_params_transform()``);
+    the model is the only thing that knows this constructor's input.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.config = model.config
+        self._pc = CKProduct(self.config.get_ck_map())
+        self._m0_names = list(self.config.m0_phys_name)
+        self._g0_names = list(self.config.g0_phys_name)
 
     @property
     def pc(self):
@@ -76,9 +81,9 @@ class PWAKernelParams(BuildKernelParams):
 class FlavourTagMixKernelParams(BuildKernelParams):
     """Legacy time/mixing model: adds the config's scalar parameters."""
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.scalar_names = list(config.scalar_names)
+    def __init__(self, model):
+        super().__init__(model)
+        self.scalar_names = list(model.scalar_names)   # policy from the model
 
     def param_names(self):
         # Dedup again: a scalar name could collide with a ck/m0/g0 name.
@@ -86,8 +91,8 @@ class FlavourTagMixKernelParams(BuildKernelParams):
             super().param_names() + list(self.scalar_names)))
 
     def param_defaults(self):
-        cfg_defaults = self.config.scalar_defaults or {}
-        return {n: float(cfg_defaults.get(n, 0.0))
+        model_defaults = self.model.scalar_defaults or {}
+        return {n: float(model_defaults.get(n, 0.0))
                 for n in self.scalar_names}
 
     def forward(self, resolved):

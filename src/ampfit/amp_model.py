@@ -148,8 +148,12 @@ class AmplitudeModel:
         return self.config._build_base_kernel_config()
 
     def build_params_transform(self) -> BuildKernelParams:
-        """Resolved ↔ kernel parameter transform for this model."""
-        return self.params_transform_cls(self.config)
+        """Resolved ↔ kernel parameter transform for this model.
+
+        The model owns the transform's constructor input, so callers only
+        see the returned object.
+        """
+        return self.params_transform_cls(self)
 
 
 @register_amplitude_model("pwa")
