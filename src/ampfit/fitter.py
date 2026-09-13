@@ -34,13 +34,6 @@ import time
 import numpy as np
 from ampfit.param_constraint import ConstraintManager
 
-SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod", "poqr", "poqi"]
-# Legacy scalar defaults — used when a config does not declare ``scalar_names``
-# (so old time/mixing configs keep working unchanged).
-SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
-                   "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
-
-
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 

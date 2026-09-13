@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
 from ampfit import Fitter
-from ampfit.fitter import SCALAR_NAMES
+from ampfit.amp_model import LEGACY_SCALAR_NAMES as SCALAR_NAMES
 
 CONFIG_FILE = "config_angle.yml"
 N_DATA = 50

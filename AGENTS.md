@@ -185,7 +185,7 @@ n_g0 = len(kc["g0_index"])               # = 288
 ## Testing
 
 ```bash
-pytest tests/ -v                        # 61 tests
+pytest tests/ -v                        # 465 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline
 pytest tests/test_new_apis.py            # LinearTransform, fmt_meas, get_defaults, …
 tests/validate_gradients.py              # 3-point gradient validation (all 6 backends)
@@ -193,7 +193,7 @@ tests/validate_gradients.py              # 3-point gradient validation (all 6 ba
 
 Benchmarks:
 ```bash
-python tests/benchmark_backends.py       # cross-backend (7 backends)
+python tests/benchmark_backends.py       # cross-backend (8 backends)
 python tests/benchmark_cuda_v2_vs_v3.py  # v2 linear vs v3 Catmull-Rom
 python tests/benchmark_integrated.py     # Integrated vs CUDA via Fitter.get_nll()
 ```

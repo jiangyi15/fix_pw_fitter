@@ -65,10 +65,7 @@ def _projection_duplicate(ret, n_proj):
     return ret
 
 
-from ampfit.amp_model import (          # noqa: E402  (amplitude models)
-    LEGACY_SCALAR_NAMES, LEGACY_SCALAR_DEFAULTS, build_amplitude_model)
-# kept for backward compatibility of imports from this module
-MIXING_AMP_MODELS = ("flavour_tag_mix", "flour_tag_mix", "p4_directly")
+from ampfit.amp_model import build_amplitude_model   # noqa: E402
 
 
 class Particle:
