@@ -215,3 +215,17 @@ def test_param_names_are_unique_with_colliding_scalar():
     path = _with(base + f"\nscalar_names: [gamma, {ck_name}]\n")
     names = Config(path).amplitude_model.build_params_transform().param_names()
     assert len(names) == len(set(names))
+
+
+def test_integrated_backend_requires_legacy_block_structure():
+    from ampfit.backends.integrated_backend import IntegratedBackend
+
+    kc_pwa = Config(PWA_CFG).build_all_index()      # n_blocks = 1
+    with pytest.raises(ValueError, match="integrated_pwa"):
+        IntegratedBackend(kc_pwa, base="numpy_pwa")
+
+    kc = Config("config_angle.yml").build_all_index()
+    be = IntegratedBackend(kc, base="numpy")
+    assert be._n_blocks == 8 and be._n_perm == 4
+    assert be._ng == be.kernel.n_wave // be._n_blocks
+    assert len(be._groups_B0[0]) == be._n_perm      # 4 identical-particle copies

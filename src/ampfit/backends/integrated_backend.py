@@ -56,19 +56,36 @@ class IntegratedBackend(ComputeBackend):
         self.strict_gram = strict_gram
         self._cache_file = cache_file
 
+        # ── Reduced Gram matrices ──────────────────────────────────
+        # The legacy model duplicates every base wave over
+        # n_blocks = n_perm · n_cp row blocks (identical-particle
+        # permutations × B0/B0bar CP).  One reduced basis vector per base
+        # wave is the group of its n_perm copies within a CP half, so the
+        # group count is n_wave // n_blocks — NOT a hardcoded 8.
+        self._n_blocks = int(kernel_config.get("n_blocks", 8))
+        self._n_perm = int(kernel_config.get("n_perm", self._n_blocks // 2))
+        if self._n_blocks < 2 or self._n_blocks % 2 or self._n_perm < 1:
+            raise ValueError(
+                "IntegratedBackend needs the legacy block structure "
+                "(n_blocks >= 2 and even); got n_blocks="
+                f"{self._n_blocks}, n_perm={self._n_perm}.  A pure-PWA "
+                "config uses the 'integrated_pwa' backend.")
+        if self.kernel.n_wave % self._n_blocks:
+            raise ValueError(
+                f"n_wave={self.kernel.n_wave} is not divisible by "
+                f"n_blocks={self._n_blocks}")
+        self._ng = self.kernel.n_wave // self._n_blocks
+        self._groups_B0 = [list(range(k, self.kernel.n_wave // 2, self._ng))
+                           for k in range(self._ng)]
+        self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
+                              for k in range(self._ng)]
+
         # ── Base backend for data NLL ─────────────────────────────
         if isinstance(base, ComputeBackend):
             self.base = base
         else:
             from . import create_backend
             self.base = create_backend(base, kernel_config)
-
-        # ── Reduced Gram matrices (from 4-group structure: n_wave//8 groups)
-        self._ng = self.kernel.n_wave // 8
-        self._groups_B0 = [list(range(k, self.kernel.n_wave // 2, self._ng))
-                           for k in range(self._ng)]
-        self._groups_B0bar = [list(range(k, self.kernel.n_wave // 2, self._ng))
-                              for k in range(self._ng)]
 
         # ── Auto‑detect gram backend from base's kernel ──────────
         # If the base backend's kernel has a compute_gram() method,
@@ -230,9 +247,9 @@ class IntegratedBackend(ComputeBackend):
             batch = {k: v[b_start:b_end] for k, v in phsp.items()
                      if isinstance(v, np.ndarray)}
             ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
-            # Project onto groups: sum 4 blocks of ng → (batch, ng)
-            A0 = ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
-            A1 = ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+            # Project onto groups: sum n_perm copies of ng → (batch, ng)
+            A0 = ba[:, :n].reshape(-1, self._n_perm, ng).sum(axis=1)
+            A1 = ba[:, n:].reshape(-1, self._n_perm, ng).sum(axis=1)
             Mpp += (A0 * w[b_start:b_end, None]).T.conj() @ A0
             Mmm += (A1 * w[b_start:b_end, None]).T.conj() @ A1
             Mpm += (A0 * w[b_start:b_end, None]).T.conj() @ A1
@@ -343,7 +360,7 @@ class IntegratedBackend(ComputeBackend):
 
         from ampfit.numpy_kernel import NumpyKernel
         nk = NumpyKernel(self._kernel_config)
-        ng = nk.n_wave // 8
+        ng = nk.n_wave // self._n_blocks
         n = nk.n_wave // 2
         if self._gram_compute is not None:
             # GPU gram kernel now uses weight directly (no sqrt).
@@ -364,8 +381,10 @@ class IntegratedBackend(ComputeBackend):
                 batch = {k: getattr(bundle, k)[b_start:b_end]
                          for k in ("mass", "q", "angle")}
                 ba = nk._compute_common_amp_factor(batch, m0=m0, g0=g0)
-                A0[b_start:b_end] = ba[:, :n].reshape(-1, 4, ng).sum(axis=1)
-                A1[b_start:b_end] = ba[:, n:].reshape(-1, 4, ng).sum(axis=1)
+                A0[b_start:b_end] = ba[:, :n].reshape(
+                    -1, self._n_perm, ng).sum(axis=1)
+                A1[b_start:b_end] = ba[:, n:].reshape(
+                    -1, self._n_perm, ng).sum(axis=1)
             # M = Σ w · A† · A  (native support for negative weights)
             Mpp = (A0 * w[:, None]).T.conj() @ A0
             Mmm = (A1 * w[:, None]).T.conj() @ A1
