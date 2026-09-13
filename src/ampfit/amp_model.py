@@ -88,40 +88,12 @@ class AmplitudeModel:
     """Base class — full access to the :class:`Config` object."""
 
     name = "pwa"
-    # Backend used when neither the caller nor the config picks one.
-    default_backend = None
     default_scalar_names = ()
     default_scalar_defaults = None
     params_transform_cls = PWAKernelParams
 
     def __init__(self, config):
         self.config = config
-
-    # -- backend/kernel surface -----------------------------------------
-    @property
-    def backends(self):
-        """Backend names registered for this model (``@register_backend``)."""
-        import ampfit.backends        # noqa: F401 — ensure registration
-        from ampfit.backends.core import backends_for_model
-        return backends_for_model(self.name)
-
-    @staticmethod
-    def backend_name(spec):
-        """Backend name from a spec (``str`` or ``{"name": ...}``), else None."""
-        if isinstance(spec, str):
-            return spec
-        if isinstance(spec, dict):
-            return spec.get("name")
-        return None
-
-    def supports_backend(self, spec):
-        """True if *spec* names a backend registered for this model.
-
-        Unknown/opaque specs (e.g. an already-built backend instance) are
-        accepted — the registry only gates named backends.
-        """
-        name = self.backend_name(spec)
-        return name is None or name in self.backends
 
     # -- model views (used by Config / Fitter / reporting) --------------
     @property
@@ -134,8 +106,8 @@ class AmplitudeModel:
     @property
     def scalar_defaults(self):
         """Model defaults merged with (and overridden by) the config's
-        explicit ``scalar_defaults`` — so a partial override keeps the
-        legacy per-name fallbacks (e.g. delta_m, poqr)."""
+        explicit ``scalar_defaults`` — a partial override keeps the legacy
+        per-name fallbacks (e.g. delta_m, poqr)."""
         merged = dict(self.default_scalar_defaults or {})
         explicit = self.config.dic.get("scalar_defaults")
         if explicit:
@@ -184,7 +156,6 @@ class AmplitudeModel:
 class PWA(AmplitudeModel):
     """Scalar-free projection-sum PWA (default)."""
     name = "pwa"
-    default_backend = "cuda_v4_pwa"
     params_transform_cls = PWAKernelParams
 
 
@@ -192,7 +163,6 @@ class PWA(AmplitudeModel):
 class FlavourTagMix(AmplitudeModel):
     """Legacy time-dependent flavour-tagged mixing model."""
     name = "flavour_tag_mix"
-    default_backend = "cuda64"
     default_scalar_names = tuple(LEGACY_SCALAR_NAMES)
     default_scalar_defaults = dict(LEGACY_SCALAR_DEFAULTS)
     params_transform_cls = FlavourTagMixKernelParams

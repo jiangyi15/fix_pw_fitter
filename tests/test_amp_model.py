@@ -107,17 +107,21 @@ def test_ck_index_helpers_respect_row_blocks():
 
 
 def test_backend_registry_gates_backends_per_model():
-    """The model owns which backends are valid (integrated vs integrated_pwa)."""
-    pwa = Config(PWA_CFG).amplitude_model
-    assert pwa.supports_backend("integrated_pwa") and pwa.supports_backend("cuda_v4_pwa")
-    assert not pwa.supports_backend("integrated")
-    assert not pwa.supports_backend("cuda64")
-    assert pwa.default_backend == "cuda_v4_pwa"
+    """Names are registered per model; "default" is a per-model name."""
+    from ampfit.backends import backends_for_model, backend_class
 
-    legacy = Config("config_angle.yml").amplitude_model
-    assert legacy.supports_backend("integrated") and legacy.supports_backend("cuda64")
-    assert not legacy.supports_backend("integrated_pwa")
-    assert legacy.default_backend == "cuda64"
+    pwa = backends_for_model("pwa")
+    assert {"integrated_pwa", "cuda_v4_pwa", "default"} <= pwa
+    assert "integrated" not in pwa and "cuda64" not in pwa
+    assert "cuda" not in pwa                       # legacy-only alias
+
+    legacy = backends_for_model("flavour_tag_mix")
+    assert {"integrated", "cuda64", "cuda", "default"} <= legacy
+    assert "integrated_pwa" not in legacy
+
+    # per-model default resolves to different classes
+    assert backend_class("default", "pwa").__name__ == "CUDABackendV4PWA"
+    assert backend_class("default", "flavour_tag_mix").__name__ == "CUDABackendV3"
 
     # selection-time rejection through the Fitter
     with pytest.raises(ValueError, match="not registered"):
@@ -138,47 +142,53 @@ def test_partial_scalar_defaults_keep_legacy_fallbacks():
     assert set(d) == set(cfg.scalar_names)
 
 
-def test_fitter_resolves_model_default_backend(monkeypatch):
+def test_fitter_uses_registered_default_backend(monkeypatch):
+    """With no explicit/config backend, Fitter passes the name 'default'."""
     import ampfit.backends as B
     seen = {}
     real = B.create_backend
 
-    def fake(spec, kernel_config, **kw):
-        seen["spec"] = spec
-        return real(spec, kernel_config, **kw)
+    def fake(spec, kernel_config, *, model=None, **kw):
+        seen["spec"], seen["model"] = spec, model
+        return real(spec, kernel_config, model=model, **kw)
 
     monkeypatch.setattr(B, "create_backend", fake)
     f = Fitter(PWA_CFG)
     try:
-        assert seen["spec"] == "cuda_v4_pwa"
+        assert seen == {"spec": "default", "model": "pwa"}
+        assert type(f.backend).__name__ == "CUDABackendV4PWA"
     finally:
         f.backend.free()
     f = Fitter("config_angle.yml")
     try:
-        assert seen["spec"] == "cuda64"
+        assert seen == {"spec": "default", "model": "flavour_tag_mix"}
+        assert type(f.backend).__name__ == "CUDABackendV3"
     finally:
         f.backend.free()
 
 
 def test_backend_registry_is_consistent():
-    from ampfit.backends import ALL_BACKENDS, BACKEND_MODELS
+    from ampfit.backends import MODEL_BACKENDS, UNIVERSAL_BACKENDS, backend_class
     from ampfit.amp_model import AMPLITUDE_MODELS
     canonical = {cls.name for cls in AMPLITUDE_MODELS.values()}
-    assert set(BACKEND_MODELS) == set(ALL_BACKENDS)
-    for models in BACKEND_MODELS.values():
-        if models is not None:
-            assert models <= canonical, models
+    assert set(MODEL_BACKENDS) <= canonical          # only real model names
+    assert "default" in MODEL_BACKENDS["pwa"]
+    assert "default" in MODEL_BACKENDS["flavour_tag_mix"]
+    assert "shard" in UNIVERSAL_BACKENDS
+    # a per-model name must not be resolvable without a model
+    with pytest.raises(ValueError, match="several amplitude models"):
+        backend_class("default")
 
 
-def test_model_without_default_backend_raises_clearly():
+def test_model_without_registered_backends_raises_clearly():
     from ampfit.amp_model import AmplitudeModel, register_amplitude_model
 
-    @register_amplitude_model("_no_default_backend")
-    class NoDefault(AmplitudeModel):
-        name = "_no_default_backend"
+    @register_amplitude_model("_no_backends")
+    class NoBackends(AmplitudeModel):
+        name = "_no_backends"
 
-    path = _with("amp_model: _no_default_backend\n" + open(PWA_CFG).read())
-    with pytest.raises(ValueError, match="no backend selected"):
+    path = _with("amp_model: _no_backends\n" + open(PWA_CFG).read())
+    with pytest.raises(ValueError, match="not registered"):
         Fitter(path)
 
 
@@ -229,3 +239,15 @@ def test_integrated_backend_requires_legacy_block_structure():
     assert be._n_blocks == 8 and be._n_perm == 4
     assert be._ng == be.kernel.n_wave // be._n_blocks
     assert len(be._groups_B0[0]) == be._n_perm      # 4 identical-particle copies
+
+
+def test_invalid_backend_fails_before_kernel_config(monkeypatch):
+    """Backend validation must precede the kernel-config build."""
+    import ampfit.config_loader as cl
+
+    def _boom(self):
+        raise AssertionError("build_all_index must not be called")
+
+    monkeypatch.setattr(cl.Config, "build_all_index", _boom)
+    with pytest.raises(ValueError, match="not registered"):
+        Fitter(PWA_CFG, backend="integrated")

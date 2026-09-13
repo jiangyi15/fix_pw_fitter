@@ -38,15 +38,15 @@ class _CUDABackend(ComputeBackend):
         self.kernel.free()
 
 
-@register_backend("cuda_v2", amp_model="flavour_tag_mix")
-@register_backend("cuda64_v2", amp_model="flavour_tag_mix")
+@register_backend("cuda_v2", model="flavour_tag_mix")
+@register_backend("cuda64_v2", model="flavour_tag_mix")
 class CUDABackendV2(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v2 import CUDAKernelV2 as K
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda32_v2", amp_model="flavour_tag_mix")
+@register_backend("cuda32_v2", model="flavour_tag_mix")
 class CUDABackendV2F32(_CUDABackend):
     dtype = np.float32
     def _make_kernel(self, kc, bs):
@@ -54,17 +54,18 @@ class CUDABackendV2F32(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda", amp_model="flavour_tag_mix")
-@register_backend("cuda64", amp_model="flavour_tag_mix")
-@register_backend("cuda_v3", amp_model="flavour_tag_mix")
-@register_backend("cuda64_v3", amp_model="flavour_tag_mix")
+@register_backend("cuda", model="flavour_tag_mix")
+@register_backend("cuda64", model="flavour_tag_mix")
+@register_backend("default", model="flavour_tag_mix")
+@register_backend("cuda_v3", model="flavour_tag_mix")
+@register_backend("cuda64_v3", model="flavour_tag_mix")
 class CUDABackendV3(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v3 import CUDAKernelV3 as K
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda32_v3", amp_model="flavour_tag_mix")
+@register_backend("cuda32_v3", model="flavour_tag_mix")
 class CUDABackendV3F32(_CUDABackend):
     dtype = np.float32
     def _make_kernel(self, kc, bs):
@@ -72,14 +73,14 @@ class CUDABackendV3F32(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_mixed_v3", amp_model="flavour_tag_mix")
+@register_backend("cuda_mixed_v3", model="flavour_tag_mix")
 class CUDABackendV3Mixed(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from ampfit.cuda._v3_mixed import CUDAKernelV3Mixed as K
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v3_cache", amp_model="flavour_tag_mix")
+@register_backend("cuda_v3_cache", model="flavour_tag_mix")
 class CUDABackendV3Cache(_CUDABackend):
     """CUDA v3 cache — lazy amplitude caching for fast data NLL.
 
@@ -92,7 +93,7 @@ class CUDABackendV3Cache(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v3_sparse", amp_model="flavour_tag_mix")
+@register_backend("cuda_v3_sparse", model="flavour_tag_mix")
 class CUDABackendV3Sparse(_CUDABackend):
     """CUDA v3 sparse — sparse scatter/gather for matrix_gamma (99.5% sparse).
 
@@ -105,7 +106,7 @@ class CUDABackendV3Sparse(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v3_ampcache", amp_model="flavour_tag_mix")
+@register_backend("cuda_v3_ampcache", model="flavour_tag_mix")
 class CUDABackendV3AmpCache(_CUDABackend):
     """CUDA v3 ampcache — v3 sparse + cached minimal-set angular amplitudes.
 
@@ -121,7 +122,8 @@ class CUDABackendV3AmpCache(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa", amp_model="pwa")
+@register_backend("cuda_v4_pwa", model="pwa")
+@register_backend("default", model="pwa")
 class CUDABackendV4PWA(_CUDABackend):
     """CUDA v4 PWA — projection-sum PWA on the ampcache infrastructure.
 
@@ -137,7 +139,7 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v5_pwa", amp_model="pwa")
+@register_backend("cuda_v5_pwa", model="pwa")
 class CUDABackendV5PWA(_CUDABackend):
     """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
     NLL does not log per event: events are grouped into ``resolution_size``-sized
@@ -176,7 +178,7 @@ class CUDABackendV5PWA(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda32_v4_pwa_cache", amp_model="pwa")
+@register_backend("cuda32_v4_pwa_cache", model="pwa")
 class CUDABackendV4PWACache32(_CUDABackend):
     """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
 
@@ -189,7 +191,7 @@ class CUDABackendV4PWACache32(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_cache", amp_model="pwa")
+@register_backend("cuda_v4_pwa_cache", model="pwa")
 class CUDABackendV4PWACache(_CUDABackend):
     """CUDA v4 PWA cache — full-amplitude cache for the fixed m0/g0 case.
 

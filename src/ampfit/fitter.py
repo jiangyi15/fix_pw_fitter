@@ -57,37 +57,21 @@ class Fitter:
         """
         from ampfit.config_loader import Config
         from ampfit.param_constraint import ConstraintManager
-        from ampfit.backends import create_backend
+        from ampfit.backends import (create_backend, resolve_backend_spec,
+                                     backends_for_model)
 
         self.config = Config(config_file)
-        self.kernel_config = self.config.build_all_index()
-
-        # Resolve backend: explicit argument > config ``config.backend`` >
-        # the amplitude model's default.  The MODEL owns which backends are
-        # valid (declared via @register_backend(amp_model=...)), so a mismatch
-        # is rejected
-        # here — e.g. "integrated" on a pure-PWA config.
         model = self.config.amplitude_model
-        if backend is None:
-            backend = getattr(self.config, "backend_spec", None)
-        if backend is None:
-            backend = model.default_backend
-        elif backend == "cuda" and model.supports_backend("cuda"):
-            backend = "cuda64"          # legacy alias
-        if backend is None:
-            raise ValueError(
-                f"no backend selected for amp_model {model.name!r}: pass one "
-                f"explicitly, set config.backend, or give the model a "
-                f"default_backend")
-        if isinstance(backend, (str, dict)):
-            if not model.supports_backend(backend):
-                raise ValueError(
-                    f"backend {model.backend_name(backend)!r} is not registered "
-                    f"for amp_model {model.name!r}; registered: "
-                    f"{sorted(model.backends)}")
-            backend = create_backend(backend, self.kernel_config)
-        # 'backend' is now a ComputeBackend instance
-        self.backend = backend
+
+        # Normalise + validate the spec first (fail fast, before the
+        # expensive kernel-config build); create_backend also accepts an
+        # already-built backend instance.
+        spec = resolve_backend_spec(
+            backend, config_spec=getattr(self.config, "backend_spec", None),
+            allowed=backends_for_model(model.name))
+        self.kernel_config = self.config.build_all_index()
+        self.backend = create_backend(spec, self.kernel_config,
+                                      model=model.name)
 
         # ck_map (list of param name tuples, one per partial wave).
         # For single-block configs get_ck_map() already returns the same

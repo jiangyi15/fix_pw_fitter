@@ -2,10 +2,11 @@
 Compute backends for ampfit Fitter.
 
 Each backend wraps a kernel implementation with a uniform interface.
-Backends are registered with ``@register_backend(name, amp_model=...)`` and
-instantiated via :func:`create_backend`.  The ``amp_model`` option records
-which amplitude model the backend serves (``None`` = universal); models
-derive their valid backend set from :func:`backends_for_model`.
+Backends are registered with ``@register_backend(name, model=...)`` (a
+single name per decorator; stack it for aliases) and instantiated via
+:func:`create_backend`.  ``model`` is the amplitude-model *name* (a string)
+or ``None`` for a model-independent backend; each model derives its valid
+backend set from :func:`backends_for_model`.
 
 :func:`create_backend` accepts a plain name or a dict::
 
@@ -16,8 +17,9 @@ Kwargs whose values are strings or dicts are recursively resolved
 as backend specs — so ``"base"`` in the example above is itself
 evaluated as a backend before being passed to ``IntegratedBackend``.
 """
-from .core import ALL_BACKENDS, BACKEND_MODELS, register_backend, \
-    backends_for_model, create_backend, DataHandle, ComputeBackend
+from .core import ALL_BACKENDS, UNIVERSAL_BACKENDS, MODEL_BACKENDS, \
+    register_backend, backends_for_model, backend_class, \
+    resolve_backend_spec, create_backend, DataHandle, ComputeBackend
 
 from . import numpy_backend        # noqa: F401 — register NumpyBackend
 from . import cuda_backends        # noqa: F401 — register CUDA backends
@@ -29,6 +31,7 @@ from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 
 __all__ = [
-    "ALL_BACKENDS", "BACKEND_MODELS", "register_backend", "backends_for_model",
-    "create_backend", "DataHandle", "ComputeBackend",
+    "ALL_BACKENDS", "UNIVERSAL_BACKENDS", "MODEL_BACKENDS",
+    "register_backend", "backends_for_model", "backend_class",
+    "resolve_backend_spec", "create_backend", "DataHandle", "ComputeBackend",
 ]

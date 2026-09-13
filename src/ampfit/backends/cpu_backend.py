@@ -3,8 +3,8 @@ import numpy as np
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("cpu64_v3", amp_model="flavour_tag_mix")
-@register_backend("cpu_v3", amp_model="flavour_tag_mix")
+@register_backend("cpu64_v3", model="flavour_tag_mix")
+@register_backend("cpu_v3", model="flavour_tag_mix")
 class CPUBackendV3(ComputeBackend):
     """CPU v3 backend (C + OpenMP + AVX2, Catmull-Rom interpolation).
 

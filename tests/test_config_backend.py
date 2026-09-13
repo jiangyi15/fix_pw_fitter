@@ -48,7 +48,7 @@ def test_create_backend_string_spec_keeps_kwargs():
     """kwargs must not be silently dropped for a string spec."""
     from ampfit.backends import create_backend, register_backend
 
-    @register_backend("_kwarg_probe", amp_model=None)
+    @register_backend("_kwarg_probe")
     class _Probe:
         def __init__(self, kernel_config, value=None):
             self.value = value

@@ -27,7 +27,7 @@ from . import create_backend
 from ampfit.integrated_pwa import IntegratedPWA as _GramPWA
 
 
-@register_backend("integrated_pwa", amp_model="pwa")
+@register_backend("integrated_pwa", model="pwa")
 class IntegratedPWABackend(ComputeBackend):
     """Hyper backend: Gram norm (pure PWA) + base backend for data NLL.
 

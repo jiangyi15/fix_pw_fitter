@@ -2,9 +2,13 @@
 import numpy as np
 
 ALL_BACKENDS = {}
-# Backend name -> frozenset of amplitude-model names it serves
-# (None = universal, e.g. the shard wrapper).
-BACKEND_MODELS = {}
+# name -> cls for names that are unambiguous across models (no model needed)
+UNIVERSAL_BACKENDS = {}
+# name -> cls for model-independent backends (e.g. the shard wrapper)
+MODEL_BACKENDS = {}
+# model_name -> {name: cls}; a model NAME (string) scopes its own names,
+# so the same name (e.g. "default") can map to different classes per model.
+_AMBIGUOUS = set()
 
 
 def per_event_dnorm(norm, P, weight, bkg=None):
@@ -28,55 +32,105 @@ def per_event_dnorm(norm, P, weight, bkg=None):
     return float(np.sum(w * P / (norm * (P + b * norm))))
 
 
-def register_backend(*names, amp_model=None):
-    """Decorator: register a backend class under one or more *names*.
+def register_backend(name, model=None):
+    """Decorator: register a backend class under a single *name*.
 
-    Args:
-        *names: backend name(s), e.g. ``@register_backend("cuda", "cuda64")``.
-        amp_model: amplitude-model name (or iterable of names) this backend
-            serves.  ``None`` (default) means the backend is universal
-            (usable by any model, e.g. the ``shard`` wrapper).  Models read
-            this back to expose their valid backend set, so a backend only
-            declares its model once, next to its implementation.
+    *model* is the amplitude-model **name** (a plain string — never a
+    class), or ``None`` for a model-independent backend.  Stack the
+    decorator to add aliases and/or other models::
+
+        @register_backend("cuda64",  model="flavour_tag_mix")
+        @register_backend("cuda",    model="flavour_tag_mix")
+        @register_backend("default", model="flavour_tag_mix")
+        class CUDABackendV3(...): ...
+
+    The same class may be registered as many names and for many models.
     """
-    models = None if amp_model is None else frozenset(
-        [amp_model] if isinstance(amp_model, str) else amp_model)
-
     def _f(cls):
-        for name in names:
+        if model is None:
+            UNIVERSAL_BACKENDS[name] = cls
+        else:
+            MODEL_BACKENDS.setdefault(model, {})[name] = cls
+        # Flat convenience index: drop a name as soon as it is ambiguous.
+        if name in ALL_BACKENDS and ALL_BACKENDS[name] is not cls:
+            _AMBIGUOUS.add(name)
+            ALL_BACKENDS.pop(name, None)
+        elif name not in _AMBIGUOUS:
             ALL_BACKENDS[name] = cls
-            BACKEND_MODELS[name] = models
         return cls
     return _f
 
 
 def backends_for_model(model_name):
-    """Names of the backends registered for *model_name* (incl. universal).
+    """Names registered for *model_name* plus the model-independent names.
 
-    Accepts an amplitude-model alias (e.g. ``p4_directly``) and normalises
-    it to the canonical name registered in ``AMPLITUDE_MODELS``.
+    *model_name* is used verbatim as the registry key (callers pass the
+    canonical ``model.name``); the registry imports nothing from ampfit.
     """
-    try:
-        from ampfit.amp_model import AMPLITUDE_MODELS
-        cls = AMPLITUDE_MODELS.get(model_name)
+    names = set(UNIVERSAL_BACKENDS)
+    names.update(MODEL_BACKENDS.get(model_name, {}))
+    return frozenset(names)
+
+
+def backend_class(name, model=None):
+    """Class registered as *name*, scoped to *model* when given."""
+    if model is not None:
+        cls = MODEL_BACKENDS.get(model, {}).get(name)
         if cls is not None:
-            model_name = cls.name
-    except Exception:      # pragma: no cover — amp_model always importable
-        pass
-    return frozenset(n for n, m in BACKEND_MODELS.items()
-                     if m is None or model_name in m)
+            return cls
+        cls = UNIVERSAL_BACKENDS.get(name)
+        if cls is not None:
+            return cls
+        raise ValueError(
+            f"unknown backend {name!r} for amplitude model {model!r}; "
+            f"available: {sorted(backends_for_model(model))}")
+    if name in _AMBIGUOUS:
+        raise ValueError(
+            f"backend {name!r} is registered for several amplitude models; "
+            f"pass a model")
+    cls = ALL_BACKENDS.get(name)
+    if cls is None:
+        raise ValueError(
+            f"unknown backend {name!r}; available: {sorted(ALL_BACKENDS)}")
+    return cls
 
 
-def resolve_backend_spec(config, spec=None, default=None):
-    """Backend spec precedence: explicit *spec* > ``config.backend_spec``
-    (the config's ``config: {backend: ...}``) > *default*."""
-    if spec is not None:
+def _spec_name(spec):
+    """Backend name from a spec (``str`` or ``{"name": ...}``), else None."""
+    if isinstance(spec, str):
         return spec
-    return getattr(config, "backend_spec", None) or default
+    if isinstance(spec, dict):
+        return spec.get("name")
+    return None
 
 
-def eval_backend_spec(spec, kernel_config):
+def resolve_backend_spec(spec=None, *, config_spec=None, allowed=None):
+    """Normalise and validate a backend spec — without constructing it.
+
+    Precedence: explicit *spec* > *config_spec* > ``"default"`` (a backend
+    registered under that name for the model).  When *allowed* is given
+    (typically ``model.backends``), a named backend outside it raises; a
+    backend instance passes through unchanged.
+
+    Pure (no side effects), so callers can validate before building the
+    kernel config.
+    """
+    chosen = spec if spec is not None else config_spec
+    if chosen is None:
+        chosen = "default"
+    name = _spec_name(chosen)
+    if name is not None and allowed is not None and name not in allowed:
+        raise ValueError(
+            f"backend {name!r} is not registered for this amplitude model; "
+            f"allowed: {sorted(allowed)}")
+    return chosen
+
+
+def eval_backend_spec(spec, kernel_config, model=None):
     """Recursively resolve a backend spec to an instance.
+
+    *model* is the amplitude-model name used to look the backend up in its
+    model-scoped namespace (falls back to the model-independent names).
 
     Supported forms:
 
@@ -93,10 +147,7 @@ def eval_backend_spec(spec, kernel_config):
         A :class:`ComputeBackend` instance.
     """
     if isinstance(spec, str):
-        if spec not in ALL_BACKENDS:
-            raise ValueError(f"Unknown backend '{spec}'. "
-                             f"Available: {list(ALL_BACKENDS.keys())}")
-        return ALL_BACKENDS[spec](kernel_config)
+        return backend_class(spec, model)(kernel_config)
 
     if not isinstance(spec, dict):
         raise TypeError(f"Expected str or dict, got {type(spec).__name__}")
@@ -106,18 +157,14 @@ def eval_backend_spec(spec, kernel_config):
     if name is None:
         raise ValueError("Dict spec must have a 'name' key; "
                          f"got keys: {list(spec.keys())}")
-    if name not in ALL_BACKENDS:
-        raise ValueError(f"Unknown backend '{name}'. "
-                         f"Available: {list(ALL_BACKENDS.keys())}")
-
-    cls = ALL_BACKENDS[name]
+    cls = backend_class(name, model)
 
     # Pass all kwargs through directly — backend constructors that
     # need nested backends (e.g. ``base``) call create_backend themselves.
     return cls(kernel_config, **spec)
 
 
-def create_backend(spec, kernel_config, **kwargs):
+def create_backend(spec, kernel_config, *, model=None, **kwargs):
     """Factory: instantiate a backend.
 
     Args:
@@ -128,8 +175,11 @@ def create_backend(spec, kernel_config, **kwargs):
         **kwargs: extra arguments (convenience, merged into dict spec).
 
     Returns:
-        A :class:`ComputeBackend` instance.
+        A :class:`ComputeBackend` instance (an instance *spec* is returned
+        unchanged, so callers need no isinstance branch).
     """
+    if isinstance(spec, ComputeBackend):
+        return spec
     import gc
     gc.collect()
     if kwargs:
@@ -137,7 +187,7 @@ def create_backend(spec, kernel_config, **kwargs):
             spec = {"name": spec, **kwargs}
         elif isinstance(spec, dict):
             spec = {**spec, **kwargs}
-    return eval_backend_spec(spec, kernel_config)
+    return eval_backend_spec(spec, kernel_config, model)
 
 
 class DataHandle:
