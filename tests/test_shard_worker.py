@@ -66,3 +66,21 @@ def test_shard_numpy_matches_single():
     finally:
         shard.free()
         single.free()
+
+
+def test_worker_error_raises_instead_of_hanging():
+    """A worker exception must surface as RuntimeError, not a blocked get()."""
+    import pytest
+
+    cfg = Config("tests/config_pwa.yml")
+    kc = cfg.build_all_index()
+    data = _arrays(50, kc, 0)
+    shard = create_backend(
+        {"name": "shard", "backends": "numpy_pwa", "n_workers": 1,
+         "start_method": "spawn"}, kc)
+    try:
+        h = shard.load_data(data)
+        with pytest.raises(RuntimeError, match="shard worker 0 failed"):
+            shard.compute({}, h)          # missing params -> worker KeyError
+    finally:
+        shard.free()

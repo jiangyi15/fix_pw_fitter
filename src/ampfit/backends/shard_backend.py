@@ -51,6 +51,9 @@ Usage::
     }, kc)
 """
 import os
+import traceback
+from queue import Empty
+
 import numpy as np
 import multiprocessing
 from .core import ComputeBackend, register_backend
@@ -102,6 +105,10 @@ def split_offsets(ne, weights, align=None):
     return [0] + [int(o) for o in offs] + [ne]
 
 
+# First element of a result-queue message that carries a worker traceback.
+_ERROR = "__shard_worker_error__"
+
+
 def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
                  device=None):
     """Persistent worker: one backend, several datasets keyed by id.
@@ -124,25 +131,30 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
     be = create_backend(spec, kernel_config)
     handles = {}
     for task in iter(task_queue.get, None):
-        op = task[0]
-        if op == "load":
-            _, data_id, chunk = task
-            handles[data_id] = be.load_data(chunk)
-        elif op == "compute":
-            _, data_id, params, norm, return_p = task
-            Q, grads, P = be.compute(params, handles[data_id], norm=norm,
-                                     return_p=return_p)
-            if norm is not None and "norm" not in grads:
-                raise RuntimeError(
-                    f"shard worker ({type(be).__name__}) did not return "
-                    f"grads['norm'] for a normed compute")
-            result_queue.put((Q, grads, P))
-        elif op == "free":
-            h = handles.pop(task[1], None)
-            if h is not None and hasattr(h, "free"):
-                h.free()
-        else:
-            raise RuntimeError(f"unknown shard task {op!r}")
+        try:
+            op = task[0]
+            if op == "load":
+                _, data_id, chunk = task
+                handles[data_id] = be.load_data(chunk)
+            elif op == "compute":
+                _, data_id, params, norm, return_p = task
+                Q, grads, P = be.compute(params, handles[data_id], norm=norm,
+                                         return_p=return_p)
+                if norm is not None and "norm" not in grads:
+                    raise RuntimeError(
+                        f"shard worker ({type(be).__name__}) did not return "
+                        f"grads['norm'] for a normed compute")
+                result_queue.put((Q, grads, P))
+            elif op == "free":
+                h = handles.pop(task[1], None)
+                if h is not None and hasattr(h, "free"):
+                    h.free()
+            else:
+                raise RuntimeError(f"unknown shard task {op!r}")
+        except Exception:
+            # Never die silently: the parent waits on this queue, so an
+            # unhandled error must come back as a message (else it hangs).
+            result_queue.put((_ERROR, traceback.format_exc()))
 
     # explicit release of every remaining dataset before the backend context
     for h in handles.values():
@@ -198,6 +210,11 @@ class ShardBackend(ComputeBackend):
         (``"fork"`` / ``"spawn"`` / ``"forkserver"``; default: the system
         default).  Prefer ``"spawn"``/``"forkserver"`` in multi-threaded or
         CUDA applications where ``fork`` is unsafe.
+    worker_timeout : float, optional
+        Seconds to wait for each worker result before raising.  ``None``
+        (default) blocks until the worker replies; worker exceptions are
+        always reported back (never a silent hang).  Set a positive value
+        to also catch a hard worker crash (segfault/OOM).
     align : int, optional
         Round every interior split boundary down to a multiple of *align*
         (worker chunks then start/end on ``align``-aligned rows, except the
@@ -207,9 +224,14 @@ class ShardBackend(ComputeBackend):
     """
 
     def __init__(self, kernel_config, backends=None, n_workers=None,
-                 weights=None, align=None, start_method=None):
+                 weights=None, align=None, start_method=None,
+                 worker_timeout=None):
         self.kernel_config = kernel_config
         self._align = int(align) if align else None
+        self._worker_timeout = (float(worker_timeout)
+                                if worker_timeout else None)
+        if self._worker_timeout is not None and self._worker_timeout <= 0:
+            raise ValueError("worker_timeout must be > 0 (or None)")
         if self._align is not None and self._align < 2:
             raise ValueError("align must be >= 2 (or None)")
         if start_method is not None and start_method not in (
@@ -297,6 +319,23 @@ class ShardBackend(ComputeBackend):
             self._task_queues[i].put(("load", data_id, chunks[i]))
         return ShardDataHandle(data_id, ne, self)
 
+    # -- result handling -----------------------------------------------
+
+    def _recv(self, i):
+        """Receive worker *i*'s result; turn an error/timeout into a raise."""
+        rq = self._result_queues[i]
+        try:
+            msg = (rq.get(timeout=self._worker_timeout)
+                   if self._worker_timeout else rq.get())
+        except Empty:
+            alive = self._procs[i].is_alive() if i < len(self._procs) else False
+            raise RuntimeError(
+                f"shard worker {i} did not respond within "
+                f"{self._worker_timeout}s (alive={alive})") from None
+        if isinstance(msg, tuple) and len(msg) == 2 and msg[0] == _ERROR:
+            raise RuntimeError(f"shard worker {i} failed:\n{msg[1]}")
+        return msg
+
     # -- compute -------------------------------------------------------
 
     def compute(self, params, data_handle, norm=None, return_p=True):
@@ -315,13 +354,17 @@ class ShardBackend(ComputeBackend):
         P_list = []
 
         for i in range(nw):
-            Q_i, grads_i, P_i = self._result_queues[i].get()
+            Q_i, grads_i, P_i = self._recv(i)
             Q_total += Q_i
 
             if grads_total is None:
                 grads_total = {k: np.asarray(v).copy()
                                for k, v in grads_i.items()}
             else:
+                if set(grads_i) != set(grads_total):
+                    raise RuntimeError(
+                        f"shard worker {i} returned gradient keys "
+                        f"{sorted(grads_i)} != {sorted(grads_total)}")
                 for k in grads_i:
                     if grads_i[k] is not None:
                         g1 = np.asarray(grads_i[k])
