@@ -419,7 +419,9 @@ def test_prior_added_to_nll():
     from ampfit.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
-    x = fitter.initial_values(seed=42)
+    # setup_fitter overrides cm.defaults after apply_constrains; use a
+    # random start here so the prior is evaluated away from its mean.
+    x = fitter.initial_values(seed=42, use_default=False)
     nll_before, grad_before = fitter.get_nll(x)
 
     # Pin a mass param with very tight Gaussian
@@ -577,8 +579,9 @@ def test_transform_save_load_round_trip():
     assert isinstance(tr2, BWParamsTransform)
     assert tr2.model.name == pname
 
-    # NLL should match
-    x = fitter.initial_values(seed=42)
+    # NLL should match (random start: setup_fitter's overridden defaults
+    # are inconsistent with the already-applied mass/width bounds)
+    x = fitter.initial_values(seed=42, use_default=False)
     nll1, _ = fitter.get_nll(x)
     nll2, _ = fitter2.get_nll(x)
     assert abs(nll2 - nll1) < 1e-12

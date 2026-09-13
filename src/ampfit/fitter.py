@@ -557,19 +557,20 @@ class Fitter:
         """Default values declared by the model (e.g. legacy scalars)."""
         return self._kernel_builder.param_defaults()
 
-    def initial_values(self, seed=None, use_default=False):
+    def initial_values(self, seed=None, use_default=True):
         """Starting guess for all free variables.
 
-        Random ``U(-π, π)`` per slot; with ``use_default=True``, slots that
-        have a physical default are seeded from it (via the bounds inverse)
-        and the rest stay random.
+        Parameters with a physical default start at that default (via the
+        bounds inverse); the rest (ck, ...) are random ``U(-π, π)``.
+        ``use_default`` is an optional knob (default True) for an all-random
+        start when set to False.
 
         Returns:
             array of shape (n_flat,) matching free_param_names() length.
         """
         return self.cm.initial_values(seed=seed, use_default=use_default)
 
-    def reinitial(self, seed=None, use_default=False):
+    def reinitial(self, seed=None, use_default=True):
         """Alias for initial_values()."""
         return self.cm.initial_values(seed=seed, use_default=use_default)
 
