@@ -248,7 +248,7 @@ def test_invalid_backend_fails_before_kernel_config(monkeypatch):
     def _boom(self):
         raise AssertionError("build_all_index must not be called")
 
-    monkeypatch.setattr(cl.Config, "build_all_index", _boom)
+    monkeypatch.setattr(cl.Config, "build_base_kernel_config", _boom)
     with pytest.raises(ValueError, match="not registered"):
         Fitter(PWA_CFG, backend="integrated")
 
@@ -265,3 +265,39 @@ def test_config_does_not_construct_a_model():
     cfg = cl.Config(PWA_CFG)
     assert not hasattr(cfg, "amplitude_model")
     assert not hasattr(cfg, "scalar_names")
+
+
+def test_create_backend_injects_model_into_composer():
+    """A backend whose __init__ takes ``model`` receives it (nested default)."""
+    from ampfit.backends import create_backend, register_backend
+
+    @register_backend("_model_probe")
+    class Probe:
+        def __init__(self, kernel_config, model=None, tag=None):
+            self.model, self.tag = model, tag
+
+    p = create_backend({"name": "_model_probe", "tag": 7}, {}, model="pwa")
+    assert p.model == "pwa" and p.tag == 7
+
+
+def test_integrated_threads_model_to_nested_base(monkeypatch):
+    import ampfit.backends as B
+    seen = {}
+    real = B.create_backend
+
+    def spy(spec, kernel_config, *, model=None, **kw):
+        seen["spec"], seen["model"] = spec, model
+        return real(spec, kernel_config, model=model, **kw)
+
+    monkeypatch.setattr(B, "create_backend", spy)
+    from ampfit.backends.integrated_backend import IntegratedBackend
+    kc = Config("config_angle.yml").build_all_index()
+    IntegratedBackend(kc, base="numpy", model="flavour_tag_mix")
+    assert seen == {"spec": "numpy", "model": "flavour_tag_mix"}
+
+
+def test_shard_records_model_for_workers():
+    from ampfit.backends.shard_backend import ShardBackend
+    kc = Config(PWA_CFG).build_all_index()
+    be = ShardBackend(kc, backends=["default"], model="pwa")
+    assert be._model == "pwa" and be._specs == [("default", None)]

@@ -1,4 +1,5 @@
 """Core types and registration machinery for compute backends."""
+import inspect
 import numpy as np
 
 ALL_BACKENDS = {}
@@ -126,6 +127,19 @@ def resolve_backend_spec(spec=None, *, config_spec=None, allowed=None):
     return chosen
 
 
+def _construct(cls, kernel_config, kwargs, model):
+    """Instantiate *cls*; pass ``model`` only if its __init__ accepts it.
+
+    Composing backends (integrated / integrated_pwa / shard) declare a
+    ``model=None`` parameter and forward it to their nested ``create_backend``
+    calls, so a per-model ``"default"`` resolves inside composition too.
+    """
+    if model is not None and "model" in inspect.signature(
+            cls.__init__).parameters:
+        return cls(kernel_config, model=model, **kwargs)
+    return cls(kernel_config, **kwargs)
+
+
 def eval_backend_spec(spec, kernel_config, model=None):
     """Recursively resolve a backend spec to an instance.
 
@@ -147,7 +161,7 @@ def eval_backend_spec(spec, kernel_config, model=None):
         A :class:`ComputeBackend` instance.
     """
     if isinstance(spec, str):
-        return backend_class(spec, model)(kernel_config)
+        return _construct(backend_class(spec, model), kernel_config, {}, model)
 
     if not isinstance(spec, dict):
         raise TypeError(f"Expected str or dict, got {type(spec).__name__}")
@@ -160,8 +174,9 @@ def eval_backend_spec(spec, kernel_config, model=None):
     cls = backend_class(name, model)
 
     # Pass all kwargs through directly — backend constructors that
-    # need nested backends (e.g. ``base``) call create_backend themselves.
-    return cls(kernel_config, **spec)
+    # need nested backends (e.g. ``base``) call create_backend themselves,
+    # receiving ``model`` via _construct when they declare it.
+    return _construct(cls, kernel_config, spec, model)
 
 
 def create_backend(spec, kernel_config, *, model=None, **kwargs):

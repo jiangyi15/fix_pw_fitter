@@ -49,7 +49,7 @@ class IntegratedBackend(ComputeBackend):
     """
 
     def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True,
-                 cache_file=None):
+                 cache_file=None, model=None):
         from ampfit.numpy_kernel import NumpyKernel
         self.kernel = NumpyKernel(kernel_config)
         self._kernel_config = kernel_config
@@ -85,7 +85,7 @@ class IntegratedBackend(ComputeBackend):
             self.base = base
         else:
             from . import create_backend
-            self.base = create_backend(base, kernel_config)
+            self.base = create_backend(base, kernel_config, model=model)
 
         # ── Auto‑detect gram backend from base's kernel ──────────
         # If the base backend's kernel has a compute_gram() method,

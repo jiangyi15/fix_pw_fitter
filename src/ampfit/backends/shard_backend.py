@@ -110,7 +110,7 @@ _ERROR = "__shard_worker_error__"
 
 
 def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
-                 device=None):
+                 device=None, model=None):
     """Persistent worker: one backend, several datasets keyed by id.
 
     Tasks are tuples ``("load", data_id, chunk)`` /
@@ -128,7 +128,7 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
     else:
         spec = backend_spec
 
-    be = create_backend(spec, kernel_config)
+    be = create_backend(spec, kernel_config, model=model)
     handles = {}
     for task in iter(task_queue.get, None):
         try:
@@ -225,8 +225,9 @@ class ShardBackend(ComputeBackend):
 
     def __init__(self, kernel_config, backends=None, n_workers=None,
                  weights=None, align=None, start_method=None,
-                 worker_timeout=None):
+                 worker_timeout=None, model=None):
         self.kernel_config = kernel_config
+        self._model = model
         self._align = int(align) if align else None
         self._worker_timeout = (float(worker_timeout)
                                 if worker_timeout else None)
@@ -289,7 +290,7 @@ class ShardBackend(ComputeBackend):
             p = self._mp.Process(
                 target=_worker_main,
                 args=(self.kernel_config, spec, self._task_queues[i],
-                      self._result_queues[i], device),
+                      self._result_queues[i], device, self._model),
             )
             p.start()
             self._procs.append(p)

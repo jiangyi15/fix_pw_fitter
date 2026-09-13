@@ -34,7 +34,8 @@ class IntegratedPWABackend(ComputeBackend):
     Nested spec: ``base`` (the data-NLL backend).
     """
 
-    def __init__(self, kernel_config, base="cuda_v4_pwa", mc_batch=5000):
+    def __init__(self, kernel_config, base="cuda_v4_pwa", mc_batch=5000,
+                 model=None):
         """Hyper backend: Gram norm (pure PWA) + base backend for data NLL.
 
         Args:
@@ -53,7 +54,7 @@ class IntegratedPWABackend(ComputeBackend):
         if isinstance(base, ComputeBackend):
             self.base = base
         else:
-            self.base = create_backend(base, kernel_config)
+            self.base = create_backend(base, kernel_config, model=model)
 
     # ── data loading ────────────────────────────────────────────────────
     # The base (GPU data) handle is created LAZILY only when a data NLL /
