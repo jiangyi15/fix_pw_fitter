@@ -7,7 +7,7 @@ from .core import ComputeBackend, register_backend
 class NumpyBackend(ComputeBackend):
     """Pure NumPy computation (f64, CPU) with optional batching.
 
-    Reports its native dNLL/dnorm (per-event NLL) in ``_last_dnorm``.
+    Reports its native dNLL/dnorm (per-event NLL) as ``grads["norm"]``.
     """
     def __init__(self, kernel_config, batch_size=50000):
         from ampfit.numpy_kernel import NumpyKernel

@@ -2,13 +2,15 @@
 import inspect
 import numpy as np
 
+# Flat convenience index: name -> cls for names that are unambiguous across
+# models (ambiguous names are dropped; see _AMBIGUOUS).
 ALL_BACKENDS = {}
-# name -> cls for names that are unambiguous across models (no model needed)
+# Model-independent backends (e.g. the shard wrapper): name -> cls.
 UNIVERSAL_BACKENDS = {}
-# name -> cls for model-independent backends (e.g. the shard wrapper)
-MODEL_BACKENDS = {}
 # model_name -> {name: cls}; a model NAME (string) scopes its own names,
 # so the same name (e.g. "default") can map to different classes per model.
+MODEL_BACKENDS = {}
+# Names registered for more than one model under different classes.
 _AMBIGUOUS = set()
 
 
@@ -110,8 +112,8 @@ def resolve_backend_spec(spec=None, *, config_spec=None, allowed=None):
 
     Precedence: explicit *spec* > *config_spec* > ``"default"`` (a backend
     registered under that name for the model).  When *allowed* is given
-    (typically ``model.backends``), a named backend outside it raises; a
-    backend instance passes through unchanged.
+    (typically the result of ``backends_for_model(model_name)``), a named
+    backend outside it raises; a backend instance passes through unchanged.
 
     Pure (no side effects), so callers can validate before building the
     kernel config.
@@ -141,21 +143,21 @@ def _construct(cls, kernel_config, kwargs, model):
 
 
 def eval_backend_spec(spec, kernel_config, model=None):
-    """Recursively resolve a backend spec to an instance.
+    """Resolve a backend spec to an instance.
 
     *model* is the amplitude-model name used to look the backend up in its
-    model-scoped namespace (falls back to the model-independent names).
+    model-scoped namespace (falls back to the model-independent names).  It
+    is injected into composers that declare a ``model`` parameter so their
+    nested ``create_backend`` calls resolve the per-model ``"default"``.
 
     Supported forms:
 
     * ``"numpy"`` — simple name.
     * ``{"name": "cuda_v3", "batch_size": 50000}`` — name + kwargs.
-    * ``{"name": "integrated", "base": "cuda_v3"}`` — nested spec;
-      *base* is itself a backend spec, resolved recursively.
-
-    Any kwarg whose value is a ``str`` or ``dict`` is treated as a
-    nested backend spec and resolved before being passed to the
-    parent backend's constructor.
+    * ``{"name": "integrated", "base": "cuda_v3"}`` — a nested backend is
+      *not* resolved here: composers such as ``integrated`` / ``shard``
+      receive ``base`` / ``backends`` unchanged and call
+      :func:`create_backend` on them themselves.
 
     Returns:
         A :class:`ComputeBackend` instance.
@@ -184,8 +186,9 @@ def create_backend(spec, kernel_config, *, model=None, **kwargs):
 
     Args:
         spec: string name, or dict with ``"name"`` + kwargs.
-              Kwarg values that are strings or dicts are recursively
-              resolved as backend specs.
+              Kwargs are passed through to the constructor unchanged;
+              composers (e.g. ``integrated``, ``shard``) resolve their own
+              nested ``base`` / ``backends`` specs.
         kernel_config: config dict from ``Config.build_all_index()``.
         **kwargs: extra arguments (convenience, merged into dict spec).
 

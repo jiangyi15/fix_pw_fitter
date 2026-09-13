@@ -95,7 +95,7 @@ class AmplitudeModel:
     def __init__(self, config):
         self.config = config
 
-    # -- model views (used by Config / Fitter / reporting) --------------
+    # -- model views (used by Fitter / reporting) ------------------------
     @property
     def scalar_names(self):
         explicit = self.config.dic.get("scalar_names")

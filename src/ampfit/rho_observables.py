@@ -5,7 +5,7 @@ Shared by ``scripts/fit_constrained.py``, ``scripts/calc_observables.py``,
 and ``scripts/eval_rho_observables.py``.
 
 All functions operate on the *resolved* parameter dict from
-``Fitter._build_params(x)`` and use Blatt-Weisskopf form factors
+``Fitter.build_params(x)`` and use Blatt-Weisskopf form factors
 matching ``ampfit``'s ``build_fl_table`` convention.
 """
 import math

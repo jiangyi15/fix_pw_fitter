@@ -13,9 +13,9 @@ backend set from :func:`backends_for_model`.
     create_backend("cuda_v3", kc)
     create_backend({"name": "integrated", "base": "cuda_v3"}, kc)
 
-Kwargs whose values are strings or dicts are recursively resolved
-as backend specs — so ``"base"`` in the example above is itself
-evaluated as a backend before being passed to ``IntegratedBackend``.
+Kwargs are passed through to the constructor unchanged; composers such as
+``integrated`` / ``shard`` receive their nested ``base`` / ``backends``
+specs unchanged and resolve them with :func:`create_backend` themselves.
 """
 from .core import ALL_BACKENDS, UNIVERSAL_BACKENDS, MODEL_BACKENDS, \
     register_backend, backends_for_model, backend_class, \

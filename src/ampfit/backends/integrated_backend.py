@@ -9,7 +9,7 @@ Usage::
 
     # Create directly
     backend = create_backend("integrated", kernel_config,
-                             base_backend="cuda64")
+                             base="cuda64")
 
     # Or via Fitter (default base: cuda_v3_cache)
     fitter = Fitter("config_angle.yml", backend="integrated")
@@ -20,7 +20,7 @@ six time/mixing scalars).  A pure-PWA config must use the sibling
 ``integrated`` for a PWA config at backend-selection time.
 """
 import numpy as np
-from .core import ComputeBackend, register_backend, create_backend
+from .core import ComputeBackend, register_backend
 
 
 @register_backend("integrated", model="flavour_tag_mix")
@@ -33,7 +33,7 @@ class IntegratedBackend(ComputeBackend):
     ----------
     kernel_config : dict
         Kernel configuration from ``Config.build_all_index()``.
-    base_backend : str or ComputeBackend, optional
+    base : str or ComputeBackend, optional
         Backend used for data NLL computation.  A string is resolved
         via :func:`create_backend`; an instance is used directly.
         Default ``"cuda_v3_cache"``.
@@ -119,13 +119,6 @@ class IntegratedBackend(ComputeBackend):
     #  Phsp pre‑integration
     # ═══════════════════════════════════════════════════════════════
 
-    def _gp_gm(self, t, scalar):
-        """Compute gp(t), gm(t) arrays.  (N,) complex128 each."""
-        Gam, DG, Dm, Ap, r, phi = scalar
-        eL = np.exp(-1j * t * (-Dm/2 - 1j * (Gam + DG/2) / 2))
-        eH = np.exp(-1j * t * (+Dm/2 - 1j * (Gam - DG/2) / 2))
-        return (eL + eH) / 2, (eL - eH) / 2
-
     def _compute_time_averages(self, scalar, pb):
         """Compute time averages via GPU if available, else CPU.
         *pb* is the :class:`_PhspBundle` containing the phsp data."""
@@ -191,85 +184,6 @@ class IntegratedBackend(ComputeBackend):
                            expt, cht, sht, ct, st, t, w, ws)
         self._ta_key = key
         return self._ta_result
-
-    def _load_phsp_matrices(self, phsp, m0, g0, phsp_handle=None):
-        """Compute ng×ng reduced Gram matrices directly (no full matrix).
-
-        Groups of 4 basis functions (spaced ng apart) are summed
-        before the outer product, reducing 4·ng×4·ng → ng×ng.
-
-        If *phsp_handle* is provided, reuses it instead of uploading
-        the phsp data again (avoids redundant GPU memory allocation).
-        """
-        n_events = phsp["mass"].shape[0]
-        n_wave = self.kernel.n_wave
-        n = n_wave // 2
-        ng = self._ng  # number of groups
-
-        # ── CUDA accelerated path (via base backend's kernel) ─────
-        if self._gram_compute is not None:
-            w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
-            # Reuse existing GPU handle if available, otherwise upload
-            if phsp_handle is not None:
-                dh = phsp_handle
-            else:
-                cuda_phsp = {k: v for k, v in phsp.items() if isinstance(v, np.ndarray)}
-                cuda_phsp.setdefault("frac", np.ones(n_events) * 0.5)
-                cuda_phsp.setdefault("time", np.zeros(n_events))
-                cuda_phsp.setdefault("bkg_raw", np.zeros(n_events))
-                dh = self.base.load_data(cuda_phsp)
-            Mpp, Mmm, Mpm = self._gram_compute(dh, m0, g0)
-            if phsp_handle is None:
-                dh.free()
-            self._Mpp_r = (Mpp + Mpp.conj().T) / 2
-            self._Mmm_r = (Mmm + Mmm.conj().T) / 2
-            self._Mpm_r = Mpm
-            self.phsp_n = n_events
-            self._phsp_weights = w
-            self._phsp_frac = np.asarray(
-                phsp.get("frac", np.ones(n_events)), dtype=np.float64)
-            self._phsp_time = np.asarray(
-                phsp.get("time", np.zeros(n_events)), dtype=np.float64)
-            return
-
-        # ── NumPy fallback (batched) ───────────────────────────────
-        w = np.asarray(phsp.get("weight", np.ones(n_events)), dtype=np.float64)
-        bs = 500
-        n_batches = (n_events + bs - 1) // bs
-        import sys, time as _time
-        _t0 = _time.time()
-        Mpp = np.zeros((ng, ng), dtype=complex)
-        Mmm = np.zeros((ng, ng), dtype=complex)
-        Mpm = np.zeros((ng, ng), dtype=complex)
-        for b_start in range(0, n_events, bs):
-            b_idx = b_start // bs
-            b_end = min(b_start + bs, n_events)
-            batch = {k: v[b_start:b_end] for k, v in phsp.items()
-                     if isinstance(v, np.ndarray)}
-            ba = self.kernel._compute_common_amp_factor(batch, m0=m0, g0=g0)
-            # Project onto groups: sum n_perm copies of ng → (batch, ng)
-            A0 = ba[:, :n].reshape(-1, self._n_perm, ng).sum(axis=1)
-            A1 = ba[:, n:].reshape(-1, self._n_perm, ng).sum(axis=1)
-            Mpp += (A0 * w[b_start:b_end, None]).T.conj() @ A0
-            Mmm += (A1 * w[b_start:b_end, None]).T.conj() @ A1
-            Mpm += (A0 * w[b_start:b_end, None]).T.conj() @ A1
-            _elapsed = _time.time() - _t0
-            _eta = _elapsed / (b_idx + 1) * (n_batches - b_idx - 1)
-            sys.stdout.write(
-                f"\r  Gram matrix: batch {b_idx + 1}/{n_batches}  "
-                f"[{_elapsed:.1f}s"
-                f"{f', {_eta:.1f}s ETA' if _eta > 1 else ''}]   ")
-            sys.stdout.flush()
-        sys.stdout.write("\n")
-        self._Mpp_r = (Mpp + Mpp.conj().T) / 2
-        self._Mmm_r = (Mmm + Mmm.conj().T) / 2
-        self._Mpm_r = Mpm  # not necessarily symmetric
-        self.phsp_n = n_events
-        self._phsp_weights = w
-        self._phsp_frac = np.asarray(
-            phsp.get("frac", np.ones(n_events)), dtype=np.float64)
-        self._phsp_time = np.asarray(
-            phsp.get("time", np.zeros(n_events)), dtype=np.float64)
 
     def _n_m0(self):
         """Number of unique BW mass parameters."""

@@ -30,7 +30,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 | NumPy PWA | `numpy_pwa` | CPU projection-sum reference implementation. |
 | Integrated PWA | `integrated_pwa` | Gram-matrix norm for the projection-sum PWA + base (default `cuda_v4_pwa`). |
 | v4 PWA cache f32 | `cuda32_v4_pwa_cache` | fp32 variant of `cuda_v4_pwa_cache`. |
-| Shard | `shard` | Multi-process wrapper sharding data across workers (`backends`, `weights`, `align`, `start_method`). Universal (`amp_model=None`). |
+| Shard | `shard` | Multi-process wrapper sharding data across workers (`backends`, `weights`, `align`, `start_method`). Universal (`model=None`). |
 | ONNX | `onnx_cpu` / `onnx_cuda` | In-memory graph, built with batch_size=1024. |
 
 `cuda` / `cuda64` alias to `cuda_v3`.  GPU `__del__` auto-frees memory — no manual `.free()` needed.
@@ -40,10 +40,13 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 Pre-computes 56×56 Gram matrices from phsp.  Norm is O(n²) per iteration instead of O(N_phsp × 448).
 Base backend handles data NLL.  Default base is `cuda_v3_cache`.
 **Legacy model only** (`n_blocks=8` + scalars): a pure-PWA config uses the
-sibling `integrated_pwa` backend.  Backends declare the model they serve at
-registration (`@register_backend("integrated", amp_model="flavour_tag_mix")`),
-and the model derives its backend set from that registry — picking `integrated`
-for a PWA config fails fast at backend selection with the registered list.
+sibling `integrated_pwa` backend.  Backends register a single name per
+decorator scoped by amplitude-model NAME (a string) — e.g.
+`@register_backend("integrated", model="flavour_tag_mix")`.  `Fitter` asks
+`backends_for_model(model.name)` for the allowed set and
+`create_backend(..., model=model.name)` resolves the per-model `"default"`;
+picking `integrated` for a PWA config fails fast at backend selection with
+the registered list.
 
 ### CUDA Build
 
@@ -85,7 +88,7 @@ per-model defaults — e.g. `cuda_v4_pwa` is also registered as `"default"` for
 ```
 Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
   │  set_data / set_phsp → backend.load_data() → handle
-  │  get_nll(x) → _build_params → _compute_norm → get_nll_raw → _flat_gradient
+  │  get_nll(x) → build_params → _compute_norm_batched → get_nll_raw → _flat_gradient
   │
   ├── Backend (standard interface) — wraps kernel, handles batching
   │     load_data(data_np) → Handle
@@ -127,7 +130,7 @@ Fitter.get_nll_raw(params):
 ```
 
 - **Fitter** is the only layer that stores numpy arrays.
-- **Backend** adds `return_p` semantics, `prepare_phsp_batched`, optional pre‑computation (Gram).
+- **Backend** adds `return_p` semantics, optional pre‑computation (Gram).
 - **Kernel** is pure compute — knows nothing about constraints, normalization, or the fitter.
 - All batching is handled inside the backend (CUDA C code or numpy backend split loop).
 - `_compute_norm_batched` always calls `backend.compute(norm=None, return_p=False)`:
@@ -192,7 +195,7 @@ n_g0 = len(kc["g0_index"])               # = 288
 ## Testing
 
 ```bash
-pytest tests/ -v                        # 465 tests
+pytest tests/ -v                        # 477 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline
 pytest tests/test_new_apis.py            # LinearTransform, fmt_meas, get_defaults, …
 tests/validate_gradients.py              # 3-point gradient validation (all 6 backends)

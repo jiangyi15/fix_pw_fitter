@@ -42,8 +42,8 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ```python
 from ampfit import Fitter
 
-# Backend selection via string shortcut (default: cuda → v3)
-fitter = Fitter("config_amp.yml")                         # backend from config, else cuda64
+# Backend selection via string shortcut (default: model's registered "default")
+fitter = Fitter("config_amp.yml")                         # config backend, else the model's "default" (legacy → cuda64/cuda_v3, PWA → cuda_v4_pwa)
 fitter = Fitter("config_amp.yml", backend="numpy")        # explicit override
 fitter = Fitter("config_amp.yml", backend="cuda32_v3")    # CUDA f32 v3
 # the config may also select it:  config: {backend: numpy}
@@ -290,14 +290,14 @@ Compute:        Kernel reads arrays/handle, produces Q, grads, P
 
 - **NumPy**: `load_data` is a no‑op — returns the dict itself (zero copy).
 - **CUDA**: `load_data` uploads to GPU, returns a `DataHandle` (GPU pointer).
-- **IntegratedBackend**: passes the phsp `handle` through to `_load_phsp_matrices`,
-  avoiding a redundant GPU re‑upload for Gram computation.
+- **IntegratedBackend**: wraps the phsp `handle` in a `_PhspBundle` and builds
+  Gram matrices lazily via `ensure_gram`, avoiding a redundant GPU re‑upload.
 
 ### Pipeline
 
 ```
 x (flat vector, 115 params)
-  ↓ _build_params
+  ↓ build_params
 apply_bounds → to_dict → resolve → build_ck  (constraint chain)
   ↓ params dict {ck, m0, g0, scalar}
   ├── Fitter._compute_norm_batched:
@@ -313,23 +313,29 @@ apply_bounds → to_dict → resolve → build_ck  (constraint chain)
 
 ### Registered backends
 
-| Name | Backend class | Precision |
-|------|:-------------|:---------:|
-| `numpy` | NumpyBackend | f64 CPU reference |
-| `cuda_v3` / `cuda64_v3` / `cuda` | CUDABackendV3 | f64 |
-| `cuda32_v3` | CUDABackendV3F32 | f32 |
-| `cuda_mixed_v3` | CUDABackendV3Mixed | f32+f64 |
-| `cuda_v2` / `cuda64_v2` | CUDABackendV2 | f64 |
-| `cuda32_v2` | CUDABackendV2F32 | f32 |
-| `integrated` | IntegratedBackend | base‑dependent |
-| `onnx_cpu` / `onnx_cuda` | ONNXBackend | f32 |
-| `numpy_pwa` | NumpyPWABackend | f64 CPU reference |
-| `cuda_v4_pwa` | CUDABackendV4PWA | f64 |
-| `cuda_v4_pwa_cache` / `cuda32_v4_pwa_cache` | CUDABackendV4PWACache / …Cache32 | f64 (f32 cache) |
-| `cuda_v5_pwa` | CUDABackendV5PWA | f64 (group-log NLL) |
-| `integrated_pwa` | IntegratedPWABackend | base‑dependent |
-| `cpu_v3` / `cpu64_v3` | CPUBackendV3 | f64 (C + OpenMP + AVX2) |
-| `shard` | ShardBackend | multi‑process |
+| Name | Backend class | Precision | Model scope |
+|------|:-------------|:---------:|:-----------:|
+| `numpy` | NumpyBackend | f64 CPU reference | `flavour_tag_mix` |
+| `cuda_v3` / `cuda64_v3` / `cuda` | CUDABackendV3 | f64 | `flavour_tag_mix` (`"default"`) |
+| `cuda_v3_cache` | CUDABackendV3Cache | f64 | `flavour_tag_mix` (integrated base default) |
+| `cuda_v3_sparse` | CUDABackendV3Sparse | f64 (fp32 FA) | `flavour_tag_mix` |
+| `cuda_v3_ampcache` | CUDABackendV3AmpCache | f64 | `flavour_tag_mix` |
+| `cuda32_v3` | CUDABackendV3F32 | f32 | `flavour_tag_mix` |
+| `cuda_mixed_v3` | CUDABackendV3Mixed | f32+f64 | `flavour_tag_mix` |
+| `cuda_v2` / `cuda64_v2` | CUDABackendV2 | f64 | `flavour_tag_mix` |
+| `cuda32_v2` | CUDABackendV2F32 | f32 | `flavour_tag_mix` |
+| `integrated` | IntegratedBackend | base‑dependent | `flavour_tag_mix` |
+| `onnx` / `onnx_cpu` / `onnx_cuda` | ONNXBackend | f32 | `flavour_tag_mix` |
+| `numpy_pwa` | NumpyPWABackend | f64 CPU reference | `pwa` |
+| `cuda_v4_pwa` | CUDABackendV4PWA | f64 | `pwa` (`"default"`) |
+| `cuda_v4_pwa_cache` / `cuda32_v4_pwa_cache` | CUDABackendV4PWACache / …Cache32 | f64 (f32 cache) | `pwa` |
+| `cuda_v5_pwa` | CUDABackendV5PWA | f64 (group-log NLL) | `pwa` |
+| `integrated_pwa` | IntegratedPWABackend | base‑dependent | `pwa` |
+| `cpu_v3` / `cpu64_v3` | CPUBackendV3 | f64 (C + OpenMP + AVX2) | `flavour_tag_mix` |
+| `shard` | ShardBackend | multi‑process | universal (`model=None`) |
+
+Each model resolves a `"default"` when no backend is given: `cuda_v3` for
+`flavour_tag_mix`, `cuda_v4_pwa` for `pwa`.
 
 ### Result persistence
 

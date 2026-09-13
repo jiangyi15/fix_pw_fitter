@@ -32,7 +32,6 @@ Usage:
 
 import time
 import numpy as np
-from ampfit.param_constraint import ConstraintManager
 
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
@@ -259,14 +258,6 @@ class Fitter:
     @property
     def _scale_params(self):
         return self.cm.scale_params
-
-    @property
-    def _alias_to_canon(self):
-        return self.cm.alias_to_canon
-
-    @property
-    def var_registry(self):
-        return self.cm.var_registry
 
     # ------------------------------------------------------------------
     # Data loading and setup
@@ -556,10 +547,6 @@ class Fitter:
         # Backend handles batching internally; just load the data
         self._phsp_holder = self.backend.load_data(phsp)
         self._phsp_scratch = self._phsp_holder
-
-    def _n_flat_vars(self):
-        """Total number of flat variables: ck vars + free time params."""
-        return self.cm.var_registry.n_flat
 
     # -- parameter surface (model-provided, type-agnostic) --------------
     def param_names(self):
@@ -1304,7 +1291,7 @@ class Fitter:
             grad_scale: gradient scaling factor (default 1.0).
                         Matches archive's grad_sacle if used.
         """
-        import json, cmath, os
+        import json, os
 
         # Accept flat x vector directly (for checkpoint saves)
         if isinstance(fit_result, np.ndarray):

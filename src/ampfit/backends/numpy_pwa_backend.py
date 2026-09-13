@@ -1,6 +1,4 @@
 """numpy_pwa backend — CPU reference for the shared-ck projection-sum PWA."""
-import numpy as np
-
 from .core import ComputeBackend, register_backend
 from ampfit.numpy_pwa import NumpyPWA
 

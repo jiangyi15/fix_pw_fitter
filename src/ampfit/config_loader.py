@@ -804,7 +804,7 @@ class Config:
             [gamma_table[i] for i in self.g0_phys_name], axis=0)
         ret["gamma_min"] = g_min
         ret["gamma_delta"] = g_delta
-        ret["fl_table"], ret["fl_min"], ret["fl_delta"] =             self.build_fl_table(self.unique_l)
+        ret["fl_table"], ret["fl_min"], ret["fl_delta"] = self.build_fl_table(self.unique_l)
         ret["ck_map"] = list(self.full_decay.get_partial_waves_params())
         # canonical per-event angle columns (phi-first) of the first chain —
         # the layout the event data builder must fill for pure-PWA models
@@ -1088,7 +1088,6 @@ class Config:
 
     def _build_param_display_map(self):
         """Pre-build mapping of all config-known parameter names to LaTeX display strings."""
-        import re
         n_map = self.name_display_map()
 
         # Scalar names (fixed)
