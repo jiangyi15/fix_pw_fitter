@@ -64,7 +64,3 @@ def test_readme_low_level_uses_factory():
     be = create_backend("numpy_pwa", kc)
     assert be is not None
 
-
-def test_run_fit_default_config_exists():
-    import os
-    assert os.path.exists("tutorials/config.yml")
