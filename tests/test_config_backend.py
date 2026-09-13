@@ -42,3 +42,16 @@ def test_config_backend_absent_is_none():
     src = open(BASE).read()
     p = _config_with(src)
     assert Config(p).backend_spec is None
+
+
+def test_create_backend_string_spec_keeps_kwargs():
+    """kwargs must not be silently dropped for a string spec."""
+    from ampfit.backends import create_backend, register_backend
+
+    @register_backend("_kwarg_probe", amp_model=None)
+    class _Probe:
+        def __init__(self, kernel_config, value=None):
+            self.value = value
+
+    assert create_backend("_kwarg_probe", {}, value=7).value == 7
+    assert create_backend({"name": "_kwarg_probe"}, {}, value=9).value == 9

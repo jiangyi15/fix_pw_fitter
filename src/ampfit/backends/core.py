@@ -132,8 +132,11 @@ def create_backend(spec, kernel_config, **kwargs):
     """
     import gc
     gc.collect()
-    if isinstance(spec, dict) and kwargs:
-        spec = {**spec, **kwargs}
+    if kwargs:
+        if isinstance(spec, str):
+            spec = {"name": spec, **kwargs}
+        elif isinstance(spec, dict):
+            spec = {**spec, **kwargs}
     return eval_backend_spec(spec, kernel_config)
 
 
