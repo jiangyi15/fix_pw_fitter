@@ -180,3 +180,17 @@ def test_model_without_default_backend_raises_clearly():
     path = _with("amp_model: _no_default_backend\n" + open(PWA_CFG).read())
     with pytest.raises(ValueError, match="no backend selected"):
         Fitter(path)
+
+
+def test_empty_top_level_amp_model_falls_back_to_data():
+    """amp_model: {} / [] / '' must not shadow data.amp_model."""
+    base = open("config_angle.yml").read()
+    for empty in ("{}", "[]", '""'):
+        cfg = Config(_with(f"amp_model: {empty}\n" + base))
+        assert cfg.amplitude_model.name == "flavour_tag_mix", empty
+
+
+def test_explicit_top_level_amp_model_wins_over_data():
+    base = open("config_angle.yml").read()      # data.amp_model = flavour_tag_mix
+    cfg = Config(_with("amp_model: pwa\n" + base))
+    assert cfg.amplitude_model.name == "pwa"

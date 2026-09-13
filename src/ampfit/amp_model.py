@@ -45,18 +45,32 @@ def register_amplitude_model(*names):
     return _f
 
 
+def _model_name_value(v):
+    """Normalise one ``amp_model`` value to a name (or None if empty).
+
+    Accepts a plain string, a one-key dict (legacy form), or a list/tuple
+    whose first entry is the name.  Empty containers / blank strings yield
+    None so the caller can fall back to the next location.
+    """
+    if isinstance(v, dict):
+        v = next(iter(v), None)
+    elif isinstance(v, (list, tuple)):
+        v = v[0] if v else None
+    if isinstance(v, str):
+        v = v.strip() or None
+    return v if isinstance(v, str) else None
+
+
 def _amp_model_name(dic):
-    """Explicit model name from ``amp_model`` / ``data.amp_model`` (or None)."""
-    m = dic.get("amp_model")
-    if m is None:
-        m = (dic.get("data") or {}).get("amp_model")
-    if isinstance(m, dict):
-        m = next(iter(m)) if len(m) else None
-    elif isinstance(m, (list, tuple)):
-        m = m[0] if len(m) else None
-    if isinstance(m, str):
-        m = m.strip() or None
-    return m
+    """Explicit model name from ``amp_model`` / ``data.amp_model`` (or None).
+
+    An empty top-level ``amp_model`` (``{}`` / ``[]`` / ``""``) counts as
+    absent, so ``data.amp_model`` still applies.
+    """
+    name = _model_name_value(dic.get("amp_model"))
+    if name is None:
+        name = _model_name_value((dic.get("data") or {}).get("amp_model"))
+    return name
 
 
 def build_amplitude_model(config):
