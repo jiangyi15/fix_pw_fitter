@@ -136,12 +136,14 @@ amp_model: pwa               # default: ck/m0/g0 only (no time/mixing/scalars)
 
 Legacy ``data.amp_model:`` is still honoured.  Custom models subclass
 ``ampfit.amp_model.AmplitudeModel(config)``, register with
-``@register_amplitude_model("name")``, declare their valid backends with
-``@register_kernel(...)``, set ``default_backend``, and override
-``build_kernel_config()`` / ``build_params_transform()``.  The model owns
-backend selection: choosing a backend it does not register (e.g.
-``integrated`` for the PWA model, which uses ``integrated_pwa``) is rejected
-by ``Fitter`` with the registered list.
+``@register_amplitude_model("name")``, set ``default_backend``, and override
+``build_kernel_config()`` / ``build_params_transform()``.  Backends declare
+the model they serve at registration —
+``@register_backend("integrated_pwa", amp_model="pwa")`` (``amp_model=None``
+= universal) — and the model derives its valid backend set from that registry.
+Choosing a backend the model does not register (e.g. ``integrated`` for the
+PWA model, which uses ``integrated_pwa``) is rejected by ``Fitter`` with the
+registered list.
 
 ### Pure-PWA (projection-sum) kernels
 

@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import argparse
 
+import numpy as np
+
 from ampfit import Fitter
 from ampfit.plot_pw_groups import PWGroupPlotter
 from ampfit.plot_pwa_groups import (

@@ -5,7 +5,7 @@ from .core import ComputeBackend, register_backend
 from ampfit.numpy_pwa import NumpyPWA
 
 
-@register_backend("numpy_pwa")
+@register_backend("numpy_pwa", amp_model="pwa")
 class NumpyPWABackend(ComputeBackend):
     """CPU backend wrapping the ``NumpyPWA`` kernel (params: ck/m0/g0)."""
 

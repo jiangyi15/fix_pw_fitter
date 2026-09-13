@@ -16,14 +16,14 @@ Usage::
 
 This backend is for the LEGACY flavour-tag/mixing model (n_blocks=8, the
 six time/mixing scalars).  A pure-PWA config must use the sibling
-``integrated_pwa`` backend instead; the amplitude model's kernel registry
-rejects ``integrated`` for a PWA config at backend-selection time.
+``integrated_pwa`` backend instead; the model's backend registry rejects
+``integrated`` for a PWA config at backend-selection time.
 """
 import numpy as np
 from .core import ComputeBackend, register_backend, create_backend
 
 
-@register_backend("integrated")
+@register_backend("integrated", amp_model="flavour_tag_mix")
 class IntegratedBackend(ComputeBackend):
     """Hyper backend: Gram‑matrix norm + base backend for data NLL.
 

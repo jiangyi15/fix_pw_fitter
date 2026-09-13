@@ -2,6 +2,9 @@
 import numpy as np
 
 ALL_BACKENDS = {}
+# Backend name -> frozenset of amplitude-model names it serves
+# (None = universal, e.g. the shard wrapper).
+BACKEND_MODELS = {}
 
 
 def per_event_dnorm(norm, P, weight, bkg=None):
@@ -25,12 +28,32 @@ def per_event_dnorm(norm, P, weight, bkg=None):
     return float(np.sum(w * P / (norm * (P + b * norm))))
 
 
-def register_backend(name):
-    """Decorator: register a backend class under *name*."""
+def register_backend(*names, amp_model=None):
+    """Decorator: register a backend class under one or more *names*.
+
+    Args:
+        *names: backend name(s), e.g. ``@register_backend("cuda", "cuda64")``.
+        amp_model: amplitude-model name (or iterable of names) this backend
+            serves.  ``None`` (default) means the backend is universal
+            (usable by any model, e.g. the ``shard`` wrapper).  Models read
+            this back to expose their valid backend set, so a backend only
+            declares its model once, next to its implementation.
+    """
+    models = None if amp_model is None else frozenset(
+        [amp_model] if isinstance(amp_model, str) else amp_model)
+
     def _f(cls):
-        ALL_BACKENDS[name] = cls
+        for name in names:
+            ALL_BACKENDS[name] = cls
+            BACKEND_MODELS[name] = models
         return cls
     return _f
+
+
+def backends_for_model(model_name):
+    """Names of the backends registered for *model_name* (incl. universal)."""
+    return frozenset(n for n, m in BACKEND_MODELS.items()
+                     if m is None or model_name in m)
 
 
 def resolve_backend_spec(config, spec=None, default=None):

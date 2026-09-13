@@ -36,9 +36,10 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 Pre-computes 56×56 Gram matrices from phsp.  Norm is O(n²) per iteration instead of O(N_phsp × 448).
 Base backend handles data NLL.  Default base is `cuda_v3_cache`.
 **Legacy model only** (`n_blocks=8` + scalars): a pure-PWA config uses the
-sibling `integrated_pwa` backend.  The amplitude model's kernel registry
-(`@register_kernel`) gates this at backend selection, so picking `integrated`
-for a PWA config fails fast with the registered list.
+sibling `integrated_pwa` backend.  Backends declare the model they serve at
+registration (`@register_backend("integrated", amp_model="flavour_tag_mix")`),
+and the model derives its backend set from that registry — picking `integrated`
+for a PWA config fails fast at backend selection with the registered list.
 
 ### CUDA Build
 
@@ -62,10 +63,11 @@ purpose: `build_kernel_config()` produces the kernel config and
 `build_params_transform()` returns the model's own `BuildKernelParams`
 (`ampfit/kernel_params.py`) — e.g. `pwa` = ck/m0/g0 only, `flavour_tag_mix`
 (`p4_directly`) adds the six time/mixing scalars.  Register custom models with
-`@register_amplitude_model("name")` and declare the backends they may run on
-with `@register_kernel(...)` (e.g. PWA → `integrated_pwa`, `cuda_v4_pwa`, …;
-legacy → `integrated`, `cuda64`, …).  Each model also sets `default_backend`,
-used by `Fitter` when neither the caller nor the config picks one.
+`@register_amplitude_model("name")`.  Each backend declares the model it
+serves at registration (`@register_backend("integrated_pwa", amp_model="pwa")`,
+`amp_model=None` = universal, e.g. `shard`); the model's `kernels` property is
+derived from that registry.  Each model also sets `default_backend`, used by
+`Fitter` when neither the caller nor the config picks one.
 
 ## Three-Layer Architecture
 

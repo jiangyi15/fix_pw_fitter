@@ -152,8 +152,8 @@ class _ONNXBackendBase(ComputeBackend):
 
 # ── CPU backend ────────────────────────────────────────────────
 
-@register_backend("onnx")
-@register_backend("onnx_cpu")
+@register_backend("onnx", amp_model="flavour_tag_mix")
+@register_backend("onnx_cpu", amp_model="flavour_tag_mix")
 class ONNXCPUBackend(_ONNXBackendBase):
     """ONNX Runtime on CPU."""
     def __init__(self, kernel_config=None, model_path=None,
@@ -165,7 +165,7 @@ class ONNXCPUBackend(_ONNXBackendBase):
 
 # ── CUDA backend ───────────────────────────────────────────────
 
-@register_backend("onnx_cuda")
+@register_backend("onnx_cuda", amp_model="flavour_tag_mix")
 class ONNXCUDABackend(_ONNXBackendBase):
     """ONNX Runtime on GPU (falls back to CPU for unsupported ops)."""
     def __init__(self, kernel_config=None, model_path=None,

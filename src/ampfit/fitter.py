@@ -78,14 +78,14 @@ class Fitter:
             backend = getattr(self.config, "backend_spec", None)
         if backend is None:
             backend = model.default_backend
-        elif backend == "cuda" and model.supports_kernel("cuda"):
+        elif backend == "cuda" and model.supports_backend("cuda"):
             backend = "cuda64"          # legacy alias
         if isinstance(backend, (str, dict)):
-            if not model.supports_kernel(backend):
+            if not model.supports_backend(backend):
                 raise ValueError(
                     f"backend {model.backend_name(backend)!r} is not registered "
                     f"for amp_model {model.name!r}; registered: "
-                    f"{sorted(model.kernels)}")
+                    f"{sorted(model.backends)}")
             backend = create_backend(backend, self.kernel_config)
         # 'backend' is now a ComputeBackend instance
         self.backend = backend

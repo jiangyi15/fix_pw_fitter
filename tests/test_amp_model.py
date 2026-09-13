@@ -106,17 +106,17 @@ def test_ck_index_helpers_respect_row_blocks():
     assert max(legacy.get_decay_ck_indices([("a1(1260)p", "rhoA")])) < n_leg
 
 
-def test_kernel_registry_gates_backends_per_model():
+def test_backend_registry_gates_backends_per_model():
     """The model owns which kernels are valid (integrated vs integrated_pwa)."""
     pwa = Config(PWA_CFG).amplitude_model
-    assert pwa.supports_kernel("integrated_pwa") and pwa.supports_kernel("cuda_v4_pwa")
-    assert not pwa.supports_kernel("integrated")
-    assert not pwa.supports_kernel("cuda64")
+    assert pwa.supports_backend("integrated_pwa") and pwa.supports_backend("cuda_v4_pwa")
+    assert not pwa.supports_backend("integrated")
+    assert not pwa.supports_backend("cuda64")
     assert pwa.default_backend == "cuda_v4_pwa"
 
     legacy = Config("config_angle.yml").amplitude_model
-    assert legacy.supports_kernel("integrated") and legacy.supports_kernel("cuda64")
-    assert not legacy.supports_kernel("integrated_pwa")
+    assert legacy.supports_backend("integrated") and legacy.supports_backend("cuda64")
+    assert not legacy.supports_backend("integrated_pwa")
     assert legacy.default_backend == "cuda64"
 
     # selection-time rejection through the Fitter
