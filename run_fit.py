@@ -24,8 +24,8 @@ def main():
                              'or a YAML dict like '
                              '\'{name: integrated, base: cuda_v3}\' '
                              "(note: spaces required after colons)")
-    parser.add_argument("--config", default="config.yml",
-                        help="config YAML (default: config.yml)")
+    parser.add_argument("--config", default="tutorials/config.yml",
+                        help="config YAML (default: tutorials/config.yml)")
     parser.add_argument("--data", default=None,
                         help="data .npz (default: use the config's "
                              "data_arr / prefix files via load_all_data)")

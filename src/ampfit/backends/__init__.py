@@ -28,8 +28,30 @@ from . import shard_backend        # noqa: F401 — register ShardBackend
 from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 
+# Concrete backend classes (for direct/low-level use, e.g. the README).
+from .numpy_backend import NumpyBackend
+from .numpy_pwa_backend import NumpyPWABackend
+from .cpu_backend import CPUBackendV3
+from .onnx_backend import ONNXCPUBackend, ONNXCUDABackend
+from .integrated_backend import IntegratedBackend
+from .integrated_pwa_backend import IntegratedPWABackend
+from .shard_backend import ShardBackend
+from .cuda_backends import (
+    CUDABackendV2, CUDABackendV2F32, CUDABackendV3, CUDABackendV3F32,
+    CUDABackendV3Mixed, CUDABackendV3Cache, CUDABackendV3Sparse,
+    CUDABackendV3AmpCache, CUDABackendV4PWA, CUDABackendV5PWA,
+    CUDABackendV4PWACache, CUDABackendV4PWACache32)
+
 
 __all__ = [
     "ALL_BACKENDS", "BACKEND_MODELS", "register_backend", "backends_for_model",
     "create_backend", "DataHandle", "ComputeBackend",
+    # concrete backends
+    "NumpyBackend", "NumpyPWABackend", "CPUBackendV3",
+    "ONNXCPUBackend", "ONNXCUDABackend",
+    "IntegratedBackend", "IntegratedPWABackend", "ShardBackend",
+    "CUDABackendV2", "CUDABackendV2F32", "CUDABackendV3", "CUDABackendV3F32",
+    "CUDABackendV3Mixed", "CUDABackendV3Cache", "CUDABackendV3Sparse",
+    "CUDABackendV3AmpCache", "CUDABackendV4PWA", "CUDABackendV5PWA",
+    "CUDABackendV4PWACache", "CUDABackendV4PWACache32",
 ]

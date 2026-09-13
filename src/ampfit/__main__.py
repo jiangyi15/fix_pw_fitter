@@ -4,7 +4,7 @@ repository (or the current module tree).
 
 Examples::
 
-    python -m ampfit run_fit --config config.yml --fit -l 5
+    python -m ampfit run_fit --config tutorials/config.yml --fit -l 5
     python -m ampfit plot_pwa_groups results.json --config config_pwa.yml
     python -m ampfit gen_toy_pwa --config config_pwa.yml
     python -m ampfit --list

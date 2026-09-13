@@ -114,7 +114,8 @@ kc = config.build_all_index()
 
 # NumPy reference
 nk = NumpyBackend(kc)
-Q, grads, P = nk.compute(params, data)
+nh = nk.load_data(data)
+Q, grads, P = nk.compute(params, nh)
 
 # CUDA v3 (or use string "cuda" / "cuda_v3")
 ck = create_backend("cuda_v3", kc)
