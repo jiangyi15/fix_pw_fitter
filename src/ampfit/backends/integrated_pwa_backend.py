@@ -33,7 +33,6 @@ class IntegratedPWABackend(ComputeBackend):
 
     Nested spec: ``base`` (the data-NLL backend).
     """
-    nested_specs = ("base",)
 
     def __init__(self, kernel_config, base="cuda_v4_pwa", mc_batch=5000):
         """Hyper backend: Gram norm (pure PWA) + base backend for data NLL.

@@ -206,8 +206,6 @@ class ShardBackend(ComputeBackend):
         groups never straddle a worker cut.
     """
 
-    nested_specs = ("backends",)
-
     def __init__(self, kernel_config, backends=None, n_workers=None,
                  weights=None, align=None, start_method=None):
         self.kernel_config = kernel_config

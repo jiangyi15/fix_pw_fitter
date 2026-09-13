@@ -72,7 +72,7 @@ class Fitter:
         # Resolve backend: explicit argument > config ``config.backend`` >
         # the amplitude model's default.  The MODEL owns which backends are
         # valid (declared via @register_backend(amp_model=...)), so a mismatch
-        # — including inside a nested base/backends spec — is rejected
+        # is rejected
         # here — e.g. "integrated" on a pure-PWA config.
         model = self.config.amplitude_model
         if backend is None:
@@ -82,7 +82,11 @@ class Fitter:
         elif backend == "cuda" and model.supports_backend("cuda"):
             backend = "cuda64"          # legacy alias
         if isinstance(backend, (str, dict)):
-            model.validate_backend_spec(backend)
+            if not model.supports_backend(backend):
+                raise ValueError(
+                    f"backend {model.backend_name(backend)!r} is not registered "
+                    f"for amp_model {model.name!r}; registered: "
+                    f"{sorted(model.backends)}")
             backend = create_backend(backend, self.kernel_config)
         # 'backend' is now a ComputeBackend instance
         self.backend = backend

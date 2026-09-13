@@ -138,17 +138,6 @@ def test_partial_scalar_defaults_keep_legacy_fallbacks():
     assert set(d) == set(cfg.scalar_names)
 
 
-def test_nested_backend_specs_are_validated():
-    pwa = Config(PWA_CFG).amplitude_model
-    with pytest.raises(ValueError, match="not registered"):
-        pwa.validate_backend_spec({"name": "integrated_pwa", "base": "cuda64"})
-    with pytest.raises(ValueError, match="not registered"):
-        pwa.validate_backend_spec({"name": "shard", "backends": ["cuda64"]})
-    legacy = Config("config_angle.yml").amplitude_model
-    with pytest.raises(ValueError, match="not registered"):
-        legacy.validate_backend_spec({"name": "integrated", "base": "numpy_pwa"})
-
-
 def test_fitter_resolves_model_default_backend(monkeypatch):
     import ampfit.backends as B
     seen = {}

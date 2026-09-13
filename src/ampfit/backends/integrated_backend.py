@@ -48,8 +48,6 @@ class IntegratedBackend(ComputeBackend):
         Spatial integrals for the latest call (user‑accessible).
     """
 
-    nested_specs = ("base",)
-
     def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True,
                  cache_file=None):
         from ampfit.numpy_kernel import NumpyKernel
