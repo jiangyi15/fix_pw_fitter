@@ -90,3 +90,17 @@ def test_registry_and_factory():
     assert "pwa" in AMPLITUDE_MODELS
     cfg = Config(PWA_CFG)
     assert isinstance(build_amplitude_model(cfg), AmplitudeModel)
+
+
+def test_ck_index_helpers_respect_row_blocks():
+    """_expand_to_blocks must use n_perm·n_cp, not a literal 8."""
+    cfg = Config(PWA_CFG)
+    n = len(cfg.get_ck_map())
+    idx = cfg.get_ck_indices(["jpsi"])
+    assert idx and max(idx) < n, (n, max(idx))
+    assert cfg.build_all_index()["n_blocks"] == 1
+
+    legacy = Config("config_angle.yml")
+    n_leg = len(legacy.get_ck_map())
+    assert legacy.build_all_index()["n_blocks"] == 8
+    assert max(legacy.get_decay_ck_indices([("a1(1260)p", "rhoA")])) < n_leg

@@ -900,9 +900,16 @@ class Config:
         return ranges
 
     def _expand_to_blocks(self, base_indices, n_base):
-        """Repeat base_indices across all 8 topology blocks."""
+        """Repeat base_indices across all row blocks.
+
+        The block count is the config-derived ``n_perm · n_cp`` from
+        :func:`row_block_factors` (identical-particle permutations × the
+        B0/B0bar CP map) — 8 for the legacy four-body configs, 1 for a
+        single-flavour pure-PWA config.
+        """
+        n_blocks = row_block_factors(self.dic)[2]
         result = []
-        for block in range(8):
+        for block in range(n_blocks):
             offset = block * n_base
             for i in sorted(base_indices):
                 result.append(offset + i)
@@ -919,7 +926,7 @@ class Config:
                              e.g. ``"f0(500)"`` or ``["a1(1260)p", "a1(1260)m"]``.
 
         Returns:
-            list[int] — ck indices covering all 8 topology blocks.
+            list[int] — ck indices covering all row blocks (n_perm · n_cp).
         """
         if isinstance(resonance_names, str):
             resonance_names = [resonance_names]
@@ -970,7 +977,7 @@ class Config:
                       D-wave (wave_idx=1) for a1 → ρπ.
 
         Returns:
-            list[int] — ck indices covering all 8 topology blocks.
+            list[int] — ck indices covering all row blocks (n_perm · n_cp).
         """
         chain_ranges = self._chain_ranges()
         n_base = chain_ranges[-1][1] if chain_ranges else 0
