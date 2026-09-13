@@ -100,6 +100,28 @@ class AmplitudeModel:
             return spec.get("name")
         return None
 
+    def validate_backend_spec(self, spec):
+        """Recursively reject a backend spec this model may not use.
+
+        Walks nested specs (``base`` for hyper backends, ``backends`` for
+        the shard wrapper) so the model gate cannot be bypassed by a
+        nested backend.  Returns *spec* for call chaining.
+        """
+        name = self.backend_name(spec)
+        if name is not None and name not in self.backends:
+            raise ValueError(
+                f"backend {name!r} is not registered for amp_model "
+                f"{self.name!r}; registered: {sorted(self.backends)}")
+        if isinstance(spec, dict):
+            for key in ("base", "backends"):
+                child = spec.get(key)
+                if child is None:
+                    continue
+                children = child if isinstance(child, (list, tuple)) else [child]
+                for c in children:
+                    self.validate_backend_spec(c)
+        return spec
+
     def supports_backend(self, spec):
         """True if *spec* names a backend registered for this model.
 
@@ -119,8 +141,14 @@ class AmplitudeModel:
 
     @property
     def scalar_defaults(self):
-        return self.config.dic.get("scalar_defaults",
-                                   self.default_scalar_defaults)
+        """Model defaults merged with (and overridden by) the config's
+        explicit ``scalar_defaults`` — so a partial override keeps the
+        legacy per-name fallbacks (e.g. delta_m, poqr)."""
+        merged = dict(self.default_scalar_defaults or {})
+        explicit = self.config.dic.get("scalar_defaults")
+        if explicit:
+            merged.update(explicit)
+        return merged
 
     @property
     def n_proj(self):

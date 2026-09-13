@@ -107,7 +107,7 @@ def test_ck_index_helpers_respect_row_blocks():
 
 
 def test_backend_registry_gates_backends_per_model():
-    """The model owns which kernels are valid (integrated vs integrated_pwa)."""
+    """The model owns which backends are valid (integrated vs integrated_pwa)."""
     pwa = Config(PWA_CFG).amplitude_model
     assert pwa.supports_backend("integrated_pwa") and pwa.supports_backend("cuda_v4_pwa")
     assert not pwa.supports_backend("integrated")
@@ -124,3 +124,58 @@ def test_backend_registry_gates_backends_per_model():
         Fitter(PWA_CFG, backend="integrated")
     with pytest.raises(ValueError, match="not registered"):
         Fitter("config_angle.yml", backend="integrated_pwa")
+
+
+def test_partial_scalar_defaults_keep_legacy_fallbacks():
+    """A partial scalar_defaults override must not zero the other scalars."""
+    base = open("config_angle.yml").read()
+    path = _with(base + "\nscalar_defaults: {gamma: 0.123}\n")
+    cfg = Config(path)
+    d = cfg.amplitude_model.build_params_transform().param_defaults()
+    assert d["gamma"] == pytest.approx(0.123)
+    assert d["delta_m"] == pytest.approx(0.506)
+    assert d["poqr"] == pytest.approx(1.0)
+    assert set(d) == set(cfg.scalar_names)
+
+
+def test_nested_backend_specs_are_validated():
+    pwa = Config(PWA_CFG).amplitude_model
+    with pytest.raises(ValueError, match="not registered"):
+        pwa.validate_backend_spec({"name": "integrated_pwa", "base": "cuda64"})
+    with pytest.raises(ValueError, match="not registered"):
+        pwa.validate_backend_spec({"name": "shard", "backends": ["cuda64"]})
+    legacy = Config("config_angle.yml").amplitude_model
+    with pytest.raises(ValueError, match="not registered"):
+        legacy.validate_backend_spec({"name": "integrated", "base": "numpy_pwa"})
+
+
+def test_fitter_resolves_model_default_backend(monkeypatch):
+    import ampfit.backends as B
+    seen = {}
+    real = B.create_backend
+
+    def fake(spec, kernel_config, **kw):
+        seen["spec"] = spec
+        return real(spec, kernel_config, **kw)
+
+    monkeypatch.setattr(B, "create_backend", fake)
+    f = Fitter(PWA_CFG)
+    try:
+        assert seen["spec"] == "cuda_v4_pwa"
+    finally:
+        f.backend.free()
+    f = Fitter("config_angle.yml")
+    try:
+        assert seen["spec"] == "cuda64"
+    finally:
+        f.backend.free()
+
+
+def test_backend_registry_is_consistent():
+    from ampfit.backends import ALL_BACKENDS, BACKEND_MODELS
+    from ampfit.amp_model import AMPLITUDE_MODELS
+    canonical = {cls.name for cls in AMPLITUDE_MODELS.values()}
+    assert set(BACKEND_MODELS) == set(ALL_BACKENDS)
+    for models in BACKEND_MODELS.values():
+        if models is not None:
+            assert models <= canonical, models

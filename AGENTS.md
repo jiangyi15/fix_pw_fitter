@@ -14,7 +14,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 
 | Backend | Flag | Note |
 |---------|------|------|
-| **Integrated** | `{"name": "integrated", "base": "cuda_v3"}` | Gram matrix O(n²) norm + CUDAv3 base for data NLL. Default in `fit.sh`. Base defaults to `cuda_v3`. |
+| **Integrated** | `{"name": "integrated", "base": "cuda_v3_cache"}` | Gram matrix O(n²) norm + base backend for data NLL. Legacy model only (`n_blocks=8`); pure PWA uses `integrated_pwa`. Default base `cuda_v3_cache`. |
 | **v3 amp-cache** | `cuda_v3_ampcache` | v3 sparse + per-handle cache of the minimal-set angular amplitudes (`Amp = fa·fl`, 272 unique/event). Forward per wave = `ck·Amp_slot[w]/bw_p`, so only the BW propagator is recomputed each iteration (m0/g0 stay fitted, grads flow). momentum/angle are uploaded only transiently for the fill and **not kept** on the GPU. fp64 fill → float2 store (constant over fit). ~1.7× faster than sparse per iteration. |
 | **v4 PWA** | `cuda_v4_pwa` | No time/mixing/scalars: `P = Σ_p |Σ_k ck_k·a_{p,k}|²`. Derived from ampcache (same angular cache + per-iteration BW). All projections share one `ck`; the projection only changes the angular part. Wave entries stored p-major: `n_wave = n_proj·N`, `ck` length `N = n_wave/n_proj`. Config key `n_proj` (default 1). |
 | **v4 PWA cache** | `cuda_v4_pwa_cache` | Same pure-PWA model, **full-amplitude cache for fixed m0/g0** (fpwfitter-style): C keeps only weight/bkg + the cached `common[e, p·N+k]`; mass/momentum/angle never live in C — the Python DataHandle retains them and builds the cache on the FIRST `compute()` from the params m0/g0 (Python-level `_filled` flag; no C-side state). Verified bit-equal to `cuda_v4_pwa` at fixed m0/g0 (Q/P/ck-grad; m0/g0 grads zero). **Strictly fixed-m0/g0**: no auto refill/switch; later m0/g0 changes raise ValueError — float masses/widths ⇒ use `cuda_v4_pwa`. |
@@ -24,9 +24,13 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 | CUDA f64 v3 | `cuda_v3`, `cuda`, `cuda64` | Catmull-Rom (default standalone). |
 | CUDA f32 v3 | `cuda32_v3` | Faster, ~1e-7 precision. |
 | CUDA f64 v2 | `cuda_v2`, `cuda64_v2` | Linear interpolation. |
+| CUDA mixed v3 | `cuda_mixed_v3` | Mixed fp32/fp64 v3 variant. |
 | CUDA f32 v2 | `cuda32_v2` | Fastest raw kernel. |
 | NumPy | `numpy` | CPU reference implementation (f64). |
 | NumPy PWA | `numpy_pwa` | CPU projection-sum reference implementation. |
+| Integrated PWA | `integrated_pwa` | Gram-matrix norm for the projection-sum PWA + base (default `cuda_v4_pwa`). |
+| v4 PWA cache f32 | `cuda32_v4_pwa_cache` | fp32 variant of `cuda_v4_pwa_cache`. |
+| Shard | `shard` | Multi-process wrapper sharding data across workers (`backends`, `weights`, `align`, `start_method`). Universal (`amp_model=None`). |
 | ONNX | `onnx_cpu` / `onnx_cuda` | In-memory graph, built with batch_size=1024. |
 
 `cuda` / `cuda64` alias to `cuda_v3`.  GPU `__del__` auto-frees memory — no manual `.free()` needed.
@@ -65,7 +69,7 @@ purpose: `build_kernel_config()` produces the kernel config and
 (`p4_directly`) adds the six time/mixing scalars.  Register custom models with
 `@register_amplitude_model("name")`.  Each backend declares the model it
 serves at registration (`@register_backend("integrated_pwa", amp_model="pwa")`,
-`amp_model=None` = universal, e.g. `shard`); the model's `kernels` property is
+`amp_model=None` = universal, e.g. `shard`); the model's `backends` property is
 derived from that registry.  Each model also sets `default_backend`, used by
 `Fitter` when neither the caller nor the config picks one.
 

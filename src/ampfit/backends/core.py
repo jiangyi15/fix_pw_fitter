@@ -51,7 +51,18 @@ def register_backend(*names, amp_model=None):
 
 
 def backends_for_model(model_name):
-    """Names of the backends registered for *model_name* (incl. universal)."""
+    """Names of the backends registered for *model_name* (incl. universal).
+
+    Accepts an amplitude-model alias (e.g. ``p4_directly``) and normalises
+    it to the canonical name registered in ``AMPLITUDE_MODELS``.
+    """
+    try:
+        from ampfit.amp_model import AMPLITUDE_MODELS
+        cls = AMPLITUDE_MODELS.get(model_name)
+        if cls is not None:
+            model_name = cls.name
+    except Exception:      # pragma: no cover — amp_model always importable
+        pass
     return frozenset(n for n, m in BACKEND_MODELS.items()
                      if m is None or model_name in m)
 
