@@ -107,13 +107,13 @@ python scripts/calc_fractions.py fit_results.json -o fractions.csv
 
 ```python
 from ampfit import Config
-from ampfit.backends import NumpyBackend, create_backend
+from ampfit.backends import create_backend
 
 config = Config("config_amp.yml")
 kc = config.build_all_index()
 
 # NumPy reference
-nk = NumpyBackend(kc)
+nk = create_backend("numpy", kc)
 nh = nk.load_data(data)
 Q, grads, P = nk.compute(params, nh)
 

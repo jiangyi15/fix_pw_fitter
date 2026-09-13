@@ -57,8 +57,12 @@ def test_create_backend_string_spec_keeps_kwargs():
     assert create_backend({"name": "_kwarg_probe"}, {}, value=9).value == 9
 
 
-def test_readme_low_level_imports():
-    from ampfit.backends import NumpyBackend, create_backend  # noqa: F401
+def test_readme_low_level_uses_factory():
+    from ampfit.backends import create_backend
+    from ampfit.config_loader import Config
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    be = create_backend("numpy_pwa", kc)
+    assert be is not None
 
 
 def test_run_fit_default_config_exists():
