@@ -101,26 +101,14 @@ class AmplitudeModel:
         return None
 
     def validate_backend_spec(self, spec):
-        """Recursively reject a backend spec this model may not use.
+        """Reject a (nested) backend spec this model may not use.
 
-        Walks nested specs (``base`` for hyper backends, ``backends`` for
-        the shard wrapper) so the model gate cannot be bypassed by a
-        nested backend.  Returns *spec* for call chaining.
+        Delegates to :func:`ampfit.backends.core.validate_backend_spec`:
+        the recursion into nested specs is driven by each backend's own
+        ``nested_specs`` declaration, not by the model.
         """
-        name = self.backend_name(spec)
-        if name is not None and name not in self.backends:
-            raise ValueError(
-                f"backend {name!r} is not registered for amp_model "
-                f"{self.name!r}; registered: {sorted(self.backends)}")
-        if isinstance(spec, dict):
-            for key in ("base", "backends"):
-                child = spec.get(key)
-                if child is None:
-                    continue
-                children = child if isinstance(child, (list, tuple)) else [child]
-                for c in children:
-                    self.validate_backend_spec(c)
-        return spec
+        from ampfit.backends.core import validate_backend_spec
+        return validate_backend_spec(spec, allowed=self.backends)
 
     def supports_backend(self, spec):
         """True if *spec* names a backend registered for this model.

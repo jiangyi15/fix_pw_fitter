@@ -177,6 +177,8 @@ class ShardDataHandle:
 class ShardBackend(ComputeBackend):
     """Multi-process backend — shards data across worker backends.
 
+    Nested spec: ``backends`` (one spec per worker).
+
     Parameters
     ----------
     kernel_config : dict
@@ -203,6 +205,8 @@ class ShardBackend(ComputeBackend):
         ``cuda_v5_pwa`` whose ``resolution_size == align`` so the log-sum
         groups never straddle a worker cut.
     """
+
+    nested_specs = ("backends",)
 
     def __init__(self, kernel_config, backends=None, n_workers=None,
                  weights=None, align=None, start_method=None):

@@ -27,6 +27,8 @@ from .core import ComputeBackend, register_backend, create_backend
 class IntegratedBackend(ComputeBackend):
     """Hyper backend: Gram‑matrix norm + base backend for data NLL.
 
+    Nested spec: ``base`` (the data-NLL backend).
+
     Parameters
     ----------
     kernel_config : dict
@@ -45,6 +47,8 @@ class IntegratedBackend(ComputeBackend):
     int_Ap2, int_Am2, int_ApAm:
         Spatial integrals for the latest call (user‑accessible).
     """
+
+    nested_specs = ("base",)
 
     def __init__(self, kernel_config, base="cuda_v3_cache", strict_gram=True,
                  cache_file=None):

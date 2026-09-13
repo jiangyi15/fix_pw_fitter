@@ -50,6 +50,41 @@ def register_backend(*names, amp_model=None):
     return _f
 
 
+def validate_backend_spec(spec, allowed=None):
+    """Validate a (possibly nested) backend spec.
+
+    Recursion is driven by each backend class's ``nested_specs`` — the
+    backend, not the caller/model, knows which of its kwargs hold nested
+    specs (e.g. ``base`` for hyper backends, ``backends`` for shard).
+
+    Args:
+        spec: ``str`` name or ``dict`` spec (may nest).
+        allowed: optional iterable of permitted backend names; a named
+            backend outside it raises ``ValueError``.
+
+    Returns *spec* for call chaining.
+    """
+    if isinstance(spec, str):
+        name, d = spec, None
+    elif isinstance(spec, dict):
+        name, d = spec.get("name"), spec
+    else:
+        return spec
+    if name is not None and allowed is not None and name not in allowed:
+        raise ValueError(
+            f"backend {name!r} is not registered for this amplitude model; "
+            f"allowed: {sorted(allowed)}")
+    if d is not None:
+        cls = ALL_BACKENDS.get(name)
+        for key in getattr(cls, "nested_specs", ()) if cls else ():
+            child = d.get(key)
+            if child is None:
+                continue
+            for c in (child if isinstance(child, (list, tuple)) else [child]):
+                validate_backend_spec(c, allowed)
+    return spec
+
+
 def backends_for_model(model_name):
     """Names of the backends registered for *model_name* (incl. universal).
 
@@ -162,6 +197,10 @@ class ComputeBackend:
     value from their kernel.
     """
     dtype = np.float64
+    # Kwargs that hold nested backend specs (a str, dict, or list of them).
+    # Declared by backends that compose others, e.g. ("base",) or
+    # ("backends",); used by :func:`validate_backend_spec`.
+    nested_specs = ()
 
     def load_data(self, data_np):
         raise NotImplementedError

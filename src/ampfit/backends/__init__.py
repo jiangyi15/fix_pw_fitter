@@ -17,7 +17,8 @@ as backend specs — so ``"base"`` in the example above is itself
 evaluated as a backend before being passed to ``IntegratedBackend``.
 """
 from .core import ALL_BACKENDS, BACKEND_MODELS, register_backend, \
-    backends_for_model, create_backend, DataHandle, ComputeBackend
+    backends_for_model, validate_backend_spec, create_backend, DataHandle, \
+    ComputeBackend
 
 from . import numpy_backend        # noqa: F401 — register NumpyBackend
 from . import cuda_backends        # noqa: F401 — register CUDA backends
@@ -31,5 +32,5 @@ from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABac
 
 __all__ = [
     "ALL_BACKENDS", "BACKEND_MODELS", "register_backend", "backends_for_model",
-    "create_backend", "DataHandle", "ComputeBackend",
+    "validate_backend_spec", "create_backend", "DataHandle", "ComputeBackend",
 ]
