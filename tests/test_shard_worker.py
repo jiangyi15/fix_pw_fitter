@@ -84,3 +84,19 @@ def test_worker_error_raises_instead_of_hanging():
             shard.compute({}, h)          # missing params -> worker KeyError
     finally:
         shard.free()
+
+
+def test_worker_dict_spec_keeps_kwargs():
+    """A dict worker spec must keep its kwargs (only device is stripped)."""
+    from ampfit.backends.shard_backend import ShardBackend
+
+    cfg = Config("tests/config_pwa.yml")
+    kc = cfg.build_all_index()
+    be = ShardBackend(kc, backends=[
+        {"name": "cuda_v5_pwa", "resolution_size": 20, "batch_size": 50000}])
+    assert be._specs[0][0] == {"name": "cuda_v5_pwa",
+                               "resolution_size": 20, "batch_size": 50000}
+
+    be = ShardBackend(kc, backends=[
+        {"name": "cuda_v5_pwa", "resolution_size": 20, "device": 1}])
+    assert be._specs[0] == ({"name": "cuda_v5_pwa", "resolution_size": 20}, 1)

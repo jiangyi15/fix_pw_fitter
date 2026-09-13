@@ -259,9 +259,12 @@ class ShardBackend(ComputeBackend):
                 if isinstance(spec, str):
                     self._specs.append((spec, None))
                 elif isinstance(spec, dict):
-                    name = spec.get("name", list(spec.keys())[0])
-                    dev = spec.get("device")
-                    self._specs.append((name, dev))
+                    # Keep the FULL worker spec (resolution_size, batch_size,
+                    # ...) minus ``device``; the worker builds from this dict.
+                    worker = {k: v for k, v in spec.items() if k != "device"}
+                    if "name" not in worker and worker:
+                        worker["name"] = next(iter(worker))
+                    self._specs.append((worker, spec.get("device")))
         self._n_workers = len(self._specs)
 
         # Default: equal weights
@@ -282,10 +285,10 @@ class ShardBackend(ComputeBackend):
         self._task_queues = [self._mp.Queue() for _ in range(nw)]
         self._result_queues = [self._mp.Queue() for _ in range(nw)]
         for i in range(nw):
-            name, device = self._specs[i]
+            spec, device = self._specs[i]
             p = self._mp.Process(
                 target=_worker_main,
-                args=(self.kernel_config, name, self._task_queues[i],
+                args=(self.kernel_config, spec, self._task_queues[i],
                       self._result_queues[i], device),
             )
             p.start()
