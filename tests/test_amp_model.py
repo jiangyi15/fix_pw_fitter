@@ -194,3 +194,24 @@ def test_explicit_top_level_amp_model_wins_over_data():
     base = open("config_angle.yml").read()      # data.amp_model = flavour_tag_mix
     cfg = Config(_with("amp_model: pwa\n" + base))
     assert cfg.amplitude_model.name == "pwa"
+
+
+def test_param_names_match_legacy_flat_order():
+    cfg = Config("config_amp.yml")
+    bases = sorted({p for comb in cfg.get_ck_map()
+                    for p in comb if isinstance(p, str)})
+    legacy = list(dict.fromkeys(
+        sorted([n + "r" for n in bases] + [n + "i" for n in bases])
+        + list(cfg.m0_phys_name) + list(cfg.g0_phys_name)
+        + list(cfg.scalar_names)))
+    assert cfg.amplitude_model.build_params_transform().param_names() == legacy
+
+
+def test_param_names_are_unique_with_colliding_scalar():
+    base = open("config_amp.yml").read()
+    cfg = Config("config_amp.yml")
+    ck_name = sorted({p for comb in cfg.get_ck_map()
+                      for p in comb if isinstance(p, str)})[0] + "r"
+    path = _with(base + f"\nscalar_names: [gamma, {ck_name}]\n")
+    names = Config(path).amplitude_model.build_params_transform().param_names()
+    assert len(names) == len(set(names))

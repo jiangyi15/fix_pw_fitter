@@ -30,10 +30,15 @@ class BuildKernelParams:
 
     # -- parameter surface (generic: whatever the model declares) --------
     def param_names(self):
-        """All resolved parameter names of this model."""
+        """All resolved parameter names of this model.
+
+        Order matches the legacy flat list: the CK real/imag names are
+        sorted *together* (interleaved ``.._i, .._r``), then m0, then g0 —
+        so seeded initial values are reproducible across the refactor.
+        """
         bases = sorted({p for comb in self.config.get_ck_map()
                         for p in comb if isinstance(p, str)})
-        names = ([b + "r" for b in bases] + [b + "i" for b in bases]
+        names = (sorted([b + "r" for b in bases] + [b + "i" for b in bases])
                  + list(self.config.m0_phys_name)
                  + list(self.config.g0_phys_name))
         return list(dict.fromkeys(names))
@@ -76,7 +81,9 @@ class FlavourTagMixKernelParams(BuildKernelParams):
         self.scalar_names = list(config.scalar_names)
 
     def param_names(self):
-        return super().param_names() + list(self.scalar_names)
+        # Dedup again: a scalar name could collide with a ck/m0/g0 name.
+        return list(dict.fromkeys(
+            super().param_names() + list(self.scalar_names)))
 
     def param_defaults(self):
         cfg_defaults = self.config.scalar_defaults or {}
