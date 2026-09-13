@@ -34,6 +34,22 @@ LEGACY_SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
                           "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
 
 AMPLITUDE_MODELS = {}
+KERNEL_REGISTRY = {}
+
+
+def register_kernel(*backend_names):
+    """Class decorator: declare the kernel/backend names a model may run on.
+
+    The model — not the backend — owns which kernels are valid, so a
+    mismatch (e.g. ``integrated`` on a pure-PWA config) is rejected at
+    selection time instead of failing deep inside a kernel.
+    """
+    def _f(cls):
+        cls.kernels = frozenset(getattr(cls, "kernels", ())) | set(backend_names)
+        for n in backend_names:
+            KERNEL_REGISTRY.setdefault(n, set()).add(cls.name)
+        return cls
+    return _f
 
 
 def register_amplitude_model(*names):
@@ -74,12 +90,35 @@ class AmplitudeModel:
     """Base class — full access to the :class:`Config` object."""
 
     name = "pwa"
+    # Backend names this model may run on (filled by @register_kernel).
+    kernels = frozenset()
+    # Backend used when neither the caller nor the config picks one.
+    default_backend = None
     default_scalar_names = ()
     default_scalar_defaults = None
     params_transform_cls = PWAKernelParams
 
     def __init__(self, config):
         self.config = config
+
+    # -- backend/kernel surface -----------------------------------------
+    @staticmethod
+    def backend_name(spec):
+        """Backend name from a spec (``str`` or ``{"name": ...}``), else None."""
+        if isinstance(spec, str):
+            return spec
+        if isinstance(spec, dict):
+            return spec.get("name")
+        return None
+
+    def supports_kernel(self, spec):
+        """True if *spec* names a backend registered for this model.
+
+        Unknown/opaque specs (e.g. an already-built backend instance) are
+        accepted — the registry only gates named backends.
+        """
+        name = self.backend_name(spec)
+        return name is None or name in self.kernels
 
     # -- model views (used by Config / Fitter / reporting) --------------
     @property
@@ -133,16 +172,26 @@ class AmplitudeModel:
 
 
 @register_amplitude_model("pwa")
+@register_kernel("numpy_pwa", "cuda_v4_pwa", "cuda_v4_pwa_cache",
+                 "cuda32_v4_pwa_cache", "cuda_v5_pwa", "integrated_pwa",
+                 "shard")
 class PWA(AmplitudeModel):
     """Scalar-free projection-sum PWA (default)."""
     name = "pwa"
+    default_backend = "cuda_v4_pwa"
     params_transform_cls = PWAKernelParams
 
 
 @register_amplitude_model("flavour_tag_mix", "flour_tag_mix", "p4_directly")
+@register_kernel("numpy", "cuda", "cuda64", "cuda64_v2", "cuda_v2",
+                 "cuda32_v2", "cuda_v3", "cuda32_v3", "cuda_mixed_v3",
+                 "cuda_v3_cache", "cuda_v3_sparse", "cuda_v3_ampcache",
+                 "integrated", "cpu_v3", "cpu64_v3", "onnx", "onnx_cpu",
+                 "onnx_cuda", "shard")
 class FlavourTagMix(AmplitudeModel):
     """Legacy time-dependent flavour-tagged mixing model."""
     name = "flavour_tag_mix"
+    default_backend = "cuda64"
     default_scalar_names = tuple(LEGACY_SCALAR_NAMES)
     default_scalar_defaults = dict(LEGACY_SCALAR_DEFAULTS)
     params_transform_cls = FlavourTagMixKernelParams

@@ -11,8 +11,13 @@ Usage::
     backend = create_backend("integrated", kernel_config,
                              base_backend="cuda64")
 
-    # Or via Fitter (defaults to numpy base)
-    fitter = Fitter("config.yml", backend="integrated")
+    # Or via Fitter (default base: cuda_v3_cache)
+    fitter = Fitter("config_angle.yml", backend="integrated")
+
+This backend is for the LEGACY flavour-tag/mixing model (n_blocks=8, the
+six time/mixing scalars).  A pure-PWA config must use the sibling
+``integrated_pwa`` backend instead; the amplitude model's kernel registry
+rejects ``integrated`` for a PWA config at backend-selection time.
 """
 import numpy as np
 from .core import ComputeBackend, register_backend, create_backend
@@ -29,7 +34,7 @@ class IntegratedBackend(ComputeBackend):
     base_backend : str or ComputeBackend, optional
         Backend used for data NLL computation.  A string is resolved
         via :func:`create_backend`; an instance is used directly.
-        Default ``"numpy"``.
+        Default ``"cuda_v3_cache"``.
 
     Attributes
     ----------
