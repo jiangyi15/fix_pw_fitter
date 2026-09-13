@@ -991,9 +991,24 @@ class ConstraintManager:
         return [n for n in self.var_registry.flat_names
                 if n not in self.fixed_tr.values]
 
-    def initial_values(self, seed=None):
-        """Flat vector with random values for all free variables."""
-        return self.var_registry.build_initial(seed=seed)
+    def initial_values(self, seed=None, use_default=False):
+        """Flat starting vector for the free variables.
+
+        By default every free slot is random ``U(-π, π)``.  With
+        ``use_default=True``, slots whose name has a physical default
+        (``cm.defaults``) are seeded from that default instead: the
+        default (bounded/model frame) is mapped to the unbounded optimizer
+        variable through the bounds inverse (identity if the name is not
+        bounded).  Names without a default — notably ck — stay random, so
+        the start still breaks symmetry.
+        """
+        x = self.var_registry.build_initial(seed=seed)
+        if use_default:
+            for i, name in enumerate(self.var_registry.flat_names):
+                if name in self._defaults:
+                    x[i] = self.bounds.inverse(name,
+                                               float(self._defaults[name]))
+        return x
 
     # ── modifiers ──────────────────────────────────────────────
 

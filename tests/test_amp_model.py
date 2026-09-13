@@ -301,3 +301,29 @@ def test_shard_records_model_for_workers():
     kc = Config(PWA_CFG).build_all_index()
     be = ShardBackend(kc, backends=["default"], model="pwa")
     assert be._model == "pwa" and be._specs == [("default", None)]
+
+
+def test_initial_values_use_default_flag():
+    """use_default seeds defaulted names via bounds inverse; ck stays random."""
+    f = Fitter("config_angle.yml", backend="numpy")
+    try:
+        names = f.cm.var_registry.flat_names
+        defaults = f.cm.defaults
+        x_rand = f.initial_values(seed=3)
+        x_def = f.initial_values(seed=3, use_default=True)
+
+        defaulted = [i for i, n in enumerate(names) if n in defaults]
+        assert defaulted, "config_angle should have defaulted free params"
+        for i, n in enumerate(names):
+            if n in defaults:
+                # injected through bounds.inverse -> may differ from random
+                pass
+            else:
+                assert x_def[i] == x_rand[i], n        # ck etc. stay random
+
+        _, resolved = f.build_params(x_def)
+        for n in defaults:
+            if n in names:
+                assert resolved[n] == pytest.approx(defaults[n], rel=1e-9), n
+    finally:
+        f.backend.free()

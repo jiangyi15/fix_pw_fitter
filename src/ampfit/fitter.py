@@ -557,17 +557,21 @@ class Fitter:
         """Default values declared by the model (e.g. legacy scalars)."""
         return self._kernel_builder.param_defaults()
 
-    def initial_values(self, seed=None):
-        """Random initial guess for all free variables.
-        
+    def initial_values(self, seed=None, use_default=False):
+        """Starting guess for all free variables.
+
+        Random ``U(-π, π)`` per slot; with ``use_default=True``, slots that
+        have a physical default are seeded from it (via the bounds inverse)
+        and the rest stay random.
+
         Returns:
             array of shape (n_flat,) matching free_param_names() length.
         """
-        return self.cm.initial_values(seed=seed)
+        return self.cm.initial_values(seed=seed, use_default=use_default)
 
-    def reinitial(self, seed=None):
+    def reinitial(self, seed=None, use_default=False):
         """Alias for initial_values()."""
-        return self.cm.initial_values(seed=seed)
+        return self.cm.initial_values(seed=seed, use_default=use_default)
 
     def values_from_dict(self, data):
         """Build the flat x vector from a save_params JSON dict.
