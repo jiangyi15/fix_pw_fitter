@@ -65,7 +65,6 @@ def _projection_duplicate(ret, n_proj):
     return ret
 
 
-from ampfit.amp_model import build_amplitude_model   # noqa: E402
 
 
 class Particle:
@@ -233,15 +232,37 @@ class Config:
         self.n_interp_gamma = 2000  # gamma table interpolation points
         self._param_display_map = None
 
-        # ── amplitude model (owns kernel config & parameter transform) ─
-        # The model is constructed with THIS Config, so it has full access
-        # and its build_* methods need no extra arguments.  Legacy views
-        # (scalar_names / n_proj / angle_formula_mode) delegate to it.
-        self.amplitude_model = build_amplitude_model(self)
-        self.n_proj = self.amplitude_model.n_proj
-        self.scalar_names = list(self.amplitude_model.scalar_names)
-        self.scalar_defaults = self.amplitude_model.scalar_defaults
-        self.angle_formula_mode = self.amplitude_model.angle_formula
+        # ── Config-derived views ───────────────────────────────────
+        # The amplitude model lives on the Fitter, not on Config.  n_proj
+        # and angle_formula are config options, computed here.
+        self.n_proj = self._compute_n_proj()
+        self.angle_formula_mode = self._compute_angle_formula()
+
+    def _spin_state_count(self, name):
+        d = self.dic.get("particle", {}).get(name)
+        if not isinstance(d, dict):
+            return 1
+        spins = d.get("spins")
+        if spins is not None:
+            return max(1, len(list(spins)))
+        return int(2 * d.get("J", 0)) + 1
+
+    def _compute_n_proj(self):
+        """Projection count: explicit ``n_proj`` else external spin states."""
+        explicit = self.dic.get("n_proj")
+        if explicit is not None:
+            return int(explicit)
+        n = self._spin_state_count(self.top)
+        for f in self.finals:
+            n *= self._spin_state_count(f)
+        return max(1, n)
+
+    def _compute_angle_formula(self):
+        mode = self.dic.get("angle_formula", "helicity")
+        if mode not in ("helicity", "cache"):
+            raise ValueError(
+                f"angle_formula must be 'helicity' or 'cache', got {mode!r}")
+        return mode
 
     def _build_topo_from_struct(self):
         """Stable topology index over ``decay_struct`` structural paths.
@@ -801,10 +822,10 @@ class Config:
         return ret
 
     def build_all_index(self):
-        """Kernel config produced by the config's amplitude model."""
-        return self.amplitude_model.build_kernel_config()
+        """Kernel config (compatibility shim → :meth:`build_base_kernel_config`)."""
+        return self.build_base_kernel_config()
 
-    def _build_base_kernel_config(self):
+    def build_base_kernel_config(self):
         # identical-particle × CP row blocks, from the config declarations
         # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
         # declarations → 1).

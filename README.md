@@ -135,16 +135,21 @@ amp_model: pwa               # default: ck/m0/g0 only (no time/mixing/scalars)
 #                            # (aliases: flour_tag_mix, p4_directly)
 ```
 
-Legacy ``data.amp_model:`` is still honoured.  Custom models subclass
-``ampfit.amp_model.AmplitudeModel(config)``, register with
-``@register_amplitude_model("name")``, set ``default_backend``, and override
-``build_kernel_config()`` / ``build_params_transform()``.  Backends declare
-the model they serve at registration —
-``@register_backend("integrated_pwa", amp_model="pwa")`` (``amp_model=None``
-= universal) — and the model derives its valid backend set from that registry.
-Choosing a backend the model does not register (e.g. ``integrated`` for the
-PWA model, which uses ``integrated_pwa``) is rejected by ``Fitter`` with the
-registered list.
+Legacy ``data.amp_model:`` is still honoured.  The **Fitter constructs the
+model**; ``Config`` does not hold one (it is pure physics + the base kernel
+config, ``build_base_kernel_config()``).  Custom models subclass
+``ampfit.amp_model.AmplitudeModel``, register with
+``@register_amplitude_model("name")``, and override ``build_kernel_config()``
+/ ``build_params_transform()``.
+
+Backends register one name per decorator, scoped by amplitude-model **name**:
+``@register_backend("integrated_pwa", model="pwa")`` (``model=None`` =
+universal).  Stack decorators for aliases/defaults — e.g. ``cuda_v4_pwa`` is
+also ``"default"`` for ``pwa``.  The model knows nothing about backends;
+``Fitter`` asks ``backends_for_model(model.name)`` and
+``create_backend(..., model=model.name)`` resolves ``"default"`` per model.
+Choosing a backend not registered for the model (e.g. ``integrated`` for PWA)
+is rejected with the registered list.
 
 ### Pure-PWA (projection-sum) kernels
 

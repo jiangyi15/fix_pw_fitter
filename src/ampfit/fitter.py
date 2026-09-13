@@ -56,12 +56,14 @@ class Fitter:
                      where ``"base"`` is itself a recursive backend spec.
         """
         from ampfit.config_loader import Config
+        from ampfit.amp_model import build_amplitude_model
         from ampfit.param_constraint import ConstraintManager
         from ampfit.backends import (create_backend, resolve_backend_spec,
                                      backends_for_model)
 
         self.config = Config(config_file)
-        model = self.config.amplitude_model
+        # Fitter is the composition root: it owns the amplitude model.
+        model = build_amplitude_model(self.config)
 
         # Normalise + validate the spec first (fail fast, before the
         # expensive kernel-config build); create_backend also accepts an
@@ -69,7 +71,7 @@ class Fitter:
         spec = resolve_backend_spec(
             backend, config_spec=getattr(self.config, "backend_spec", None),
             allowed=backends_for_model(model.name))
-        self.kernel_config = self.config.build_all_index()
+        self.kernel_config = model.build_kernel_config()
         self.backend = create_backend(spec, self.kernel_config,
                                       model=model.name)
 
@@ -89,8 +91,7 @@ class Fitter:
         # Kernel parameter transform — produced by the amplitude model; it
         # owns the FULL parameter surface (ck/m0/g0 and, for legacy models,
         # the scalars), so the fitter treats every parameter generically.
-        self._kernel_builder = self.config.amplitude_model \
-            .build_params_transform()
+        self._kernel_builder = model.build_params_transform()
 
         # Standalone constraint manager — flat name list, no type distinction.
         self.cm = ConstraintManager(self._kernel_builder.param_names())

@@ -114,38 +114,10 @@ class AmplitudeModel:
             merged.update(explicit)
         return merged
 
-    @property
-    def n_proj(self):
-        """Projection count: explicit ``n_proj`` else external spin states."""
-        explicit = self.config.dic.get("n_proj")
-        if explicit is not None:
-            return int(explicit)
-        n = self._spin_state_count(self.config.top)
-        for f in self.config.finals:
-            n *= self._spin_state_count(f)
-        return max(1, n)
-
-    @property
-    def angle_formula(self):
-        mode = self.config.dic.get("angle_formula", "helicity")
-        if mode not in ("helicity", "cache"):
-            raise ValueError(
-                f"angle_formula must be 'helicity' or 'cache', got {mode!r}")
-        return mode
-
-    def _spin_state_count(self, name):
-        d = self.config.dic.get("particle", {}).get(name)
-        if not isinstance(d, dict):
-            return 1
-        spins = d.get("spins")
-        if spins is not None:
-            return max(1, len(list(spins)))
-        return int(2 * d.get("J", 0)) + 1
-
     # -- what the model produces ----------------------------------------
     def build_kernel_config(self):
         """Kernel config for this model (base index config, model-shaped)."""
-        return self.config._build_base_kernel_config()
+        return self.config.build_base_kernel_config()
 
     def build_params_transform(self) -> BuildKernelParams:
         """Resolved ↔ kernel parameter transform for this model.

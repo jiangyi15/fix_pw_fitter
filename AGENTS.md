@@ -62,16 +62,23 @@ Auto-detection priority:
 ## Amplitude models
 
 `amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
-`AmplitudeModel(config)` object (`ampfit/amp_model.py`) that owns the model
-purpose: `build_kernel_config()` produces the kernel config and
-`build_params_transform()` returns the model's own `BuildKernelParams`
-(`ampfit/kernel_params.py`) — e.g. `pwa` = ck/m0/g0 only, `flavour_tag_mix`
-(`p4_directly`) adds the six time/mixing scalars.  Register custom models with
-`@register_amplitude_model("name")`.  Each backend declares the model it
-serves at registration (`@register_backend("integrated_pwa", amp_model="pwa")`,
-`amp_model=None` = universal, e.g. `shard`); the model's `backends` property is
-derived from that registry.  Each model also sets `default_backend`, used by
-`Fitter` when neither the caller nor the config picks one.
+`AmplitudeModel` (`ampfit/amp_model.py`).  The **Fitter is the composition
+root and constructs the model**; `Config` does NOT hold a model instance — it
+is pure physics plus the generic base kernel config
+(`Config.build_base_kernel_config()`; `build_all_index()` is kept as a
+compatibility shim).  The model owns model policy only:
+`build_kernel_config()` and `build_params_transform()` →
+`BuildKernelParams` (`ampfit/kernel_params.py`) — e.g. `pwa` = ck/m0/g0 only,
+`flavour_tag_mix` (`p4_directly`) adds the six time/mixing scalars.  Register
+custom models with `@register_amplitude_model("name")`.
+
+Backends register a **single name per decorator**, scoped by amplitude-model
+**name** (a string): `@register_backend("integrated_pwa", model="pwa")`
+(`model=None` = universal, e.g. `shard`).  Stack decorators for aliases and
+per-model defaults — e.g. `cuda_v4_pwa` is also registered as `"default"` for
+`pwa`.  The model knows nothing about backends: `Fitter` asks
+`backends_for_model(model.name)` for the allowed set and
+`create_backend(..., model=model.name)` resolves `"default"` per model.
 
 ## Three-Layer Architecture
 
