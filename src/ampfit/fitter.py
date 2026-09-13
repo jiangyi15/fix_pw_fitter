@@ -81,6 +81,11 @@ class Fitter:
             backend = model.default_backend
         elif backend == "cuda" and model.supports_backend("cuda"):
             backend = "cuda64"          # legacy alias
+        if backend is None:
+            raise ValueError(
+                f"no backend selected for amp_model {model.name!r}: pass one "
+                f"explicitly, set config.backend, or give the model a "
+                f"default_backend")
         if isinstance(backend, (str, dict)):
             if not model.supports_backend(backend):
                 raise ValueError(

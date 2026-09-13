@@ -168,3 +168,15 @@ def test_backend_registry_is_consistent():
     for models in BACKEND_MODELS.values():
         if models is not None:
             assert models <= canonical, models
+
+
+def test_model_without_default_backend_raises_clearly():
+    from ampfit.amp_model import AmplitudeModel, register_amplitude_model
+
+    @register_amplitude_model("_no_default_backend")
+    class NoDefault(AmplitudeModel):
+        name = "_no_default_backend"
+
+    path = _with("amp_model: _no_default_backend\n" + open(PWA_CFG).read())
+    with pytest.raises(ValueError, match="no backend selected"):
+        Fitter(path)
