@@ -11,7 +11,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
 from ampfit import Fitter
-from ampfit.amp_model import LEGACY_SCALAR_NAMES as SCALAR_NAMES
 
 CONFIG_FILE = "config_angle.yml"
 N_DATA = 50
@@ -48,8 +47,13 @@ def setup_fitter():
     for name, val in zip(fitter.config.g0_phys_name,
                          np.random.random(fitter.n_g0) + 0.1):
         d[name] = float(val)
-    for name, val in zip(SCALAR_NAMES, [0.6, 0.01, 0.506, 0.01, 0.9, 0.2]):
-        d[name] = float(val)
+    # Override the six legacy scalars by NAME (order-independent); the
+    # values are arbitrary test inputs.  param_defaults() is only used to
+    # check the model actually declares them.
+    scalar_vals = {"gamma": 0.6, "delta_gamma": 0.01, "delta_m": 0.506,
+                   "A_prod": 0.01, "poqr": 0.9, "poqi": 0.2}
+    assert set(scalar_vals) <= set(fitter.param_defaults())
+    d.update(scalar_vals)
     fitter.cm.set_defaults(d)
     # A_prod must stay in [-1, 1] so 1 ± A_prod ≥ 0 in probability formula
     fitter.set_range('A_prod', -1, 1)
