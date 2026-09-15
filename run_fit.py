@@ -16,6 +16,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampfit import Fitter
 
 
+def _init_out_path(save_init, config, run=None):
+    """Output path for ``--save-init`` (run id appended in loop mode).
+
+    ``save_init`` is the raw CLI value: a path, or falsy (``None``/``""``)
+    for the default ``<config>_init.json`` next to the config.
+    """
+    base = save_init
+    if not base:
+        base = os.path.splitext(config)[0] + "_init"
+    stem, ext = os.path.splitext(base)
+    ext = ext or ".json"
+    return f"{stem}{run}{ext}" if run is not None else stem + ext
+
+
 def main():
     parser = argparse.ArgumentParser(description="NLL computation with ampfit")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
@@ -47,6 +61,12 @@ def main():
                         default=None, help="Plot distributions (optional: output dir)")
     parser.add_argument("--init", type=str, default=None,
                         help="Initial parameters JSON file (from save_params output)")
+    parser.add_argument("--save-init", type=str, nargs="?", const="", default=None,
+                        help="Save the starting parameters to JSON (same format "
+                             "as --init reads, so they can be replayed). Optional "
+                             "value = path; default <config>_init.json next "
+                             "to the config. In a --loop fit each run's start "
+                             "is written to <config>_init{run}.json")
     args = parser.parse_args()
 
     if args.loop > 1 and not args.fit:
@@ -134,6 +154,19 @@ def main():
         print(f"Initialized from {args.init}")
     else:
         x0 = fitter.initial_values(seed=None)
+
+    def _save_init(x, run=None):
+        """Dump a start vector in save_params format (replayable via --init)."""
+        if args.save_init is None:
+            return
+        path = _init_out_path(args.save_init, args.config, run)
+        fitter.save_params(x, path)
+        print(f"  Init params saved to {path}  (reuse with: --init {path})")
+
+    # Single-run case: save once here.  In a loop, save each run below.
+    if args.save_init is not None and not (args.fit and args.loop > 1):
+        _save_init(x0)
+
     print(f"x0 shape: {x0.shape}")
 
     # Print initial parameters (physical values after transforms)
@@ -195,6 +228,7 @@ def main():
             if not (args.init and i == 0):
                 # fresh random start each run (loop) or by default
                 x0 = fitter.initial_values(seed=None)
+            _save_init(x0, run=run_id)
             t0 = time.time()
             try:
                 res = fitter.fit(x0, maxiter=args.maxiter, disp=True)

@@ -34,6 +34,8 @@ pip install -e .
 python run_fit.py                            # Compute NLL
 python run_fit.py --fit --maxiter 200 --plot results/
 python run_fit.py --init results.json --fit --maxiter 500  # Restart
+python run_fit.py --save-init starts/init.json             # Dump the start
+python run_fit.py --init starts/init.json --fit            # Replay that start
 python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ```
 
