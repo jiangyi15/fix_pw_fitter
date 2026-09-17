@@ -107,6 +107,15 @@ Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
         └── NumpyKernel / CUDAKernelV3/V2 / ONNXKernel
 ```
 
+**Decay tree**: the `decay:` / `particle:` declarations are interpreted by a
+standalone value object, `ampfit.decay_tree.DecayTree` (structure, chains,
+stable topology index) — it depends on no kernel/params/backend.  `Config`
+composes it as `config.decay_tree` and keeps the legacy attribute names
+(`full_decay`, `decay_struct`, `topo_index`, `n_topo`, `n_decay`, `n_res`,
+`n_angles`, `finals`) as aliases; the `Particle`/`Decay`/`DecayChain`/
+`DecayGroup` classes are re-exported from `config_loader` for compatibility.
+`decay_tree` never imports `config_loader` (layering stays acyclic).
+
 ### Data flow
 
 ```
