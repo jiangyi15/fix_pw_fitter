@@ -82,9 +82,9 @@ def build_amplitude_model(config):
     *config* may be a :class:`~ampfit.config_loader.Config` instance, a config
     file path, or an already-parsed config dict.
     """
-    from ampfit.config_loader import Config
+    from ampfit.config_loader import RawConfig
     if not hasattr(config, "dic"):
-        config = Config(config)              # file path (str) or raw dict
+        config = RawConfig(config)           # file path (str) or raw dict
     name = _amp_model_name(config.dic)
     cls = AMPLITUDE_MODELS["pwa"] if name is None else AMPLITUDE_MODELS.get(name)
     if cls is None:
@@ -114,11 +114,10 @@ class AmplitudeModel(BaseModel):
         # there is ONE interpretation and the lazily-filled index data
         # (``unique_*``, ``m0_phys_name`` ...) stays consistent no matter
         # which object the caller reads.
-        base = getattr(config, "base_model", None)   # Config facade
-        if base is None:
-            base = config                             # a BaseModel directly, or a dict
-        if isinstance(base, BaseModel):
-            self.__dict__.update(base.__dict__)
+        # config: a BaseModel (adopt its state), or a raw Config / dict to
+        # interpret here.
+        if isinstance(config, BaseModel):
+            self.__dict__.update(config.__dict__)
         else:
             dic = config if isinstance(config, dict) else getattr(config, "dic", config)
             super().__init__(dic, getattr(config, "_config_path", ""))

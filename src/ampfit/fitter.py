@@ -54,13 +54,13 @@ class Fitter:
 
                      where ``"base"`` is itself a recursive backend spec.
         """
-        from ampfit.config_loader import Config
+        from ampfit.config_loader import RawConfig
         from ampfit.amp_model import build_amplitude_model
         from ampfit.param_constraint import ConstraintManager
         from ampfit.backends import (create_backend, resolve_backend_spec,
                                      backends_for_model)
 
-        self.config = Config(config_file)
+        self.config = RawConfig(config_file)
         # Fitter is the composition root: it owns the amplitude model.
         self.model = build_amplitude_model(self.config)
 

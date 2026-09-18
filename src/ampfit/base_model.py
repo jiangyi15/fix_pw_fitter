@@ -64,7 +64,18 @@ def _projection_duplicate(ret, n_proj):
 
 
 class BaseModel:
-    def __init__(self, dic, config_path=""):
+    def __init__(self, config, config_path=""):
+        """Build from a raw :class:`Config` (has ``dic``) or a config dict."""
+        if hasattr(config, "dic"):
+            dic = config.dic
+            if not config_path:
+                config_path = getattr(config, "_config_path", "")
+        elif isinstance(config, dict):
+            dic = config
+        else:
+            raise TypeError(
+                "BaseModel expects a Config or a dict; got "
+                f"{type(config).__name__}")
         self.dic = dic
         self._config_path = config_path
         # The decay tree is interpreted by a standalone value object; the

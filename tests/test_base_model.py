@@ -22,17 +22,17 @@ def _imports(module):
     return mods
 
 
-def test_config_is_a_loader_holding_a_base_model():
+def test_config_wraps_the_amplitude_model():
     from ampfit.base_model import BaseModel
-    from ampfit.config_loader import Config
+    from ampfit.config_loader import Config, RawConfig
 
     cfg = Config(CONFIG)
-    assert not isinstance(cfg, BaseModel)          # a loader, not a model
-    assert isinstance(cfg.base_model, BaseModel)   # it built one
-    assert cfg.build_base_model() is cfg.base_model
-    # interpreted physics is delegated to the built BaseModel
-    assert cfg.decay_tree is cfg.base_model.decay_tree
-    assert cfg.n_topo == cfg.base_model.n_topo
+    assert isinstance(cfg.raw, RawConfig)          # raw input
+    assert not isinstance(cfg, BaseModel)          # a wrapper, not a model
+    assert isinstance(cfg.model, BaseModel)        # the built model
+    # interpreted physics is delegated to the model
+    assert cfg.decay_tree is cfg.model.decay_tree
+    assert cfg.n_topo == cfg.model.n_topo
 
 
 def test_base_model_builds_from_raw_dict_without_config():
@@ -84,31 +84,35 @@ def test_amplitude_model_is_a_base_model():
     assert not hasattr(model, "config")
 
 
-def test_model_shares_the_config_interpretation():
+def test_config_wrapper_delegates_and_models_are_independent():
     from ampfit.amp_model import build_amplitude_model
     from ampfit.config_loader import Config
 
     cfg = Config(CONFIG)
+    # the wrapper delegates physics to its own model
+    assert cfg.decay_tree is cfg.model.decay_tree
+    assert cfg.m0_phys_name is cfg.model.m0_phys_name
+    # a separately built model is an independent interpretation of the config
     model = build_amplitude_model(cfg)
-    # single interpretation: shared references, no duplicated derivation
-    assert model.decay_tree is cfg.decay_tree
-    assert model.unique_bw is cfg.unique_bw
-    assert model.m0_phys_name is cfg.m0_phys_name
-    # lazily-filled index data is visible through both objects
+    assert model is not cfg.model
+    assert model.topo_index == cfg.topo_index
+    # m0 names are filled lazily by the kernel-config build
+    assert cfg.m0_phys_name == []
     model.build_kernel_config()
-    assert len(cfg.m0_phys_name) == len(model.m0_phys_name) > 0
-    assert len(cfg.unique_bw) == len(model.unique_bw) > 0
+    assert len(model.m0_phys_name) > 0
+    cfg.build_kernel_config()
+    assert cfg.m0_phys_name == model.m0_phys_name
 
 
 def test_fitter_keeps_the_model():
     from ampfit import Fitter
     from ampfit.amp_model import AmplitudeModel
+    from ampfit.config_loader import RawConfig
 
     f = Fitter(CONFIG, backend="numpy_pwa")
     try:
-        assert isinstance(f.model, AmplitudeModel)
-        assert f.model.decay_tree is f.config.decay_tree
-        assert f.model.m0_phys_name is f.config.m0_phys_name
+        assert isinstance(f.config, RawConfig)       # raw input only
+        assert isinstance(f.model, AmplitudeModel)   # the model
         assert f.all_comb == f.model.get_ck_map()
     finally:
         f.backend.free()
