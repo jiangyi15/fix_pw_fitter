@@ -105,8 +105,11 @@ class AmplitudeModel(BaseModel):
         # there is ONE interpretation and the lazily-filled index data
         # (``unique_*``, ``m0_phys_name`` ...) stays consistent no matter
         # which object the caller reads.
-        if isinstance(config, BaseModel):
-            self.__dict__.update(config.__dict__)
+        base = getattr(config, "base_model", None)   # Config facade
+        if base is None:
+            base = config                             # a BaseModel directly, or a dict
+        if isinstance(base, BaseModel):
+            self.__dict__.update(base.__dict__)
         else:
             dic = config if isinstance(config, dict) else getattr(config, "dic", config)
             super().__init__(dic, getattr(config, "_config_path", ""))

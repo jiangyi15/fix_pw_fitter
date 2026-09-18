@@ -248,7 +248,7 @@ def test_invalid_backend_fails_before_kernel_config(monkeypatch):
     def _boom(self):
         raise AssertionError("build_all_index must not be called")
 
-    monkeypatch.setattr(cl.Config, "build_base_kernel_config", _boom)
+    monkeypatch.setattr(cl.BaseModel, "build_base_kernel_config", _boom)
     with pytest.raises(ValueError, match="not registered"):
         Fitter(PWA_CFG, backend="integrated")
 

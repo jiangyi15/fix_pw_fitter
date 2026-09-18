@@ -22,12 +22,17 @@ def _imports(module):
     return mods
 
 
-def test_config_subclasses_base_model():
+def test_config_is_a_loader_holding_a_base_model():
     from ampfit.base_model import BaseModel
     from ampfit.config_loader import Config
 
-    assert issubclass(Config, BaseModel)
-    assert isinstance(Config(CONFIG), BaseModel)
+    cfg = Config(CONFIG)
+    assert not isinstance(cfg, BaseModel)          # a loader, not a model
+    assert isinstance(cfg.base_model, BaseModel)   # it built one
+    assert cfg.build_base_model() is cfg.base_model
+    # interpreted physics is delegated to the built BaseModel
+    assert cfg.decay_tree is cfg.base_model.decay_tree
+    assert cfg.n_topo == cfg.base_model.n_topo
 
 
 def test_base_model_builds_from_raw_dict_without_config():

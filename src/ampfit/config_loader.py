@@ -1,9 +1,10 @@
-"""Config: raw YAML input, plus the interpreted physical model.
+"""Config: raw YAML loader + the interpreted BaseModel it builds.
 
-``Config`` owns the raw config (``dic``, ``_config_path``, ``backend_spec``)
-and subclasses :class:`~ampfit.base_model.BaseModel`, which derives the decay
-tree, the index/tables and the base kernel config.  Every legacy attribute
-stays available on ``Config``.
+``Config`` owns the raw input (``dic``, ``_config_path``, ``backend_spec``)
+and builds ``self.base_model`` (a :class:`~ampfit.base_model.BaseModel`) —
+the decay tree, the index/tables and the base kernel config.  Attribute
+access for that interpreted physics is delegated to the BaseModel, so
+callers can keep using ``cfg.full_decay`` / ``cfg.build_all_index()`` / ...
 """
 import yaml
 import numpy as np  # used by the __main__ dev block
@@ -24,14 +25,36 @@ def load_config(filename):
     return ret
 
 
-class Config(BaseModel):
+class Config:
+    """Raw YAML loader that builds the interpreted :class:`BaseModel`.
+
+    Owns the raw input (``dic`` / ``_config_path`` / ``backend_spec``) and
+    builds ``self.base_model``.  Interpreted-physics attributes are delegated
+    to that BaseModel for backward compatibility.
+    """
+
     def __init__(self, filename):
-        dic = load_config(filename)
-        super().__init__(dic, filename if isinstance(filename, str) else "")
+        self.dic = load_config(filename)
+        self._config_path = filename if isinstance(filename, str) else ""
         # optional ``config: {backend: ...}`` (or a top-level ``backend``)
         # selecting the compute backend for this config; ``None`` = default
-        self.backend_spec = (dic.get("config") or {}).get("backend",
-                                                          dic.get("backend"))
+        self.backend_spec = (self.dic.get("config") or {}).get("backend",
+                                                              self.dic.get("backend"))
+        # the interpreted physical model (decay tree, index/tables, base kc)
+        self.base_model = BaseModel(self.dic, self._config_path)
+
+    def build_base_model(self):
+        """The interpreted :class:`BaseModel` (built at construction)."""
+        return self.base_model
+
+    def __getattr__(self, name):
+        # Only called when normal lookup fails: delegate the interpreted
+        # physics to the BaseModel facade.
+        try:
+            base = object.__getattribute__(self, "base_model")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(base, name)
 
 
 if __name__=="__main__":
