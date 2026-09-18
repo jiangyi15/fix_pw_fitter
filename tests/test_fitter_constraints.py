@@ -41,10 +41,10 @@ def setup_fitter():
     fitter.set_data(make_data(N_DATA))
     # Override defaults with random values (was fitter.set_default_params)
     d = dict(fitter.cm.defaults)
-    for name, val in zip(fitter.config.m0_phys_name,
+    for name, val in zip(fitter.model.m0_phys_name,
                          np.random.random(fitter.n_m0) + 2):
         d[name] = float(val)
-    for name, val in zip(fitter.config.g0_phys_name,
+    for name, val in zip(fitter.model.g0_phys_name,
                          np.random.random(fitter.n_g0) + 0.1):
         d[name] = float(val)
     # Override the six legacy scalars by NAME (order-independent); the
@@ -425,7 +425,7 @@ def test_prior_added_to_nll():
     nll_before, grad_before = fitter.get_nll(x)
 
     # Pin a mass param with very tight Gaussian
-    mass_name = fitter.config.m0_phys_name[0]
+    mass_name = fitter.model.m0_phys_name[0]
     prior = GaussianPrior(mass_name, mu=fitter.cm.defaults.get(mass_name, 2.0), sigma=1e-6)
     fitter.add_prior(prior)
 
@@ -442,7 +442,7 @@ def test_prior_gradient_numerical():
     from ampfit.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
-    mass_name = fitter.config.m0_phys_name[0]
+    mass_name = fitter.model.m0_phys_name[0]
     prior = GaussianPrior(mass_name, mu=1.5, sigma=0.2)
     fitter.add_prior(prior)
 
@@ -468,8 +468,8 @@ def test_multiple_priors():
 
     fitter = setup_fitter()
 
-    mass_name = fitter.config.m0_phys_name[0]
-    g0_name = fitter.config.g0_phys_name[0]
+    mass_name = fitter.model.m0_phys_name[0]
+    g0_name = fitter.model.g0_phys_name[0]
 
     fitter.add_prior(GaussianPrior(mass_name, mu=1.5, sigma=0.1))
     fitter.add_prior(GaussianPrior(g0_name, mu=0.2, sigma=0.05))
@@ -520,8 +520,8 @@ def test_prior_save_load_constraints():
     from ampfit.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
-    mass_name = fitter.config.m0_phys_name[0]
-    g0_name = fitter.config.g0_phys_name[0]
+    mass_name = fitter.model.m0_phys_name[0]
+    g0_name = fitter.model.g0_phys_name[0]
     fitter.add_prior(GaussianPrior(mass_name, mu=1.3, sigma=0.1))
     fitter.add_prior(GaussianPrior([mass_name, g0_name], mu=[1.3, 0.2], sigma=[0.1, 0.05]))
 

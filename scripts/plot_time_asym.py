@@ -44,9 +44,9 @@ def main():
         with open(args.fit_json) as _fh:
             f.load_fixed_from_dict(_json.load(_fh))
         fs2 = {}
-        for name in f.config.m0_phys_name:
+        for name in f.model.m0_phys_name:
             fs2[name] = float(f.cm.defaults[name])
-        for name in f.config.g0_phys_name:
+        for name in f.model.g0_phys_name:
             fs2[name] = float(f.cm.defaults[name])
         if fs2:
             f.set_fixed(fs2, reset=False)

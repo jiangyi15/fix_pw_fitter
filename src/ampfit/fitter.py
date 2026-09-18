@@ -14,9 +14,9 @@ Usage:
     fitter.set_phsp(phsp_dict)
     # Override defaults via cm directly (was set_default_params)
     d = dict(fitter.cm.defaults)
-    for name, val in zip(fitter.config.m0_phys_name, m0_arr):
+    for name, val in zip(fitter.model.m0_phys_name, m0_arr):
         d[name] = float(val)
-    for name, val in zip(fitter.config.g0_phys_name, g0_arr):
+    for name, val in zip(fitter.model.g0_phys_name, g0_arr):
         d[name] = float(val)
     for name, val in fitter.param_defaults().items():
         d.setdefault(name, float(val))
@@ -80,12 +80,12 @@ class Fitter:
         # '_total_0' normalization and coupling (r, θ) starts are handled by
         # the parameter-constraint layer (apply_constrains / starting
         # values), exactly as in the legacy flow.
-        self.all_comb = self.config.get_ck_map()
+        self.all_comb = self.model.get_ck_map()
         self.n_wave = len(self.all_comb)
 
         # Physical parameter dimensions
-        self.n_m0 = len(self.config.m0_phys_name)
-        self.n_g0 = len(self.config.g0_phys_name)
+        self.n_m0 = len(self.model.m0_phys_name)
+        self.n_g0 = len(self.model.g0_phys_name)
 
         # Kernel parameter transform — produced by the amplitude model; it
         # owns the FULL parameter surface (ck/m0/g0 and, for legacy models,

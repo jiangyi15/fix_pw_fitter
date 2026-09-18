@@ -122,7 +122,7 @@ def main():
     except ValueError as exc:
         sys.exit(str(exc))
     n_base = f.config._chain_ranges()[-1][1]
-    cm = f.config.get_ck_map()
+    cm = f.model.get_ck_map()
 
     # each wave = one CK channel; block-0 index and channel name
     chans = []          # (block0_index, name)
