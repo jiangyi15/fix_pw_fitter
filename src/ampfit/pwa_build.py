@@ -211,7 +211,7 @@ def _duck_chain_from_struct(cfg, tid):
     ``decay_chain_leaves`` / ``decay_angles_vectorized``.
     """
     from types import SimpleNamespace
-    for path in cfg.decay_struct:
+    for path in (getattr(cfg, "decay_struct", None) or cfg.struct):
         outs_all = {}
         for p, outs, _kw in path:
             outs_all[p] = list(outs)
@@ -262,7 +262,9 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     from ampfit.helicity_angle import decay_chain_leaves
     from ampfit.momenta_to_angles import decay_angles_vectorized
 
-    if not list(cfg.full_decay.get_partial_waves()):
+    # ``cfg`` may be a Config/AmplitudeModel (``full_decay`` alias) or a DecayTree.
+    full_decay = getattr(cfg, "full_decay", None) or getattr(cfg, "full")
+    if not list(full_decay.get_partial_waves()):
         raise ValueError("no partial waves in config")
     n_decay, n_res, n_topo = cfg.n_decay, cfg.n_res, cfg.n_topo
     finals = list(cfg.finals)
@@ -284,8 +286,18 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
 
     mass = np.zeros((n, n_topo * n_res))
     q = np.zeros((n, n_topo * n_decay))
-    vars_ = list(kc.get("variables") or [])
-    n_base = len(vars_) if vars_ else 2 * nv
+    if kc is not None and kc.get("variables"):
+        vars_ = list(kc["variables"])
+    else:
+        # derive the canonical angle basis from the tree (kc-free); same
+        # source as Config.build_base_kernel_config sets kc["variables"]
+        from ampfit.helicity_angle import (decay_chain_to_tree, tree_vertices,
+                                           canonical_variables, to_spin)
+        ref = active[0] if active else rows[0]
+        _nv = len(tree_vertices(decay_chain_to_tree(ref)))
+        _topj0 = to_spin(ref.decays[0].core.J) == 0
+        vars_ = canonical_variables(_nv, top_j0=_topj0)
+    n_base = len(vars_)
     ang = np.zeros((n, n_topo, n_base + (3 * len(spinful_names)
                                          if need_align else 0)))
 
@@ -352,7 +364,9 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
 
         if need_align and chain in active:
             from ampfit.momenta_to_angles import aligned_euler_from_chain
-            m_node = {nm: np.full(n, float(cfg.dic["particle"][nm]["mass"]))
+            part = getattr(cfg, "dic", None)
+            part = part["particle"] if part else getattr(cfg, "particle_spec", {})
+            m_node = {nm: np.full(n, float(part[nm]["mass"]))
                       for nm in names}
             for idx in range(n_decay):
                 if idx > 0:

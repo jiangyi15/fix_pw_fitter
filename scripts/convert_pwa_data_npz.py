@@ -13,7 +13,7 @@ Optional per-event sidecars override the converter defaults:
 * ``--bkg     file.npy``   per-event background values (default ones)
 * ``--dat-order a,b,c``    column order of the momenta file (default:
                            the order ``pwa_event_data_tree`` expects, i.e.
-                           ``cfg.finals``)
+                           config ``finals``)
 
 Usage::
 
@@ -31,7 +31,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
-from ampfit.config_loader import Config
+from ampfit.config_loader import load_config
+from ampfit.decay_tree import DecayTree
 from ampfit.pwa_build import pwa_event_data_tree
 
 
@@ -46,30 +47,30 @@ def main():
                     help="optional per-event background .npy (n,)")
     ap.add_argument("--dat-order", default=None,
                     help="comma list of final names in the momenta columns "
-                         "(default cfg.finals order)")
+                         "(default config finals order)")
     ap.add_argument("--out", required=True,
                     help="output .npz (use e.g. data_arr.npz)")
     args = ap.parse_args()
 
-    cfg = Config(args.config)
-    kc = cfg.build_all_index()
-    pws = list(cfg.full_decay.get_partial_waves())
-    byt = {cfg.topo_index[ch.topo_id()]: ch for _, ch in pws}
+    dic = load_config(args.config)
+    tree = DecayTree(dic["decay"], dic["particle"])
+    pws = tree.partial_waves()
+    byt = {tree.topo_index[ch.topo_id()]: ch for _, ch in pws}
 
     mom = np.load(args.momenta)
     if mom.ndim != 3 or mom.shape[-1] != 4:
         raise SystemExit(f"--momenta must be (n, n_finals, 4), got {mom.shape}")
 
     order = (args.dat_order.split(",") if args.dat_order
-             else list(cfg.finals))
+             else list(tree.finals))
     if len(order) != mom.shape[1]:
         raise SystemExit(f"{len(order)} dat-order names but "
                          f"{mom.shape[1]} momenta columns")
-    perm = [list(order).index(f) for f in cfg.finals]
+    perm = [list(order).index(f) for f in tree.finals]
     if perm != list(range(len(perm))):
         mom = mom[:, perm]
 
-    arr = pwa_event_data_tree(cfg, kc, byt, mom)
+    arr = pwa_event_data_tree(tree, None, byt, mom)
     if args.weight:
         w = np.load(args.weight).astype(float).ravel()
         if w.shape[0] != mom.shape[0]:
