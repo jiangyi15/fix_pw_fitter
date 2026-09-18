@@ -182,7 +182,7 @@ class Fitter:
         """
         transforms = []
         seen = set()
-        for chain in self.config.full_decay.chains:
+        for chain in self.model.full_decay.chains:
             for decay in chain.decays[1:]:
                 model = decay.core._model
                 mid = id(model)
@@ -415,12 +415,12 @@ class Fitter:
                     "events")
 
         # reorder columns from data.dat_order into cfg.finals order
-        order = data_conf.get("dat_order") or list(self.config.finals)
+        order = data_conf.get("dat_order") or list(self.model.finals)
         if len(order) != momenta.shape[1]:
             raise ValueError(
                 f"{prefix}: {momenta.shape[1]} columns but dat_order has "
                 f"{len(order)} entries")
-        perm = [list(order).index(f) for f in self.config.finals]
+        perm = [list(order).index(f) for f in self.model.finals]
         momenta = momenta[:, perm]
 
         from ampfit.config_loader import row_block_factors
@@ -432,10 +432,10 @@ class Fitter:
             # (NLL shift on the real 609k pi+pi-eta fit < 0.03).
             from ampfit.pwa_build import pwa_event_data_tree
             chains_by_topo = {}
-            for _, chain in self.config.full_decay.get_partial_waves():
-                tid = self.config.topo_index[chain.topo_id()]
+            for _, chain in self.model.full_decay.get_partial_waves():
+                tid = self.model.topo_index[chain.topo_id()]
                 chains_by_topo[tid] = chain
-            spinful = [nm for nm in self.config.finals
+            spinful = [nm for nm in self.model.finals
                        if float(self.config.dic["particle"][nm].get("J", 0))
                        != 0]
             out = pwa_event_data_tree(self.config, self.kernel_config,
@@ -652,7 +652,7 @@ class Fitter:
         """Build default physical params from particle models and sync to cm."""
         d = {}
         seen = set()
-        for chain in self.config.full_decay.chains:
+        for chain in self.model.full_decay.chains:
             for decay in chain.decays[1:]:
                 model = decay.core._model
                 mid = id(model)
@@ -1738,7 +1738,7 @@ class Fitter:
         Raises:
             ValueError: if *particle_name* is not found.
         """
-        for chain in self.config.full_decay.chains:
+        for chain in self.model.full_decay.chains:
             for decay in chain.decays[1:]:
                 if decay.core.name == particle_name:
                     return decay.core._model
