@@ -107,14 +107,19 @@ Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
         └── NumpyKernel / CUDAKernelV3/V2 / ONNXKernel
 ```
 
-**Decay tree**: the `decay:` / `particle:` declarations are interpreted by a
-standalone value object, `ampfit.decay_tree.DecayTree` (structure, chains,
-stable topology index) — it depends on no kernel/params/backend.  `Config`
-composes it as `config.decay_tree` and keeps the legacy attribute names
+**Layering / decay tree**: the `decay:` / `particle:` declarations are
+interpreted by a standalone value object `ampfit.decay_tree.DecayTree`
+(structure, chains, stable topology index).  The interpreted physics —
+structure + index/tables + the predefined base kernel config — lives on
+`ampfit.base_model.BaseModel`.  `Config` owns only the *raw* input (`dic`,
+`_config_path`, `backend_spec`) and subclasses `BaseModel`, so the layering
+is `config_loader -> base_model -> decay_tree` (acyclic; `base_model` is a
+leaf w.r.t. `config_loader`/`amp_model`/`backends`).  Legacy attribute names
 (`full_decay`, `decay_struct`, `topo_index`, `n_topo`, `n_decay`, `n_res`,
-`n_angles`, `finals`) as aliases; the `Particle`/`Decay`/`DecayChain`/
-`DecayGroup` classes are re-exported from `config_loader` for compatibility.
-`decay_tree` never imports `config_loader` (layering stays acyclic).
+`n_angles`, `finals`) stay aliases of `config.decay_tree`, and the
+`Particle`/`Decay`/`DecayChain`/`DecayGroup` classes + `row_block_factors` +
+`_projection_duplicate` are re-exported from `config_loader` for
+compatibility.
 
 ### Data flow
 
