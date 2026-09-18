@@ -57,7 +57,7 @@ def main():
     # Best-fit BW values from resolved params (no Hessian needed)
     _, resolved_best = fitter.build_params(r.x)
     model = None
-    for chain in fitter.config.full_decay.chains:
+    for chain in fitter.full_decay.chains:
         for decay in chain.decays[1:]:
             if decay.core.name == args.particle:
                 model = decay.core._model

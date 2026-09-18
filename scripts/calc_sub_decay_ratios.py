@@ -311,7 +311,7 @@ def main():
     name_map = f.config.name_display_map()
 
     stems = discover_sub_decays(f.config, name_map, merge_cp=not args.no_merge_cp)
-    n_base = len(f.config.full_decay.get_partial_waves_params())
+    n_base = len(f.full_decay.get_partial_waves_params())
 
     # ── Terminal output (populates ``af`` cache) ────────────────────
     csv_rows = []

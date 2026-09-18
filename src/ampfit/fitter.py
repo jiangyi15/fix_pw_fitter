@@ -648,6 +648,26 @@ class Fitter:
         """
         return self.cm.free_param_names()
 
+    # -- interpreted-physics accessors (delegate to the model) -----------
+    @property
+    def full_decay(self):
+        """Resonance-resolved decay chains (a ``DecayGroup``).
+
+        The interpreted physics lives on the amplitude model; this is the
+        Fitter-level handle, so callers do not reach into ``fitter.config``.
+        Equivalent to ``fitter.model.full_decay``.
+        """
+        return self.model.full_decay
+
+    @property
+    def decay_tree(self):
+        """The interpreted :class:`~ampfit.decay_tree.DecayTree`.
+
+        Exposes ``.full`` (chains), ``.topo_index``, ``.partial_waves()``,
+        ``.topo_index_from_name()`` etc. without touching ``fitter.config``.
+        """
+        return self.model.decay_tree
+
     def _build_defaults(self):
         """Build default physical params from particle models and sync to cm."""
         d = {}

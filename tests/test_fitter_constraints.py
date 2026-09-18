@@ -558,7 +558,7 @@ def test_transform_save_load_round_trip():
     from ampfit import BWParamsTransform, transform_from_dict
 
     fitter = setup_fitter()
-    chain = fitter.config.full_decay.chains[0]
+    chain = fitter.full_decay.chains[0]
     pname = chain.decays[1].core.name
     model = fitter.get_particle_model(pname)
 

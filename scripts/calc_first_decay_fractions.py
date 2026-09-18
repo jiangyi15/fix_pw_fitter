@@ -106,7 +106,7 @@ def _setup_fitter(args):
 
 def _compute_groups(f, stems, af):
     """Build masks, compute fractions for all groups."""
-    n_base = len(f.config.full_decay.get_partial_waves_params())
+    n_base = len(f.full_decay.get_partial_waves_params())
 
     def split_ls(idxs):
         ls, lsbar = [], []

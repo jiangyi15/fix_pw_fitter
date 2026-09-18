@@ -58,7 +58,7 @@ def main():
     model = None
     res_name = None
     res_disp = None
-    for chain in f.config.full_decay.chains:
+    for chain in f.full_decay.chains:
         for decay in chain.decays[1:]:
             m = decay.core._model
             nm = decay.core.name

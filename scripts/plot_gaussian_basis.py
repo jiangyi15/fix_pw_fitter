@@ -53,7 +53,7 @@ def main():
     particle_map = {}  # name → (model, mu, sigma)
     from ampfit.particle_model.models_builtin import GaussianBasisModel, BSplineBasisModel
     basis_types = (GaussianBasisModel, BSplineBasisModel)
-    for chain in f.config.full_decay.chains:
+    for chain in f.full_decay.chains:
         for decay in chain.decays[1:]:
             model = decay.core._model
             if not isinstance(model, basis_types):

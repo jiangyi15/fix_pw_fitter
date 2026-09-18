@@ -59,7 +59,7 @@ def main():
 
     seen = set()
     resonances = []
-    for chain in f.config.full_decay.chains:
+    for chain in f.full_decay.chains:
         for decay in chain.decays[1:]:
             model = decay.core._model
             mid = id(model)

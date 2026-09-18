@@ -114,7 +114,7 @@ def _handle_cp_symmetry(fitter, spec):
     - Scales by -1 if the decay's outgoing particle has odd J
     - Stores free list for the ``free_var`` handler
     """
-    chains = fitter.config.full_decay.chains
+    chains = fitter.full_decay.chains
     if not chains:
         return
 
@@ -183,12 +183,12 @@ def _handle_cp_symmetry_mass(fitter, spec):
       ``{name}p_width = {name}m_width``
     """
     names = set()
-    for chain in fitter.config.full_decay.chains:
+    for chain in fitter.full_decay.chains:
         name = chain.decays[1].core.name
         if name.endswith("p"):
             base = name[:-1]
             if base + "m" in {c.decays[1].core.name
-                              for c in fitter.config.full_decay.chains}:
+                              for c in fitter.full_decay.chains}:
                 names.add(base)
 
     for base in sorted(names):

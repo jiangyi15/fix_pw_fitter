@@ -108,8 +108,8 @@ def test_load_dataset_dat_order_permutation(cfg, tmp_path):
 
     # direct tree conversion of the correctly-ordered momenta
     kc = f1.config.build_all_index()
-    pws = list(f1.config.full_decay.get_partial_waves())
-    byt = {f1.config.topo_index[ch.topo_id()]: ch for _, ch in pws}
+    pws = list(f1.full_decay.get_partial_waves())
+    byt = {f1.decay_tree.topo_index[ch.topo_id()]: ch for _, ch in pws}
     expect = pwa_event_data_tree(f1.config, kc, byt, mom)
     assert np.allclose(ev3["mass"], expect["mass"])
     assert np.allclose(ev3["angle"], expect["angle"])

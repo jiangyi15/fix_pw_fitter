@@ -57,7 +57,7 @@ def _particle_names(f):
     """All resonance particle names in the config (for charge-conjugate
     detection)."""
     names = set()
-    for chain in f.config.full_decay.chains:
+    for chain in f.full_decay.chains:
         for d in chain.decays:
             names.add(d.core.name)
     return names

@@ -48,7 +48,7 @@ def find_resonance(f, res_name):
 
 def resonance_model(f, res_name):
     """The particle model of the top-level resonance *res_name*."""
-    for chain in f.config.full_decay.chains:
+    for chain in f.full_decay.chains:
         for d in chain.decays:
             if d.core.name == res_name:
                 return d.core._model
