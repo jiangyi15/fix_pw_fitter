@@ -65,15 +65,28 @@ Auto-detection priority:
 ## Amplitude models
 
 `amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
-`AmplitudeModel` (`ampfit/amp_model.py`).  The **Fitter is the composition
-root and constructs the model**; `Config` does NOT hold a model instance — it
-is pure physics plus the generic base kernel config
-(`Config.build_base_kernel_config()`; `build_all_index()` is kept as a
-compatibility shim).  The model owns model policy only:
-`build_kernel_config()` and `build_params_transform()` →
-`BuildKernelParams` (`ampfit/kernel_params.py`) — e.g. `pwa` = ck/m0/g0 only,
-`flavour_tag_mix` (`p4_directly`) adds the six time/mixing scalars.  Register
-custom models with `@register_amplitude_model("name")`.
+`AmplitudeModel` (`ampfit/amp_model.py`) via `build_amplitude_model(source)`,
+where *source* is a file path, a config dict, or a `RawConfig`.  Registered
+models: `pwa` (default) and `flavour_tag_mix` (aliases `flour_tag_mix`,
+`p4_directly`); add your own with `@register_amplitude_model("name")`.
+
+Object roles:
+- **`RawConfig`** (`ampfit/config_loader.py`) — the raw YAML input only:
+  `dic`, `_config_path`, `backend_spec` (`load_config`).  No derived physics.
+- **`Config(path)`** — a thin **legacy alias** → `build_amplitude_model(path)`
+  (returns the model).  Prefer `build_amplitude_model(...)` / `RawConfig`.
+- **`BaseModel`** (`ampfit/base_model.py`) — the interpreted physics: decay
+  tree, index/tables, the predefined base kernel config
+  (`build_base_kernel_config()`; `build_all_index()` is a compatibility
+  shim).  Constructible without a model: `BaseModel(config_or_dict)`.
+- **`AmplitudeModel(BaseModel)`** — physics + model policy (`name`, scalar
+  policy, `params_transform_cls`, the `build_kernel_config` seam, and
+  `build_event_data`); it derives its own physics from the raw config.
+- **`Fitter`** — composition root: builds the model (`self.model`) from a
+  `RawConfig` (`self.config`) and reads policy/kc through the model.
+
+`build_params_transform()` → `BuildKernelParams` (`ampfit/kernel_params.py`):
+`pwa` = ck/m0/g0 only, `flavour_tag_mix` adds the six time/mixing scalars.
 
 Backends register a **single name per decorator**, scoped by amplitude-model
 **name** (a string): `@register_backend("integrated_pwa", model="pwa")`
@@ -107,28 +120,44 @@ Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
         └── NumpyKernel / CUDAKernelV3/V2 / ONNXKernel
 ```
 
-**Layering / decay tree**: the `decay:` / `particle:` declarations are
-interpreted by a standalone value object `ampfit.decay_tree.DecayTree`
-(structure, chains, stable topology index).  The interpreted physics —
-structure + index/tables + the predefined base kernel config — lives on
-`ampfit.base_model.BaseModel`.  `Config` owns only the *raw* input (`dic`,
-`_config_path`, `backend_spec`) and subclasses `BaseModel`, so the layering
-is `config_loader -> base_model -> decay_tree` (acyclic; `base_model` is a
-leaf w.r.t. `config_loader`/`amp_model`/`backends`).  Legacy attribute names
+**Layering / decay tree**: `decay:` / `particle:` are interpreted by the
+standalone value object `ampfit.decay_tree.DecayTree` — structure, chains,
+stable topology index, and the `data.identical_particles` / `cp_particles`
+symmetry declarations (`n_perm` / `n_cp` / `n_blocks` + `block_orders()`).
+`BaseModel` holds the interpreted physics (DecayTree + index/tables + base
+kernel config).  Layer direction is `config_loader -> base_model ->
+decay_tree`, plus `amp_model -> base_model`; `base_model` is a leaf w.r.t.
+`config_loader`/`amp_model`/`backends`.  Legacy attribute names
 (`full_decay`, `decay_struct`, `topo_index`, `n_topo`, `n_decay`, `n_res`,
-`n_angles`, `finals`) stay aliases of `config.decay_tree`, and the
-`Particle`/`Decay`/`DecayChain`/`DecayGroup` classes + `row_block_factors` +
-`_projection_duplicate` are re-exported from `config_loader` for
-compatibility.
+`n_angles`, `finals`) are aliases of `model.decay_tree`; the
+`Particle`/`Decay`/`DecayChain`/`DecayGroup` classes +
+`symmetry_factors`/`block_column_orders`/`row_block_factors` +
+`_projection_duplicate` are re-exported from `config_loader`.
 
 **AmplitudeModel**: subclasses `BaseModel` — the model *is* the interpreted
-physical model plus fitting policy (`name`, scalar policy,
-`params_transform_cls`, the `build_kernel_config` override seam).  It is
-built from the `Config`'s already-interpreted state (shared object
-references), so `config` and `model` expose the same physics and the
-lazily-filled index data (`m0_phys_name`, `unique_*`, …) never diverges.
-`Fitter` keeps the model as `fitter.model` and reads its policy/kernel
-config through it.
+physical model plus fitting policy.  It derives its own physics from the raw
+config (`AmplitudeModel(raw_config_or_dict)`), so it shares no mutable state
+with a Config.  `build_kernel_config()` is the override seam: `PWA` adds the
+pure-PWA meta keys on top of the base config; `FlavourTagMix` (legacy mixing)
+keeps the base.  `Fitter` keeps the model as `fitter.model` and reads its
+policy/kernel config through it.
+
+### Event data (model-driven)
+
+`Fitter.load_momenta_conf` only reads the file, reorders columns by
+`data.dat_order`, and delegates to `model.build_event_data(momenta, kc)`:
+
+- **PWA** (default): `build_tree_event_data(cfg, kc, chains_by_topo, momenta)`
+  — a generic tree fill with **identical-particle / CP block expansion**
+  (`n_blocks = n_perm · n_cp` blocks; each block reorders the final columns,
+  and a CP block additionally reverses the 3-momentum `p → −p` **in the CM
+  frame**).  `n_blocks == 1` is the plain single-block fill.
+- **`flavour_tag_mix`**: `momenta_to_data` — the legacy 24-row layout that also
+  emits the `frac`/`time` mixing inputs.
+
+Block enumeration lives on the tree: `DecayTree.block_orders()` →
+`[(column order, is_cp), ...]` (order is arbitrary — all blocks share one
+`ck` and are summed).  Geometry-only consumers construct `DecayTree` directly.
 
 ### Data flow
 
@@ -215,10 +244,12 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 11. **`g0` is not the direct nominal width**: the fitted `g0` parameter is the width at the reference defined by the resonance mass FIXED in the config's particle table (the mass used to build the running-width `gamma_table`/`fl_table`).  It is NOT tied to the `m0` fit parameter — when `m0` is fitted away from that fixed reference mass, the physical Breit–Wigner width changes through the running-width term `g0·γ(m)`.  So treat fitted `g0` values as “width at the config reference mass”, not the width at the fitted mass.
 
+12. **`Config` vs `RawConfig`**: `Config(path)` is a legacy alias for `build_amplitude_model(path)` (it returns the model).  The raw input object is `RawConfig` (`dic` / `_config_path` / `backend_spec`); `Fitter.config` is a `RawConfig` and `Fitter.model` is the `AmplitudeModel`.  Physics/kc members (`full_decay`, `build_kernel_config()`, `m0_phys_name`, …) live on `BaseModel`/`AmplitudeModel`, not on `RawConfig`.
+
 ## Testing
 
 ```bash
-pytest tests/ -v                        # 477 tests
+pytest tests/ -v                        # 507 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline
 pytest tests/test_new_apis.py            # LinearTransform, fmt_meas, get_defaults, …
 tests/validate_gradients.py              # 3-point gradient validation (all 6 backends)

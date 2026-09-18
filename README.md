@@ -97,9 +97,9 @@ vals, errs = af.fractions([[0,1,2], [3,4,5]])
 # Custom denominator
 vals, errs = af.fractions([range(224)], denominator=range(224, 448))
 
-# Look up ck indices by resonance name
-idx_f0 = fitter.config.get_ck_indices("f0(500)")
-idx = fitter.config.get_decay_ck_indices([("a1(1260)p", "f0(500)")])
+# Look up ck indices by resonance name (physics/kc live on fitter.model)
+idx_f0 = fitter.model.get_ck_indices("f0(500)")
+idx = fitter.model.get_decay_ck_indices([("a1(1260)p", "f0(500)")])
 
 # Scripted batch computation
 python scripts/calc_fractions.py fit_results.json -o fractions.csv
@@ -108,11 +108,10 @@ python scripts/calc_fractions.py fit_results.json -o fractions.csv
 ### Low-level: Direct kernel
 
 ```python
-from ampfit import Config
+from ampfit.amp_model import build_amplitude_model
 from ampfit.backends import create_backend
 
-config = Config("config_amp.yml")
-kc = config.build_all_index()
+kc = build_amplitude_model("config_amp.yml").build_kernel_config()
 
 # NumPy reference
 nk = create_backend("numpy", kc)
@@ -137,12 +136,16 @@ amp_model: pwa               # default: ck/m0/g0 only (no time/mixing/scalars)
 #                            # (aliases: flour_tag_mix, p4_directly)
 ```
 
-Legacy ``data.amp_model:`` is still honoured.  The **Fitter constructs the
-model**; ``Config`` does not hold one (it is pure physics + the base kernel
-config, ``build_base_kernel_config()``).  Custom models subclass
+Legacy ``data.amp_model:`` is still honoured.  ``build_amplitude_model(source)``
+(source = file path, config dict, or ``RawConfig``) returns the model;
+``Config(path)`` is a thin legacy alias for it, and ``RawConfig`` is the raw
+input (``dic`` / ``_config_path`` / ``backend_spec``).  The model derives the
+interpreted physics (decay tree, index/tables, base kernel config
+``build_base_kernel_config()``) and owns the policy; ``Fitter`` builds it from
+a ``RawConfig`` and keeps it as ``fitter.model``.  Custom models subclass
 ``ampfit.amp_model.AmplitudeModel``, register with
 ``@register_amplitude_model("name")``, and override ``build_kernel_config()``
-/ ``build_params_transform()``.
+/ ``build_params_transform()`` / ``build_event_data()``.
 
 Backends register one name per decorator, scoped by amplitude-model **name**:
 ``@register_backend("integrated_pwa", model="pwa")`` (``model=None`` =
