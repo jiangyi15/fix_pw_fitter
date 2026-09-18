@@ -47,7 +47,7 @@ def discover_sub_decays(config, name_map, merge_cp=False):
     pws = config.full_decay.get_partial_waves_params()
 
     idx_to_ls = {}
-    for start, end, chain in config._chain_ranges():
+    for start, end, chain in config.chain_ck_ranges():
         if len(chain.decays) > 1:
             ls_list = chain.decays[1].get_ls_list()
             for j, base_idx in enumerate(range(start, end)):

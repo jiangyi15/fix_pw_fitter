@@ -121,7 +121,7 @@ def main():
         chains, bachelor = find_resonance(f, args.resonance)
     except ValueError as exc:
         sys.exit(str(exc))
-    n_base = f.config._chain_ranges()[-1][1]
+    n_base = f.model.chain_ck_ranges()[-1][1]
     cm = f.model.get_ck_map()
 
     # each wave = one CK channel; block-0 index and channel name

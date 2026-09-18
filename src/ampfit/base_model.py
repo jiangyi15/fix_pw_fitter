@@ -605,8 +605,15 @@ class BaseModel:
                         ret.append((j[0], j[1].replace("g_ls", "g_lsbar"), *j[2:]))
         return ret
 
-    def _chain_ranges(self):
-        """Build list of (base_start, base_end, chain) for all chains."""
+    def chain_ck_ranges(self):
+        """Per-chain ck index ranges in the base (pre-block) layout.
+
+        Returns ``[(base_start, base_end, chain), ...]``: each full decay
+        chain owns ``len(chain.get_gls_combination())`` consecutive ck slots,
+        and the last ``base_end`` is the total base ck count (equal to
+        ``len(full_decay.get_partial_waves_params())``).  Row-block expansion
+        (``n_perm · n_cp``) is applied separately by ``_expand_to_blocks``.
+        """
         idx = 0
         ranges = []
         for chain in self.full_decay.chains:
@@ -648,7 +655,7 @@ class BaseModel:
             resonance_names = [resonance_names]
         target = set(resonance_names)
 
-        chain_ranges = self._chain_ranges()
+        chain_ranges = self.chain_ck_ranges()
         n_base = chain_ranges[-1][1] if chain_ranges else 0
 
         matching = set()
@@ -695,7 +702,7 @@ class BaseModel:
         Returns:
             list[int] — ck indices covering all row blocks (n_perm · n_cp).
         """
-        chain_ranges = self._chain_ranges()
+        chain_ranges = self.chain_ck_ranges()
         n_base = chain_ranges[-1][1] if chain_ranges else 0
 
         matching = set()

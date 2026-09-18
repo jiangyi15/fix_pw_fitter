@@ -27,7 +27,7 @@ def find_resonance(f, res_name):
     """
     chains = []
     bachelor = None
-    for start, end, chain in f.config._chain_ranges():
+    for start, end, chain in f.model.chain_ck_ranges():
         outs = [o.name for o in chain.decays[0].outs]
         res_outs = [o for o in outs if o not in PION_NAMES]
         pion_outs = [o for o in outs if o in PION_NAMES]

@@ -98,7 +98,7 @@ def main():
 
     chains, bach = find_resonance(f, args.resonance)
     ck_ranges = [(s, e) for s, e, _ in chains]
-    n_base = f.config._chain_ranges()[-1][1]
+    n_base = f.model.chain_ck_ranges()[-1][1]
     n_wave = sum(e - s for s, e in ck_ranges)
     print(f"R = {args.resonance}: {len(chains)} chain(s) "
           f"({n_wave} wave(s), blocks {{0,2}}, bachelor={bach})")

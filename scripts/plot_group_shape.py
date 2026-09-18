@@ -253,7 +253,7 @@ def main():
         groups = {k: v for k, v in groups.items() if args.group in k}
     if not groups:
         sys.exit(f"no groups matching {args.group!r}")
-    chain_ranges = f.config._chain_ranges()
+    chain_ranges = f.model.chain_ck_ranges()
 
     lo1, hi1 = args.m1 if args.m1 else (2 * M_PI, M_B - M_PI)
     grid = np.linspace(lo1, hi1, args.n)
