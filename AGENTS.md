@@ -121,6 +121,15 @@ leaf w.r.t. `config_loader`/`amp_model`/`backends`).  Legacy attribute names
 `_projection_duplicate` are re-exported from `config_loader` for
 compatibility.
 
+**AmplitudeModel**: subclasses `BaseModel` — the model *is* the interpreted
+physical model plus fitting policy (`name`, scalar policy,
+`params_transform_cls`, the `build_kernel_config` override seam).  It is
+built from the `Config`'s already-interpreted state (shared object
+references), so `config` and `model` expose the same physics and the
+lazily-filled index data (`m0_phys_name`, `unique_*`, …) never diverges.
+`Fitter` keeps the model as `fitter.model` and reads its policy/kernel
+config through it.
+
 ### Data flow
 
 ```

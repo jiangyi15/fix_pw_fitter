@@ -24,6 +24,7 @@ Registered models:
   time-dependent flavour-tagged mixing: adds the six scalar parameters.
 """
 
+from ampfit.base_model import BaseModel
 from ampfit.kernel_params import (
     BuildKernelParams, PWAKernelParams, FlavourTagMixKernelParams)
 
@@ -84,8 +85,14 @@ def build_amplitude_model(config):
     return cls(config)
 
 
-class AmplitudeModel:
-    """Base class — full access to the :class:`Config` object."""
+class AmplitudeModel(BaseModel):
+    """An interpreted physical model plus amplitude-model policy.
+
+    Inherits the decay tree, index/tables and the predefined base kernel
+    config from :class:`~ampfit.base_model.BaseModel`; adds only the fitting
+    policy (``name``, scalar policy, ``params_transform_cls``) and the
+    ``build_kernel_config`` override seam.
+    """
 
     name = "pwa"
     default_scalar_names = ()
@@ -93,12 +100,21 @@ class AmplitudeModel:
     params_transform_cls = PWAKernelParams
 
     def __init__(self, config):
-        self.config = config
+        # ``config`` (a Config/BaseModel) has already interpreted the
+        # declarations; adopt that same state (shared object references) so
+        # there is ONE interpretation and the lazily-filled index data
+        # (``unique_*``, ``m0_phys_name`` ...) stays consistent no matter
+        # which object the caller reads.
+        if isinstance(config, BaseModel):
+            self.__dict__.update(config.__dict__)
+        else:
+            dic = config if isinstance(config, dict) else getattr(config, "dic", config)
+            super().__init__(dic, getattr(config, "_config_path", ""))
 
     # -- model views (used by Fitter / reporting) ------------------------
     @property
     def scalar_names(self):
-        explicit = self.config.dic.get("scalar_names")
+        explicit = self.dic.get("scalar_names")
         if explicit is not None:
             return list(explicit)
         return list(self.default_scalar_names)
@@ -109,7 +125,7 @@ class AmplitudeModel:
         explicit ``scalar_defaults`` — a partial override keeps the legacy
         per-name fallbacks (e.g. delta_m, poqr)."""
         merged = dict(self.default_scalar_defaults or {})
-        explicit = self.config.dic.get("scalar_defaults")
+        explicit = self.dic.get("scalar_defaults")
         if explicit:
             merged.update(explicit)
         return merged
@@ -117,7 +133,7 @@ class AmplitudeModel:
     # -- what the model produces ----------------------------------------
     def build_kernel_config(self):
         """Kernel config for this model (base index config, model-shaped)."""
-        return self.config.build_base_kernel_config()
+        return self.build_base_kernel_config()
 
     def build_params_transform(self) -> BuildKernelParams:
         """Resolved ↔ kernel parameter transform for this model.

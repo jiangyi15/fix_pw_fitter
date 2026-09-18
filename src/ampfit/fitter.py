@@ -62,17 +62,17 @@ class Fitter:
 
         self.config = Config(config_file)
         # Fitter is the composition root: it owns the amplitude model.
-        model = build_amplitude_model(self.config)
+        self.model = build_amplitude_model(self.config)
 
         # Normalise + validate the spec first (fail fast, before the
         # expensive kernel-config build); create_backend also accepts an
         # already-built backend instance.
         spec = resolve_backend_spec(
             backend, config_spec=getattr(self.config, "backend_spec", None),
-            allowed=backends_for_model(model.name))
-        self.kernel_config = model.build_kernel_config()
+            allowed=backends_for_model(self.model.name))
+        self.kernel_config = self.model.build_kernel_config()
         self.backend = create_backend(spec, self.kernel_config,
-                                      model=model.name)
+                                      model=self.model.name)
 
         # ck_map (list of param name tuples, one per partial wave).
         # For single-block configs get_ck_map() already returns the same
@@ -90,7 +90,7 @@ class Fitter:
         # Kernel parameter transform — produced by the amplitude model; it
         # owns the FULL parameter surface (ck/m0/g0 and, for legacy models,
         # the scalars), so the fitter treats every parameter generically.
-        self._kernel_builder = model.build_params_transform()
+        self._kernel_builder = self.model.build_params_transform()
 
         # Standalone constraint manager — flat name list, no type distinction.
         self.cm = ConstraintManager(self._kernel_builder.param_names())

@@ -23,10 +23,9 @@ class BuildKernelParams:
 
     def __init__(self, model):
         self.model = model
-        self.config = model.config
-        self._pc = CKProduct(self.config.get_ck_map())
-        self._m0_names = list(self.config.m0_phys_name)
-        self._g0_names = list(self.config.g0_phys_name)
+        self._pc = CKProduct(model.get_ck_map())
+        self._m0_names = list(model.m0_phys_name)
+        self._g0_names = list(model.g0_phys_name)
 
     @property
     def pc(self):
@@ -41,11 +40,11 @@ class BuildKernelParams:
         sorted *together* (interleaved ``.._i, .._r``), then m0, then g0 —
         so seeded initial values are reproducible across the refactor.
         """
-        bases = sorted({p for comb in self.config.get_ck_map()
+        bases = sorted({p for comb in self.model.get_ck_map()
                         for p in comb if isinstance(p, str)})
         names = (sorted([b + "r" for b in bases] + [b + "i" for b in bases])
-                 + list(self.config.m0_phys_name)
-                 + list(self.config.g0_phys_name))
+                 + list(self.model.m0_phys_name)
+                 + list(self.model.g0_phys_name))
         return list(dict.fromkeys(names))
 
     def param_defaults(self):

@@ -64,3 +64,46 @@ def test_base_model_carries_no_model_policy():
     for attr in ("name", "params_transform_cls", "scalar_names",
                  "scalar_defaults", "data_layout", "build_params_transform"):
         assert not hasattr(BaseModel, attr), attr
+
+
+
+def test_amplitude_model_is_a_base_model():
+    from ampfit.amp_model import AmplitudeModel, build_amplitude_model
+    from ampfit.base_model import BaseModel
+    from ampfit.config_loader import Config
+
+    assert issubclass(AmplitudeModel, BaseModel)
+    model = build_amplitude_model(Config(CONFIG))
+    assert isinstance(model, BaseModel)
+    # the policy object does not keep a reference to the raw Config
+    assert not hasattr(model, "config")
+
+
+def test_model_shares_the_config_interpretation():
+    from ampfit.amp_model import build_amplitude_model
+    from ampfit.config_loader import Config
+
+    cfg = Config(CONFIG)
+    model = build_amplitude_model(cfg)
+    # single interpretation: shared references, no duplicated derivation
+    assert model.decay_tree is cfg.decay_tree
+    assert model.unique_bw is cfg.unique_bw
+    assert model.m0_phys_name is cfg.m0_phys_name
+    # lazily-filled index data is visible through both objects
+    model.build_kernel_config()
+    assert len(cfg.m0_phys_name) == len(model.m0_phys_name) > 0
+    assert len(cfg.unique_bw) == len(model.unique_bw) > 0
+
+
+def test_fitter_keeps_the_model():
+    from ampfit import Fitter
+    from ampfit.amp_model import AmplitudeModel
+
+    f = Fitter(CONFIG, backend="numpy_pwa")
+    try:
+        assert isinstance(f.model, AmplitudeModel)
+        assert f.model.decay_tree is f.config.decay_tree
+        assert f.model.m0_phys_name is f.config.m0_phys_name
+        assert f.all_comb == f.model.get_ck_map()
+    finally:
+        f.backend.free()
