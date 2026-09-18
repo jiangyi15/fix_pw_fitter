@@ -45,7 +45,7 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 from ampfit import Fitter
 
 # Backend selection via string shortcut (default: model's registered "default")
-fitter = Fitter("config_amp.yml")                         # config backend, else the model's "default" (legacy → cuda64/cuda_v3, PWA → cuda_v4_pwa)
+fitter = Fitter("config_amp.yml")                         # config backend, else the model's "default" (TD → cuda64/cuda_v3, PWA → cuda_v4_pwa)
 fitter = Fitter("config_amp.yml", backend="numpy")        # explicit override
 fitter = Fitter("config_amp.yml", backend="cuda32_v3")    # CUDA f32 v3
 # the config may also select it:  config: {backend: numpy}
@@ -132,7 +132,7 @@ kernel-config content and the parameter transform (so there is no runtime
 
 ```yaml
 amp_model: pwa               # default: ck/m0/g0 only (no time/mixing/scalars)
-# amp_model: flavour_tag_mix # legacy time/mixing model: adds 6 scalars
+# amp_model: flavour_tag_mix # time-dependent (TD) mixing model: adds 6 scalars
 #                            # (aliases: flour_tag_mix, p4_directly)
 ```
 

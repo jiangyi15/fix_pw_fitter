@@ -14,7 +14,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 
 | Backend | Flag | Note |
 |---------|------|------|
-| **Integrated** | `{"name": "integrated", "base": "cuda_v3_cache"}` | Gram matrix O(n²) norm + base backend for data NLL. Legacy model only (`n_blocks=8`); pure PWA uses `integrated_pwa`. Default base `cuda_v3_cache`. |
+| **Integrated** | `{"name": "integrated", "base": "cuda_v3_cache"}` | Gram matrix O(n²) norm + base backend for data NLL. TD model only (`n_blocks=8`); pure PWA uses `integrated_pwa`. Default base `cuda_v3_cache`. |
 | **v3 amp-cache** | `cuda_v3_ampcache` | v3 sparse + per-handle cache of the minimal-set angular amplitudes (`Amp = fa·fl`, 272 unique/event). Forward per wave = `ck·Amp_slot[w]/bw_p`, so only the BW propagator is recomputed each iteration (m0/g0 stay fitted, grads flow). momentum/angle are uploaded only transiently for the fill and **not kept** on the GPU. fp64 fill → float2 store (constant over fit). ~1.7× faster than sparse per iteration. |
 | **v4 PWA** | `cuda_v4_pwa` | No time/mixing/scalars: `P = Σ_p |Σ_k ck_k·a_{p,k}|²`. Derived from ampcache (same angular cache + per-iteration BW). All projections share one `ck`; the projection only changes the angular part. Wave entries stored p-major: `n_wave = n_proj·N`, `ck` length `N = n_wave/n_proj`. Config key `n_proj` (default 1). |
 | **v4 PWA cache** | `cuda_v4_pwa_cache` | Same pure-PWA model, **full-amplitude cache for fixed m0/g0** (fpwfitter-style): C keeps only weight/bkg + the cached `common[e, p·N+k]`; mass/momentum/angle never live in C — the Python DataHandle retains them and builds the cache on the FIRST `compute()` from the params m0/g0 (Python-level `_filled` flag; no C-side state). Verified bit-equal to `cuda_v4_pwa` at fixed m0/g0 (Q/P/ck-grad; m0/g0 grads zero). **Strictly fixed-m0/g0**: no auto refill/switch; later m0/g0 changes raise ValueError — float masses/widths ⇒ use `cuda_v4_pwa`. |
@@ -39,7 +39,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 
 Pre-computes 56×56 Gram matrices from phsp.  Norm is O(n²) per iteration instead of O(N_phsp × 448).
 Base backend handles data NLL.  Default base is `cuda_v3_cache`.
-**Legacy model only** (`n_blocks=8` + scalars): a pure-PWA config uses the
+**TD model only** (`n_blocks=8` + scalars): a pure-PWA config uses the
 sibling `integrated_pwa` backend.  Backends register a single name per
 decorator scoped by amplitude-model NAME (a string) — e.g.
 `@register_backend("integrated", model="flavour_tag_mix")`.  `Fitter` asks
@@ -67,8 +67,9 @@ Auto-detection priority:
 `amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
 `AmplitudeModel` (`ampfit/amp_model.py`) via `build_amplitude_model(source)`,
 where *source* is a file path, a config dict, or a `RawConfig`.  Registered
-models: `pwa` (default) and `flavour_tag_mix` (aliases `flour_tag_mix`,
-`p4_directly`); add your own with `@register_amplitude_model("name")`.
+models: `pwa` (default) and `flavour_tag_mix` — the **time-dependent (TD)**
+mixing model (aliases `flour_tag_mix`, `p4_directly`); add your own with
+`@register_amplitude_model("name")`.
 
 Object roles:
 - **`RawConfig`** (`ampfit/config_loader.py`) — the raw YAML input only:
@@ -138,8 +139,8 @@ decay_tree`, plus `amp_model -> base_model`; `base_model` is a leaf w.r.t.
 physical model plus fitting policy.  It derives its own physics from the raw
 config (`AmplitudeModel(raw_config_or_dict)`), so it shares no mutable state
 with a Config.  `build_kernel_config()` is the override seam: `PWA` adds the
-pure-PWA meta keys on top of the base config; `FlavourTagMix` (legacy mixing)
-keeps the base.  `Fitter` keeps the model as `fitter.model` and reads its
+pure-PWA meta keys on top of the base config; `FlavourTagMix` (the
+**time-dependent / TD** model) keeps the base.  `Fitter` keeps the model as `fitter.model` and reads its
 policy/kernel config through it.
 
 ### Event data (model-driven)
@@ -152,8 +153,8 @@ policy/kernel config through it.
   (`n_blocks = n_perm · n_cp` blocks; each block reorders the final columns,
   and a CP block additionally reverses the 3-momentum `p → −p` **in the CM
   frame**).  `n_blocks == 1` is the plain single-block fill.
-- **`flavour_tag_mix`**: `momenta_to_data` — the legacy 24-row layout that also
-  emits the `frac`/`time` mixing inputs.
+- **`flavour_tag_mix` (TD)**: `momenta_to_data` — the time-dependent 24-row
+  layout that also emits the `frac`/`time` mixing inputs.
 
 Block enumeration lives on the tree: `DecayTree.block_orders()` →
 `[(column order, is_cp), ...]` (order is arbitrary — all blocks share one
