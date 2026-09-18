@@ -24,6 +24,8 @@ Registered models:
   time-dependent flavour-tagged mixing: adds the six scalar parameters.
 """
 
+import numpy as np
+
 from ampfit.base_model import BaseModel
 from ampfit.kernel_params import (
     BuildKernelParams, PWAKernelParams, FlavourTagMixKernelParams)
@@ -138,6 +140,30 @@ class AmplitudeModel(BaseModel):
         """Kernel config for this model (base index config, model-shaped)."""
         return self.build_base_kernel_config()
 
+    def build_event_data(self, momenta, kernel_config, *, weight=None,
+                         bkg=None):
+        """Build kernel-ready event arrays for this model.
+
+        Default (PWA-style): generic tree fill with the identical-particle /
+        CP block expansion.  Models whose kernel consumes time/mixing
+        override this (see :class:`FlavourTagMix`).
+        """
+        from ampfit.pwa_build import build_tree_event_data
+
+        chains_by_topo = {}
+        for _, chain in self.full_decay.get_partial_waves():
+            chains_by_topo[self.topo_index[chain.topo_id()]] = chain
+        spinful = [nm for nm in self.finals
+                   if float(self.dic["particle"][nm].get("J", 0)) != 0]
+        out = build_tree_event_data(self, kernel_config, chains_by_topo,
+                                    momenta, spinful_names=spinful)
+        n = momenta.shape[0]
+        out["weight"] = (np.ones(n) if weight is None
+                         else np.asarray(weight, dtype=float))
+        if bkg is not None:
+            out["bkg"] = np.asarray(bkg, dtype=np.float64).ravel()
+        return out
+
     def build_params_transform(self) -> BuildKernelParams:
         """Resolved ↔ kernel parameter transform for this model.
 
@@ -161,3 +187,22 @@ class FlavourTagMix(AmplitudeModel):
     default_scalar_names = tuple(LEGACY_SCALAR_NAMES)
     default_scalar_defaults = dict(LEGACY_SCALAR_DEFAULTS)
     params_transform_cls = FlavourTagMixKernelParams
+
+    def build_event_data(self, momenta, kernel_config, *, weight=None,
+                         bkg=None):
+        """Legacy 24-row layout with the ``frac`` / ``time`` mixing inputs."""
+        from ampfit.momenta_to_data import momenta_to_data
+
+        n = momenta.shape[0]
+        w = np.ones(n) if weight is None else np.asarray(weight, dtype=float)
+        d = momenta_to_data(momenta, weight=w)
+        return {
+            "mass": d["mass"].reshape(n, -1),
+            "q": d["q"].reshape(n, -1),
+            "angle": d["angles"],
+            "frac": d["frac"],
+            "time": d["time"],
+            "bkg": (d["bkg_raw"] if bkg is None
+                    else np.asarray(bkg, dtype=np.float64).ravel()),
+            "weight": np.asarray(d["weight"], dtype=float),
+        }

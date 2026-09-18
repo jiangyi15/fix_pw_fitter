@@ -423,40 +423,11 @@ class Fitter:
         perm = [list(order).index(f) for f in self.model.finals]
         momenta = momenta[:, perm]
 
-        from ampfit.config_loader import row_block_factors
-        C = row_block_factors(self.config.dic)[2]
-        if C == 1:
-            # generic tree-based event fill (arbitrary chain depth; appends
-            # +3 alignment columns per spinful final shared by >1 active
-            # topology).  Replaces the former 2-decay-only pwa_event_data
-            # (NLL shift on the real 609k pi+pi-eta fit < 0.03).
-            from ampfit.pwa_build import pwa_event_data_tree
-            chains_by_topo = {}
-            for _, chain in self.model.full_decay.get_partial_waves():
-                tid = self.model.topo_index[chain.topo_id()]
-                chains_by_topo[tid] = chain
-            spinful = [nm for nm in self.model.finals
-                       if float(self.config.dic["particle"][nm].get("J", 0))
-                       != 0]
-            out = pwa_event_data_tree(self.model, self.kernel_config,
-                                      chains_by_topo, momenta,
-                                      spinful_names=spinful)
-            out["weight"] = np.asarray(weight, dtype=float)
-            if bg is not None:
-                out["bkg"] = bg
-        else:
-            from ampfit.momenta_to_data import momenta_to_data
-            d = momenta_to_data(momenta, weight=weight)
-            out = {
-                "mass": d["mass"].reshape(momenta.shape[0], -1),
-                "q": d["q"].reshape(momenta.shape[0], -1),
-                "angle": d["angles"],
-                "frac": d["frac"],
-                "time": d["time"],
-                "bkg": d["bkg_raw"] if bg is None else bg,
-                "weight": np.asarray(d["weight"], dtype=float),
-            }
-        return out
+        # The amplitude model builds the arrays for its own data case:
+        # PWA -> generic tree fill with identical/CP block expansion;
+        # flavour_tag_mix -> the legacy 24-row layout with frac/time.
+        return self.model.build_event_data(momenta, self.kernel_config,
+                                           weight=weight, bkg=bg)
 
     _load_momenta_conf = load_momenta_conf   # backward-compatible alias
 

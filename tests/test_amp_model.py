@@ -327,3 +327,31 @@ def test_initial_values_use_default():
         assert all(x_rand[i] == raw[i] for i in range(len(names)))
     finally:
         f.backend.free()
+
+
+def test_model_builds_event_data_per_case():
+    """PWA -> tree (+blocks, no frac/time); FlavourTagMix -> 24-row + frac/time."""
+    import numpy as np
+    from ampfit.config_loader import Config
+    from ampfit.amp_model import build_amplitude_model
+
+    def _mom(n, masses, seed=0):
+        rs = np.random.RandomState(seed)
+        p3 = rs.uniform(-0.4, 0.4, size=(n, len(masses), 3))
+        out = np.empty((n, len(masses), 4))
+        for j, m in enumerate(masses):
+            E = np.sqrt(m ** 2 + (p3[:, j] ** 2).sum(-1))
+            out[:, j] = np.concatenate([E[:, None], p3[:, j]], axis=-1)
+        return out
+
+    m = build_amplitude_model(Config("tests/config_pwa.yml"))
+    d = m.build_event_data(_mom(5, [0.13957, 0.13957, 0.54786]),
+                           m.build_kernel_config())
+    assert {"mass", "q", "angle", "weight"} <= set(d)
+    assert "frac" not in d and "time" not in d
+
+    ml = build_amplitude_model(Config("config_amp.yml"))
+    dl = ml.build_event_data(_mom(5, [0.13957] * 4),
+                             ml.build_kernel_config())
+    assert "frac" in dl and "time" in dl
+    assert dl["angle"].shape[1] == 24
