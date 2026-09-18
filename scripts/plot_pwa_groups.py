@@ -79,8 +79,7 @@ def main():
             merge.append((pat, label))
 
     f = Fitter(args.config, backend=args.backend)
-    kc = f.config.build_all_index()
-    n_comp = (int(len(kc["variables"])) if "variables" in kc else 3)
+    n_comp = int(f.kernel_config["angle_k"].shape[1])
     cp = os.path.splitext(args.fit_json)[0] + "_constraints.json"
     if os.path.exists(cp):
         f.load_constraints(cp)
