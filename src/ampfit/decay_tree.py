@@ -315,12 +315,6 @@ class DecayTree:
         self.data = dict(data_spec or {})
         self.top = particle_spec["$top"]
         self.finals = list(particle_spec["$finals"])
-        # The particle/column ORDER is defined by ``data.dat_order`` (``$finals``
-        # is just the list of finals): order ``finals`` by it when it is a
-        # permutation of the declared finals.
-        dat_order = list(self.data.get("dat_order") or [])
-        if dat_order and set(dat_order) == set(self.finals):
-            self.finals = list(dat_order)
 
         self.struct = build_decay_struct(decay_spec, self.top, self.finals)
         # intermediate structural chain specs are not kept on the object:

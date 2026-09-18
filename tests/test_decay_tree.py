@@ -93,20 +93,3 @@ def test_decay_tree_owns_symmetry_declarations():
     assert tree.identical_groups == [["pip", "pim"]]
     orders = tree.block_orders()
     assert len(orders) == 4 and sum(is_cp for _, is_cp in orders) == 2
-
-
-def test_finals_order_follows_dat_order():
-    """dat_order defines the particle/column order ($finals is just a list)."""
-    from ampfit.config_loader import Config, load_config
-
-    dic = load_config(CONFIG)
-    dic["data"] = dict(dic.get("data") or {})
-    dic["data"]["dat_order"] = ["eta", "pip", "pim"]
-    assert Config(dic).decay_tree.finals == ["eta", "pip", "pim"]
-
-    # no dat_order -> fall back to the declared $finals order
-    dic2 = load_config(CONFIG)
-    dic2["data"] = {k: v for k, v in (dic2.get("data") or {}).items()
-                    if k != "dat_order"}
-    c2 = Config(dic2)
-    assert c2.decay_tree.finals == list(c2.dic["particle"]["$finals"])
