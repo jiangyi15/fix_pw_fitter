@@ -66,61 +66,45 @@ class AmplitudeFractions:
             return self._cache[key]
 
         p = dict(p)
-        ck_masked = self._ck_masked(mask)
-        p["ck"] = ck_masked
+        p["ck"] = self._ck_masked(mask)
         Q, grads, _ = self.fitter.backend.compute(p, self._data, norm=None)
         total = float(Q)
 
-        cfg = self.fitter.config
-        # Build per-resolved-name gradients via kernel builder
-        total_grads_mod = {
-            "ck": grads["ck"].copy(),
-            "m0": grads["m0"],
-            "g0": grads["g0"],
-            # pure-PWA models have no scalar couplings
-            "scalar": grads.get("scalar", 0.0),
-        }
+        # Mask the ck gradient exactly like the couplings; every other
+        # parameter group is handed to the transform untouched, so this code
+        # never needs to know which groups exist (ck/m0/g0[/scalar]).
+        grads = dict(grads)
         if mask is not None:
+            ck_grad = np.asarray(grads["ck"]).copy()
             for i in range(self._n_ck):
                 if i not in mask:
-                    total_grads_mod["ck"][i] = 0.0j
-        grad = self.fitter._kernel_builder.backward(
-            total_grads_mod, self._resolved
-        )
+                    ck_grad[i] = 0.0j
+            grads["ck"] = ck_grad
+        grad = self.fitter._kernel_builder.backward(grads, self._resolved)
 
         if key is not None:
             self._cache[key] = (total, grad)
         return total, grad
 
-    def _phys_to_params(self, p, phys_dict):
-        """Apply physical-parameter shifts into a params dict copy."""
-        p = dict(p)
-        cfg = self.fitter.config
-        for name, val in phys_dict.items():
-            if name in cfg.m0_phys_name:
-                p["m0"][cfg.m0_phys_name.index(name)] = val
-            elif name in cfg.g0_phys_name:
-                p["g0"][cfg.g0_phys_name.index(name)] = val
-        return p
+    def _phys_to_params(self, phys_dict):
+        """Kernel params at the best fit with *phys_dict* overrides applied.
+
+        Delegates the name → (array, slot) mapping to the model's parameter
+        transform, so every parameter group (ck/m0/g0[/scalar]) is handled
+        uniformly.
+        """
+        kb = self.fitter._kernel_builder
+        return kb.forward({**self._resolved, **phys_dict})
 
     def _default_param_names(self):
-        """Return all varying physical parameter names in the resolved dict.
+        """Free (optimized) parameter names, from the variable registry.
 
-        Includes CK internal names (from VariableRegistry), m0, and g0.
+        These are the x-space names the fit covariance is defined over; the
+        transform owns the kernel-side grouping, so there is no need to list
+        m0/g0 here (``cal_uncertainties_multi`` already restricts to names
+        present in the resolved dict).
         """
-        resolved = self._resolved
-        cfg = self.fitter.config
-        names = []
-        # CK internal variable names (real/imag parts)
-        for n in self.fitter.cm.var_registry.flat_names:
-            names.append(n)
-        for n in cfg.m0_phys_name:
-            if n in resolved:
-                names.append(n)
-        for n in cfg.g0_phys_name:
-            if n in resolved:
-                names.append(n)
-        return names
+        return list(self.fitter.cm.var_registry.flat_names)
 
     # ── public API ────────────────────────────────────────────────
 
@@ -150,7 +134,7 @@ class AmplitudeFractions:
 
         def fun_3pt(phys):
             """Forward‑only: compute fractions from weighted sums."""
-            p = R._phys_to_params(R._params, phys)
+            p = R._phys_to_params(phys)
             total_den, _ = R._compute_total_and_grad(p, denominator)
             vals = []
             for m in masks:
@@ -160,7 +144,7 @@ class AmplitudeFractions:
 
         def fun_jac(phys):
             """Forward + backward: fractions + analytical gradient dicts."""
-            p = R._phys_to_params(R._params, phys)
+            p = R._phys_to_params(phys)
 
             # Denominator (computed once, shared across all masks)
             total_den, grad_den = R._compute_total_and_grad(p, denominator)
