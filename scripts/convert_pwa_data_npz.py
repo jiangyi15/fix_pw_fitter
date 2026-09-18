@@ -53,7 +53,7 @@ def main():
     args = ap.parse_args()
 
     dic = load_config(args.config)
-    tree = DecayTree(dic["decay"], dic["particle"])
+    tree = DecayTree(dic["decay"], dic["particle"], dic.get("data"))
     pws = tree.partial_waves()
     byt = {tree.topo_index[ch.topo_id()]: ch for _, ch in pws}
     blocks = block_orders(tree.finals, dic.get("data") or {})

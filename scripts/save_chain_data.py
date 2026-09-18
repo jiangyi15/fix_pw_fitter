@@ -55,7 +55,7 @@ def main():
     args = ap.parse_args()
 
     dic = load_config(args.config)
-    tree = DecayTree(dic["decay"], dic["particle"])
+    tree = DecayTree(dic["decay"], dic["particle"], dic.get("data"))
 
     # resolve chain selector -> topology slot (int, single name, or list)
     sel = args.chain

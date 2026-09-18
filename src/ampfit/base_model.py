@@ -33,14 +33,9 @@ def row_block_factors(dic):
     ``n_blocks = n_perm · n_cp``.  No declarations → 1 block (a
     single-flavour pure-PWA model, e.g. config_pwa.yml).
     """
-    data_d = dic.get("data") or {}
-    id_groups = data_d.get("identical_particles") or []
-    cp_groups = data_d.get("cp_particles") or []
-    n_perm = 1
-    for grp in id_groups:
-        n_perm *= math.factorial(len(grp))
-    n_cp = 2 if cp_groups else 1
-    return n_perm, n_cp, n_perm * n_cp
+    from .decay_tree import symmetry_factors
+    n_perm, n_cp, n_blocks, _, _ = symmetry_factors(dic.get("data") or {})
+    return n_perm, n_cp, n_blocks
 
 
 def _projection_duplicate(ret, n_proj):
@@ -74,7 +69,8 @@ class BaseModel:
         self._config_path = config_path
         # The decay tree is interpreted by a standalone value object; the
         # legacy attribute names below stay as aliases for compatibility.
-        self.decay_tree = DecayTree(self.dic["decay"], self.dic["particle"])
+        self.decay_tree = DecayTree(self.dic["decay"], self.dic["particle"],
+                                          self.dic.get("data"))
         self.top = self.decay_tree.top
         self.finals = self.decay_tree.finals
         self.decay_struct = self.decay_tree.struct

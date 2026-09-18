@@ -76,3 +76,20 @@ def test_decay_tree_display_helpers_are_model_free():
     chain = tree.full.chains[0]
     assert r"\to" in tree.display_decay(chain.decays[0])
     assert tree.display_chain(chain)
+
+
+def test_decay_tree_owns_symmetry_declarations():
+    """identical/cp declarations are decay information on the tree."""
+    from ampfit.config_loader import load_config
+    from ampfit.decay_tree import DecayTree
+
+    dic = load_config(CONFIG)
+    dic["data"] = dict(dic.get("data") or {})
+    dic["data"]["identical_particles"] = [["pip", "pim"]]
+    dic["data"]["cp_particles"] = [["pip", "pim"]]
+    tree = DecayTree(dic["decay"], dic["particle"], dic["data"])
+
+    assert tree.n_perm == 2 and tree.n_cp == 2 and tree.n_blocks == 4
+    assert tree.identical_groups == [["pip", "pim"]]
+    orders = tree.block_orders()
+    assert len(orders) == 4 and sum(is_cp for _, is_cp in orders) == 2

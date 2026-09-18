@@ -11,6 +11,7 @@ legacy attribute names (``full_decay``, ``decay_struct``, ``topo_index``, …)
 as aliases for backward compatibility.
 """
 import itertools
+import math
 
 from .particle_model import build_particle
 
@@ -248,6 +249,58 @@ def get_topo_index(decay):
     return topo_id
 
 
+def symmetry_factors(data_spec):
+    """``(n_perm, n_cp, n_blocks, identical_groups, cp_groups)`` from the
+    config ``data`` section.  Each identical group of size ``g`` contributes
+    ``g!`` permutations; a declared CP map contributes a second (conjugate)
+    copy -> ``n_blocks = n_perm * n_cp``.
+    """
+    data = data_spec or {}
+    id_groups = [list(g) for g in (data.get("identical_particles") or [])]
+    cp_groups = [list(g) for g in (data.get("cp_particles") or [])]
+    n_perm = 1
+    for g in id_groups:
+        n_perm *= math.factorial(len(g))
+    n_cp = 2 if cp_groups else 1
+    return n_perm, n_cp, n_perm * n_cp, id_groups, cp_groups
+
+
+def block_column_orders(finals, id_groups=(), cp_groups=()):
+    """Column orders for the identical permutations x CP blocks.
+
+    Returns ``[(order, is_cp), ...]``: ``momenta[:, order]`` gives that
+    block's configuration; ``is_cp`` marks a CP block (conjugate columns +
+    reversed 3-momentum).  Order is arbitrary (all blocks share one ``ck``).
+    """
+    idx = {f: j for j, f in enumerate(finals)}
+    n = len(finals)
+    group_cols = [[idx[g] for g in grp] for grp in (id_groups or [])]
+    if group_cols:
+        perms = []
+        for combo in itertools.product(*[list(itertools.permutations(c))
+                                         for c in group_cols]):
+            order = list(range(n))
+            for cols, perm in zip(group_cols, combo):
+                for dst, src in zip(cols, perm):
+                    order[dst] = src
+            perms.append(tuple(order))
+    else:
+        perms = [tuple(range(n))]
+
+    cp_col = None
+    if cp_groups:
+        cp_col = list(range(n))
+        for pair in cp_groups:
+            ia, ib = idx[pair[0]], idx[pair[1]]
+            cp_col[ia], cp_col[ib] = ib, ia
+
+    blocks = [(p, False) for p in perms]
+    if cp_col is not None:
+        for p in perms:
+            blocks.append((tuple(cp_col[p[i]] for i in range(n)), True))
+    return blocks
+
+
 class DecayTree:
     """The decay/particle declarations as a pure value object.
 
@@ -256,9 +309,10 @@ class DecayTree:
     stable topology index.
     """
 
-    def __init__(self, decay_spec, particle_spec):
+    def __init__(self, decay_spec, particle_spec, data_spec=None):
         self.decay_spec = decay_spec
         self.particle_spec = particle_spec
+        self.data = dict(data_spec or {})
         self.top = particle_spec["$top"]
         self.finals = list(particle_spec["$finals"])
 
@@ -276,10 +330,20 @@ class DecayTree:
         self.topo_index = self._build_topo_from_struct()
         self.n_topo = len(self.topo_index)
 
+        # decay-symmetry declarations (data section): identical-particle
+        # permutations x CP duplicate the event rows.
+        (self.n_perm, self.n_cp, self.n_blocks,
+         self.identical_groups, self.cp_groups) = symmetry_factors(self.data)
+
     # -- queries ---------------------------------------------------------
     def partial_waves(self):
         """``(ls, chain)`` pairs over every resonance-resolved chain."""
         return self.full.get_partial_waves()
+
+    def block_orders(self):
+        """``[(column order, is_cp), ...]`` for the declared blocks."""
+        return block_column_orders(self.finals, self.identical_groups,
+                                   self.cp_groups)
 
     # -- display (particle / decay-chain labels) -------------------------
     def name_display_map(self):

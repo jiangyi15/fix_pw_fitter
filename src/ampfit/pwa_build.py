@@ -388,49 +388,11 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
 
 
 # ── generic identical-particle / CP block expansion ──────────────────────
-def _block_orders(finals, id_groups=(), cp_groups=()):
-    """Column orders for the identical permutations x CP blocks.
-
-    Returns ``[(order, is_cp), ...]``.  ``momenta[:, order]`` gives that
-    block's configuration; ``is_cp`` marks a CP block whose azimuth columns
-    are negated (mirrors ``momenta_to_data_full``).  Block order is arbitrary:
-    all blocks share one ``ck`` and are summed.
-    """
-    import itertools
-    idx = {f: j for j, f in enumerate(finals)}
-    n = len(finals)
-    group_cols = [[idx[g] for g in grp] for grp in (id_groups or [])]
-    if group_cols:
-        perms = []
-        for combo in itertools.product(*[list(itertools.permutations(c))
-                                         for c in group_cols]):
-            order = list(range(n))
-            for cols, perm in zip(group_cols, combo):
-                for dst, src in zip(cols, perm):
-                    order[dst] = src
-            perms.append(tuple(order))
-    else:
-        perms = [tuple(range(n))]
-
-    cp_col = None
-    if cp_groups:
-        cp_col = list(range(n))
-        for pair in cp_groups:
-            ia, ib = idx[pair[0]], idx[pair[1]]
-            cp_col[ia], cp_col[ib] = ib, ia
-
-    blocks = [(p, False) for p in perms]
-    if cp_col is not None:
-        for p in perms:
-            blocks.append((tuple(cp_col[p[i]] for i in range(n)), True))
-    return blocks
-
-
 def block_orders(finals, data):
-    """Public wrapper: block column orders from a config ``data`` section."""
-    data = data or {}
-    return _block_orders(finals, data.get("identical_particles"),
-                         data.get("cp_particles"))
+    """Block column orders from a config ``data`` section."""
+    from ampfit.decay_tree import block_column_orders, symmetry_factors
+    _, _, _, id_groups, cp_groups = symmetry_factors(data or {})
+    return block_column_orders(finals, id_groups, cp_groups)
 
 
 def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
@@ -444,8 +406,12 @@ def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     exactly the single-block result.
     """
     if blocks is None:
-        data = (getattr(cfg, "dic", None) or {}).get("data") or {}
-        blocks = block_orders(list(getattr(cfg, "finals")), data)
+        tree = cfg if hasattr(cfg, "block_orders") else getattr(cfg, "decay_tree", None)
+        if tree is not None:
+            blocks = tree.block_orders()
+        else:
+            data = (getattr(cfg, "dic", None) or {}).get("data") or {}
+            blocks = block_orders(list(getattr(cfg, "finals")), data)
     if len(blocks) == 1:
         return pwa_event_data_tree(cfg, kc, chains_by_topo, momenta,
                                    spinful_names=spinful_names,
