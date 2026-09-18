@@ -31,7 +31,9 @@ def test_default_model_is_pwa():
     assert isinstance(m.build_params_transform(), PWAKernelParams)
     assert cfg.angle_formula_mode == "helicity" and cfg.n_proj >= 1
     # the raw input holds no model instance / scalar mirror
-    assert not hasattr(cfg.raw, "amplitude_model") and not hasattr(cfg.raw, "scalar_names")
+    from ampfit.config_loader import RawConfig
+    raw = RawConfig(PWA_CFG)
+    assert not hasattr(raw, "amplitude_model") and not hasattr(raw, "scalar_names")
 
 
 def test_legacy_model_adds_scalars():
@@ -265,7 +267,7 @@ def test_raw_config_has_no_model():
     raw = cl.RawConfig(PWA_CFG)
     assert not hasattr(raw, "amplitude_model")
     assert not hasattr(raw, "scalar_names")
-    assert cl.Config(PWA_CFG).model.name == "pwa"
+    assert cl.Config(PWA_CFG).name == "pwa"
 
 
 def test_create_backend_injects_model_into_composer():

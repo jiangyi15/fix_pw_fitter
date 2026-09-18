@@ -22,22 +22,21 @@ def _imports(module):
     return mods
 
 
-def test_config_wraps_the_amplitude_model():
-    from ampfit.base_model import BaseModel
+def test_config_is_a_legacy_alias_for_the_model():
+    from ampfit.amp_model import AmplitudeModel
     from ampfit.config_loader import Config, RawConfig
 
-    cfg = Config(CONFIG)
-    assert isinstance(cfg.raw, RawConfig)          # raw input
-    assert not isinstance(cfg, BaseModel)          # a wrapper, not a model
-    assert isinstance(cfg.model, BaseModel)        # the built model
-    # interpreted physics is delegated to the model
-    assert cfg.decay_tree is cfg.model.decay_tree
-    assert cfg.n_topo == cfg.model.n_topo
+    model = Config(CONFIG)                     # legacy alias
+    assert isinstance(model, AmplitudeModel)
+    assert model.name == "pwa"
+    raw = RawConfig(CONFIG)
+    assert not hasattr(raw, "topo_index")      # raw input has no physics
+    assert model.topo_index is not None
 
 
 def test_base_model_builds_from_raw_dict_without_config():
     from ampfit.base_model import BaseModel
-    from ampfit.config_loader import Config, load_config
+    from ampfit.config_loader import Config, RawConfig, load_config
 
     dic = load_config(CONFIG)
     base = BaseModel(dic, CONFIG)
@@ -49,7 +48,7 @@ def test_base_model_builds_from_raw_dict_without_config():
         set(cfg.build_base_kernel_config())
     # raw-input state lives on Config, not BaseModel
     assert not hasattr(base, "backend_spec")
-    assert cfg.backend_spec == Config(CONFIG).backend_spec
+    assert RawConfig(CONFIG).backend_spec is None
 
 
 def test_base_model_module_is_leaf():
@@ -84,24 +83,14 @@ def test_amplitude_model_is_a_base_model():
     assert not hasattr(model, "config")
 
 
-def test_config_wrapper_delegates_and_models_are_independent():
+def test_config_alias_and_factory_agree():
     from ampfit.amp_model import build_amplitude_model
     from ampfit.config_loader import Config
 
-    cfg = Config(CONFIG)
-    # the wrapper delegates physics to its own model
-    assert cfg.decay_tree is cfg.model.decay_tree
-    assert cfg.m0_phys_name is cfg.model.m0_phys_name
-    # a separately built model is an independent interpretation of the config
-    model = build_amplitude_model(cfg)
-    assert model is not cfg.model
-    assert model.topo_index == cfg.topo_index
-    # m0 names are filled lazily by the kernel-config build
-    assert cfg.m0_phys_name == []
-    model.build_kernel_config()
-    assert len(model.m0_phys_name) > 0
-    cfg.build_kernel_config()
-    assert cfg.m0_phys_name == model.m0_phys_name
+    a = Config(CONFIG)                      # legacy alias
+    b = build_amplitude_model(CONFIG)       # explicit factory
+    assert a.topo_index == b.topo_index
+    assert a.n_proj == b.n_proj
 
 
 def test_fitter_keeps_the_model():

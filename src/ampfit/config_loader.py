@@ -36,29 +36,15 @@ class RawConfig:
                                                               self.dic.get("backend"))
 
 
-class Config:
-    """Ergonomic entry: load the raw config and build the amplitude model.
+def Config(filename):
+    """Legacy alias: ``Config(path)`` returns the amplitude model.
 
-    Owns a :class:`RawConfig` (``self.raw``) and the amplitude model built
-    from it (``self.model``); interpreted-physics / kernel-config attributes
-    are delegated to the model, so ``Config(path).full_decay`` /
-    ``.build_kernel_config()`` / ... work.
+    Kept for callers that used ``Config`` as the entry point; the interpreted
+    physics / kernel config all live on the returned model.  Prefer
+    ``build_amplitude_model(...)`` (model) or ``RawConfig(...)`` (raw input).
     """
-
-    def __init__(self, filename):
-        self.raw = RawConfig(filename)
-        self.dic = self.raw.dic
-        self._config_path = self.raw._config_path
-        self.backend_spec = self.raw.backend_spec
-        from .amp_model import build_amplitude_model
-        self.model = build_amplitude_model(self.raw)
-
-    def __getattr__(self, name):
-        try:
-            model = object.__getattribute__(self, "model")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(model, name)
+    from .amp_model import build_amplitude_model
+    return build_amplitude_model(filename)
 
 
 if __name__=="__main__":

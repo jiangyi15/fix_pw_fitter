@@ -4,7 +4,7 @@ import os
 import tempfile
 
 from ampfit import Fitter
-from ampfit.config_loader import Config
+from ampfit.config_loader import Config, RawConfig
 from ampfit.backends.numpy_pwa_backend import NumpyPWABackend
 
 BASE = os.path.join(os.path.dirname(__file__), "config_pwa.yml")
@@ -21,8 +21,7 @@ def _config_with(text):
 def test_config_backend_spec_and_fitter_default():
     src = open(BASE).read()
     p = _config_with("config:\n    backend: numpy_pwa\n\n" + src)
-    cfg = Config(p)
-    assert cfg.backend_spec == "numpy_pwa"
+    assert RawConfig(p).backend_spec == "numpy_pwa"
 
     f = Fitter(p)                     # no explicit backend -> config value
     try:
@@ -41,7 +40,7 @@ def test_config_backend_spec_and_fitter_default():
 def test_config_backend_absent_is_none():
     src = open(BASE).read()
     p = _config_with(src)
-    assert Config(p).backend_spec is None
+    assert RawConfig(p).backend_spec is None
 
 
 def test_create_backend_string_spec_keeps_kwargs():
@@ -59,7 +58,7 @@ def test_create_backend_string_spec_keeps_kwargs():
 
 def test_readme_low_level_uses_factory():
     from ampfit.backends import create_backend
-    from ampfit.config_loader import Config
+    from ampfit.config_loader import Config, RawConfig
     kc = Config("tests/config_pwa.yml").build_all_index()
     be = create_backend("numpy_pwa", kc)
     assert be is not None
