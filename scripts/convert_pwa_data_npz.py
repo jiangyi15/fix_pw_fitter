@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
-from ampfit.config_loader import load_config
+from ampfit.config_loader import load_config, row_block_factors
 from ampfit.decay_tree import DecayTree
 from ampfit.pwa_build import pwa_event_data_tree
 
@@ -53,6 +53,12 @@ def main():
     args = ap.parse_args()
 
     dic = load_config(args.config)
+    C = row_block_factors(dic)[2]
+    if C != 1:
+        raise SystemExit(
+            f"pure-PWA converter: config declares identical/cp particles "
+            f"(n_blocks={C}); the tree layout has no permutation/CP rows -> "
+            f"use the legacy momenta_to_data path instead")
     tree = DecayTree(dic["decay"], dic["particle"])
     pws = tree.partial_waves()
     byt = {tree.topo_index[ch.topo_id()]: ch for _, ch in pws}

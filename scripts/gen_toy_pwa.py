@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import numpy as np
 
 from ampfit import Fitter
+from ampfit.config_loader import row_block_factors
 from ampfit.pwa_build import pwa_event_data_tree, generate_pwa_phsp
 
 
@@ -80,6 +81,9 @@ def main():
     # Fitter is the composition root: it owns the parameter layer (model +
     # constraints) AND the configured backend for the density computation.
     f = Fitter(args.config, backend=backend_spec)
+    if row_block_factors(f.config.dic)[2] != 1:
+        raise SystemExit("gen_toy_pwa is pure-PWA only (n_blocks != 1: "
+                         "identical/cp particles declared)")
     f.apply_constrains()
     model, kc = f.model, f.kernel_config
     tree = f.decay_tree
