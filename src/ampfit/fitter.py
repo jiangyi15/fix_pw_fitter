@@ -438,7 +438,7 @@ class Fitter:
             spinful = [nm for nm in self.model.finals
                        if float(self.config.dic["particle"][nm].get("J", 0))
                        != 0]
-            out = pwa_event_data_tree(self.config, self.kernel_config,
+            out = pwa_event_data_tree(self.model, self.kernel_config,
                                       chains_by_topo, momenta,
                                       spinful_names=spinful)
             out["weight"] = np.asarray(weight, dtype=float)

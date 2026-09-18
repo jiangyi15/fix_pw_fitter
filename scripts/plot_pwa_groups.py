@@ -118,11 +118,11 @@ def main():
     r = f.load_results(args.fit_json)
     if r.x is None or len(r.x) == 0:
         sys.exit("no parameter vector in the fit result")
-    if not hasattr(f.config, "full_decay"):
+    if not hasattr(f.model, "full_decay"):
         sys.exit("plot_pwa_groups needs a config with full_decay "
                  "(pure-PWA mode)")
 
-    groups = discover_pwa_groups(f.config, by=args.by, merge=merge)
+    groups = discover_pwa_groups(f.model, by=args.by, merge=merge)
     plotter = PWGroupPlotter(f, r, groups)
     if rec_used:
         # ORIGINAL-event arrays are loaded with the SAME generic prefix
@@ -144,7 +144,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     # ── one figure per config-plot variable (ReadVar items) ─────────
-    items = config_plot_items(f.config, data_np, phsp_np)
+    items = config_plot_items(f.model, data_np, phsp_np)
     if items:
         print("  variables from config plot section (one figure each): " +
               ", ".join(it["key"] for it in items))

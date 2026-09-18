@@ -144,7 +144,7 @@ def main():
         sys.exit(1)
 
     # ── Build groups ──────────────────────────────────────────────
-    groups_3pi, groups_B = discover_groups(f.config)
+    groups_3pi, groups_B = discover_groups(f.model)
 
     # ── AmplitudeFractions ────────────────────────────────────────
     fit_ns = SimpleNamespace(x=fit_result.x,

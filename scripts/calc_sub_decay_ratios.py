@@ -310,7 +310,7 @@ def main():
 
     name_map = f.name_display_map()
 
-    stems = discover_sub_decays(f.config, name_map, merge_cp=not args.no_merge_cp)
+    stems = discover_sub_decays(f.model, name_map, merge_cp=not args.no_merge_cp)
     n_base = len(f.full_decay.get_partial_waves_params())
 
     # ── Terminal output (populates ``af`` cache) ────────────────────

@@ -243,7 +243,7 @@ def main():
         print("ERROR: no fit results")
         sys.exit(1)
     af = AmplitudeFractions(f, r)
-    cfg = f.config
+    cfg = f.model
 
     # ── Build LaTeX ────────────────────────────────────────────────
     out_path = args.output or (os.path.splitext(args.fit_json)[0] + ".tex")

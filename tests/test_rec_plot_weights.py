@@ -39,7 +39,7 @@ def test_rec_group_sum_invariants():
     f.set_data(data_rec)
     x = f.initial_values(seed=0)
     params, _ = f.build_params(x)
-    groups = discover_pwa_groups(f.config, by="chain")
+    groups = discover_pwa_groups(f.model, by="chain")
 
     plotter = PWGroupPlotter(f, OptimizeResult(x=x), groups)
     plotter.use_rec(data_rec_np=data_rec, phsp_rec_np=phsp_rec)

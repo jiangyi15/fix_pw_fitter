@@ -248,7 +248,7 @@ def main():
     x0 = np.asarray(r.x)
 
     discover_ls_groups = _load_ls_groups()
-    groups = discover_ls_groups(f.config)
+    groups = discover_ls_groups(f.model)
     if args.group:
         groups = {k: v for k, v in groups.items() if args.group in k}
     if not groups:

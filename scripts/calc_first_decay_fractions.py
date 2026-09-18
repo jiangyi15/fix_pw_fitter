@@ -262,7 +262,7 @@ def main():
     name_map = f.name_display_map()
     label_fn = _make_label_fn(name_map)
 
-    stems = group_ck_stems(f.config, label_fn)
+    stems = group_ck_stems(f.model, label_fn)
     groups, vals, errs, split_ls, _ = _compute_groups(f, stems, af)
 
     # ── Terminal output (always) ───────────────────────────────────

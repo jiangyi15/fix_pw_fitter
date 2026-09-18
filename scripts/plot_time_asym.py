@@ -62,7 +62,7 @@ def main():
         print("ERROR: could not reconstruct x from", args.fit_json)
         sys.exit(1)
 
-    groups = discover_groups(f.config)
+    groups = discover_groups(f.model)
     plotter = PWGroupPlotter(f, r, groups).compute()
 
     os.makedirs(args.output, exist_ok=True)

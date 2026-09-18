@@ -220,7 +220,7 @@ def run(fit_json, config, data, phsp, max_events, backend, output, fmt,
     if r.x is None or len(r.x) == 0:
         sys.exit(1)
 
-    groups = groups_fn(f.config)
+    groups = groups_fn(f.model)
     plotter = PWGroupPlotter(f, r, groups).compute()
     print(f"  {len(plotter.labels)} {description}: {plotter.labels}")
     plot_common(plotter, f, output=output, fmt=fmt)
