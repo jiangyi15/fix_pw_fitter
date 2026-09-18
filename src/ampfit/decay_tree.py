@@ -278,6 +278,36 @@ class DecayTree:
         """``(ls, chain)`` pairs over every resonance-resolved chain."""
         return self.full.get_partial_waves()
 
+    # -- display (particle / decay-chain labels) -------------------------
+    def name_display_map(self):
+        """Map particle config names to display names.
+
+        Covers every particle appearing in a chain (as a decay core or an
+        out).  Values with the same display merge naturally (e.g. ``rhoA``
+        and ``rhoB`` both map to the same label).
+        """
+        seen = {}
+        for chain in self.full.chains:
+            for decay in chain.decays:
+                p = decay.core
+                if p.name not in seen:
+                    seen[p.name] = p.display
+                for out in decay.outs:
+                    if out.name not in seen:
+                        seen[out.name] = out.display
+        return seen
+
+    def display_decay(self, decay):
+        """LaTeX display string for a decay: ``parent -> child1 child2``."""
+        parent = decay.core.display
+        children = [o.display for o in decay.outs]
+        return rf"{parent} \to {children[0]}\,{children[1]}"
+
+    def display_chain(self, chain):
+        """LaTeX display string for an entire decay chain."""
+        parts = [self.display_decay(d) for d in chain.decays]
+        return r" \quad ".join(parts)
+
     def _build_topo_from_struct(self):
         """Stable topology index over ``struct`` structural paths.
 

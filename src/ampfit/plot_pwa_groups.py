@@ -45,7 +45,7 @@ def _ls_tag(ls):
 
 def _display(config, name):
     """LaTeX display name when the config knows the particle, else raw."""
-    dm = config.name_display_map()
+    dm = config.decay_tree.name_display_map()
     if name in dm:
         return dm[name]
     return name
@@ -71,7 +71,7 @@ def discover_pwa_groups(config, by="resonance", merge=None):
     The k-axis ground truth is ``full_decay.get_partial_waves()``:
     ``waves[k] = (ls_tuple, chain)``.  Group keys are built from the
     intermediate (non-top) resonance cores of each chain, formatted with
-    ``config.name_display_map()``.  The per-base indices are duplicated over
+    ``config.decay_tree.name_display_map()``.  The per-base indices are duplicated over
     the full ck list (blocks × CP/permutation copies) the same way the
     legacy plot groups expand over the 8 blocks, so masks always index the
     real parameter vector handed to the backends.

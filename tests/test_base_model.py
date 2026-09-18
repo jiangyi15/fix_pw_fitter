@@ -107,3 +107,16 @@ def test_fitter_keeps_the_model():
         assert f.all_comb == f.model.get_ck_map()
     finally:
         f.backend.free()
+
+
+def test_display_split_tree_vs_params():
+    """Decay/particle display on DecayTree; parameter labels on BaseModel."""
+    from ampfit.base_model import BaseModel
+    from ampfit.decay_tree import DecayTree
+
+    for m in ("name_display_map", "display_decay", "display_chain"):
+        assert hasattr(DecayTree, m), m
+        assert not hasattr(BaseModel, m), m
+    for m in ("display_g_ls", "display_g_lsbar", "display_a_total",
+              "param_display"):
+        assert hasattr(BaseModel, m), m

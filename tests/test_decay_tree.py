@@ -62,3 +62,17 @@ def test_decay_tree_module_is_leaf():
         elif isinstance(node, ast.Import):
             mods += [a.name for a in node.names]
     assert not any("config_loader" in m for m in mods), mods
+
+
+def test_decay_tree_display_helpers_are_model_free():
+    """Particle / decay-chain labels live on the tree, not on a model."""
+    from ampfit.config_loader import load_config
+    from ampfit.decay_tree import DecayTree
+
+    dic = load_config(CONFIG)
+    tree = DecayTree(dic["decay"], dic["particle"])
+    names = tree.name_display_map()
+    assert names["pip"]                      # non-empty LaTeX label
+    chain = tree.full.chains[0]
+    assert r"\to" in tree.display_decay(chain.decays[0])
+    assert tree.display_chain(chain)

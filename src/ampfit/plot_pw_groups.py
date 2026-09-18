@@ -137,7 +137,7 @@ def discover_groups(config, merge=None):
     """Return dict mapping display label → merged ck indices (B0+B0bar).
 
     Group keys are particle *display* names (LaTeX, from
-    :meth:`Config.name_display_map`), e.g. ``$a_2(1320)^+$`` or
+    :meth:`DecayTree.name_display_map`), e.g. ``$a_2(1320)^+$`` or
     ``$\\rho$ + $\\rho$`` — the same convention used by
     ``scripts/plot_pw_resonance.py``, so legends show display names
     directly via ``PWGroupPlotter.labels``.
@@ -164,7 +164,7 @@ def discover_groups(config, merge=None):
     for chain in config.full_decay.chains:
         inner_set.update(chain.inner)
 
-    display_map = config.name_display_map()
+    display_map = config.decay_tree.name_display_map()
 
     def _charge_stem(name):
         if name.startswith("a1(1260)"):

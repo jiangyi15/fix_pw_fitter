@@ -730,41 +730,6 @@ class BaseModel:
 
     # ── Display helpers ──────────────────────────────────────────
 
-    def name_display_map(self):
-        """Map particle config names to display names.
-
-        Returns a dict ``{config_name: display_name}``, where
-        *display_name* is the LaTeX-formatted string (with ``$``
-        delimiters) from :attr:`Particle.display`.
-
-        Values with the same display name merge naturally (e.g. both
-        ``rhoA`` and ``rhoB`` map to the same key).
-        """
-        seen = {}
-        for chain in self.full_decay.chains:
-            for decay in chain.decays:
-                p = decay.core
-                if p.name not in seen:
-                    seen[p.name] = p.display
-                for out in decay.outs:
-                    if out.name not in seen:
-                        seen[out.name] = out.display
-        return seen
-
-    def display_decay(self, decay):
-        """LaTeX display string for a decay: ``parent → child1 child2``.
-
-        Uses :attr:`Particle.display` for each particle name.
-        """
-        parent = decay.core.display
-        children = [o.display for o in decay.outs]
-        return rf"{parent} \to {children[0]}\,{children[1]}"
-
-    def display_chain(self, chain):
-        """LaTeX display string for an entire decay chain."""
-        parts = [self.display_decay(d) for d in chain.decays]
-        return r" \quad ".join(parts)
-
     _L_LABEL = {0: "S", 1: "P", 2: "D", 3: "F", 4: "G", 5: "H"}
 
     def display_g_ls(self, decay):
@@ -774,26 +739,26 @@ class BaseModel:
 
             g^{{\\rho \\to \\pi\\pi}}_{{S}},  g^{{\\rho \\to \\pi\\pi}}_{{D}},  …
         """
-        sup = self.display_decay(decay).replace("$", "")
+        sup = self.decay_tree.display_decay(decay).replace("$", "")
         ls_list = decay.get_ls_list()
         return [rf"$g^{{{sup}}}_{{{self._L_LABEL.get(l, str(l))}}}$"
                 for l, s in ls_list]
 
     def display_g_lsbar(self, decay):
         """Display names for each ``\\bar{{g}}_{{ls}}`` partial wave."""
-        sup = self.display_decay(decay).replace("$", "")
+        sup = self.decay_tree.display_decay(decay).replace("$", "")
         ls_list = decay.get_ls_list()
         return [rf"$\bar{{g}}^{{{sup}}}_{{{self._L_LABEL.get(l, str(l))}}}$"
                 for l, s in ls_list]
 
     def display_a_total(self, chain):
         """Display name for the total amplitude: ``a_{{\\mathrm{{total}}}}^{{decay[0]}}``."""
-        sup = self.display_decay(chain.decays[0]).replace("$", "") if chain.decays else ""
+        sup = self.decay_tree.display_decay(chain.decays[0]).replace("$", "") if chain.decays else ""
         return rf"$a_{{\mathrm{{total}}}}^{{{sup}}}$"
 
     def _build_param_display_map(self):
         """Pre-build mapping of all config-known parameter names to LaTeX display strings."""
-        n_map = self.name_display_map()
+        n_map = self.decay_tree.name_display_map()
 
         # Scalar names (fixed)
         sc = {

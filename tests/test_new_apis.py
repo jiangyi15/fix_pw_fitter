@@ -868,7 +868,7 @@ def test_config_name_display_map():
     """name_display_map covers all particles in decay chains."""
     from ampfit.config_loader import Config
     c = Config("config_angle.yml")
-    m = c.name_display_map()
+    m = c.decay_tree.name_display_map()
     assert isinstance(m, dict)
     assert len(m) > 5
     # Every chain particle is included
@@ -883,7 +883,7 @@ def test_config_display_decay():
     c = Config("config_angle.yml")
     for chain in c.full_decay.chains:
         for decay in chain.decays[1:]:
-            d = c.display_decay(decay)
+            d = c.decay_tree.display_decay(decay)
             assert d.startswith("$") or "$" in d, f"decay display missing LaTeX: {d}"
             assert r"\to" in d, f"decay display missing \\to: {d}"
             break

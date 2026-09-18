@@ -1812,33 +1812,34 @@ class Fitter:
                 "width_bw_err": float(np.sqrt(max(cov[1, 1], 0.0))),
                 "mass_width_cov": float(cov[0, 1])}
 
+    # -- display labels: decay/particle from the tree, params from the model
     def name_display_map(self):
-        """Map particle config names to display names (see :meth:`Config.name_display_map`)."""
-        return self.config.name_display_map()
+        """Particle-name -> LaTeX label (see :meth:`DecayTree.name_display_map`)."""
+        return self.decay_tree.name_display_map()
 
     def display_decay(self, decay):
-        """LaTeX display for a decay (see :meth:`Config.display_decay`)."""
-        return self.config.display_decay(decay)
+        """LaTeX label for a decay (see :meth:`DecayTree.display_decay`)."""
+        return self.decay_tree.display_decay(decay)
 
     def display_chain(self, chain):
-        """LaTeX display for a decay chain (see :meth:`Config.display_chain`)."""
-        return self.config.display_chain(chain)
+        """LaTeX label for a decay chain (see :meth:`DecayTree.display_chain`)."""
+        return self.decay_tree.display_chain(chain)
 
     def display_g_ls(self, decay):
-        """Display names for g_ls partial waves (see :meth:`Config.display_g_ls`)."""
-        return self.config.display_g_ls(decay)
+        """Labels for g_ls partial waves (see :meth:`BaseModel.display_g_ls`)."""
+        return self.model.display_g_ls(decay)
 
     def display_g_lsbar(self, decay):
-        """Display names for g_lsbar (see :meth:`Config.display_g_lsbar`)."""
-        return self.config.display_g_lsbar(decay)
+        """Labels for g_lsbar waves (see :meth:`BaseModel.display_g_lsbar`)."""
+        return self.model.display_g_lsbar(decay)
 
     def display_a_total(self, chain):
-        """Display name for total amplitude (see :meth:`Config.display_a_total`)."""
-        return self.config.display_a_total(chain)
+        """Label for the total amplitude (see :meth:`BaseModel.display_a_total`)."""
+        return self.model.display_a_total(chain)
 
     def param_display(self, name):
-        """Map parameter name to LaTeX display (see :meth:`Config.param_display`)."""
-        return self.config.param_display(name)
+        """Parameter-name -> LaTeX label (see :meth:`BaseModel.param_display`)."""
+        return self.model.param_display(name)
 
     def free(self):
         """Free all memory held by the backend."""

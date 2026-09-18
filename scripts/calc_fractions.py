@@ -175,7 +175,7 @@ def main():
 
     # ── LaTeX output ──────────────────────────────────────────────
     if args.output:
-        name_map = f.config.name_display_map()
+        name_map = f.name_display_map()
         sections = [("Resonance $\\to 3\\pi$", rows_3pi)]
         if rows_B:
             sections.append(("$B\\to R_1 R_2$", rows_B))
