@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Save single-chain stand-alone mass & angles (.npy) from a 4-momentum file.
 
-Input  : event 4-momentum file (N, n_finals, 4) in ``cfg.finals`` order.
+Input  : event 4-momentum file (N, n_finals, 4) in config ``finals`` order.
 Output : per chosen chain ONE plain .npy file, all variables stacked
 
     {out}.npy  (N, n_mass + n_vars)
@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import numpy as np
 
-from ampfit.config_loader import Config
+from ampfit.config_loader import load_config
+from ampfit.decay_tree import DecayTree
 from ampfit.helicity_angle import decay_chain_leaves
 from ampfit.helicity_angle import canonical_variables, tree_vertices
 from ampfit.momenta_to_angles import decay_angles_vectorized
@@ -43,7 +44,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--data", required=True,
-                    help="4-momentum .npy (N, n_finals, 4), cfg.finals order")
+                    help="4-momentum .npy (N, n_finals, 4), config finals order")
     ap.add_argument("--chain", required=True,
                     help="structural resonance name(s) in decay: — a single "
                          "label (pipeta), a comma/JSON list of the internal "
@@ -53,8 +54,8 @@ def main():
                     help="output file prefix (default = --chain value)")
     args = ap.parse_args()
 
-    cfg = Config(args.config)
-    kc = cfg.build_all_index()
+    dic = load_config(args.config)
+    tree = DecayTree(dic["decay"], dic["particle"])
 
     # resolve chain selector -> topology slot (int, single name, or list)
     sel = args.chain
@@ -65,16 +66,16 @@ def main():
             sel = json.loads(sel)
         elif "," in sel:
             sel = [x.strip() for x in sel.split(",")]
-        tid = cfg.topo_index_from_name(sel)
+        tid = tree.topo_index_from_name(sel)
 
     chain = None
-    for ls, ch in cfg.full_decay.get_partial_waves():
-        if cfg.topo_index.get(ch.topo_id()) == tid:
+    for ls, ch in tree.partial_waves():
+        if tree.topo_index.get(ch.topo_id()) == tid:
             chain = ch
             break
     if chain is None:
         raise SystemExit(f"no partial-wave chain on topology {tid} "
-                         f"(n_topo={cfg.n_topo})")
+                         f"(n_topo={tree.n_topo})")
 
     mom = np.load(args.data)
     if mom.ndim != 3 or mom.shape[-1] != 4:
@@ -88,7 +89,7 @@ def main():
                        for j in range(mom.shape[1])], axis=1)
 
     names = [o.name for o in decay_chain_leaves(chain)]
-    perm = [cfg.finals.index(nm) for nm in names]
+    perm = [tree.finals.index(nm) for nm in names]
     mom_chain = mom_cm[:, perm]
 
     # intermediate (sub-system) invariant masses of decays[1:]
@@ -116,7 +117,7 @@ def main():
     print(f"wrote {prefix}.npy    {arr.shape}   "
           f"[{mass.shape[1]} mass + {ang.shape[1]} angles, phi-first]")
     print(f"chain: {chain}")
-    print(f"finals (columns): {cfg.finals}")
+    print(f"finals (columns): {tree.finals}")
 
 
 if __name__ == "__main__":
