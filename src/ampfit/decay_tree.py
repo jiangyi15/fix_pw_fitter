@@ -252,7 +252,8 @@ class DecayTree:
     """The decay/particle declarations as a pure value object.
 
     Built from the raw ``decay`` spec and ``particle`` spec only; it holds the
-    resolved structure, the chains, and the stable topology index.
+    structural view (``struct``), the resolved chains (``full``) and the
+    stable topology index.
     """
 
     def __init__(self, decay_spec, particle_spec):
@@ -262,8 +263,10 @@ class DecayTree:
         self.finals = list(particle_spec["$finals"])
 
         self.struct = build_decay_struct(decay_spec, self.top, self.finals)
-        self.chains = get_decay_chains(self.struct, particle_spec)
-        self.full = build_decay_chains(self.chains, particle_spec)
+        # intermediate structural chain specs are not kept on the object:
+        # `struct` is the structural view, `full` the resolved chains.
+        struct_chains = get_decay_chains(self.struct, particle_spec)
+        self.full = build_decay_chains(struct_chains, particle_spec)
 
         self.n_decay = len(self.struct[0])
         self.n_res = self.n_decay - 1

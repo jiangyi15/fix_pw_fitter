@@ -78,7 +78,6 @@ class BaseModel:
         self.top = self.decay_tree.top
         self.finals = self.decay_tree.finals
         self.decay_struct = self.decay_tree.struct
-        self.decay_chains_lst = self.decay_tree.chains
         self.full_decay = self.decay_tree.full
         self.n_decay = self.decay_tree.n_decay
         self.n_res = self.decay_tree.n_res
