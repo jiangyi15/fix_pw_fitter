@@ -95,9 +95,9 @@ def test_build_tree_event_data_blocks_shapes_and_composition():
                            direct["mass"])
 
 
-def test_cp_block_negates_phi_columns():
-    from ampfit.pwa_build import (_phi_columns, block_orders,
-                                  build_tree_event_data, pwa_event_data_tree)
+def test_cp_block_reverses_three_momentum():
+    from ampfit.pwa_build import (block_orders, build_tree_event_data,
+                                  pwa_event_data_tree)
 
     cfg = _cfg(cp=[["pip", "pim"]])
     tree = cfg.decay_tree
@@ -106,16 +106,13 @@ def test_cp_block_negates_phi_columns():
     blocks = block_orders(tree.finals, cfg.dic["data"])
     d = build_tree_event_data(tree, None, byt, mom, blocks=blocks)
 
-    ref = next(iter(byt.values()))
-    phi_cols = _phi_columns(None, ref)
-    assert phi_cols, "expected azimuth columns"
-
     cp_b = [i for i, (_, is_cp) in enumerate(blocks) if is_cp][0]
     order = list(blocks[cp_b][0])
-    direct = pwa_event_data_tree(tree, None, byt, mom[:, order])["angle"]
-    got = d["angle"][:, cp_b * tree.n_topo:(cp_b + 1) * tree.n_topo, :]
-    for j in range(got.shape[-1]):
-        if j in phi_cols:
-            assert np.allclose(got[..., j], -direct[..., j]), j
-        else:
-            assert np.allclose(got[..., j], direct[..., j]), j
+    mom_cp = mom[:, order].copy()
+    mom_cp[:, :, 1:] *= -1.0                       # CP: reverse 3-momentum
+    direct = pwa_event_data_tree(tree, None, byt, mom_cp)
+    lo, hi = cp_b * tree.n_topo, (cp_b + 1) * tree.n_topo
+    assert np.allclose(d["angle"][:, lo:hi, :], direct["angle"])
+    nres, ndec = tree.n_res, tree.n_decay
+    assert np.allclose(d["mass"][:, cp_b * tree.n_topo * nres:(cp_b + 1) * tree.n_topo * nres],
+                       direct["mass"])

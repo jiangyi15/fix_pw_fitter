@@ -420,18 +420,6 @@ def _block_orders(finals, id_groups=(), cp_groups=()):
     return blocks
 
 
-def _phi_columns(kc, ref_chain):
-    """Indices of the azimuth ('phi') columns of the tree angle layout."""
-    from ampfit.helicity_angle import (canonical_variables, decay_chain_to_tree,
-                                       to_spin, tree_vertices)
-    if kc is not None and kc.get("variables"):
-        vars_ = list(kc["variables"])
-    else:
-        nv = len(tree_vertices(decay_chain_to_tree(ref_chain)))
-        vars_ = canonical_variables(nv, top_j0=(to_spin(ref_chain.decays[0].core.J) == 0))
-    return [j for j, (v, kind) in enumerate(vars_) if kind == "phi"]
-
-
 def block_orders(finals, data):
     """Public wrapper: block column orders from a config ``data`` section."""
     data = data or {}
@@ -456,15 +444,16 @@ def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
         return pwa_event_data_tree(cfg, kc, chains_by_topo, momenta,
                                    spinful_names=spinful_names,
                                    cm_boost=cm_boost)
-    ref = next(iter(chains_by_topo.values()))
-    phi_cols = _phi_columns(kc, ref)
     outs = []
     for order, is_cp in blocks:
-        d = pwa_event_data_tree(cfg, kc, chains_by_topo, momenta[:, list(order)],
-                                spinful_names=spinful_names, cm_boost=cm_boost)
-        if is_cp and phi_cols:
-            d["angle"][..., phi_cols] *= -1.0
-        outs.append(d)
+        mom_b = momenta[:, list(order)]
+        if is_cp:
+            # CP: conjugate columns AND reverse the 3-momentum (parity).
+            mom_b = np.array(mom_b, dtype=float, copy=True)
+            mom_b[:, :, 1:] *= -1.0
+        outs.append(pwa_event_data_tree(cfg, kc, chains_by_topo, mom_b,
+                                        spinful_names=spinful_names,
+                                        cm_boost=cm_boost))
     return {
         "mass": np.concatenate([d["mass"] for d in outs], axis=1),
         "q": np.concatenate([d["q"] for d in outs], axis=1),
