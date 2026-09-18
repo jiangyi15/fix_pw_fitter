@@ -344,14 +344,24 @@ def test_model_builds_event_data_per_case():
             out[:, j] = np.concatenate([E[:, None], p3[:, j]], axis=-1)
         return out
 
-    m = build_amplitude_model(Config("tests/config_pwa.yml"))
+    m = build_amplitude_model("tests/config_pwa.yml")     # path directly
     d = m.build_event_data(_mom(5, [0.13957, 0.13957, 0.54786]),
                            m.build_kernel_config())
     assert {"mass", "q", "angle", "weight"} <= set(d)
     assert "frac" not in d and "time" not in d
 
-    ml = build_amplitude_model(Config("config_amp.yml"))
+    ml = build_amplitude_model("config_amp.yml")          # path directly
     dl = ml.build_event_data(_mom(5, [0.13957] * 4),
                              ml.build_kernel_config())
     assert "frac" in dl and "time" in dl
     assert dl["angle"].shape[1] == 24
+
+
+def test_build_amplitude_model_accepts_path_config_dict():
+    from ampfit.config_loader import Config, load_config
+    from ampfit.amp_model import build_amplitude_model
+
+    m1 = build_amplitude_model("tests/config_pwa.yml")        # path
+    m2 = build_amplitude_model(Config("tests/config_pwa.yml"))  # Config
+    m3 = build_amplitude_model(load_config("tests/config_pwa.yml"))  # dict
+    assert all(type(m).__name__ == "PWA" for m in (m1, m2, m3))

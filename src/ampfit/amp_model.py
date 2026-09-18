@@ -77,7 +77,14 @@ def _amp_model_name(dic):
 
 
 def build_amplitude_model(config):
-    """Instantiate the config's amplitude model (default ``pwa``)."""
+    """Instantiate the amplitude model for *config* (default ``pwa``).
+
+    *config* may be a :class:`~ampfit.config_loader.Config` instance, a config
+    file path, or an already-parsed config dict.
+    """
+    from ampfit.config_loader import Config
+    if not hasattr(config, "dic"):
+        config = Config(config)              # file path (str) or raw dict
     name = _amp_model_name(config.dic)
     cls = AMPLITUDE_MODELS["pwa"] if name is None else AMPLITUDE_MODELS.get(name)
     if cls is None:
