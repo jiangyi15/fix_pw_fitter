@@ -106,11 +106,14 @@ def test_cp_block_reverses_three_momentum():
     blocks = block_orders(tree.finals, cfg.dic["data"])
     d = build_tree_event_data(tree, None, byt, mom, blocks=blocks)
 
+    from ampfit.pwa_build import _boost_to_cm
+
     cp_b = [i for i, (_, is_cp) in enumerate(blocks) if is_cp][0]
     order = list(blocks[cp_b][0])
-    mom_cp = mom[:, order].copy()
-    mom_cp[:, :, 1:] *= -1.0                       # CP: reverse 3-momentum
-    direct = pwa_event_data_tree(tree, None, byt, mom_cp)
+    mom_cm = _boost_to_cm(mom)
+    mom_cp = mom_cm[:, order].copy()
+    mom_cp[:, :, 1:] *= -1.0                       # CP: reverse 3-momentum (CM)
+    direct = pwa_event_data_tree(tree, None, byt, mom_cp, cm_boost=False)
     lo, hi = cp_b * tree.n_topo, (cp_b + 1) * tree.n_topo
     assert np.allclose(d["angle"][:, lo:hi, :], direct["angle"])
     nres, ndec = tree.n_res, tree.n_decay

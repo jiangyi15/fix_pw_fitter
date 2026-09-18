@@ -237,6 +237,14 @@ def _duck_chain_from_struct(cfg, tid):
     return None
 
 
+def _boost_to_cm(momenta):
+    """Boost each event to its own centre-of-mass frame (per-particle boost)."""
+    tot = momenta.sum(axis=1)
+    beta = -(tot[:, 1:] / tot[:, 0:1])
+    return np.stack([_boost_vec(momenta[:, j], beta)
+                     for j in range(momenta.shape[1])], axis=1)
+
+
 def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
                         cm_boost=True):
     """Tree-shape event buffers (mass/q/angle [+alignment]) by FLAT loops.
@@ -272,9 +280,7 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
 
     mom0 = np.asarray(momenta, dtype=float)
     if cm_boost:
-        tot0 = mom0.sum(axis=1)
-        mom0 = np.stack([_boost_vec(mom0[:, j], -(tot0[:, 1:] / tot0[:, 0:1]))
-                         for j in range(mom0.shape[1])], axis=1)
+        mom0 = _boost_to_cm(mom0)
     leaf_of_name = {finals[j]: mom0[:, j] for j in range(len(finals))}
 
     real = [chains_by_topo.get(t) for t in range(n_topo)]
@@ -444,16 +450,20 @@ def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
         return pwa_event_data_tree(cfg, kc, chains_by_topo, momenta,
                                    spinful_names=spinful_names,
                                    cm_boost=cm_boost)
+    # Boost to CM ONCE; the CP map (conjugate columns + p -> -p) is applied
+    # in that frame, matching the legacy order (rest frame first).
+    mom0 = _boost_to_cm(np.asarray(momenta, dtype=float)) if cm_boost \
+        else np.asarray(momenta, dtype=float)
     outs = []
     for order, is_cp in blocks:
-        mom_b = momenta[:, list(order)]
+        mom_b = mom0[:, list(order)]
         if is_cp:
             # CP: conjugate columns AND reverse the 3-momentum (parity).
             mom_b = np.array(mom_b, dtype=float, copy=True)
             mom_b[:, :, 1:] *= -1.0
         outs.append(pwa_event_data_tree(cfg, kc, chains_by_topo, mom_b,
                                         spinful_names=spinful_names,
-                                        cm_boost=cm_boost))
+                                        cm_boost=False))
     return {
         "mass": np.concatenate([d["mass"] for d in outs], axis=1),
         "q": np.concatenate([d["q"] for d in outs], axis=1),
