@@ -380,3 +380,95 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     return {"mass": mass, "q": q, "angle": ang,
             "weight": np.ones(n), "bkg": np.ones(n)}
 
+
+# ── generic identical-particle / CP block expansion ──────────────────────
+def _block_orders(finals, id_groups=(), cp_groups=()):
+    """Column orders for the identical permutations x CP blocks.
+
+    Returns ``[(order, is_cp), ...]``.  ``momenta[:, order]`` gives that
+    block's configuration; ``is_cp`` marks a CP block whose azimuth columns
+    are negated (mirrors ``momenta_to_data_full``).  Block order is arbitrary:
+    all blocks share one ``ck`` and are summed.
+    """
+    import itertools
+    idx = {f: j for j, f in enumerate(finals)}
+    n = len(finals)
+    group_cols = [[idx[g] for g in grp] for grp in (id_groups or [])]
+    if group_cols:
+        perms = []
+        for combo in itertools.product(*[list(itertools.permutations(c))
+                                         for c in group_cols]):
+            order = list(range(n))
+            for cols, perm in zip(group_cols, combo):
+                for dst, src in zip(cols, perm):
+                    order[dst] = src
+            perms.append(tuple(order))
+    else:
+        perms = [tuple(range(n))]
+
+    cp_col = None
+    if cp_groups:
+        cp_col = list(range(n))
+        for pair in cp_groups:
+            ia, ib = idx[pair[0]], idx[pair[1]]
+            cp_col[ia], cp_col[ib] = ib, ia
+
+    blocks = [(p, False) for p in perms]
+    if cp_col is not None:
+        for p in perms:
+            blocks.append((tuple(cp_col[p[i]] for i in range(n)), True))
+    return blocks
+
+
+def _phi_columns(kc, ref_chain):
+    """Indices of the azimuth ('phi') columns of the tree angle layout."""
+    from ampfit.helicity_angle import (canonical_variables, decay_chain_to_tree,
+                                       to_spin, tree_vertices)
+    if kc is not None and kc.get("variables"):
+        vars_ = list(kc["variables"])
+    else:
+        nv = len(tree_vertices(decay_chain_to_tree(ref_chain)))
+        vars_ = canonical_variables(nv, top_j0=(to_spin(ref_chain.decays[0].core.J) == 0))
+    return [j for j, (v, kind) in enumerate(vars_) if kind == "phi"]
+
+
+def block_orders(finals, data):
+    """Public wrapper: block column orders from a config ``data`` section."""
+    data = data or {}
+    return _block_orders(finals, data.get("identical_particles"),
+                         data.get("cp_particles"))
+
+
+def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
+                          cm_boost=True, blocks=None):
+    """Tree event data with identical-particle / CP block expansion.
+
+    Wraps :func:`pwa_event_data_tree` per block: each declared block reorders
+    the momentum columns (identical permutations x CP exchange) and is filled
+    separately, then the blocks are concatenated along the topology axis,
+    matching the kernel's ``n_blocks`` index shifts.  ``n_blocks == 1`` gives
+    exactly the single-block result.
+    """
+    if blocks is None:
+        data = (getattr(cfg, "dic", None) or {}).get("data") or {}
+        blocks = block_orders(list(getattr(cfg, "finals")), data)
+    if len(blocks) == 1:
+        return pwa_event_data_tree(cfg, kc, chains_by_topo, momenta,
+                                   spinful_names=spinful_names,
+                                   cm_boost=cm_boost)
+    ref = next(iter(chains_by_topo.values()))
+    phi_cols = _phi_columns(kc, ref)
+    outs = []
+    for order, is_cp in blocks:
+        d = pwa_event_data_tree(cfg, kc, chains_by_topo, momenta[:, list(order)],
+                                spinful_names=spinful_names, cm_boost=cm_boost)
+        if is_cp and phi_cols:
+            d["angle"][..., phi_cols] *= -1.0
+        outs.append(d)
+    return {
+        "mass": np.concatenate([d["mass"] for d in outs], axis=1),
+        "q": np.concatenate([d["q"] for d in outs], axis=1),
+        "angle": np.concatenate([d["angle"] for d in outs], axis=1),
+        "weight": outs[0]["weight"],
+        "bkg": outs[0]["bkg"],
+    }
