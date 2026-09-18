@@ -45,46 +45,10 @@ def pwa_duplication_factors(cfg):
     Declarations are lists of groups; each group lists the equivalent final
     particles (identical) or the CP-pair mapping (cp).
     """
-    data_d = cfg.dic.get("data") or {}
-    id_groups = data_d.get("identical_particles") or []
-    cp_groups = data_d.get("cp_particles") or []
-    n_id = 1
-    for grp in id_groups:
-        n_id *= math.factorial(len(grp))
-    n_cp = 2 if cp_groups else 1
+    from ampfit.decay_tree import symmetry_factors
+    data = (getattr(cfg, "dic", None) or {}).get("data") or {}
+    n_id, n_cp, _, id_groups, cp_groups = symmetry_factors(data)
     return n_id, n_cp, (id_groups, cp_groups)
-
-
-def build_pwa_kernel_config(cfg):
-    """Pure-PWA kernel config as a thin view over the generic loader index.
-
-    The multi-topology-capable kernel arrays come from
-    ``Config.build_all_index()`` (proved numerically identical to the former
-    duplicated builder on config_pwa.yml); this wrapper only adds the few
-    meta keys the pure-PWA consumers/tests use (wave names, external
-    helicity states, identical-particle count, BW/gamma parameter names).
-    """
-    kc = cfg.build_all_index()
-    n_id, n_cp, _ = pwa_duplication_factors(cfg)
-    kc["n_identical"] = n_id
-    kc["n_cp"] = n_cp
-    kc["top_states"] = [int(x) for x in (cfg._helicity_top_states()
-                                          if hasattr(cfg, "_helicity_top_states")
-                                          else [])] or None
-    kc["wave_names"] = [str(ls) for ls, _ in cfg.full_decay.get_partial_waves()]
-    m0, g0 = [], []
-    for _, ch in cfg.full_decay.get_partial_waves():
-        for idx, d in enumerate(ch.decays):
-            if idx != 0:
-                nm = d.core.name + "_mass"
-                if nm not in m0:
-                    m0.append(nm)
-                for gn in d.core._model.get_gamma_name():
-                    if gn not in g0:
-                        g0.append(gn)
-    kc["m0_names"] = m0
-    kc["g0_names"] = g0
-    return kc
 
 
 def _two_body_q(M, m1, m2):

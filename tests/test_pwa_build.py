@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import (build_pwa_kernel_config,
-                              pwa_event_data_tree, pwa_duplication_factors)
+from ampfit.pwa_build import pwa_event_data_tree, pwa_duplication_factors
+from ampfit.amp_model import build_amplitude_model
 from ampfit.numpy_pwa import NumpyPWA
 from ampfit.helicity_angle import (decay_chain_to_tree, tree_vertices,
                                    amplitude)
@@ -29,7 +29,7 @@ def cfg():
 
 @pytest.fixture(scope="module")
 def kc(cfg):
-    return build_pwa_kernel_config(cfg)
+    return build_amplitude_model(cfg).build_kernel_config()
 
 
 @pytest.fixture(scope="module")
@@ -154,7 +154,8 @@ def test_build_all_index_routes_pure_pwa(cfg):
     assert row_block_factors(cfg.dic) == (1, 1, 1)
     c2 = Config("tests/config_pwa.yml")
     kc = c2.build_all_index()                      # single generic entry point
-    kc_ref = build_pwa_kernel_config(Config("tests/config_pwa.yml"))
+    kc_ref = build_amplitude_model(
+        Config("tests/config_pwa.yml")).build_kernel_config()
     for key in ("matrix_angle", "bw_order", "fl_order", "m0_index",
                 "mass_index", "g0_index", "g0_mass_index", "fl_type",
                 "fl_q_index", "angle_index", "angle_k", "angle_b",

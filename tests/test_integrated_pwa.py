@@ -12,7 +12,8 @@ import numpy as np
 import pytest
 
 from ampfit.config_loader import Config
-from ampfit.pwa_build import build_pwa_kernel_config, pwa_event_data_tree
+from ampfit.pwa_build import pwa_event_data_tree
+from ampfit.amp_model import build_amplitude_model
 from ampfit.integrated_pwa import IntegratedPWA
 
 
@@ -24,7 +25,7 @@ def _tree_data(cfg, kc, mom):
 
 def _pwa_setup(n_events=1500):
     cfg = Config("tests/config_pwa.yml")
-    kc = build_pwa_kernel_config(cfg)
+    kc = build_amplitude_model(cfg).build_kernel_config()
     data = _tree_data(cfg, kc, np.load("data/phsp.npy")[:n_events])
     return kc, data
 

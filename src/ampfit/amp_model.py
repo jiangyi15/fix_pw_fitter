@@ -186,6 +186,34 @@ class PWA(AmplitudeModel):
     name = "pwa"
     params_transform_cls = PWAKernelParams
 
+    def build_kernel_config(self):
+        """Base index config plus the pure-PWA meta keys.
+
+        The kernels/backends read only the base arrays; these meta keys
+        describe the PWA basis and are used by the reference engine /
+        introspection: external helicity states (``top_states``), wave and
+        BW-gamma parameter names, and the identical/CP counts.
+        """
+        kc = super().build_kernel_config()
+        kc["n_identical"] = self.decay_tree.n_perm
+        kc["n_cp"] = self.decay_tree.n_cp
+        kc["top_states"] = [int(x) for x in self._helicity_top_states()] or None
+        kc["wave_names"] = [str(ls) for ls, _ in self.full_decay.get_partial_waves()]
+        m0, g0 = [], []
+        for _, ch in self.full_decay.get_partial_waves():
+            for idx, d in enumerate(ch.decays):
+                if idx != 0:
+                    nm = d.core.name + "_mass"
+                    if nm not in m0:
+                        m0.append(nm)
+                    for gn in d.core._model.get_gamma_name():
+                        if gn not in g0:
+                            g0.append(gn)
+        kc["m0_names"] = m0
+        kc["g0_names"] = g0
+        return kc
+
+
 
 @register_amplitude_model("flavour_tag_mix", "flour_tag_mix", "p4_directly")
 class FlavourTagMix(AmplitudeModel):
