@@ -34,6 +34,7 @@ from .bw_form_factor import (
     form_factor as bw_form_factor,
     register_barrier,
 )
+from . import build_defaults
 
 __all__ = [
     "Config",
@@ -56,4 +57,5 @@ __all__ = [
     "register_barrier",
     "build_barrier",
     "barrier_names",
+    "build_defaults",
 ]

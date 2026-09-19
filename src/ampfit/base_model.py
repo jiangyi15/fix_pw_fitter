@@ -78,10 +78,16 @@ class BaseModel:
                 f"{type(config).__name__}")
         self.dic = dic
         self._config_path = config_path
+        # Config ``defaults`` are loaded as a *temporary* build context while
+        # this model is built (so config files stay physics-only); the global
+        # ``build_defaults`` is the fallback when the config has none.
+        self._defaults = dict(self.dic.get("defaults") or {})
         # The decay tree is interpreted by a standalone value object; the
         # legacy attribute names below stay as aliases for compatibility.
-        self.decay_tree = DecayTree(self.dic["decay"], self.dic["particle"],
-                                          self.dic.get("data"))
+        with self._default_context():
+            self.decay_tree = DecayTree(self.dic["decay"],
+                                        self.dic["particle"],
+                                        self.dic.get("data"))
         self.top = self.decay_tree.top
         self.finals = self.decay_tree.finals
         self.decay_struct = self.decay_tree.struct
@@ -97,6 +103,7 @@ class BaseModel:
         self.unique_bw = []
         self.unique_gamma = []
         self.unique_fl = []
+        self.fl_forms = []          # unique barrier factors (fl_type indexes)
         self.unique_angle_basis = []
         self.n_interp_gamma = 2000  # gamma table interpolation points
         self._param_display_map = None
@@ -150,7 +157,8 @@ class BaseModel:
 
     def build_gamma_table(self, n_interp=None):
         if n_interp is None:
-            n_interp = self.n_interp_gamma
+            from .build_defaults import get as _build_get
+            n_interp = int(_build_get("n_interp", self.n_interp_gamma))
         gamma_table = {}
         m_min, m_max = self.get_max_mass_range()
         m = np.linspace(m_min-0.01, m_max + 0.01, n_interp)
@@ -172,6 +180,14 @@ class BaseModel:
         q_max = math.sqrt( (m_max**2 - (m1+m2)**2)*(m_max**2-(m1+m2)**2) )/2/m_max
         return 0., q_max * 1.2  # 20% safety margin for sub-decay q values
 
+    def _default_context(self):
+        """Context manager applying this config's ``defaults`` (or a no-op)."""
+        if not getattr(self, "_defaults", None):
+            from contextlib import nullcontext
+            return nullcontext()
+        from .build_defaults import scope
+        return scope(**self._defaults)
+
     def _barrier(self, decay, L):
         """Barrier factor for the *decay* vertex's orbital angular momentum.
 
@@ -181,18 +197,21 @@ class BaseModel:
         Two vertices with the same ``get_id()`` share one ``fl_table`` row.
         """
         from ampfit.bw_form_factor import DEFAULT_BARRIER, build_barrier
+        from .build_defaults import get as _build_get
 
-        spec = getattr(decay, "barrier", DEFAULT_BARRIER)
+        default_type = _build_get("barrier", DEFAULT_BARRIER)
+        spec = getattr(decay, "barrier", default_type)
         if isinstance(spec, dict):
             params = dict(spec)
-            name = params.pop("type", params.pop("name", DEFAULT_BARRIER))
+            name = params.pop("type", params.pop("name", default_type))
         else:
             name, params = spec, {}
         params.pop("L", None)                          # L is kinematic
-        params.setdefault("d", float(getattr(decay, "d", 3.0)))
+        params.setdefault("d", float(getattr(decay, "d",
+                                              _build_get("d", 3.0))))
         return build_barrier(name, L=L, **params)
 
-    def build_fl_table(self, forms, n_interp=2000):
+    def build_fl_table(self, forms, n_interp=None):
         """Build the barrier (form-factor) table.
 
         *forms* is the ordered list of unique barrier instances
@@ -203,7 +222,10 @@ class BaseModel:
         ``F_L(q0_ref) = q0_ref^L`` at ``q0_ref = 1 GeV``.
         """
         from ampfit.bw_form_factor import BarrierFactor, build_barrier
+        from .build_defaults import get as _build_get
 
+        if n_interp is None:
+            n_interp = int(_build_get("n_interp", 2000))
         q0 = 1.0  # Reference momentum (GeV) for the TFPWA normalisation
 
         q_min, q_max = self.get_max_q_range()
@@ -535,12 +557,10 @@ class BaseModel:
             fl_q_index.append(key[1])
         ret["fl_type"] = np.stack(fl_type)
         ret["fl_q_index"] = np.stack(fl_q_index)
-        ret["fl_l"] = np.array([b.L for b in unique_forms], dtype=int)
-        ret["fl_d"] = np.array([b.d for b in unique_forms], dtype=float)
-        ret["fl_forms"] = [b.name for b in unique_forms]
-        # full constructor kwargs per form (rebuilds the barrier exactly,
-        # including any extra parameters)
-        ret["fl_specs"] = [b.get_params() for b in unique_forms]
+        # Barrier forms are model metadata, not kernel inputs: the kernels
+        # read only fl_table / fl_type / fl_min / fl_delta (fl_type indexes
+        # this list).  Stored on the model, not in the kernel config.
+        self.fl_forms = unique_forms
 
         gamma_table, g_min, g_delta = self.build_gamma_table()
         ret["gamma_table"] = np.stack(
@@ -569,6 +589,11 @@ class BaseModel:
         return self.build_base_kernel_config()
 
     def build_base_kernel_config(self):
+        """Base index config, built with the config ``defaults`` in scope."""
+        with self._default_context():
+            return self._build_base_kernel_config()
+
+    def _build_base_kernel_config(self):
         # identical-particle × CP row blocks, from the config declarations
         # (legacy B→4π: 4 permutations × 2 CP = 8; pure PWA without
         # declarations → 1).
@@ -620,8 +645,7 @@ class BaseModel:
         ret["n_blocks"] = C
 
         for name in ["gamma_table","fl_table", "gamma_min", "gamma_delta",
-                     "fl_min", "fl_delta", "fl_l", "fl_d", "fl_forms",
-                     "fl_specs"]:
+                     "fl_min", "fl_delta"]:
             ret[name] = base[name]
 
         # ── cuda_v4_pwa: p-major projection duplication ─────────────────

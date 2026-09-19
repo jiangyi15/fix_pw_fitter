@@ -81,29 +81,31 @@ def _override_model():
 def test_default_config_backward_compatible():
     from ampfit.amp_model import build_amplitude_model
 
-    c = build_amplitude_model(CFG).build_kernel_config()
-    assert c["fl_forms"] == ["bw"] * len(c["fl_forms"])
-    assert c["fl_l"].tolist() == [1, 2, 3]
-    assert (np.asarray(c["fl_d"]) == 3.0).all()
+    m = build_amplitude_model(CFG)
+    c = m.build_kernel_config()
+    assert [b.name for b in m.fl_forms] == ["bw"] * len(m.fl_forms)
+    assert [b.L for b in m.fl_forms] == [1, 2, 3]
+    assert all(b.d == 3.0 for b in m.fl_forms)
+    # barrier metadata is on the model, not the kernel config
+    assert not ({"fl_forms", "fl_l", "fl_d", "fl_specs"} & set(c))
     # one row per unique L, exactly the legacy bw table
     q = c["fl_min"] + c["fl_delta"] * np.arange(c["fl_table"].shape[1])
-    for i, L in enumerate(c["fl_l"]):
-        np.testing.assert_allclose(c["fl_table"][i], form_factor(L, q),
+    for i, b in enumerate(m.fl_forms):
+        np.testing.assert_allclose(c["fl_table"][i], form_factor(b.L, q),
                                    rtol=0, atol=0)
 
 
 def test_per_decay_barrier_and_d():
-    c = _override_model().build_kernel_config()
-    assert set(c["fl_forms"]) == {"bw", "exp"}
+    m = _override_model()
+    c = m.build_kernel_config()
+    assert {b.name for b in m.fl_forms} == {"bw", "exp"}
     q = c["fl_min"] + c["fl_delta"] * np.arange(c["fl_table"].shape[1])
-    for i, (kind, d, L) in enumerate(zip(c["fl_forms"], c["fl_d"], c["fl_l"])):
+    for i, b in enumerate(m.fl_forms):
         np.testing.assert_allclose(c["fl_table"][i],
-                                   form_factor(L, q, d=d, kind=kind),
+                                   form_factor(b.L, q, d=b.d, kind=b.name),
                                    rtol=1e-12, atol=1e-14)
-    exp_d = np.asarray(c["fl_d"])[[k == "exp" for k in c["fl_forms"]]]
-    bw_d = np.asarray(c["fl_d"])[[k == "bw" for k in c["fl_forms"]]]
-    assert (exp_d == 1.5).all()               # overridden radius
-    assert (bw_d == 3.0).all()                # untouched sub-decays
+    assert all(b.d == 1.5 for b in m.fl_forms if b.name == "exp")
+    assert all(b.d == 3.0 for b in m.fl_forms if b.name == "bw")
 
 
 def test_nested_barrier_spec_extra_params():
@@ -126,22 +128,23 @@ def test_nested_barrier_spec_extra_params():
     dic["decay"]["jpsi"][0] = list(dic["decay"]["jpsi"][0]) + [
         {"barrier": {"type": "test_gauss", "d": 1.5, "alpha": 2.0}}]
     try:
-        c = build_amplitude_model(dic).build_kernel_config()
-        i = c["fl_forms"].index("test_gauss")
-        # extra param reached the class and the exact spec is recorded
-        assert c["fl_specs"][i] == {
+        m = build_amplitude_model(dic)
+        c = m.build_kernel_config()
+        i = [b.name for b in m.fl_forms].index("test_gauss")
+        # extra param reached the class and the exact spec is on the model
+        assert m.fl_forms[i].get_params() == {
             "type": "test_gauss", "q0_ref": 1.0, "d": 1.5, "alpha": 2.0}
         q = c["fl_min"] + c["fl_delta"] * np.arange(c["fl_table"].shape[1])
         np.testing.assert_allclose(c["fl_table"][i],
                                    np.exp(-2.0 * q ** 2),
                                    rtol=1e-12, atol=1e-14)
         # a different alpha is a different id (would be another row)
-        assert (build_barrier("test_gauss", L=int(c["fl_l"][i]),
-                              d=1.5, alpha=3.0)
-                != build_barrier("test_gauss", L=int(c["fl_l"][i]),
-                                 d=1.5, alpha=2.0))
+        L = m.fl_forms[i].L
+        assert (build_barrier("test_gauss", L=L, d=1.5, alpha=3.0)
+                != build_barrier("test_gauss", L=L, d=1.5, alpha=2.0))
     finally:
         BARRIER_MODELS.pop("test_gauss", None)
+
 
 
 # ── end-to-end: the per-decay barrier reaches the CUDA kernels ────

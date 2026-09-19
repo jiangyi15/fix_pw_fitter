@@ -97,6 +97,62 @@ per-model defaults — e.g. `cuda_v4_pwa` is also registered as `"default"` for
 `backends_for_model(model.name)` for the allowed set and
 `create_backend(..., model=model.name)` resolves `"default"` per model.
 
+### Barrier factors & build-time defaults
+
+The Blatt-Weisskopf form factor `F_L(q)` of every decay vertex is baked into
+the kernel config's `fl_table` (all backends / `onnx_cpu` / `onnx_cuda` only
+interpolate it), so barrier **forms** are pluggable in pure Python:
+
+- `ampfit.bw_form_factor.BarrierFactor` — base class (`L`, `q0_ref`, `d`);
+  override `factor(q)` and `get_params()` (extra parameters go in
+  `get_params`, which feeds `get_id()` and the model's `fl_forms`).
+  `register_barrier(name)` registers a subclass; built-ins: `"bw"` (default,
+  Blatt-Weisskopf, unchanged) and `"exp"` (`exp(-(q·d)²/2)`).
+- Selected **per decay** with the existing decay-entry kwargs:
+  `barrier: <name>` or `barrier: {type: exp, d: 1.5, alpha: 2.0}` (extra keys
+  go to the class constructor); a sibling `d:` sets the radius.  Defaults are
+  `bw` / `3.0`.
+
+**Build-time defaults come from the global build context, not the config.**
+`ampfit.build_defaults` is the module; its `scope(**kw)` is a
+`contextvars`-backed `with` scope:
+`with build_defaults.scope(n_interp=4000, d=1.5): …`
+(`from ampfit.build_defaults import scope`).  Inside the scope the
+given overrides apply; on exit everything is back to the global defaults
+(`n_interp=2000`, `d=3.0`, `barrier="bw"`, in `build_defaults.DEFAULTS`).
+Recognised keys: `n_interp` (sampling of `fl_table` / `gamma_table`), `d`
+(Blatt-Weisskopf radius), `barrier` (default type).
+Build code reads it when a particle/decay omits the value (`BaseModel._barrier`,
+`build_fl_table`, `build_gamma_table`, `particle_model.build_particle`), so
+config files stay physics-only.  A config may also carry a `defaults:` mapping
+(`defaults: {d: 1.5, n_interp: 4000}`); `BaseModel` loads it as a **temporary**
+context for its own build — it does not leak into the global context.
+
+`BaseModel.fl_forms` is the ordered list of unique `BarrierFactor` objects
+(model metadata for the `fl_table` rows); the kernel config keeps only the
+arrays the kernels index (see gotcha 13).
+
+#### `fl_*` arrays: kernel inputs vs model metadata
+
+`fl_table` is `(n_forms, n_interp)` and the kernels pick a row per
+(wave, decay-vertex) with **two independent indices**:
+
+```c
+int fl_idx = fl_order[w * n_decay + d];                          // (wave, vertex) -> pair
+double q   = momentum[event * n_momentum + fl_q_index[fl_idx]];   // INPUT: which q
+fl *= interp(fl_table, fl_type[fl_idx], q, …);                    // FUNCTION: which row
+```
+
+- `fl_type` — the `fl_table` **row** (which form / function),
+- `fl_q_index` — the momentum **slot** (which input `q`),
+- `fl_order` — per (wave, vertex) → the dedup pair `(row, q-slot)`,
+- `fl_min` / `fl_delta` — the table grid.
+
+Those five are genuine kernel inputs and stay in the kernel config.  The
+*meaning* of each row (`L`, radius, type, params) is not — it lives on the
+model as `BaseModel.fl_forms` (a list of `BarrierFactor`); `fl_type` indexes
+it.
+
 ## Three-Layer Architecture
 
 ```
@@ -247,10 +303,14 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 12. **`Config` vs `RawConfig`**: `Config(path)` is a legacy alias for `build_amplitude_model(path)` (it returns the model).  The raw input object is `RawConfig` (`dic` / `_config_path` / `backend_spec`); `Fitter.config` is a `RawConfig` and `Fitter.model` is the `AmplitudeModel`.  Physics/kc members (`full_decay`, `build_kernel_config()`, `m0_phys_name`, …) live on `BaseModel`/`AmplitudeModel`, not on `RawConfig`.
 
+13. **Barrier metadata lives on `BaseModel`, not the kernel config**: the kernel config carries only what the kernels index — `fl_table` / `fl_type` / `fl_q_index` / `fl_order` / `fl_min` / `fl_delta`.  The barrier *forms* (`L` / radius / type / params) are `BaseModel.fl_forms` (a list of `BarrierFactor`); `fl_type` indexes it.  Consumers (`lineshape_common.b_barrier_factor`, `scripts/calc_3pi_lineshape.py`) read `f.model.fl_forms`.  The two `fl` indices are independent: `fl_type[fl_idx]` selects the function (table row), `fl_q_index[fl_idx]` selects the input momentum slot, and `fl_order` maps each (wave, vertex) to the dedup pair.
+
+14. **Build-time defaults via `build_defaults`**: `n_interp`, `d`, `barrier` are read from the `ampfit.build_defaults` module (a `contextvars` scope), not the config — so configs stay physics-only.  A config's top-level `defaults:` is loaded as a *temporary* context while that model is built (`BaseModel._default_context`).
+
 ## Testing
 
 ```bash
-pytest tests/ -v                        # 507 tests
+pytest tests/ -v                        # 539 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline
 pytest tests/test_new_apis.py            # LinearTransform, fmt_meas, get_defaults, …
 tests/validate_gradients.py              # 3-point gradient validation (all 6 backends)

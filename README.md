@@ -156,6 +156,55 @@ also ``"default"`` for ``pwa``.  The model knows nothing about backends;
 Choosing a backend not registered for the model (e.g. ``integrated`` for PWA)
 is rejected with the registered list.
 
+### Barrier factors & build defaults
+
+The Blatt–Weisskopf form factor of every decay vertex is baked into the kernel
+config's ``fl_table`` (every backend only interpolates it), so barrier forms
+are pluggable in pure Python: subclass ``ampfit.BarrierFactor``, register with
+``@register_barrier("name")``, and override ``factor(q)`` (extra parameters go
+in ``get_params()``).  Built-ins: ``"bw"`` (default, Blatt–Weisskopf) and
+``"exp"`` (``exp(-(q·d)²/2)``).
+
+```python
+import numpy as np
+from ampfit import BarrierFactor, register_barrier
+
+@register_barrier("myform")
+class MyBarrier(BarrierFactor):
+    def factor(self, q):
+        return np.exp(-0.5 * (q * self.d) ** 2)
+```
+
+Select it per decay with the existing decay-entry kwargs (defaults ``bw`` /
+``d = 3.0``):
+
+```yaml
+decay:
+  B:
+  - [rho, pi, barrier: {type: exp, d: 1.5}]   # or `barrier: bw` + sibling `d:`
+```
+
+Build-time defaults come from the global build context, not the config.  The
+module ``ampfit.build_defaults`` exposes ``scope``, a ``with`` scope:
+the overrides apply only inside the scope, then it is back to the global
+defaults.
+
+```python
+from ampfit.build_defaults import scope
+
+with scope(n_interp=4000, d=1.5):
+    kc = build_amplitude_model(cfg).build_kernel_config()
+# here n_interp / d are back to the global defaults
+```
+
+Keys: ``n_interp`` (``fl``/``gamma`` table sampling), ``d`` (barrier radius),
+``barrier`` (default type).  A config may also set
+``defaults: {d: 1.5, n_interp: 4000}``; the model loads it as a *temporary*
+context for its own build, so config files stay physics-only.  The barrier
+forms themselves are model metadata (``fitter.model.fl_forms``); the kernel
+config keeps only the arrays the kernels index (``fl_table``, ``fl_type``,
+``fl_q_index``, ``fl_order``, ``fl_min``, ``fl_delta``).
+
 ### Pure-PWA (projection-sum) kernels
 
 The pure-PWA family implements the scalar-free projection-sum model

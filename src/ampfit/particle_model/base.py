@@ -23,6 +23,10 @@ def build_particle(name, **kwargs):
     (default ``"BW"``).  Remaining kwargs are passed to the
     constructor.
     """
+    from ..build_defaults import get as _build_get
+    # default Blatt-Weisskopf radius from the global build context (models
+    # that do not read ``d`` simply ignore it)
+    kwargs.setdefault("d", _build_get("d", 3.0))
     model = kwargs.pop("model", "BW")
     return ALL_MODELS[model](name, **kwargs)
 
