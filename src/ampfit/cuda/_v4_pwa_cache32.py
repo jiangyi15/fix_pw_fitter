@@ -228,9 +228,13 @@ class CUDAKernelV4PWACache32:
             return _ffi.cast("double*", buf)
 
         ne = data["mass"].shape[0]
-        mass = np.ascontiguousarray(data["mass"].reshape(ne, -1))
-        mom = np.ascontiguousarray(data["q"].reshape(ne, -1))
-        ang = np.ascontiguousarray(data["angle"].reshape(ne, -1))
+        mass = np.ascontiguousarray(
+            data["mass"].reshape(ne, -1)[:, :self.n_mass])
+        mom = np.ascontiguousarray(
+            data["q"].reshape(ne, -1)[:, :self.n_momentum])
+        ang = np.ascontiguousarray(
+            data["angle"].reshape(ne, -1)[:, :self.n_angle_total
+                                          * self.n_angle_comp])
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 

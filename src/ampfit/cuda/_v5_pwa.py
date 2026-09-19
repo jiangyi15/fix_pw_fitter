@@ -232,9 +232,10 @@ class CUDAKernelV5PWA:
                 f"group is partial.  Resolution-cloud data should contain "
                 f"n_original x resolution_size rows.", RuntimeWarning,
                 stacklevel=2)
-        mass = data["mass"].reshape(ne, -1)
-        mom = data["q"].reshape(ne, -1)
-        ang = data["angle"].reshape(ne, -1)
+        mass = data["mass"].reshape(ne, -1)[:, :self.n_mass]
+        mom = data["q"].reshape(ne, -1)[:, :self.n_momentum]
+        ang = data["angle"].reshape(ne, -1)[:, :self.n_angle_total
+                                            * self.n_angle_comp]
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
