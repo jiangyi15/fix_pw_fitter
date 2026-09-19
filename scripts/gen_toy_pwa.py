@@ -17,10 +17,16 @@ The density uses the **Fitter parameter layer** (constraints/defaults via
 ``initial_values``/``build_params``) and an actual **Backend**
 (``--backend``, default ``numpy_pwa``) — never the raw kernel directly.
 
+The generating parameter point is either drawn from the Fitter parameter
+layer (``initial_values``: ck random, m0/g0 at their config defaults) or read
+from a saved parameter file with ``--params`` (``save_params`` JSON, e.g. a fit
+result).  In both cases the **same** point is written to ``init.json``, so
+``run_fit --init init.json`` starts exactly at the truth.
+
 ``--seed`` is a master seed: the sub-seeds are ``seed`` (phsp), ``seed+1``
-(proposal), ``seed+2`` (parameter point) and ``seed+3`` (event selection).
-Omit it and a random master seed is drawn and printed, so a run can be
-reproduced with ``--seed <printed>``.
+(proposal), ``seed+2`` (parameter point, unused with ``--params``) and
+``seed+3`` (event selection).  Omit it and a random master seed is drawn and
+printed, so a run can be reproduced with ``--seed <printed>``.
 """
 import argparse
 import os
@@ -52,6 +58,10 @@ def main():
     ap.add_argument("--backend", default="numpy_pwa",
                     help='compute backend (name or YAML dict); the toy '
                          'generator is a CPU utility, default "numpy_pwa"')
+    ap.add_argument("--params", default=None,
+                    help="JSON (save_params format) giving the generating "
+                         "parameter point, e.g. a fit result; default: the "
+                         "Fitter's random initial_values")
     ap.add_argument("--seed", type=int, default=None,
                     help="master seed; sub-seeds are seed, +1 (phsp/proposal), "
                          "+2 (params), +3 (event selection).  Omitted -> draw "
@@ -96,9 +106,15 @@ def main():
                                generate_pwa_phsp(model, chain, args.nprop,
                                                  seed=s + 1))
 
-    # Parameter point from the Fitter parameter layer (constraints/defaults):
-    # ck is random (symmetric start), m0/g0 come from the config defaults.
-    x0 = f.initial_values(seed=s + 2)
+    # Parameter point: from --params (save_params JSON), else from the Fitter
+    # parameter layer (ck random symmetric start, m0/g0 at config defaults).
+    if args.params:
+        import json
+        with open(args.params) as fh:
+            x0 = f.values_from_dict(json.load(fh))
+        print(f"params      : {args.params}")
+    else:
+        x0 = f.initial_values(seed=s + 2)
     params, resolved = f.build_params(x0)
 
     # Density via the configured Backend (norm=None -> unnormalised P/e).
