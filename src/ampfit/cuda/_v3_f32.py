@@ -208,9 +208,10 @@ class CUDAKernelV3F32:
         ne = data["mass"].shape[0]
 
         # Reshape from (N, 24, 2) -> (N, n_mass) etc.
-        mass = data["mass"].reshape(ne, -1)
-        mom = data["q"].reshape(ne, -1)
-        ang = data["angle"].reshape(ne, -1)
+        mass = data["mass"].reshape(ne, -1)[:, :self.n_mass]
+        mom = data["q"].reshape(ne, -1)[:, :self.n_momentum]
+        ang = data["angle"].reshape(ne, -1)[:, :self.n_angle_total
+                                            * self.n_angle_comp]
 
         # Use n_angle_total for per-event angle stride
         nang = self.n_angle_total
