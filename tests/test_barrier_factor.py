@@ -9,7 +9,7 @@ import copy
 import numpy as np
 import pytest
 
-from ampfit.bw_form_factor import (BARRIER_MODELS, BarrierFactor,
+from tabpwa.bw_form_factor import (BARRIER_MODELS, BarrierFactor,
                                    barrier_names, build_barrier, form_factor,
                                    register_barrier)
 
@@ -69,8 +69,8 @@ def test_register_custom_type():
 # ── per-decay config ──────────────────────────────────────────────
 
 def _override_model():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     dic["decay"]["jpsi"][0] = list(dic["decay"]["jpsi"][0]) + [
@@ -79,7 +79,7 @@ def _override_model():
 
 
 def test_default_config_backward_compatible():
-    from ampfit.amp_model import build_amplitude_model
+    from tabpwa.amp_model import build_amplitude_model
 
     m = build_amplitude_model(CFG)
     c = m.build_kernel_config()
@@ -109,8 +109,8 @@ def test_per_decay_barrier_and_d():
 
 
 def test_nested_barrier_spec_extra_params():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     @register_barrier("test_gauss")
     class TestGauss(BarrierFactor):
@@ -150,9 +150,9 @@ def test_nested_barrier_spec_extra_params():
 # ── end-to-end: the per-decay barrier reaches the CUDA kernels ────
 
 def test_numpy_vs_cuda_with_exp_barrier():
-    from ampfit import Fitter
-    from ampfit.config_loader import load_config
-    from ampfit.pwa_build import generate_pwa_phsp, pwa_event_data_tree
+    from tabpwa import Fitter
+    from tabpwa.config_loader import load_config
+    from tabpwa.pwa_build import generate_pwa_phsp, pwa_event_data_tree
 
     dic: dict = copy.deepcopy(load_config(CFG))
     dic["decay"]["jpsi"][0] = list(dic["decay"]["jpsi"][0]) + [

@@ -24,8 +24,8 @@ _SRC = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, _SRC)
 
 import argparse
-from ampfit import Fitter
-from ampfit.rho_observables import read_polar
+from tabpwa import Fitter
+from tabpwa.rho_observables import read_polar
 
 # ── a1(1260)± B-decay coupling names (single wave, L = 1) ─────────
 A1_NAMES = {

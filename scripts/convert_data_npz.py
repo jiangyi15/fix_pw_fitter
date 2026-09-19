@@ -4,7 +4,7 @@
 Scans the config's ``data`` section for *momentum datasets* — any list
 of ``.npy`` paths whose key is not an auxiliary array (keys ending in
 ``_time``, ``_tag1``, ``_eta1``, ``_bg_value``, ``_weight``, ``_arr``,
-...) — and converts each one with :func:`ampfit.momenta_to_data` to an
+...) — and converts each one with :func:`tabpwa.momenta_to_data` to an
 output npz.  All paths resolve relative to the config file directory.
 
 Dataset naming::
@@ -36,7 +36,7 @@ import os
 import numpy as np
 import yaml
 
-from ampfit.momenta_to_data import momenta_to_data
+from tabpwa.momenta_to_data import momenta_to_data
 
 KEYS = ("mass", "q", "angles", "frac", "time", "bkg_raw", "weight")
 

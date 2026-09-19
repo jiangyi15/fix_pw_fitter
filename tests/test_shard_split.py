@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ampfit.backends.shard_backend import split_offsets
+from tabpwa.backends.shard_backend import split_offsets
 
 
 def test_equal_weights_no_align():

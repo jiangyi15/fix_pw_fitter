@@ -34,7 +34,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
+from tabpwa import Fitter
 
 M_PI = 0.13957
 M_B = 5.279

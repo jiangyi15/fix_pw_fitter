@@ -6,11 +6,11 @@ import tempfile
 import numpy as np
 import pytest
 
-from ampfit import Fitter
-from ampfit.amp_model import (AmplitudeModel, PWA, FlavourTagMix,
+from tabpwa import Fitter
+from tabpwa.amp_model import (AmplitudeModel, PWA, FlavourTagMix,
                               build_amplitude_model, AMPLITUDE_MODELS)
-from ampfit.kernel_params import (PWAKernelParams, FlavourTagMixKernelParams)
-from ampfit.config_loader import Config
+from tabpwa.kernel_params import (PWAKernelParams, FlavourTagMixKernelParams)
+from tabpwa.config_loader import Config
 
 PWA_CFG = os.path.join(os.path.dirname(__file__), "config_pwa.yml")
 
@@ -31,7 +31,7 @@ def test_default_model_is_pwa():
     assert isinstance(m.build_params_transform(), PWAKernelParams)
     assert cfg.angle_formula_mode == "helicity" and cfg.n_proj >= 1
     # the raw input holds no model instance / scalar mirror
-    from ampfit.config_loader import RawConfig
+    from tabpwa.config_loader import RawConfig
     raw = RawConfig(PWA_CFG)
     assert not hasattr(raw, "amplitude_model") and not hasattr(raw, "scalar_names")
 
@@ -110,7 +110,7 @@ def test_ck_index_helpers_respect_row_blocks():
 
 def test_backend_registry_gates_backends_per_model():
     """Names are registered per model; "default" is a per-model name."""
-    from ampfit.backends import backends_for_model, backend_class
+    from tabpwa.backends import backends_for_model, backend_class
 
     pwa = backends_for_model("pwa")
     assert {"integrated_pwa", "cuda_v4_pwa", "default"} <= pwa
@@ -146,7 +146,7 @@ def test_partial_scalar_defaults_keep_legacy_fallbacks():
 
 def test_fitter_uses_registered_default_backend(monkeypatch):
     """With no explicit/config backend, Fitter passes the name 'default'."""
-    import ampfit.backends as B
+    import tabpwa.backends as B
     seen = {}
     real = B.create_backend
 
@@ -170,8 +170,8 @@ def test_fitter_uses_registered_default_backend(monkeypatch):
 
 
 def test_backend_registry_is_consistent():
-    from ampfit.backends import MODEL_BACKENDS, UNIVERSAL_BACKENDS, backend_class
-    from ampfit.amp_model import AMPLITUDE_MODELS
+    from tabpwa.backends import MODEL_BACKENDS, UNIVERSAL_BACKENDS, backend_class
+    from tabpwa.amp_model import AMPLITUDE_MODELS
     canonical = {cls.name for cls in AMPLITUDE_MODELS.values()}
     assert set(MODEL_BACKENDS) <= canonical          # only real model names
     assert "default" in MODEL_BACKENDS["pwa"]
@@ -183,7 +183,7 @@ def test_backend_registry_is_consistent():
 
 
 def test_model_without_registered_backends_raises_clearly():
-    from ampfit.amp_model import AmplitudeModel, register_amplitude_model
+    from tabpwa.amp_model import AmplitudeModel, register_amplitude_model
 
     @register_amplitude_model("_no_backends")
     class NoBackends(AmplitudeModel):
@@ -230,7 +230,7 @@ def test_param_names_are_unique_with_colliding_scalar():
 
 
 def test_integrated_backend_requires_legacy_block_structure():
-    from ampfit.backends.integrated_backend import IntegratedBackend
+    from tabpwa.backends.integrated_backend import IntegratedBackend
 
     kc_pwa = Config(PWA_CFG).build_all_index()      # n_blocks = 1
     with pytest.raises(ValueError, match="integrated_pwa"):
@@ -245,7 +245,7 @@ def test_integrated_backend_requires_legacy_block_structure():
 
 def test_invalid_backend_fails_before_kernel_config(monkeypatch):
     """Backend validation must precede the kernel-config build."""
-    import ampfit.config_loader as cl
+    import tabpwa.config_loader as cl
 
     def _boom(self):
         raise AssertionError("build_all_index must not be called")
@@ -256,14 +256,14 @@ def test_invalid_backend_fails_before_kernel_config(monkeypatch):
 
 
 def test_amp_model_module_does_not_import_backends():
-    import ampfit.amp_model as am
+    import tabpwa.amp_model as am
     src = open(am.__file__).read()
-    assert "ampfit.backends" not in src
+    assert "tabpwa.backends" not in src
 
 
 def test_raw_config_has_no_model():
     """RawConfig is pure raw input; the model is built from it."""
-    import ampfit.config_loader as cl
+    import tabpwa.config_loader as cl
     raw = cl.RawConfig(PWA_CFG)
     assert not hasattr(raw, "amplitude_model")
     assert not hasattr(raw, "scalar_names")
@@ -272,7 +272,7 @@ def test_raw_config_has_no_model():
 
 def test_create_backend_injects_model_into_composer():
     """A backend whose __init__ takes ``model`` receives it (nested default)."""
-    from ampfit.backends import create_backend, register_backend
+    from tabpwa.backends import create_backend, register_backend
 
     @register_backend("_model_probe")
     class Probe:
@@ -284,7 +284,7 @@ def test_create_backend_injects_model_into_composer():
 
 
 def test_integrated_threads_model_to_nested_base(monkeypatch):
-    import ampfit.backends as B
+    import tabpwa.backends as B
     seen = {}
     real = B.create_backend
 
@@ -293,14 +293,14 @@ def test_integrated_threads_model_to_nested_base(monkeypatch):
         return real(spec, kernel_config, model=model, **kw)
 
     monkeypatch.setattr(B, "create_backend", spy)
-    from ampfit.backends.integrated_backend import IntegratedBackend
+    from tabpwa.backends.integrated_backend import IntegratedBackend
     kc = Config("config_angle.yml").build_all_index()
     IntegratedBackend(kc, base="numpy", model="flavour_tag_mix")
     assert seen == {"spec": "numpy", "model": "flavour_tag_mix"}
 
 
 def test_shard_records_model_for_workers():
-    from ampfit.backends.shard_backend import ShardBackend
+    from tabpwa.backends.shard_backend import ShardBackend
     kc = Config(PWA_CFG).build_all_index()
     be = ShardBackend(kc, backends=["default"], model="pwa")
     assert be._model == "pwa" and be._specs == [("default", None)]
@@ -335,8 +335,8 @@ def test_initial_values_use_default():
 def test_model_builds_event_data_per_case():
     """PWA -> tree (+blocks, no frac/time); FlavourTagMix -> 24-row + frac/time."""
     import numpy as np
-    from ampfit.config_loader import Config
-    from ampfit.amp_model import build_amplitude_model
+    from tabpwa.config_loader import Config
+    from tabpwa.amp_model import build_amplitude_model
 
     def _mom(n, masses, seed=0):
         rs = np.random.RandomState(seed)
@@ -361,8 +361,8 @@ def test_model_builds_event_data_per_case():
 
 
 def test_build_amplitude_model_accepts_path_config_dict():
-    from ampfit.config_loader import Config, load_config
-    from ampfit.amp_model import build_amplitude_model
+    from tabpwa.config_loader import Config, load_config
+    from tabpwa.amp_model import build_amplitude_model
 
     m1 = build_amplitude_model("tests/config_pwa.yml")        # path
     m2 = build_amplitude_model(Config("tests/config_pwa.yml"))  # Config

@@ -12,9 +12,9 @@ _cuda_lib_path = "/usr/local/lib/ollama/mlx_cuda_v13"
 if _cuda_lib_path not in os.environ.get("LD_LIBRARY_PATH", ""):
     os.environ["LD_LIBRARY_PATH"] = f"{_cuda_lib_path}:{os.environ.get('LD_LIBRARY_PATH', '')}"
 
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
-from ampfit import Fitter
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
+from tabpwa import Fitter
 
 CONFIG_FILE = "config_angle.yml"
 N_EVENTS = 16  # small enough for f32 precision, large enough for stable gradients

@@ -23,8 +23,8 @@ CONFIG_FILE = "config_angle.yml"
 BATCH_SIZE = 512
 
 import warnings
-from ampfit.config_loader import Config
-from ampfit._onnx_builder import PWAONNXBuilder
+from tabpwa.config_loader import Config
+from tabpwa._onnx_builder import PWAONNXBuilder
 config = Config(CONFIG_FILE)
 kc = config.build_all_index()
 builder = PWAONNXBuilder(kc)

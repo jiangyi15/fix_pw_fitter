@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
+from tabpwa.config_loader import Config
 
 
 @pytest.fixture(scope="module")
@@ -35,8 +35,8 @@ def _make(kernel_cls, kc):
 
 
 def test_v4_pwa_cache_matches_v4_pwa_fixed(pwa_small):
-    from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
-    from ampfit.cuda._v4_pwa_cache import CUDAKernelV4PWACache as KC
+    from tabpwa.cuda._v4_pwa import CUDAKernelV4PWA as KV4
+    from tabpwa.cuda._v4_pwa_cache import CUDAKernelV4PWACache as KC
     _cfg, kc, data, params, _p = pwa_small
 
     kv, kc_ = _make(KV4, kc), _make(KC, kc)

@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernel
-from ampfit.amp_cache import (build_amp_cache_layout, fill_amp_cache,
+from tabpwa.config_loader import Config
+from tabpwa.numpy_kernel import NumpyKernel
+from tabpwa.amp_cache import (build_amp_cache_layout, fill_amp_cache,
                               amp_factor_cached)
 
 CONFIGS = ["config_angle.yml", "config_amp.yml"]

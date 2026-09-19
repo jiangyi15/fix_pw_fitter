@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build portable ampfit AppImage: Python 3.10 + CUDA 12 runtime + nvcc + deps.
+# Build portable tabpwa AppImage: Python 3.10 + CUDA 12 runtime + nvcc + deps.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASE_APPIMAGE="$SCRIPT_DIR/python3.10.8-cp310-cp310-manylinux2014_x86_64.AppImage"
 APPIMAGETOOL="$SCRIPT_DIR/appimagetool-x86_64.AppImage"
 APP_DIR="$SCRIPT_DIR/AppDir"
-OUTPUT="$SCRIPT_DIR/ampfit-python3.10-cuda12.AppImage"
+OUTPUT="$SCRIPT_DIR/tabpwa-python3.10-cuda12.AppImage"
 CONDA="/home/jiangy/miniconda3"
 
 step() { echo "=== $1 ==="; }
@@ -60,9 +60,9 @@ cp -rL "$CONDA/targets" "$CUDA_TK/"
 
 # 5. Pre-compile CUDA kernels (sm_70, sm_75, sm_86, sm_89)
 step "Pre-compile CUDA kernels"
-TMP_SRC="/tmp/ampfit_build_$$"
+TMP_SRC="/tmp/tabpwa_build_$$"
 mkdir -p "$TMP_SRC"
-cp -r "$PROJECT_DIR/src/ampfit" "$TMP_SRC/"
+cp -r "$PROJECT_DIR/src/tabpwa" "$TMP_SRC/"
 # Use clean environment to avoid conda GCC version conflicts
 "$APP_DIR/AppRun" -c "
 import sys, os
@@ -70,16 +70,16 @@ os.environ.clear()
 os.environ['PATH'] = '$CUDA_TK/bin:$CUDA_TK/nvvm/bin:/usr/bin:/bin'
 os.environ['LD_LIBRARY_PATH'] = '$CUDA_TK/lib64:$CUDA_TK/nvvm/lib64'
 os.environ['HOME'] = '/tmp'
-os.environ['AMPFIT_HASH_DIR'] = '/tmp'
+os.environ['TABPWA_HASH_DIR'] = '/tmp'
 sys.path.insert(0, '$TMP_SRC')
-from ampfit.cuda.build import set_arch, build
+from tabpwa.cuda.build import set_arch, build
 set_arch('sm_70,sm_75,sm_86,sm_89')
 print('Building kernels...', end='')
 ok = build()
 print(' OK' if ok else ' FAILED')
 " 2>&1
-mkdir -p "$APP_DIR/usr/lib/ampfit/cuda"
-cp "$TMP_SRC/ampfit/cuda/"libcuda_kernels_*.so "$APP_DIR/usr/lib/ampfit/cuda/" 2>/dev/null || true
+mkdir -p "$APP_DIR/usr/lib/tabpwa/cuda"
+cp "$TMP_SRC/tabpwa/cuda/"libcuda_kernels_*.so "$APP_DIR/usr/lib/tabpwa/cuda/" 2>/dev/null || true
 rm -rf "$TMP_SRC"
 
 # 6. AppRun entry point
@@ -91,18 +91,18 @@ export LD_LIBRARY_PATH="$SELF/usr/lib/cuda:$SELF/usr/local/cuda/lib64:$SELF/usr/
 export PATH="$SELF/usr/local/cuda/bin:$SELF/usr/local/cuda/nvvm/bin:${PATH:-}"
 export CUDA_PATH="$SELF/usr/local/cuda"
 export CUDA_HOME="$CUDA_PATH"
-export AMPFIT_CUDA_DIR="$SELF/usr/lib/ampfit/cuda"
+export TABPWA_CUDA_DIR="$SELF/usr/lib/tabpwa/cuda"
 PYTHON="$SELF/opt/python3.10/bin/python3.10"
 exec "$PYTHON" "$@"
 APPRUN
 chmod +x "$APP_DIR/AppRun"
 
 # 7. Desktop file
-cat > "$APP_DIR/ampfit.desktop" << EOF
+cat > "$APP_DIR/tabpwa.desktop" << EOF
 [Desktop Entry]
-Name=ampfit (Python 3.10 + CUDA 12)
+Name=tabpwa (Python 3.10 + CUDA 12)
 Exec=AppRun
-Icon=ampfit
+Icon=tabpwa
 Terminal=true
 Type=Application
 Categories=Science;Physics;

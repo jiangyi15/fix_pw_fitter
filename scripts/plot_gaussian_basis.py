@@ -36,7 +36,7 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from ampfit import Fitter
+    from tabpwa import Fitter
 
     # ── Load ────────────────────────────────────────────────────
     os.chdir(os.path.dirname(os.path.abspath(args.config)))
@@ -51,7 +51,7 @@ def main():
     # ── Build CK and collect per-particle amplitudes ────────────
     seen_models = set()
     particle_map = {}  # name → (model, mu, sigma)
-    from ampfit.particle_model.models_builtin import GaussianBasisModel, BSplineBasisModel
+    from tabpwa.particle_model.models_builtin import GaussianBasisModel, BSplineBasisModel
     basis_types = (GaussianBasisModel, BSplineBasisModel)
     for chain in f.full_decay.chains:
         for decay in chain.decays[1:]:

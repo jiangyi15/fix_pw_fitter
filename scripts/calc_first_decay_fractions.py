@@ -23,8 +23,8 @@ sys.path.insert(0, _SCRIPT_DIR)
 def _default_path(name):
     """Return absolute path relative to project root."""
     return os.path.join(_SCRIPT_DIR, name)
-from ampfit import Fitter
-from ampfit.amp_frac import AmplitudeFractions
+from tabpwa import Fitter
+from tabpwa.amp_frac import AmplitudeFractions
 
 
 def _make_label_fn(name_map):

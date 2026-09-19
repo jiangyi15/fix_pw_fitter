@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.phasespace_b4pi import (
+from tabpwa.phasespace_b4pi import (
     generate_b4pi, generate_b4pi_fixed_m3pi, two_body_momentum, sample_masses,
     _mass_weight, M_PION, M_B_MESON,
 )

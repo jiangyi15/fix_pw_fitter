@@ -19,8 +19,8 @@ import matplotlib.ticker as mticker
 from matplotlib.patches import Ellipse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ampfit import Fitter
-from ampfit.gp import GP
+from tabpwa import Fitter
+from tabpwa.gp import GP
 
 
 def main():

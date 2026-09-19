@@ -11,8 +11,8 @@ Usage:
 
 import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
-from ampfit.plot_pw_groups import PWGroupPlotter, discover_groups
+from tabpwa import Fitter
+from tabpwa.plot_pw_groups import PWGroupPlotter, discover_groups
 
 
 def main():

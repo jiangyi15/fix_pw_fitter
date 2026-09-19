@@ -8,9 +8,9 @@ import os
 
 import numpy as np
 
-from ampfit.amp_model import build_amplitude_model
-from ampfit.build_defaults import DEFAULTS, scope
-from ampfit.param_constraint import CKProduct, complex_tail, phase_name
+from tabpwa.amp_model import build_amplitude_model
+from tabpwa.build_defaults import DEFAULTS, scope
+from tabpwa.param_constraint import CKProduct, complex_tail, phase_name
 
 CFG = os.path.join(os.path.dirname(__file__), "config_pwa.yml")
 
@@ -61,7 +61,7 @@ def test_scoped_tail_param_names():
 
 def test_fitter_captures_tail_at_build():
     """The tail is baked into the Fitter's cached transform, not re-read."""
-    from ampfit import Fitter
+    from tabpwa import Fitter
 
     with scope(complex_tail=("rho", "phi")):
         fitter = Fitter(CFG, backend="numpy_pwa")

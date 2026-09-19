@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import build_particle
+from tabpwa.particle_model import build_particle
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ class TestLinearShape:
 
     def test_registered(self):
         """'linear' is a registered model name."""
-        from ampfit.particle_model import ALL_MODELS
+        from tabpwa.particle_model import ALL_MODELS
         assert "linear" in ALL_MODELS
 
 

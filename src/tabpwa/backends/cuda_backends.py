@@ -1,0 +1,209 @@
+"""CUDA backends — GPU-accelerated computation (f64 and f32)."""
+import numpy as np
+from .core import ComputeBackend, register_backend
+
+
+class _CUDABackend(ComputeBackend):
+    """Common base for all CUDA backends — thin adapters around a kernel.
+
+    Each kernel is standalone and provides its own native d(NLL)/d(norm) in
+    ``self._last_dnorm`` (set during a normed compute); the backend simply
+    forwards it as ``grads["norm"]`` and passes ``return_p`` through so a
+    fit never round-trips per-event P to the host.
+    """
+
+    def __init__(self, kernel_config, batch_size=50000):
+        self.kernel = self._make_kernel(kernel_config, batch_size)
+
+    def _make_kernel(self, kernel_config, batch_size):
+        raise NotImplementedError
+
+    def load_data(self, data_np):
+        return self.kernel.load_data(data_np)
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            native = self.kernel._last_dnorm
+            if native is None:
+                raise RuntimeError(
+                    f"{type(self).__name__}: kernel did not provide a "
+                    f"native dNLL/dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(native)
+        return Q, grads, P
+
+    def free(self):
+        self.kernel.free()
+
+
+@register_backend("cuda_v2", model="flavour_tag_mix")
+@register_backend("cuda64_v2", model="flavour_tag_mix")
+class CUDABackendV2(_CUDABackend):
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v2 import CUDAKernelV2 as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda32_v2", model="flavour_tag_mix")
+class CUDABackendV2F32(_CUDABackend):
+    dtype = np.float32
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v2_f32 import CUDAKernelV2F32 as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda", model="flavour_tag_mix")
+@register_backend("cuda64", model="flavour_tag_mix")
+@register_backend("default", model="flavour_tag_mix")
+@register_backend("cuda_v3", model="flavour_tag_mix")
+@register_backend("cuda64_v3", model="flavour_tag_mix")
+class CUDABackendV3(_CUDABackend):
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3 import CUDAKernelV3 as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda32_v3", model="flavour_tag_mix")
+class CUDABackendV3F32(_CUDABackend):
+    dtype = np.float32
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3_f32 import CUDAKernelV3F32 as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_mixed_v3", model="flavour_tag_mix")
+class CUDABackendV3Mixed(_CUDABackend):
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3_mixed import CUDAKernelV3Mixed as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_cache", model="flavour_tag_mix")
+class CUDABackendV3Cache(_CUDABackend):
+    """CUDA v3 cache — lazy amplitude caching for fast data NLL.
+
+    Suitable as the base backend for IntegratedBackend.  On first
+    compute() call, caches per-wave complex amplitudes.  Subsequent
+    calls skip BW/angular/FF evaluation.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3_cache import CUDAKernelV3Cache as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_sparse", model="flavour_tag_mix")
+class CUDABackendV3Sparse(_CUDABackend):
+    """CUDA v3 sparse — sparse scatter/gather for matrix_gamma (99.5% sparse).
+
+    Same split-kernel + FP32 FA as v3_split, but the 288×216 matrix_gamma
+    matmul in g_bw and grad_g0 is replaced by scatter/gather via column-index
+    array — 0.5% of the original arithmetic.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3_sparse import CUDAKernelV3Sparse as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v3_ampcache", model="flavour_tag_mix")
+class CUDABackendV3AmpCache(_CUDABackend):
+    """CUDA v3 ampcache — v3 sparse + cached minimal-set angular amplitudes.
+
+    The per-wave amplitude is ``a_w = ck_w·Amp_w(q,angles)/bw_p_w(m)``; the
+    angular part (272 unique values/event) is pure kinematics and is cached
+    per handle at load_data (fp64 fill, float2 storage), while the BW
+    propagator is recomputed each iteration — so m0/g0 remain fitted
+    (unlike cuda_v3_cache, which requires them fixed).  Cache is constant
+    over the fit, so fp32 storage never moves the minimum.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v3_ampcache import CUDAKernelV3AmpCache as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v4_pwa", model="pwa")
+@register_backend("default", model="pwa")
+class CUDABackendV4PWA(_CUDABackend):
+    """CUDA v4 PWA — projection-sum PWA on the ampcache infrastructure.
+
+    No time evolution / no D mixing / no scalar params:
+    ``P(e) = Σ_p |A_p(e)|²`` with ``A_p = Σ_k ck_k·a_{p,k}(e)``.  All
+    projections share the same ck; the projection (helicity / spin
+    projection etc.) only changes the angular part of the per-wave
+    amplitude.  Wave entries are stored p-major (n_wave = n_proj·N, ck
+    length N = n_wave/n_proj).  Config must provide ``n_proj``.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa import CUDAKernelV4PWA as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v5_pwa", model="pwa")
+class CUDABackendV5PWA(_CUDABackend):
+    """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
+    NLL does not log per event: events are grouped into ``resolution_size``-sized
+    chunks and one log is taken per group,
+
+        Q = -Σ_groups log Σ_{e∈g} w_e·(P_e/norm + bkg_e)
+
+    ``P_e = Σ_p |A_p|²`` is unchanged (returned per event).  The phase-space
+    path (``norm=None``) is identical to v4, so normalization integrals and
+    their gradients are bit-comparable.  ``dNLL/dnorm`` is accumulated per
+    group on the GPU/C path and exposed to the fitter (``dnorm_on_gpu``).
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
+@register_backend("cuda32_v4_pwa_cache", model="pwa")
+class CUDABackendV4PWACache32(_CUDABackend):
+    """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
+
+    The cached amplitude matrix is stored as float2, halving the
+    steady-state memory traffic of the fp64 cache (~2x per-call speed at
+    large wave counts); arithmetic stays fp64.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_cache32 import CUDAKernelV4PWACache32 as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v4_pwa_cache", model="pwa")
+class CUDABackendV4PWACache(_CUDABackend):
+    """CUDA v4 PWA cache — full-amplitude cache for the fixed m0/g0 case.
+
+    Same pure-PWA model as ``cuda_v4_pwa`` (P = Σ_p |Σ_k ck·a|², shared ck,
+    p-major entries).  Strictly for fits where every m0/g0 is fixed: the
+    per-event per-entry spatial amplitude common[e, p·N+k] (angular cache ×
+    BW propagator) is then constant and is computed ONCE per data handle at
+    the parameters seen on the first compute().  Every later compute() only
+    contracts ck over the cached amplitude (forward + ck gradient) and
+    returns zero m0/g0 gradients.  There is no automatic refill or switch —
+    when masses/widths float, pick ``cuda_v4_pwa`` instead.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_cache import CUDAKernelV4PWACache as K
+        return K(kc, batch_size=bs)

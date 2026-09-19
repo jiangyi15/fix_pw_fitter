@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import pytest
-from ampfit import Fitter
+from tabpwa import Fitter
 
 CONFIG_FILE = "config_angle.yml"
 N_DATA = 50
@@ -152,7 +152,7 @@ def test_set_same_reset():
 
 def test_set_same_chained_transitive():
     """Chained equality [["a","b"],["b","c"]] resolves all to the root."""
-    from ampfit.param_constraint import NameResolution
+    from tabpwa.param_constraint import NameResolution
     nr = NameResolution()
     # both group orders must give the same transitive closure
     for groups in ([["a", "b"], ["b", "c"]], [["b", "c"], ["a", "b"]]):
@@ -167,7 +167,7 @@ def test_set_same_chained_transitive():
 
 def test_set_same_chained_no_cycle():
     """A degenerate self-referential group collapses to one root."""
-    from ampfit.param_constraint import NameResolution
+    from tabpwa.param_constraint import NameResolution
     nr = NameResolution()
     nr.set_same([["a", "b"], ["b", "a"]])   # contradictory cycle
     # collapses to a single canonical root (no 2-cycle)
@@ -379,7 +379,7 @@ def test_gradients_nonzero():
 
 def test_gaussian_prior_basic():
     """GaussianPrior produces correct fun and gradients."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     p = GaussianPrior("test_x", mu=1.0, sigma=0.5)
     resolved = {"test_x": 1.3, "other": 99.0}
@@ -392,7 +392,7 @@ def test_gaussian_prior_basic():
 
 def test_gaussian_prior_multiname():
     """GaussianPrior with multiple names."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     p = GaussianPrior(["a", "b"], mu=[1.0, 2.0], sigma=[0.1, 0.2])
     resolved = {"a": 1.1, "b": 2.3}
@@ -406,7 +406,7 @@ def test_gaussian_prior_multiname():
 
 def test_gaussian_prior_broadcast():
     """Single mu/sigma broadcasts to all names."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     p = GaussianPrior(["a", "b", "c"], mu=0.0, sigma=1.0)
     resolved = {"a": 0.5, "b": -0.3, "c": 1.2}
@@ -416,7 +416,7 @@ def test_gaussian_prior_broadcast():
 
 def test_prior_added_to_nll():
     """Fitter.get_nll includes prior NLL."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
     # setup_fitter overrides cm.defaults after apply_constrains; use a
@@ -439,7 +439,7 @@ def test_prior_added_to_nll():
 
 def test_prior_gradient_numerical():
     """Prior gradient matches finite difference."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
     mass_name = fitter.model.m0_phys_name[0]
@@ -464,7 +464,7 @@ def test_prior_gradient_numerical():
 
 def test_multiple_priors():
     """Multiple priors accumulate correctly."""
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
 
@@ -484,7 +484,7 @@ def test_multiple_priors():
 
 def test_gaussian_prior_to_dict():
     """GaussianPrior.to_dict/from_dict round-trip."""
-    from ampfit.param_constraint import GaussianPrior, prior_from_dict
+    from tabpwa.param_constraint import GaussianPrior, prior_from_dict
 
     p = GaussianPrior(["a", "b"], mu=[1.0, 2.0], sigma=[0.1, 0.2])
     d = p.to_dict()
@@ -503,7 +503,7 @@ def test_gaussian_prior_to_dict():
 def test_prior_round_trip_via_json():
     """GaussianPrior survives JSON serialisation."""
     import json
-    from ampfit.param_constraint import GaussianPrior, prior_from_dict
+    from tabpwa.param_constraint import GaussianPrior, prior_from_dict
 
     p = GaussianPrior("test_x", mu=0.5, sigma=0.2)
     d = p.to_dict()
@@ -517,7 +517,7 @@ def test_prior_round_trip_via_json():
 def test_prior_save_load_constraints():
     """Fitter.save_constraints / load_constraints round-trips priors."""
     import json, tempfile
-    from ampfit.param_constraint import GaussianPrior
+    from tabpwa.param_constraint import GaussianPrior
 
     fitter = setup_fitter()
     mass_name = fitter.model.m0_phys_name[0]
@@ -546,7 +546,7 @@ def test_prior_save_load_constraints():
 
 def test_prior_from_dict_unknown():
     """prior_from_dict raises on unknown type."""
-    from ampfit.param_constraint import prior_from_dict
+    from tabpwa.param_constraint import prior_from_dict
     import pytest
     with pytest.raises(ValueError, match="Unknown prior type"):
         prior_from_dict({"type": "NonExistentPrior"})
@@ -555,7 +555,7 @@ def test_prior_from_dict_unknown():
 def test_transform_save_load_round_trip():
     """BWParamsTransform survives save/load of constraints."""
     import json, tempfile, os
-    from ampfit import BWParamsTransform, transform_from_dict
+    from tabpwa import BWParamsTransform, transform_from_dict
 
     fitter = setup_fitter()
     chain = fitter.full_decay.chains[0]
@@ -591,7 +591,7 @@ def test_transform_save_load_round_trip():
 
 def test_transform_from_dict_unknown():
     """transform_from_dict raises on unknown type."""
-    from ampfit import transform_from_dict
+    from tabpwa import transform_from_dict
     with pytest.raises(ValueError, match="Unknown transform type"):
         transform_from_dict({"type": "NonExistentTransform"})
 
@@ -600,7 +600,7 @@ def test_transform_from_dict_unknown():
 
 def test_blind_transform_roundtrip():
     """UnBlindTransform: forward shifts, inverse recovers, others pass through."""
-    from ampfit.param_constraint import UnBlindTransform
+    from tabpwa.param_constraint import UnBlindTransform
     tr = UnBlindTransform(["a", "b"], seed=42, scale=3.0)
     d = {"a": 5.0, "b": 1.0, "c": 3.0}
     out = tr.apply_forward(dict(d))
@@ -613,7 +613,7 @@ def test_blind_transform_roundtrip():
 
 def test_blind_deterministic_and_per_name_stable():
     """Same seed+names → same offsets; offsets independent per name."""
-    from ampfit.param_constraint import UnBlindTransform
+    from tabpwa.param_constraint import UnBlindTransform
     tr1 = UnBlindTransform(["a", "b"], seed=7, scale=1.0)
     tr2 = UnBlindTransform(["a", "b"], seed=7, scale=1.0)
     assert tr1.offsets == tr2.offsets
@@ -628,7 +628,7 @@ def test_blind_deterministic_and_per_name_stable():
 
 def test_blind_offset_scale():
     """Offset magnitude = U(-1,1) * scale; standalone, no bounds involved."""
-    from ampfit.param_constraint import UnBlindTransform
+    from tabpwa.param_constraint import UnBlindTransform
     tr = UnBlindTransform(["a", "b"], seed=3, scale=5.0)
     assert abs(tr.offsets["a"]) <= 5.0
     assert abs(tr.offsets["b"]) <= 5.0
@@ -643,7 +643,7 @@ def test_blind_offset_scale():
 
 def test_blind_between_bounds_and_fixed():
     """Blind sits between bounds and fixed; inverse round-trips after unblind."""
-    from ampfit.param_constraint import ConstraintManager
+    from tabpwa.param_constraint import ConstraintManager
     cm = ConstraintManager(["a"])
     cm.set_range("a", 0, 10)
     cm.set_blind(["a"], seed=7)
@@ -684,7 +684,7 @@ def test_blind_fit_result_is_shifted_not_compensated():
     after-bounds (report) values are therefore the blinded result —
     unblinding (adding the offset) recovers the true values.
     """
-    from ampfit.param_constraint import ConstraintManager
+    from tabpwa.param_constraint import ConstraintManager
     cm = ConstraintManager(["a"])
     cm.set_range("a", 0, 10)
     cm.set_blind(["a"], seed=7)
@@ -728,7 +728,7 @@ def test_blind_report_params_and_save():
 
 def test_blind_set_blind_reset():
     """set_blind is additive; reset=True replaces."""
-    from ampfit.param_constraint import ConstraintManager
+    from tabpwa.param_constraint import ConstraintManager
     cm = ConstraintManager(["a", "b"])
     cm.set_blind(["a"], seed=1)
     cm.set_blind(["b"], seed=1)
@@ -789,7 +789,7 @@ def test_blind_with_same_uses_canon_directly():
     its canonical value *directly* — so an offset applied to an alias is
     overwritten.  To blind a same-group the canonical name must be given.
     """
-    from ampfit.param_constraint import ConstraintManager
+    from tabpwa.param_constraint import ConstraintManager
 
     # alias blinded → no effect: the group uses the canon's value directly
     cm = ConstraintManager(["a", "b"])
@@ -820,7 +820,7 @@ def test_blind_with_same_uses_canon_directly():
 
 def test_blind_config_handler():
     """apply_constrains('blind', spec) blinds the named parameters."""
-    from ampfit.constrain_plugins import apply_constrains
+    from tabpwa.constrain_plugins import apply_constrains
     fitter = setup_fitter()
     names = [n for n in fitter.var_registry.flat_names if "mass" in n][:1]
     apply_constrains(fitter, {"blind": {"seed": 99, "names": names, "scale": 0.5}})

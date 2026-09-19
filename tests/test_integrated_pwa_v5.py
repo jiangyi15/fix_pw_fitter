@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
 
 
 def _data(ne, kc, seed):

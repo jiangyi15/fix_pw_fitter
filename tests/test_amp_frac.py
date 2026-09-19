@@ -21,8 +21,8 @@ class _StubResult:
 
 
 def _make():
-    from ampfit import Fitter
-    from ampfit.amp_frac import AmplitudeFractions
+    from tabpwa import Fitter
+    from tabpwa.amp_frac import AmplitudeFractions
 
     f = Fitter(CONFIG, backend="numpy_pwa")
     f.apply_constrains()

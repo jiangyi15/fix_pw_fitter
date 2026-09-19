@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
 
 
 def _arrays(ne, kc, seed):
@@ -88,7 +88,7 @@ def test_worker_error_raises_instead_of_hanging():
 
 def test_worker_dict_spec_keeps_kwargs():
     """A dict worker spec must keep its kwargs (only device is stripped)."""
-    from ampfit.backends.shard_backend import ShardBackend
+    from tabpwa.backends.shard_backend import ShardBackend
 
     cfg = Config("tests/config_pwa.yml")
     kc = cfg.build_all_index()

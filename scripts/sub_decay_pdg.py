@@ -9,9 +9,9 @@ Output: .tex file alongside the input JSON (or --output).
 import sys, os, numpy as np
 _SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _SCRIPT_DIR)
-from ampfit import Fitter
-from ampfit.amp_frac import AmplitudeFractions
-from ampfit.utils import fmt_meas, fmt_particle
+from tabpwa import Fitter
+from tabpwa.amp_frac import AmplitudeFractions
+from tabpwa.utils import fmt_meas, fmt_particle
 
 
 # ── PDG reference data ──────────────────────────────────────────────

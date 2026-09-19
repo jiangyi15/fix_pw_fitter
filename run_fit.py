@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Real NLL computation using ampfit.
+Real NLL computation using tabpwa.
 
 Usage:
     python run_fit.py                      # Full fit with all data
@@ -13,7 +13,7 @@ import argparse
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampfit import Fitter
+from tabpwa import Fitter
 
 
 def _init_out_path(save_init, config, run=None):
@@ -31,7 +31,7 @@ def _init_out_path(save_init, config, run=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NLL computation with ampfit")
+    parser = argparse.ArgumentParser(description="NLL computation with tabpwa")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
     parser.add_argument("--backend", default=None,
                         help='Compute backend: a name like "cuda_v3", '

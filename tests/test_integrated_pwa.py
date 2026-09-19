@@ -11,10 +11,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data_tree
-from ampfit.amp_model import build_amplitude_model
-from ampfit.integrated_pwa import IntegratedPWA
+from tabpwa.config_loader import Config
+from tabpwa.pwa_build import pwa_event_data_tree
+from tabpwa.amp_model import build_amplitude_model
+from tabpwa.integrated_pwa import IntegratedPWA
 
 
 def _tree_data(cfg, kc, mom):
@@ -80,7 +80,7 @@ def test_gram_projection_count():
 
 def test_integrated_pwa_backend():
     """Backend phsp-norm via Gram matches direct sum; data path = numpy."""
-    from ampfit.backends import create_backend
+    from tabpwa.backends import create_backend
 
     kc, phsp = _pwa_setup(n_events=1500)
     mom = np.load("data/phsp.npy")
@@ -102,7 +102,7 @@ def test_integrated_pwa_backend():
     norm, gnorm, _ = be.compute(params, php, norm=None, return_p=False)
 
     # Gram norm == direct per-event sum over the same phsp
-    from ampfit.integrated_pwa import IntegratedPWA
+    from tabpwa.integrated_pwa import IntegratedPWA
     direct = IntegratedPWA(kc).norm_from_data(phsp, params)
     assert norm == pytest.approx(direct, rel=1e-9)
     # norm ck gradient == conj(D @ ck)  (∂norm/∂ck, data-kernel convention)
@@ -114,7 +114,7 @@ def test_integrated_pwa_backend():
     dth = be.load_data(dt)
     Q, grads, P = be.compute(params, dth, norm=norm)
 
-    from ampfit.numpy_pwa import NumpyPWA
+    from tabpwa.numpy_pwa import NumpyPWA
     npw = NumpyPWA(kc)
     Qn, grads_n, Pn = npw.compute(params, npw.load_data(dt), norm=norm)
     assert Q == pytest.approx(Qn, rel=1e-9)

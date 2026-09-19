@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
+from tabpwa.config_loader import Config
 
 
 def pwa_cfg():
@@ -12,7 +12,7 @@ def pwa_cfg():
 
 
 def _kernel(kc, batch_size=256, rsize=1):
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     try:
         return KV5(kc, batch_size=batch_size, resolution_size=rsize)
     except RuntimeError as e:
@@ -69,7 +69,7 @@ def test_v5_partial_tail_group_matches_reference():
 
 def test_v5_batch_smaller_than_resolution_raises():
     cfg, kc = pwa_cfg()
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     try:
         with pytest.raises(ValueError):
             KV5(kc, batch_size=16, resolution_size=32)

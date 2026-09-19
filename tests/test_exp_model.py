@@ -12,12 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import ALL_MODELS, build_particle
-from ampfit.particle_model.interp_k_model import (
+from tabpwa.particle_model import ALL_MODELS, build_particle
+from tabpwa.particle_model.interp_k_model import (
     InterpKModel, KToCRWeightsTransform,
     cr_basis, cr_basis_deriv,
 )
-from ampfit.particle_model.exp_model import ExpModel
+from tabpwa.particle_model.exp_model import ExpModel
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -163,7 +163,7 @@ class TestInterpKModel:
         with pytest.raises(NotImplementedError):
             m = ALL_MODELS.get("NonExistent", None)
             # If somehow registered, skip; otherwise just verify base raises
-            from ampfit.particle_model.interp_k_model import InterpKModel
+            from tabpwa.particle_model.interp_k_model import InterpKModel
             # Can't instantiate abstract directly via build_particle since
             # InterpKModel is not registered; verify gamma() raises
             class BadModel(InterpKModel):
@@ -264,8 +264,8 @@ class TestFullPipeline:
 
         Uses a Config (without fitter) to test the constraint pipeline.
         """
-        from ampfit.config_loader import Config
-        from ampfit.param_constraint import ConstraintManager
+        from tabpwa.config_loader import Config
+        from tabpwa.param_constraint import ConstraintManager
 
         cfg = Config("config_angle.yml")
         kc = cfg.build_all_index()

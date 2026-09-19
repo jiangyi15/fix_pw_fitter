@@ -1,4 +1,4 @@
-# Validation — ampfit vs TFPWA Reference
+# Validation — tabpwa vs TFPWA Reference
 
 Backend validation for the B → 4π amplitude analysis fitting framework.
 
@@ -36,7 +36,7 @@ Each backend tested in an isolated process (no GPU context cross-contamination).
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
-| `repro_nll_ampfit.py` | NLL reproduction vs TFPWA reference for any backend | `python repro_nll_ampfit.py --backend <name>` |
+| `repro_nll_tabpwa.py` | NLL reproduction vs TFPWA reference for any backend | `python repro_nll_tabpwa.py --backend <name>` |
 | `compare_final.py` | Per-wave K factor, ck, A/Abar, P comparison (112 waves) | Needs REF_DIR reference data |
 | `check_load.py` | Verify data loading pipeline | `python check_load.py` |
 | `repro_nll.py` | Older NLL reproduction (deprecated) | — |

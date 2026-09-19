@@ -43,10 +43,10 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
-from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum,
+from tabpwa import Fitter
+from tabpwa.phasespace_b4pi import (generate_b4pi, two_body_momentum,
                                     M_PION, M_B_MESON)
-from ampfit.lineshape_common import (find_resonance, resonance_model,
+from tabpwa.lineshape_common import (find_resonance, resonance_model,
                                      b_barrier_factor, inv_mass,
                                      resonance_indices, chain_amplitude)
 

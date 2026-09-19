@@ -12,9 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum, M_PION,
+from tabpwa.phasespace_b4pi import (generate_b4pi, two_body_momentum, M_PION,
                                     M_B_MESON)
-from ampfit.momenta_to_data import (momenta_to_data, momenta_to_data_full,
+from tabpwa.momenta_to_data import (momenta_to_data, momenta_to_data_full,
                                     momenta_to_data_samesign,
                                     data_to_momentum, data_to_momentum_samesign,
                                     _boost, _boost3_op, _inv_mass_sq)
@@ -272,7 +272,7 @@ class TestDataToMomentum:
 
     def test_fixed_m3pi_roundtrip(self):
         """The fixed-m(πππ) generator also round-trips."""
-        from ampfit.phasespace_b4pi import generate_b4pi_fixed_m3pi
+        from tabpwa.phasespace_b4pi import generate_b4pi_fixed_m3pi
         mom = generate_b4pi_fixed_m3pi(1.3, 20000, seed=3)["momenta"]
         data = momenta_to_data(mom)
         mom2 = data_to_momentum(data)

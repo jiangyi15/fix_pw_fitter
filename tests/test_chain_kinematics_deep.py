@@ -11,9 +11,9 @@ import tempfile
 
 import numpy as np
 
-from ampfit.config_loader import Config
-from ampfit.momenta_to_angles import angles_to_momenta
-from ampfit.chain_kinematics import (
+from tabpwa.config_loader import Config
+from tabpwa.momenta_to_angles import angles_to_momenta
+from tabpwa.chain_kinematics import (
     canonical_of_chain, reconstruct_from_canonical, chain_meta)
 
 LC_CONFIG = """data_order:

@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import numpy as np
 
-from ampfit import Fitter
-from ampfit.pwa_build import build_tree_event_data, generate_pwa_phsp
+from tabpwa import Fitter
+from tabpwa.pwa_build import build_tree_event_data, generate_pwa_phsp
 
 
 def _npz(data):

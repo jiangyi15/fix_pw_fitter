@@ -32,8 +32,8 @@ def main():
                     help="Output format: png, pdf, svg (default: png)")
     args = ap.parse_args()
 
-    from ampfit import Fitter
-    from ampfit.utils import fmt_meas, fmt_particle
+    from tabpwa import Fitter
+    from tabpwa.utils import fmt_meas, fmt_particle
     f = Fitter(args.config, backend=args.backend)
     cp = os.path.splitext(args.results_json)[0] + "_constraints.json"
     if os.path.exists(cp):

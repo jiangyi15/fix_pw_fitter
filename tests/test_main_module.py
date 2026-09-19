@@ -1,11 +1,11 @@
-"""Tests for the ``python -m ampfit`` entry point."""
+"""Tests for the ``python -m tabpwa`` entry point."""
 
 import importlib
 import os
 
 
 def _main_mod():
-    return importlib.import_module("ampfit.__main__")
+    return importlib.import_module("tabpwa.__main__")
 
 
 def test_resolve_run_fit_and_scripts():

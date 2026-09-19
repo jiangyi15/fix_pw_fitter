@@ -14,15 +14,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
 
 CONFIG = "config_angle.yml"
 
 
 def _require_cuda():
     try:
-        from ampfit.cuda._v3_ampcache import CUDAKernelV3AmpCache
+        from tabpwa.cuda._v3_ampcache import CUDAKernelV3AmpCache
         lib = CUDAKernelV3AmpCache.__module__ and None
     except Exception as e:
         pytest.skip(f"cuda_v3_ampcache unavailable: {e}")

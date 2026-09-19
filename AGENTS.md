@@ -1,4 +1,4 @@
-# AGENTS.md — ampfit
+# AGENTS.md — tabpwa
 
 Amplitude analysis fitting framework.  NumPy / CUDA / ONNX backends, Wirtinger gradients, BFGS fit with constraints.
 
@@ -53,9 +53,9 @@ the registered list.
 Kernels auto-build on import — `.so` is rebuilt automatically when the corresponding `.cu` source file changes (SHA-256 check).  Force rebuild all or specify arch:
 
 ```bash
-python -m ampfit.cuda.build                       # auto-detect (nvidia-smi)
-python -m ampfit.cuda.build --arch sm_86           # single arch
-python -m ampfit.cuda.build --arch sm_70,sm_86     # fat binary (multi-arch)
+python -m tabpwa.cuda.build                       # auto-detect (nvidia-smi)
+python -m tabpwa.cuda.build --arch sm_86           # single arch
+python -m tabpwa.cuda.build --arch sm_70,sm_86     # fat binary (multi-arch)
 ```
 
 Auto-detection priority:
@@ -65,18 +65,18 @@ Auto-detection priority:
 ## Amplitude models
 
 `amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
-`AmplitudeModel` (`ampfit/amp_model.py`) via `build_amplitude_model(source)`,
+`AmplitudeModel` (`tabpwa/amp_model.py`) via `build_amplitude_model(source)`,
 where *source* is a file path, a config dict, or a `RawConfig`.  Registered
 models: `pwa` (default) and `flavour_tag_mix` — the **time-dependent (TD)**
 mixing model (aliases `flour_tag_mix`, `p4_directly`); add your own with
 `@register_amplitude_model("name")`.
 
 Object roles:
-- **`RawConfig`** (`ampfit/config_loader.py`) — the raw YAML input only:
+- **`RawConfig`** (`tabpwa/config_loader.py`) — the raw YAML input only:
   `dic`, `_config_path`, `backend_spec` (`load_config`).  No derived physics.
 - **`Config(path)`** — a thin **legacy alias** → `build_amplitude_model(path)`
   (returns the model).  Prefer `build_amplitude_model(...)` / `RawConfig`.
-- **`BaseModel`** (`ampfit/base_model.py`) — the interpreted physics: decay
+- **`BaseModel`** (`tabpwa/base_model.py`) — the interpreted physics: decay
   tree, index/tables, the predefined base kernel config
   (`build_base_kernel_config()`; `build_all_index()` is a compatibility
   shim).  Constructible without a model: `BaseModel(config_or_dict)`.
@@ -86,7 +86,7 @@ Object roles:
 - **`Fitter`** — composition root: builds the model (`self.model`) from a
   `RawConfig` (`self.config`) and reads policy/kc through the model.
 
-`build_params_transform()` → `BuildKernelParams` (`ampfit/kernel_params.py`):
+`build_params_transform()` → `BuildKernelParams` (`tabpwa/kernel_params.py`):
 `pwa` = ck/m0/g0 only, `flavour_tag_mix` adds the six time/mixing scalars.
 
 Backends register a **single name per decorator**, scoped by amplitude-model
@@ -103,7 +103,7 @@ The Blatt-Weisskopf form factor `F_L(q)` of every decay vertex is baked into
 the kernel config's `fl_table` (all backends / `onnx_cpu` / `onnx_cuda` only
 interpolate it), so barrier **forms** are pluggable in pure Python:
 
-- `ampfit.bw_form_factor.BarrierFactor` — base class (`L`, `q0_ref`, `d`);
+- `tabpwa.bw_form_factor.BarrierFactor` — base class (`L`, `q0_ref`, `d`);
   override `factor(q)` and `get_params()` (extra parameters go in
   `get_params`, which feeds `get_id()` and the model's `fl_forms`).
   `register_barrier(name)` registers a subclass; built-ins: `"bw"` (default,
@@ -114,10 +114,10 @@ interpolate it), so barrier **forms** are pluggable in pure Python:
   `bw` / `3.0`.
 
 **Build-time defaults come from the global build context, not the config.**
-`ampfit.build_defaults` is the module; its `scope(**kw)` is a
+`tabpwa.build_defaults` is the module; its `scope(**kw)` is a
 `contextvars`-backed `with` scope:
 `with build_defaults.scope(n_interp=4000, d=1.5): …`
-(`from ampfit.build_defaults import scope`).  Inside the scope the
+(`from tabpwa.build_defaults import scope`).  Inside the scope the
 given overrides apply; on exit everything is back to the global defaults
 (`n_interp=2000`, `d=3.0`, `barrier="bw"`, in `build_defaults.DEFAULTS`).
 Recognised keys: `n_interp` (sampling of `fl_table` / `gamma_table`), `d`
@@ -181,7 +181,7 @@ Fitter (orchestrator) — owns constraints + numpy data (_data_np, _phsp_np)
 ```
 
 **Layering / decay tree**: `decay:` / `particle:` are interpreted by the
-standalone value object `ampfit.decay_tree.DecayTree` — structure, chains,
+standalone value object `tabpwa.decay_tree.DecayTree` — structure, chains,
 stable topology index, and the `data.identical_particles` / `cp_particles`
 symmetry declarations (`n_perm` / `n_cp` / `n_blocks` + `block_orders()`).
 `BaseModel` holds the interpreted physics (DecayTree + index/tables + base
@@ -294,7 +294,7 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 6. **`get_decay_ck_indices(decay_pairs, wave_idx=)`: `wave_idx` picks a specific LS combination (0=S-wave, 1=D-wave, etc.) within each matching chain.  `_get()` helper in scripts uses OR semantics (each pair resolved independently, then unioned).
 
-7. **`fmt_meas(v, e, pct=False)`** in `ampfit.utils`: error-threshold decimal formatting.  `e=0 → no ±.  Thresholds: <0.355 → 2dp, <0.950 → 1dp, else 0dp (after 3‑sig‑fig rounding).`
+7. **`fmt_meas(v, e, pct=False)`** in `tabpwa.utils`: error-threshold decimal formatting.  `e=0 → no ±.  Thresholds: <0.355 → 2dp, <0.950 → 1dp, else 0dp (after 3‑sig‑fig rounding).`
 
 8. **Constraint file format**: JSON with `fixed`, `same`, `scale`, `bounds`.  `scale` values can be `float` or `[factor, bias]`.
 
@@ -308,7 +308,7 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 13. **Barrier metadata lives on `BaseModel`, not the kernel config**: the kernel config carries only what the kernels index — `fl_table` / `fl_type` / `fl_q_index` / `fl_order` / `fl_min` / `fl_delta`.  The barrier *forms* (`L` / radius / type / params) are `BaseModel.fl_forms` (a list of `BarrierFactor`); `fl_type` indexes it.  Consumers (`lineshape_common.b_barrier_factor`, `scripts/calc_3pi_lineshape.py`) read `f.model.fl_forms`.  The two `fl` indices are independent: `fl_type[fl_idx]` selects the function (table row), `fl_q_index[fl_idx]` selects the input momentum slot, and `fl_order` maps each (wave, vertex) to the dedup pair.
 
-14. **Build-time defaults via `build_defaults`**: `n_interp`, `d`, `barrier` are read from the `ampfit.build_defaults` module (a `contextvars` scope), not the config — so configs stay physics-only.  A config's top-level `defaults:` is loaded as a *temporary* context while that model is built (`BaseModel._default_context`).
+14. **Build-time defaults via `build_defaults`**: `n_interp`, `d`, `barrier` are read from the `tabpwa.build_defaults` module (a `contextvars` scope), not the config — so configs stay physics-only.  A config's top-level `defaults:` is loaded as a *temporary* context while that model is built (`BaseModel._default_context`).
 
 ## Testing
 

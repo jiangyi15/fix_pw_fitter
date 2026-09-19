@@ -26,13 +26,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import build_particle, ALL_MODELS
-from ampfit.particle_model.rho_omega2_model import (
+from tabpwa.particle_model import build_particle, ALL_MODELS
+from tabpwa.particle_model.rho_omega2_model import (
     RhoOmega2Model, RhoOmegaWeightsTransform,
 )
-from ampfit.config_loader import Config
-from ampfit.amp_model import build_amplitude_model
-from ampfit.numpy_kernel import NumpyKernel
+from tabpwa.config_loader import Config
+from tabpwa.amp_model import build_amplitude_model
+from tabpwa.numpy_kernel import NumpyKernel
 
 CFG = "tests/config_rho_omega2.yml"
 # Default pole parameters (rho, omega)
@@ -83,8 +83,8 @@ def _find_model(ampl_model):
 
 
 def _build_fitter(backend):
-    from ampfit import Fitter
-    from ampfit.pwa_build import generate_pwa_phsp
+    from tabpwa import Fitter
+    from tabpwa.pwa_build import generate_pwa_phsp
 
     f = Fitter(CFG, backend=backend)
     cfg = f.model
@@ -273,7 +273,7 @@ def test_fitter_gradients_numpy_pwa():
 # ── cuda_v4_pwa ──────────────────────────────────────────────────────
 
 def _cuda_fitter_or_skip():
-    from ampfit.backends import backends_for_model
+    from tabpwa.backends import backends_for_model
     if "cuda_v4_pwa" not in backends_for_model("pwa"):
         pytest.skip("cuda_v4_pwa not registered for the pwa model")
     try:
@@ -286,7 +286,7 @@ def _cuda_fitter_or_skip():
 def test_cuda_v4_pwa_selected_and_nll():
     f = _cuda_fitter_or_skip()
     try:
-        from ampfit.backends import backends_for_model
+        from tabpwa.backends import backends_for_model
         assert "cuda_v4_pwa" in backends_for_model(f.model.name)
         _free_four(f)
         x = f.initial_values(seed=4)

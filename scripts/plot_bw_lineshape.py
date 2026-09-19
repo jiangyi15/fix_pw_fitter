@@ -36,7 +36,7 @@ def main():
     ap.add_argument("--resonances", nargs="*", default=None)
     args = ap.parse_args()
 
-    from ampfit import Fitter
+    from tabpwa import Fitter
     import matplotlib.pyplot as plt
 
     f = Fitter(args.config, backend=args.backend)

@@ -8,8 +8,8 @@ import copy
 import numpy as np
 import pytest
 
-import ampfit
-from ampfit.build_defaults import scope, get
+import tabpwa
+from tabpwa.build_defaults import scope, get
 
 CFG = "tests/config_pwa.yml"
 
@@ -61,8 +61,8 @@ def test_context_is_isolated_across_threads():
 # ── build integration ─────────────────────────────────────────────
 
 def test_n_interp_controls_table_sampling():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     with scope(n_interp=1234):
@@ -75,8 +75,8 @@ def test_n_interp_controls_table_sampling():
 
 
 def test_context_d_hits_decays_and_particles():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     with scope(d=1.5):
@@ -89,8 +89,8 @@ def test_context_d_hits_decays_and_particles():
 
 
 def test_context_barrier_type():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     with scope(barrier="exp"):
@@ -100,8 +100,8 @@ def test_context_barrier_type():
 
 
 def test_context_d_overridden_per_decay_and_particle():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     dic["decay"]["jpsi"][0] = list(dic["decay"]["jpsi"][0]) + [{"d": 2.0}]
@@ -111,7 +111,7 @@ def test_context_d_overridden_per_decay_and_particle():
     ds = {b.d for b in m.fl_forms}
     assert 2.0 in ds and 1.5 in ds                       # explicit wins
 
-    from ampfit.particle_model import build_particle
+    from tabpwa.particle_model import build_particle
     with scope(d=1.5):
         mod = build_particle("R", model="GS_rho", mass=0.775, width=0.149,
                              L=1, d=0.9)
@@ -119,8 +119,8 @@ def test_context_d_overridden_per_decay_and_particle():
 
 
 def test_config_defaults_loaded_as_temporary_context():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     dic["defaults"] = {"d": 1.5, "n_interp": 400, "barrier": "exp"}
@@ -143,8 +143,8 @@ def test_config_defaults_loaded_as_temporary_context():
 
 
 def test_config_defaults_override_global_context():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import load_config
 
     dic: dict = copy.deepcopy(load_config(CFG))
     dic["defaults"] = {"d": 1.5}
@@ -156,7 +156,7 @@ def test_config_defaults_override_global_context():
 
 
 def test_context_d_reaches_particle_model():
-    from ampfit.particle_model import build_particle
+    from tabpwa.particle_model import build_particle
 
     kw = dict(model="GS_rho", mass=0.775, width=0.149, L=1,
               daug2Mass=0.13957039, daug3Mass=0.1349768)

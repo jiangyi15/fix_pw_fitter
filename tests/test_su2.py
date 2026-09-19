@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ampfit.su2 import (Rotation_z, Rotation_y, Boost_z, Boost_z_from_p,
+from tabpwa.su2 import (Rotation_z, Rotation_y, Boost_z, Boost_z_from_p,
                         inv, _mul, get_euler_angle)
 
 

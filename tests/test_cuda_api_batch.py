@@ -3,8 +3,8 @@
 import sys, os, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
 
 
 def _cuda_backends():

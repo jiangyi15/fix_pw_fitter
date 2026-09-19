@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit import Fitter
-from ampfit.toy_generator import (
+from tabpwa import Fitter
+from tabpwa.toy_generator import (
     toy_generate, _build_params, _make_frac_time,
     TAU_B0_PDG, GAMMA_B0_PDG,
 )

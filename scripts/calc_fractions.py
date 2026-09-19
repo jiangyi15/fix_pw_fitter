@@ -18,8 +18,8 @@ import sys, os, argparse, csv
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
-from ampfit.amp_frac import AmplitudeFractions
+from tabpwa import Fitter
+from tabpwa.amp_frac import AmplitudeFractions
 
 
 def discover_groups(config):

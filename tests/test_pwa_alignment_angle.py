@@ -1,8 +1,8 @@
 """Momentum -> alignment euler angles (spinful finals, multi-topology)."""
 import numpy as np
 
-from ampfit.config_loader import Config
-from ampfit.momenta_to_angles import (
+from tabpwa.config_loader import Config
+from tabpwa.momenta_to_angles import (
     aligned_euler_from_momenta, _chain_total_rotations,
 )
 
@@ -158,9 +158,9 @@ def test_pwa_event_data_tree_fill(tmp_path):
     """Tree-shape event fill: only angles need the tree (already tree-based
     decay_angles_vectorized); mass/q/angle columns come from FLAT per-decay
     loops and match independent physics for every topology row."""
-    from ampfit.pwa_build import pwa_event_data_tree, _two_body_p
-    from ampfit.momenta_to_angles import decay_angles_vectorized
-    from ampfit.helicity_angle import decay_chain_leaves
+    from tabpwa.pwa_build import pwa_event_data_tree, _two_body_p
+    from tabpwa.momenta_to_angles import decay_angles_vectorized
+    from tabpwa.helicity_angle import decay_chain_leaves
     c = _cfg(tmp_path)
     kc = c.build_all_index()
     byt, chains = {}, []
@@ -195,7 +195,7 @@ def test_pwa_event_data_tree_fill(tmp_path):
                            _two_body_p(mi, m0, m1), atol=1e-9)
         # alignment slice equals the analytic angle/|p|-based function
         # (engine-consistent zyz(gamma=0) frames; independently re-derived)
-        from ampfit.momenta_to_angles import aligned_euler_from_chain
+        from tabpwa.momenta_to_angles import aligned_euler_from_chain
         outs = [o.name for o in ch.decays[1].outs]
         s4 = np.zeros((5, 4))
         for o in outs:

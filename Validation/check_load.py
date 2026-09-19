@@ -127,9 +127,9 @@ for i in range(5):
 
 # Compare with kernel's ck for verification
 sys.path.insert(0, 'src')
-from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernel as Kernel
-import ampfit.fitter as ft
+from tabpwa.config_loader import Config
+from tabpwa.numpy_kernel import NumpyKernel as Kernel
+import tabpwa.fitter as ft
 
 config = Config('config_amp.yml')
 fitter=ft.Fitter('config_amp.yml',backend='numpy')

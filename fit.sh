@@ -17,7 +17,7 @@ INIT="${5:-tutorials/init_pwa.json}"
 MAXITER="${6:-1000}"
 BACKEND="${BACKEND:-}"
 
-echo "=== ampfit full fit ==="
+echo "=== tabpwa full fit ==="
 echo "config:  $CONFIG"
 echo "data:    $DATA"
 echo "phsp:    $PHSP"

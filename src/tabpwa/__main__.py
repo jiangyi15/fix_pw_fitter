@@ -1,0 +1,124 @@
+"""
+``python -m tabpwa <command> [args...]`` — run the tabpwa scripts from the
+repository (or the current module tree).
+
+Examples::
+
+    python -m tabpwa run_fit --config config.yml --fit -l 5
+    python -m tabpwa plot_pwa_groups results.json --config config_pwa.yml
+    python -m tabpwa gen_toy_pwa --config config_pwa.yml
+    python -m tabpwa --list
+
+Resolution order for *command*:
+    1. a repository/scripts script  ``<root>/scripts/<command>.py``
+    2. a repository top-level script ``<root>/<command>.py``   (e.g. run_fit)
+
+The chosen script is executed with ``runpy.run_path(..., run_name="__main__")``
+so its own argparse/usage/relative paths behave exactly as if invoked
+directly.
+"""
+
+import argparse
+import os
+import runpy
+import sys
+
+try:  # repo layout: tabpwa package under <repo>/src
+    _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    if not os.path.isdir(os.path.join(_ROOT, "scripts")):
+        raise OSError
+except OSError:  # installed layout (no repo scripts available)
+    _ROOT = ""
+
+_CURATED = {
+    "run_fit": "run_fit.py",
+    "plot_pwa_groups": "plot_pwa_groups.py",
+    "plot_pw_groups": "plot_pw_groups.py",
+    "plot_pw_ls": "plot_pw_ls.py",
+    "plot_pw_resonance": "plot_pw_resonance.py",
+    "gen_toy_pwa": "gen_toy_pwa.py",
+    "save_chain_data": "save_chain_data.py",
+}
+
+
+def _resolve(name):
+    """Return the script path for a command name, or None."""
+    root = _ROOT
+    if not root:
+        return None
+    rel = _CURATED.get(name, name + ".py")
+    for base in (os.path.join(root, "scripts"), root):
+        path = os.path.join(base, rel)
+        if os.path.isfile(path):
+            return path
+    # direct fallback: <root>/<name>.py without forcing scripts/ first
+    path = os.path.join(root, rel)
+    return path if os.path.isfile(path) else None
+
+
+def _available():
+    if not _ROOT:
+        return sorted(_CURATED)
+    found = set()
+    for base in (os.path.join(_ROOT, "scripts"), _ROOT):
+        if not os.path.isdir(base):
+            continue
+        for fn in sorted(os.listdir(base)):
+            if fn.endswith(".py") and not fn.startswith("_"):
+                found.add(fn[:-3])
+    return sorted(found)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="python -m tabpwa",
+        description="Run tabpwa scripts/fits from the current module tree.",
+        add_help=False)
+    parser.add_argument("command", nargs="?", help="script name, e.g. run_fit")
+    parser.add_argument("--list", action="store_true", dest="list_",
+                        help="list available commands")
+    # -h/--help is intentionally NOT a known option here: when a command is
+    # given it must stay in *rest* and be forwarded to the target script
+    # (e.g. `python -m tabpwa run_fit --help` -> run_fit's own usage).
+    args, rest = parser.parse_known_args(argv)
+    top_help = (args.command is None
+                and any(t in ("-h", "--help") for t in argv))
+
+    # top-level --help only makes sense without a command
+    if top_help:
+        parser.print_help()
+        return 0
+
+    if args.list_ or args.command is None:
+        avail = _available()
+        print("tabpwa commands:" if args.command is None
+              else "available tabpwa commands:")
+        for name in avail:
+            path = _resolve(name) or ""
+            print(f"  {name:<22s} {path}")
+        return 0
+
+    path = _resolve(args.command)
+    if path is None:
+        avail = _available()
+        print(f"tabpwa: unknown command {args.command!r}. Available:",
+              file=sys.stderr)
+        for name in avail:
+            print(f"  {name}", file=sys.stderr)
+        return 2
+
+    # make the script see the same argv as a direct invocation
+    sys.argv = [path] + rest
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    try:
+        runpy.run_path(path, run_name="__main__")
+    except SystemExit as e:
+        return int(e.code or 0)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

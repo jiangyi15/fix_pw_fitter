@@ -103,7 +103,7 @@ def discover_sub_decays(config, name_map, merge_cp=False):
 
 
 def _setup(args):
-    from ampfit import Fitter
+    from tabpwa import Fitter
 
     f = Fitter(args.config, backend=args.backend)
     cp = os.path.splitext(args.fit_json)[0] + "_constraints.json"
@@ -297,8 +297,8 @@ def main():
                     help="Show charge-conjugate pairs separately")
     args = ap.parse_args()
 
-    from ampfit import Fitter
-    from ampfit.amp_frac import AmplitudeFractions
+    from tabpwa import Fitter
+    from tabpwa.amp_frac import AmplitudeFractions
 
     f = _setup(args)
     fit_result = f.load_results(args.fit_json)

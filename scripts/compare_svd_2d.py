@@ -33,8 +33,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ampfit.particle_model import build_particle
-from ampfit.particle_model.spline_k_model import spline_weights
+from tabpwa.particle_model import build_particle
+from tabpwa.particle_model.spline_k_model import spline_weights
 
 M0, G0 = 0.5, 1.0
 A_RANGE = [0.1, 2.0]

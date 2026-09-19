@@ -11,7 +11,7 @@ import sys, os, argparse
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
+from tabpwa import Fitter
 
 
 def main():

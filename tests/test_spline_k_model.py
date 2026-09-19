@@ -12,13 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import ALL_MODELS, build_particle
-from ampfit.particle_model.spline_k_model import (
+from tabpwa.particle_model import ALL_MODELS, build_particle
+from tabpwa.particle_model.spline_k_model import (
     SplineKModel, KToSplineWeightsTransform,
     spline_basis_matrix, spline_weights, spline_weight_deriv,
 )
-from ampfit.particle_model.interp_k_model import KToCRWeightsTransform
-from ampfit.particle_model.exp_model import ExpModel
+from tabpwa.particle_model.interp_k_model import KToCRWeightsTransform
+from tabpwa.particle_model.exp_model import ExpModel
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -229,7 +229,7 @@ class TestSplineKModel:
 
     def test_param_handling(self):
         """get_gamma_name, get_defaults, get_gamma_count match config."""
-        from ampfit.particle_model.spline_k_model import ExpSplineModel
+        from tabpwa.particle_model.spline_k_model import ExpSplineModel
         m = ExpSplineModel("test", mass=0.5, k=1.5,
                             k_range=[0.1, 5.0], n_interp=20)
         assert m.get_gamma_count() == 20
@@ -493,8 +493,8 @@ class TestFullPipeline:
 
     def test_transform_backward_in_pipeline(self):
         """KToSplineWeightsTransform backward via cm.chain_gradient."""
-        from ampfit.config_loader import Config
-        from ampfit.param_constraint import ConstraintManager
+        from tabpwa.config_loader import Config
+        from tabpwa.param_constraint import ConstraintManager
 
         cfg = Config("config_angle.yml")
         kc = cfg.build_all_index()

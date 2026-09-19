@@ -12,8 +12,8 @@ CONFIG = os.path.join(ROOT, "tests", "config_pwa.yml")
 
 
 def test_config_composes_a_decay_tree():
-    from ampfit.config_loader import Config
-    from ampfit.decay_tree import DecayTree
+    from tabpwa.config_loader import Config
+    from tabpwa.decay_tree import DecayTree
 
     c = Config(CONFIG)
     assert isinstance(c.decay_tree, DecayTree)
@@ -28,8 +28,8 @@ def test_config_composes_a_decay_tree():
 
 
 def test_decay_tree_builds_from_declarations_only():
-    from ampfit.config_loader import Config, load_config
-    from ampfit.decay_tree import DecayTree
+    from tabpwa.config_loader import Config, load_config
+    from tabpwa.decay_tree import DecayTree
 
     dic = load_config(CONFIG)
     tree = DecayTree(dic["decay"], dic["particle"])
@@ -40,8 +40,8 @@ def test_decay_tree_builds_from_declarations_only():
 
 
 def test_decay_classes_reexported_for_compat():
-    from ampfit.config_loader import Particle, Decay, DecayChain, DecayGroup
-    from ampfit import decay_tree
+    from tabpwa.config_loader import Particle, Decay, DecayChain, DecayGroup
+    from tabpwa import decay_tree
 
     assert Particle is decay_tree.Particle
     assert Decay is decay_tree.Decay
@@ -53,7 +53,7 @@ def test_decay_tree_module_is_leaf():
     """decay_tree must not import config_loader (layering stays acyclic)."""
     import ast
 
-    from ampfit import decay_tree
+    from tabpwa import decay_tree
 
     mods = []
     for node in ast.walk(ast.parse(inspect.getsource(decay_tree))):
@@ -66,8 +66,8 @@ def test_decay_tree_module_is_leaf():
 
 def test_decay_tree_display_helpers_are_model_free():
     """Particle / decay-chain labels live on the tree, not on a model."""
-    from ampfit.config_loader import load_config
-    from ampfit.decay_tree import DecayTree
+    from tabpwa.config_loader import load_config
+    from tabpwa.decay_tree import DecayTree
 
     dic = load_config(CONFIG)
     tree = DecayTree(dic["decay"], dic["particle"])
@@ -80,8 +80,8 @@ def test_decay_tree_display_helpers_are_model_free():
 
 def test_decay_tree_owns_symmetry_declarations():
     """identical/cp declarations are decay information on the tree."""
-    from ampfit.config_loader import load_config
-    from ampfit.decay_tree import DecayTree
+    from tabpwa.config_loader import load_config
+    from tabpwa.decay_tree import DecayTree
 
     dic = load_config(CONFIG)
     dic["data"] = dict(dic.get("data") or {})

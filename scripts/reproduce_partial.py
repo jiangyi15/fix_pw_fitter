@@ -79,13 +79,13 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
-from ampfit.phasespace_b4pi import (generate_b4pi, two_body_momentum,
+from tabpwa import Fitter
+from tabpwa.phasespace_b4pi import (generate_b4pi, two_body_momentum,
                                     M_B_MESON, M_PION)
-from ampfit.momenta_to_data import momenta_to_data
-from ampfit.toy_generator import _build_params
-from ampfit.particle_model.ck_matrix_v2 import _gamma_functions
-from ampfit.lineshape_common import (find_resonance, resonance_model,
+from tabpwa.momenta_to_data import momenta_to_data
+from tabpwa.toy_generator import _build_params
+from tabpwa.particle_model.ck_matrix_v2 import _gamma_functions
+from tabpwa.lineshape_common import (find_resonance, resonance_model,
                                      b_barrier_factor, inv_mass2,
                                      resonance_indices, fitted_ck)
 

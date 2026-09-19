@@ -14,7 +14,7 @@ import math
 import numpy as np
 import pytest
 
-from ampfit.helicity_angle import (alignment_D_parts, helicity_values,
+from tabpwa.helicity_angle import (alignment_D_parts, helicity_values,
                                    wigner_d, wigner_D_conj, to_spin)
 
 

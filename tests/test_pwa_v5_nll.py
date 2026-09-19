@@ -15,7 +15,7 @@ exposed through ``_last_dnorm``) follow the per-group chain rule.
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
+from tabpwa.config_loader import Config
 
 
 @pytest.fixture(scope="module")
@@ -59,8 +59,8 @@ def _numpy_group_nll(P, w, bkg, norm, resolution_size):
 
 
 def test_v5_batch1_equals_v4(pwa_small):
-    from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v4_pwa import CUDAKernelV4PWA as KV4
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
 
     kv, k5 = _make(KV4, kc), _make(KV5, kc, resolution_size=1)
@@ -86,8 +86,8 @@ def test_v5_batch1_equals_v4(pwa_small):
 
 
 def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
-    from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v4_pwa import CUDAKernelV4PWA as KV4
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
     resolution_size = 12
 
@@ -116,7 +116,7 @@ def test_v5_group_matches_numpy_reference_and_phsp_identical(pwa_small):
 
 
 def test_v5_group_grads_match_finite_difference(pwa_small):
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, phsp, params, _p = pwa_small
     resolution_size = 15
     ne = data["mass"].shape[0]
@@ -163,8 +163,8 @@ def test_v5_group_grads_match_finite_difference(pwa_small):
 def test_v5_weights_inside_group_sum(pwa_small):
     """Non-unit weights enter the group sum (Σ w·(P/norm+bkg)), not a
     per-event log factor — resolution_size=1 with w≠1 therefore differs from v4."""
-    from ampfit.cuda._v4_pwa import CUDAKernelV4PWA as KV4
-    from ampfit.cuda._v5_pwa import CUDAKernelV5PWA as KV5
+    from tabpwa.cuda._v4_pwa import CUDAKernelV4PWA as KV4
+    from tabpwa.cuda._v5_pwa import CUDAKernelV5PWA as KV5
     _cfg, kc, data, _phsp, params, _p = pwa_small
 
     wdata = dict(data, weight=0.5 + 0.5 * np.abs(

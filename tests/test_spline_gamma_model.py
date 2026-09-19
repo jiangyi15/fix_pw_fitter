@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import build_particle, ALL_MODELS
-from ampfit.particle_model.spline_gamma_model import (
+from tabpwa.particle_model import build_particle, ALL_MODELS
+from tabpwa.particle_model.spline_gamma_model import (
     bspline_basis_all,
     BSplineGammaModel, _SplineMassFixTransform,
 )

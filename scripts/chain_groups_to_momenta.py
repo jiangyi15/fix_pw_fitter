@@ -33,8 +33,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from ampfit.config_loader import Config                       # noqa: E402
-from ampfit.chain_kinematics import (                         # noqa: E402
+from tabpwa.config_loader import Config                       # noqa: E402
+from tabpwa.chain_kinematics import (                         # noqa: E402
     chain_meta, reconstruct_from_canonical)
 
 

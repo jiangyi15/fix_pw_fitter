@@ -45,12 +45,12 @@ def cfg(tmp_path):
 
     cfg_file = tmp_path / "c.yml"
     cfg_file.write_text(patch(text))
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     return Config(str(cfg_file))
 
 
 def _fitter(cfg):
-    from ampfit import Fitter
+    from tabpwa import Fitter
     return Fitter(cfg._config_path, backend="numpy_pwa")
 
 
@@ -75,7 +75,7 @@ def test_load_dataset_bg_length_mismatch(cfg, tmp_path):
     cfg_file.write_text(text.replace("    data: ./data_slice.npy",
                                      f"    data: {data}\n"
                                      f"    data_bg_value: {tmp_path}/short.npy"))
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     f = _fitter(Config(str(cfg_file)))
     with pytest.raises(ValueError):
         f.load_dataset("data")
@@ -84,8 +84,8 @@ def test_load_dataset_bg_length_mismatch(cfg, tmp_path):
 
 def test_load_dataset_dat_order_permutation(cfg, tmp_path):
     """A permuted momenta file + matching dat_order reloads identically."""
-    from ampfit.config_loader import Config
-    from ampfit.pwa_build import pwa_event_data_tree
+    from tabpwa.config_loader import Config
+    from tabpwa.pwa_build import pwa_event_data_tree
 
     f1 = _fitter(cfg)
     base = f1.load_dataset("data")
@@ -117,7 +117,7 @@ def test_load_dataset_dat_order_permutation(cfg, tmp_path):
 
 
 def test_load_npz_max_events_takes_first_rows(tmp_path):
-    from ampfit import Fitter
+    from tabpwa import Fitter
     rs = np.random.RandomState(0)
     n = 60
     npz = tmp_path / "arr.npz"

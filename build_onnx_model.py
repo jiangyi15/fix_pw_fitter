@@ -10,8 +10,8 @@ import onnx
 from onnx import helper, TensorProto, numpy_helper
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampfit.config_loader import Config
-from ampfit._onnx_builder import PWAONNXBuilder
+from tabpwa.config_loader import Config
+from tabpwa._onnx_builder import PWAONNXBuilder
 
 OP = onnx.helper.make_node
 

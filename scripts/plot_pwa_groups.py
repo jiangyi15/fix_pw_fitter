@@ -25,9 +25,9 @@ import argparse
 
 import numpy as np
 
-from ampfit import Fitter
-from ampfit.plot_pw_groups import PWGroupPlotter
-from ampfit.plot_pwa_groups import (
+from tabpwa import Fitter
+from tabpwa.plot_pw_groups import PWGroupPlotter
+from tabpwa.plot_pwa_groups import (
     config_plot_items, discover_pwa_groups, pwa_mass_varfun,
     pwa_angle_varfun, angle_variable_labels, var_ranges)
 

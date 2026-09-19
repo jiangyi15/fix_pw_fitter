@@ -13,7 +13,7 @@ CONFIG = os.path.join(ROOT, "tests", "config_pwa.yml")
 
 
 def _cfg(ident=None, cp=None):
-    from ampfit.config_loader import Config, load_config
+    from tabpwa.config_loader import Config, load_config
 
     dic = load_config(CONFIG)
     dic["data"] = dict(dic.get("data") or {})
@@ -41,7 +41,7 @@ def _byt(tree):
 
 
 def test_block_orders_counts():
-    from ampfit.pwa_build import block_orders
+    from tabpwa.pwa_build import block_orders
 
     f = ["pip", "pim", "eta"]
     assert block_orders(f, {}) == [((0, 1, 2), False)]
@@ -58,7 +58,7 @@ def test_block_orders_counts():
 
 
 def test_build_tree_event_data_single_block_is_unchanged():
-    from ampfit.pwa_build import build_tree_event_data, pwa_event_data_tree
+    from tabpwa.pwa_build import build_tree_event_data, pwa_event_data_tree
 
     cfg = _cfg()
     tree = cfg.decay_tree
@@ -71,7 +71,7 @@ def test_build_tree_event_data_single_block_is_unchanged():
 
 
 def test_build_tree_event_data_blocks_shapes_and_composition():
-    from ampfit.pwa_build import (block_orders, build_tree_event_data,
+    from tabpwa.pwa_build import (block_orders, build_tree_event_data,
                                   pwa_event_data_tree)
 
     cfg = _cfg(ident=[["pip", "pim"]], cp=[["pip", "pim"]])
@@ -96,7 +96,7 @@ def test_build_tree_event_data_blocks_shapes_and_composition():
 
 
 def test_cp_block_reverses_three_momentum():
-    from ampfit.pwa_build import (block_orders, build_tree_event_data,
+    from tabpwa.pwa_build import (block_orders, build_tree_event_data,
                                   pwa_event_data_tree)
 
     cfg = _cfg(cp=[["pip", "pim"]])
@@ -106,7 +106,7 @@ def test_cp_block_reverses_three_momentum():
     blocks = block_orders(tree.finals, cfg.dic["data"])
     d = build_tree_event_data(tree, None, byt, mom, blocks=blocks)
 
-    from ampfit.pwa_build import _boost_to_cm
+    from tabpwa.pwa_build import _boost_to_cm
 
     cp_b = [i for i, (_, is_cp) in enumerate(blocks) if is_cp][0]
     order = list(blocks[cp_b][0])

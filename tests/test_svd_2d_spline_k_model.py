@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import ALL_MODELS, build_particle
-from ampfit.particle_model.svd_2d_spline_k_model import (
+from tabpwa.particle_model import ALL_MODELS, build_particle
+from tabpwa.particle_model.svd_2d_spline_k_model import (
     KToSVDWeights2DTransform, SVDSplineKModel2D,
 )
 

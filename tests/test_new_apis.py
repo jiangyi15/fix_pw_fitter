@@ -14,12 +14,12 @@ import numpy as np
 import json, io, tempfile
 import pytest
 
-from ampfit.param_constraint import (
+from tabpwa.param_constraint import (
     LinearTransform, ScaleTransform, ConstraintManager,
 )
-from ampfit.utils import fmt_meas
-from ampfit.config_loader import Config
-from ampfit import Fitter
+from tabpwa.utils import fmt_meas
+from tabpwa.config_loader import Config
+from tabpwa import Fitter
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -147,7 +147,7 @@ def test_fmt_meas_pct_suffix():
 
 def test_model_get_defaults_bw():
     """BW model has mass+width defaults."""
-    from ampfit.particle_model.models_builtin import BWModel
+    from tabpwa.particle_model.models_builtin import BWModel
     m = BWModel('test', mass=1.0, width=0.1)
     d = m.get_defaults()
     assert isinstance(d, dict)
@@ -157,7 +157,7 @@ def test_model_get_defaults_bw():
 
 def test_model_get_defaults_bwr():
     """BWR model has mass+width defaults."""
-    from ampfit.particle_model.bwr_model import BWRModel
+    from tabpwa.particle_model.bwr_model import BWRModel
     m = BWRModel('test', mass=1.0, width=0.1, L=1, daug2Mass=0.14, daug3Mass=0.14)
     d = m.get_defaults()
     assert 'test_mass' in d
@@ -166,7 +166,7 @@ def test_model_get_defaults_bwr():
 
 def test_model_get_defaults_gs():
     """GS_rho model has mass+width defaults."""
-    from ampfit.particle_model.gs_rho_model import GSRhoModel
+    from tabpwa.particle_model.gs_rho_model import GSRhoModel
     m = GSRhoModel('test', mass=1.0, width=0.1)
     d = m.get_defaults()
     assert 'test_mass' in d
@@ -175,7 +175,7 @@ def test_model_get_defaults_gs():
 
 def test_model_get_defaults_flattec():
     """FlatteC model has mass and _g0.._gN couplings."""
-    from ampfit.particle_model.models_builtin import FlatteCModel
+    from tabpwa.particle_model.models_builtin import FlatteCModel
     m = FlatteCModel('f0_980', mass=0.965, mass_list=[(0.1, 0.1), (0.14, 0.14)])
     d = m.get_defaults()
     assert 'f0_980_mass' in d
@@ -185,14 +185,14 @@ def test_model_get_defaults_flattec():
 
 def test_model_get_defaults_one():
     """OneModel returns {} (params fixed by transform)."""
-    from ampfit.particle_model.models_builtin import OneModel
+    from tabpwa.particle_model.models_builtin import OneModel
     m = OneModel('NR0', mass=0.475, width=0.55)
     assert m.get_defaults() == {}
 
 
 def test_model_get_defaults_fixed_shape():
     """FixedShapeModel subclasses return {} (params fixed by transform)."""
-    from ampfit.particle_model.rho_omega_model import RhoOmegaModel
+    from tabpwa.particle_model.rho_omega_model import RhoOmegaModel
     m = RhoOmegaModel('test', mass=0.775, width=0.149)
     assert m.get_defaults() == {}
 
@@ -416,7 +416,7 @@ def test_cm_resolve_full_includes_defaults():
 
 def test_cm_flat_resolve_stop_after_transforms():
     """flat_resolve with stop_after='transforms' via Fitter."""
-    from ampfit.fitter import Fitter
+    from tabpwa.fitter import Fitter
     f = Fitter('config_angle.yml', backend='numpy')
     x = f.initial_values(seed=42)
     d = f.cm.flat_resolve(x, stop_after='transforms')
@@ -425,7 +425,7 @@ def test_cm_flat_resolve_stop_after_transforms():
 
 def test_cm_flat_resolve_stop_after_bounds():
     """flat_resolve with stop_after='bounds'."""
-    from ampfit.fitter import Fitter
+    from tabpwa.fitter import Fitter
     f = Fitter('config_angle.yml', backend='numpy')
     x = f.initial_values(seed=42)
     d = f.cm.flat_resolve(x, stop_after='bounds')
@@ -521,7 +521,7 @@ def test_values_from_dict_ignores_absent_k_param(tmp_path):
     so the reinitial value is kept.
     """
     import yaml
-    from ampfit import Fitter
+    from tabpwa import Fitter
     cfg = yaml.safe_load(open('config_amp.yml'))
     cfg['particle']['NR0'].update({'model': 'ExpSpline', 'k': 0.3,
                                    'k_range': [-1.0, 1.0], 'n_interp': 21,
@@ -681,7 +681,7 @@ def _ck_model_kwargs(ck_matrix_test_data, extra=None):
 
 def test_ck_matrix_v2_polar_forward(ck_matrix_test_data):
     """CK matrix v2: forward with magnitude/phase convention (r*exp(j*θ))."""
-    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    from tabpwa.particle_model.ck_matrix_v2 import CKMatrixModelV2
     kw = _ck_model_kwargs(ck_matrix_test_data, {
         "mass": 1.0, "width": 0.1,
         "ck": [2.0, 0.5, 1.5, -0.3, 3.0, 1.2],
@@ -699,7 +699,7 @@ def test_ck_matrix_v2_polar_forward(ck_matrix_test_data):
 
 def test_ck_matrix_v2_polar_gradients(ck_matrix_test_data):
     """CK matrix v2: polar gradients match numerical (r≠1, θ≠0)."""
-    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    from tabpwa.particle_model.ck_matrix_v2 import CKMatrixModelV2
     kw = _ck_model_kwargs(ck_matrix_test_data, {
         "mass": 1.0, "width": 0.1,
         "ck": [2.0, 0.5, 1.5, -0.3, 3.0, 1.2],
@@ -731,7 +731,7 @@ def test_ck_matrix_v2_polar_gradients(ck_matrix_test_data):
 
 def test_ck_matrix_v2_sqrt_division(ck_matrix_test_data):
     """ck_matrix_v2_sqrt divides the M table by √s = m."""
-    from ampfit.particle_model.ck_matrix_v2 import (CKMatrixModelV2,
+    from tabpwa.particle_model.ck_matrix_v2 import (CKMatrixModelV2,
                                                     CKMatrixModelV2Sqrt)
     kw = _ck_model_kwargs(ck_matrix_test_data, {"mass": 1.0, "width": 0.1})
     base = CKMatrixModelV2("test", **kw)
@@ -754,7 +754,7 @@ def test_ck_matrix_v2_sqrt_division(ck_matrix_test_data):
 
 def test_ck_matrix_v2_ref_file(ck_matrix_test_data, tmp_path):
     """CK matrix v2: ref_file loads g_ls from reference JSON."""
-    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    from tabpwa.particle_model.ck_matrix_v2 import CKMatrixModelV2
     # Create a reference JSON with known g_ls values
     ref = {
         "test_width": 0.15,
@@ -790,7 +790,7 @@ def test_ck_matrix_v2_ref_file(ck_matrix_test_data, tmp_path):
 
 def test_ck_matrix_v2_jacobian(ck_matrix_test_data):
     """CK matrix v2: Jacobian d(gamma)/d(r) matches numerical (signed r)."""
-    from ampfit.particle_model.ck_matrix_v2 import CKMatrixModelV2
+    from tabpwa.particle_model.ck_matrix_v2 import CKMatrixModelV2
     import numpy as np
     kw = _ck_model_kwargs(ck_matrix_test_data, {
         "mass": 1.0, "width": 0.1,
@@ -842,7 +842,7 @@ def test_ck_matrix_v2_jacobian(ck_matrix_test_data):
 
 def test_particle_display_default():
     """Particle gets LaTeX display from fmt_particle."""
-    from ampfit.config_loader import Particle
+    from tabpwa.config_loader import Particle
     cases = [
         ("a1(1260)p",  r"$a_1(1260)^+$"),
         ("a1(1260)m",  r"$a_1(1260)^-$"),
@@ -859,14 +859,14 @@ def test_particle_display_default():
 
 def test_particle_display_custom():
     """YAML ``display`` key is stored as-is (no forced $$)."""
-    from ampfit.config_loader import Particle
+    from tabpwa.config_loader import Particle
     p = Particle("my_res", display=r"\mathrm{MyRes}")
     assert p.display == r"\mathrm{MyRes}"
 
 
 def test_config_name_display_map():
     """name_display_map covers all particles in decay chains."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     m = c.decay_tree.name_display_map()
     assert isinstance(m, dict)
@@ -879,7 +879,7 @@ def test_config_name_display_map():
 
 def test_config_display_decay():
     """display_decay wraps particle names in LaTeX."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     for chain in c.full_decay.chains:
         for decay in chain.decays[1:]:
@@ -892,7 +892,7 @@ def test_config_display_decay():
 
 def test_config_display_g_ls():
     """display_g_ls returns one LaTeX label per LS combination."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     for chain in c.full_decay.chains:
         for decay in chain.decays[1:]:
@@ -908,7 +908,7 @@ def test_config_display_g_ls():
 
 def test_config_display_a_total():
     """display_a_total returns a LaTeX string."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     for chain in c.full_decay.chains:
         d = c.display_a_total(chain)
@@ -918,7 +918,7 @@ def test_config_display_a_total():
 
 def test_config_param_display_mass():
     """param_display formats mass parameters."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     assert c.param_display("rhoA_mass") == r"$m_{\rho}$"
     assert r"_mass" not in c.param_display("f0(980)_mass")
@@ -926,7 +926,7 @@ def test_config_param_display_mass():
 
 def test_config_param_display_width():
     """param_display formats width parameters."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     d = c.param_display("rhoA_width")
     assert d.startswith(r"$\Gamma")
@@ -935,7 +935,7 @@ def test_config_param_display_width():
 
 def test_config_param_display_g_ls():
     """param_display formats g_ls magnitude and phase."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     # Find a g_ls name from the config
     name_r = None
@@ -960,7 +960,7 @@ def test_config_param_display_g_ls():
 
 def test_config_param_display_scalar():
     """param_display formats scalar names."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     assert c.param_display("gamma") == r"$\Gamma$"
     assert c.param_display("delta_gamma") == r"$\Delta\Gamma$"
@@ -969,7 +969,7 @@ def test_config_param_display_scalar():
 
 def test_config_param_display_unknown():
     """param_display escapes underscores for unknown names."""
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
     c = Config("config_angle.yml")
     d = c.param_display("some_unknown_param")
     assert r"\_" in d, f"underscore not escaped: {d}"
@@ -982,8 +982,8 @@ def test_discover_groups_display_labels():
     Charge-merged waves get ``^{\pm}``; a1(1260)+ and a1(1260)- stay
     separate (exact display names).  d1d2 groups join with `` + ``.
     """
-    from ampfit.config_loader import Config
-    from ampfit.plot_pw_groups import discover_groups
+    from tabpwa.config_loader import Config
+    from tabpwa.plot_pw_groups import discover_groups
 
     c = Config("config_angle.yml")
     g = discover_groups(c)
@@ -1010,8 +1010,8 @@ def test_discover_groups_display_labels():
 
 def test_discover_groups_merge_preserves_labels():
     """merge patterns apply to internal names; synthetic labels kept."""
-    from ampfit.config_loader import Config
-    from ampfit.plot_pw_groups import discover_groups
+    from tabpwa.config_loader import Config
+    from tabpwa.plot_pw_groups import discover_groups
 
     c = Config("config_angle.yml")
     # No MI0 particles here → merge is a no-op, labels unchanged

@@ -1,4 +1,4 @@
-"""Tests for the numeric helicity-angle engine (ampfit.helicity_angle).
+"""Tests for the numeric helicity-angle engine (tabpwa.helicity_angle).
 
 Covers:
   * Clebsch–Gordan against closed-form values and orthonormality
@@ -13,7 +13,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from ampfit.helicity_angle import (cg, wigner_d, amplitude,
+from tabpwa.helicity_angle import (cg, wigner_d, amplitude,
                                    amplitude_monomials, tree_info,
                                    wave_ls_lists)
 
@@ -133,7 +133,7 @@ def test_reproduces_predefined_B_to_4pi_formulas():
     Representative entry: ls ((0,0),(1,0),(1,0)) —
       √3/3·(cos(Φ) sinθ1 sinθ2 − cosθ1 cosθ2),   Φ = φ1 + φ2.
     """
-    from ampfit.angular_formula import cache_formula
+    from tabpwa.angular_formula import cache_formula
     key = (('pim1', 'pip1'), ('pim2', 'pip2')), ((0, 0), (1, 0), (1, 0))
     entry = cache_formula[key]
 
@@ -169,8 +169,8 @@ def test_gauge_top0_matches_cache_phi_theta_layout():
     """Top J=0 gauge rule: drop the first three per-vertex angles
     (φ0, θ0, φ1); the remaining layout is [φ2?, θ1, θ2] which matches the
     old cache's (Φ, θ1, θ2) ordering with the surviving azimuth as Φ."""
-    from ampfit.angular_formula import cache_formula
-    from ampfit.helicity_angle import gauge_fix_top0
+    from tabpwa.angular_formula import cache_formula
+    from tabpwa.helicity_angle import gauge_fix_top0
 
     tree = (0, [(1, [0, 0]), (1, [0, 0])])
     topo = (('pim1', 'pip1'), ('pim2', 'pip2'))
@@ -218,9 +218,9 @@ def test_gauge_top0_matches_cache_phi_theta_layout():
 def test_chain_angular_table_reproduces_cache():
     """DecayChain → canonical angular table; the gauge-fixed [φ,θ,θ] table
     reproduces the predefined B→ρρ cache rows numerically."""
-    from ampfit.config_loader import Config
-    from ampfit.helicity_angle import (chain_angular_table, evaluate_table)
-    from ampfit.angular_formula import cache_formula
+    from tabpwa.config_loader import Config
+    from tabpwa.helicity_angle import (chain_angular_table, evaluate_table)
+    from tabpwa.angular_formula import cache_formula
 
     cfg = Config('config_amp.yml')
     ch = [cc for cc in cfg.full_decay.chains if 'rhoA' in str(cc)][0]
@@ -259,8 +259,8 @@ def test_chain_angular_table_reproduces_cache():
 
 
 def test_chain_angular_table_self_consistent():
-    from ampfit.config_loader import Config
-    from ampfit.helicity_angle import (chain_angular_table, evaluate_table,
+    from tabpwa.config_loader import Config
+    from tabpwa.helicity_angle import (chain_angular_table, evaluate_table,
                                        decay_chain_to_tree, amplitude)
 
     cfg = Config('config_amp.yml')
@@ -287,8 +287,8 @@ def test_chain_angular_table_self_consistent():
 def test_angular_model_combines_all_chains():
     """config_amp: all chains merge into one phi-first gauge layout with a
     global basis; every entry reproduces amplitude() numerically."""
-    from ampfit.config_loader import Config
-    from ampfit.helicity_angle import (angular_model, evaluate_model,
+    from tabpwa.config_loader import Config
+    from tabpwa.helicity_angle import (angular_model, evaluate_model,
                                        decay_chain_to_tree, amplitude)
 
     cfg = Config('config_amp.yml')
@@ -327,7 +327,7 @@ def test_angle_formula_mode_option():
     """Config option angle_formula: 'helicity' (default) / 'cache'."""
     import copy
     import yaml
-    from ampfit.config_loader import Config, load_config
+    from tabpwa.config_loader import Config, load_config
 
     base = yaml.safe_load(open('config_amp.yml'))
     assert Config(copy.deepcopy(base)).angle_formula_mode == 'helicity'
@@ -341,8 +341,8 @@ def test_angle_formula_mode_option():
 
 
 def test_compare_to_cache_all_matched():
-    from ampfit.config_loader import Config
-    from ampfit.helicity_angle import compare_to_cache
+    from tabpwa.config_loader import Config
+    from tabpwa.helicity_angle import compare_to_cache
 
     cfg = Config('config_amp.yml')
     rows, summary = compare_to_cache(list(cfg.full_decay.chains),
@@ -355,7 +355,7 @@ def test_build_single_index_modes_equivalent_config_amp():
     """config_amp (B→4π): helicity-mode build_single_index reproduces the
     predefined cache-mode index arrays (matrix/angle basis identical)."""
     import copy
-    from ampfit.config_loader import Config
+    from tabpwa.config_loader import Config
 
     base = {'angle_formula': 'cache'}
     d = {'angle_formula': 'cache'}
@@ -376,8 +376,8 @@ def test_build_single_index_modes_equivalent_config_amp():
 def test_amplitude_vectorized_matches_scalar():
     """numpy amplitude_vectorized equals the scalar amplitude (config_pwa
     J/ψ→MI→ππη chains, both top helicities)."""
-    from ampfit.config_loader import Config
-    from ampfit.helicity_angle import (amplitude_vectorized, tree_vertices,
+    from tabpwa.config_loader import Config
+    from tabpwa.helicity_angle import (amplitude_vectorized, tree_vertices,
                                        decay_chain_to_tree,
                                        decay_chain_ls_sets)
 

@@ -7,7 +7,7 @@ Uses the Fitter API directly, exercising the full pipeline:
 import sys, os, time, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from ampfit import Fitter
+from tabpwa import Fitter
 
 CONFIG_FILE = "config_amp.yml"
 WARMUP = 5

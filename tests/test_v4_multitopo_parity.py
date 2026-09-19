@@ -20,8 +20,8 @@ CFG = "tests/config_pwa.yml"
 
 
 def _data(nph=800, nd=300):
-    from ampfit import Fitter
-    from ampfit.pwa_build import generate_pwa_phsp, pwa_event_data_tree
+    from tabpwa import Fitter
+    from tabpwa.pwa_build import generate_pwa_phsp, pwa_event_data_tree
 
     f = Fitter(CFG, backend="numpy_pwa")
     f.apply_constrains()
@@ -37,7 +37,7 @@ def _data(nph=800, nd=300):
 
 
 def test_config_has_empty_declared_pairings():
-    from ampfit.amp_model import build_amplitude_model
+    from tabpwa.amp_model import build_amplitude_model
 
     m = build_amplitude_model(CFG)
     kc = m.build_kernel_config()
@@ -53,7 +53,7 @@ def test_config_has_empty_declared_pairings():
 
 
 def test_cuda_pwa_matches_numpy_on_multitopo():
-    from ampfit import Fitter
+    from tabpwa import Fitter
 
     kc, ph, da = _data()
     f = Fitter(CFG, backend="numpy_pwa")

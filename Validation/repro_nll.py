@@ -264,7 +264,7 @@ for batch in range(n_batch):
     sl = slice(batch*batch_size, min((batch+1)*batch_size, data.shape[0]))
     batch_data.append((data[sl], data_time[sl], data_bbar_frac[sl], Bi[sl], sw[sl]))
 
-# Load params (with scale reversal matching ampfit values_from_dict)
+# Load params (with scale reversal matching tabpwa values_from_dict)
 with open("pw_cfit5_td6_fix29/final_params_0.json") as f: pdat = json.load(f)
 
 def get_val(name):

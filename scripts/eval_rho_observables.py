@@ -24,9 +24,9 @@ sys.path.insert(0, _SRC)
 sys.path.insert(0, _SCR)
 
 import argparse
-from ampfit import Fitter
-from ampfit.bw_form_factor import form_factor as bw_form_factor
-from ampfit.rho_observables import helicity_amplitudes, get_rho_couplings
+from tabpwa import Fitter
+from tabpwa.bw_form_factor import form_factor as bw_form_factor
+from tabpwa.rho_observables import helicity_amplitudes, get_rho_couplings
 
 
 # ═══════════════════════════════════════════════════════════════════

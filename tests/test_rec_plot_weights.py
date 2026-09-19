@@ -3,11 +3,11 @@
 import numpy as np
 from scipy.optimize import OptimizeResult
 
-from ampfit import Fitter
-from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data_tree
-from ampfit.plot_pw_groups import PWGroupPlotter
-from ampfit.plot_pwa_groups import discover_pwa_groups
+from tabpwa import Fitter
+from tabpwa.config_loader import Config
+from tabpwa.pwa_build import pwa_event_data_tree
+from tabpwa.plot_pw_groups import PWGroupPlotter
+from tabpwa.plot_pwa_groups import discover_pwa_groups
 
 
 def _momenta(n, seed):

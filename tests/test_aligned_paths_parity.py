@@ -1,4 +1,4 @@
-"""Regression: the two ampfit aligned-euler paths agree with each other.
+"""Regression: the two tabpwa aligned-euler paths agree with each other.
 
 For a Lambda_c -> p pim pip eta multi-topology process (spinful final "p")
 we compare, on physical CM events, the alignment euler angles produced by
@@ -8,22 +8,22 @@ we compare, on physical CM events, the alignment euler angles produced by
   * the angle/|p| path ``pwa_event_data_tree`` alignment slice (frames built
     from precomputed per-vertex angles and two-body |p| only).
 
-tf-pwa parity note: both ampfit paths reproduce tf-pwa's per-particle SU(2)
+tf-pwa parity note: both tabpwa paths reproduce tf-pwa's per-particle SU(2)
 *frames* (r_matrix/b_matrix) to machine precision (~1e-14).  The *aligned*
 rotation R = ref_r . inv(chain_r) is therefore expected to agree with tf-pwa
 at the rotation level too.  The only naming difference is that tf-pwa's
 ``SU2M.get_euler_angle`` reports the z-y-z triple with alpha<->gamma swapped
 (its columns are (gamma, beta, alpha) relative to our Rz(a)Ry(b)Rz(g)
-convention); the physical rotations agree.  This test only needs pure ampfit
+convention); the physical rotations agree.  This test only needs pure tabpwa
 (no tf-pwa dependency) and is fast.
 """
 import numpy as np
 
-from ampfit.config_loader import Config
-from ampfit.momenta_to_angles import (
+from tabpwa.config_loader import Config
+from tabpwa.momenta_to_angles import (
     aligned_euler_from_momenta, angles_to_momenta,
 )
-from ampfit.pwa_build import pwa_event_data_tree
+from tabpwa.pwa_build import pwa_event_data_tree
 
 LC_CONFIG = """data_order:
     dat_order: [p, pim, pip, eta]

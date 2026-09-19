@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ampfit"
+name = "TabPWA"
 version = "0.1.0"
-description = "Amplitude analysis fitting framework with NumPy and CUDA kernels"
+description = "Amplitude analysis fitting framework with tabulated/interpolated kernels, TFPWA-compatible"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
@@ -36,7 +36,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["ampfit*"]
+include = ["tabpwa*"]
 
 [tool.setuptools.package-data]
-ampfit = ["cuda/*.cu", "cuda/*.cuh", "cuda/*.hash", "cpu/*.c"]
+tabpwa = ["cuda/*.cu", "cuda/*.cuh", "cuda/*.hash", "cpu/*.c"]

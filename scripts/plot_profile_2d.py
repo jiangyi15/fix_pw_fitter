@@ -14,7 +14,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ampfit.gp import GP
+from tabpwa.gp import GP
 
 
 def main():

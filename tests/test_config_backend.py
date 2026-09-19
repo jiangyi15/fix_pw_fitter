@@ -3,9 +3,9 @@
 import os
 import tempfile
 
-from ampfit import Fitter
-from ampfit.config_loader import Config, RawConfig
-from ampfit.backends.numpy_pwa_backend import NumpyPWABackend
+from tabpwa import Fitter
+from tabpwa.config_loader import Config, RawConfig
+from tabpwa.backends.numpy_pwa_backend import NumpyPWABackend
 
 BASE = os.path.join(os.path.dirname(__file__), "config_pwa.yml")
 
@@ -45,7 +45,7 @@ def test_config_backend_absent_is_none():
 
 def test_create_backend_string_spec_keeps_kwargs():
     """kwargs must not be silently dropped for a string spec."""
-    from ampfit.backends import create_backend, register_backend
+    from tabpwa.backends import create_backend, register_backend
 
     @register_backend("_kwarg_probe")
     class _Probe:
@@ -57,8 +57,8 @@ def test_create_backend_string_spec_keeps_kwargs():
 
 
 def test_readme_low_level_uses_factory():
-    from ampfit.backends import create_backend
-    from ampfit.config_loader import Config, RawConfig
+    from tabpwa.backends import create_backend
+    from tabpwa.config_loader import Config, RawConfig
     kc = Config("tests/config_pwa.yml").build_all_index()
     be = create_backend("numpy_pwa", kc)
     assert be is not None

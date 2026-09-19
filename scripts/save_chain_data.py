@@ -32,12 +32,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 import numpy as np
 
-from ampfit.config_loader import load_config
-from ampfit.decay_tree import DecayTree
-from ampfit.helicity_angle import decay_chain_leaves
-from ampfit.helicity_angle import canonical_variables, tree_vertices
-from ampfit.momenta_to_angles import decay_angles_vectorized
-from ampfit.pwa_build import _boost_vec
+from tabpwa.config_loader import load_config
+from tabpwa.decay_tree import DecayTree
+from tabpwa.helicity_angle import decay_chain_leaves
+from tabpwa.helicity_angle import canonical_variables, tree_vertices
+from tabpwa.momenta_to_angles import decay_angles_vectorized
+from tabpwa.pwa_build import _boost_vec
 
 
 def main():

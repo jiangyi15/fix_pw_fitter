@@ -2,7 +2,7 @@
 
 import pytest
 
-from ampfit.utils import fmt_particle
+from tabpwa.utils import fmt_particle
 
 
 @pytest.mark.parametrize("name,expected", [

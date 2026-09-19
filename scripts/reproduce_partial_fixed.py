@@ -56,12 +56,12 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampfit import Fitter
-from ampfit.phasespace_b4pi import (generate_b4pi_fixed_m3pi,
+from tabpwa import Fitter
+from tabpwa.phasespace_b4pi import (generate_b4pi_fixed_m3pi,
                                     two_body_momentum, M_B_MESON, M_PION)
-from ampfit.momenta_to_data import momenta_to_data
-from ampfit.toy_generator import _build_params
-from ampfit.lineshape_common import (find_resonance, resonance_model,
+from tabpwa.momenta_to_data import momenta_to_data
+from tabpwa.toy_generator import _build_params
+from tabpwa.lineshape_common import (find_resonance, resonance_model,
                                      b_barrier_factor, fitted_ck)
 
 
@@ -245,7 +245,7 @@ def _validate(f, model, r, args, M, Htot):
     contr = np.einsum("a,sab,b->s", ck, Mtab[1:], np.conj(ck)).real
     c1 = np.corrcoef(contr, Htot)[0, 1]
 
-    from ampfit.particle_model.ck_matrix_v2 import _gamma_functions
+    from tabpwa.particle_model.ck_matrix_v2 import _gamma_functions
     m = np.linspace(xg[0], xg[-1], 400)
     M00 = np.real(Mtab[:, 0, 0]).astype(float)
     scale = float(np.interp(m0, xg, M00)) or 1.0

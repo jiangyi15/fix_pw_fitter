@@ -19,7 +19,7 @@ import sys, os, json, argparse
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ampfit import Fitter
+from tabpwa import Fitter
 
 
 # ── Gaussian Process ───────────────────────────────────────────────

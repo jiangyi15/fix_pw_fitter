@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.plot_pwa_groups import (
+from tabpwa.config_loader import Config
+from tabpwa.plot_pwa_groups import (
     discover_pwa_groups, pwa_mass_varfun, pwa_angle_varfun,
     angle_variable_labels, var_ranges)
 
@@ -81,7 +81,7 @@ def pwa_events():
 
 
 def test_readvar_item_classes(cfg_pwa):
-    from ampfit.read_var import ReadVar, MassVar, AngleVar
+    from tabpwa.read_var import ReadVar, MassVar, AngleVar
     m = ReadVar(cfg_pwa, "pipeta")
     assert isinstance(m, MassVar) and m.kind == "mass"
     a = ReadVar(cfg_pwa, ("angle", "pipi/pip", "alpha"))
@@ -93,7 +93,7 @@ def test_readvar_item_classes(cfg_pwa):
 
 
 def test_massvar_reads_column(cfg_pwa, pwa_events):
-    from ampfit.read_var import MassVar
+    from tabpwa.read_var import MassVar
     m0 = MassVar(cfg_pwa, "pipi")
     m1 = MassVar(cfg_pwa, "pipeta")
     assert np.allclose(m0.read(pwa_events), pwa_events["mass"][:, 0])
@@ -101,7 +101,7 @@ def test_massvar_reads_column(cfg_pwa, pwa_events):
 
 
 def test_anglevar_vertex_mapping(cfg_pwa, pwa_events):
-    from ampfit.read_var import AngleVar
+    from tabpwa.read_var import AngleVar
     a = pwa_events["angle"]
     wrap = (a[:, 0, 0] + np.pi) % (2 * np.pi) - np.pi
     assert np.allclose(AngleVar(cfg_pwa, "pipi", "alpha").read(pwa_events),
@@ -116,7 +116,7 @@ def test_anglevar_vertex_mapping(cfg_pwa, pwa_events):
 
 
 def test_exprvar_elementwise(cfg_pwa, pwa_events):
-    from ampfit.read_var import MassVar, ExprVar
+    from tabpwa.read_var import MassVar, ExprVar
     mv = {f"m_{n}": MassVar(cfg_pwa, n) for n in ("pipi", "pipeta")}
     e = ExprVar("max(m_pipi,m_pipeta) ** 2 - m_pipi", mv)
     got = e.read(pwa_events)
@@ -126,7 +126,7 @@ def test_exprvar_elementwise(cfg_pwa, pwa_events):
 
 
 def test_vars_from_config_classes(cfg_pwa):
-    from ampfit.read_var import vars_from_config, MassVar, AngleVar
+    from tabpwa.read_var import vars_from_config, MassVar, AngleVar
     items = dict(vars_from_config(cfg_pwa))
     assert isinstance(items["pipi"], MassVar)
     # config_pwa has only topology 0 wave-active -> pipeta angles skipped
@@ -135,7 +135,7 @@ def test_vars_from_config_classes(cfg_pwa):
 
 
 def test_config_panels_from_readvars(cfg_pwa, pwa_events):
-    from ampfit.plot_pwa_groups import config_panels
+    from tabpwa.plot_pwa_groups import config_panels
     p = config_panels(cfg_pwa, pwa_events, pwa_events)
     assert p["mass"]["keys"] == ["pipi", "pipeta", "pimeta"]
     # pipi + pipi/pip (alpha/cos) + the two extra_vars expressions
@@ -146,7 +146,7 @@ def test_config_panels_from_readvars(cfg_pwa, pwa_events):
 
 def test_apply_plot_entry_priority(cfg_pwa):
     """per-variable config bins/range override plot.config defaults."""
-    from ampfit.read_var import MassVar
+    from tabpwa.read_var import MassVar
     defaults = {"nbins": 200, "legend": False, "range": [0.0, 5.0]}
     v = MassVar(cfg_pwa, "pipi").apply_plot_entry(defaults)
     assert v.nbins == 200 and v.range == (0.0, 5.0)

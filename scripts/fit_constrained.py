@@ -31,7 +31,7 @@ Usage:
     # S-wave LS fraction (|gs|²/total)
     python scripts/fit_constrained.py --constraint fS:0.35
 
-Constraints use the Blatt-Weisskopf form factor from ampfit's
+Constraints use the Blatt-Weisskopf form factor from tabpwa's
 ``build_fl_table`` (F_L(q) = q^L · B'_L(q), normalised so that
 F_L(1 GeV) = 1).  The Jacobian is computed via finite differences.
 """
@@ -39,8 +39,8 @@ import sys, os, json, time, argparse, math
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ampfit import Fitter
-from ampfit.rho_observables import (helicity_amplitudes,
+from tabpwa import Fitter
+from tabpwa.rho_observables import (helicity_amplitudes,
     obs_fL, obs_fS, obs_weak_phase, obs_cp_asym)
 
 

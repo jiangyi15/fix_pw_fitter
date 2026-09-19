@@ -23,8 +23,8 @@ def _imports(module):
 
 
 def test_config_is_a_legacy_alias_for_the_model():
-    from ampfit.amp_model import AmplitudeModel
-    from ampfit.config_loader import Config, RawConfig
+    from tabpwa.amp_model import AmplitudeModel
+    from tabpwa.config_loader import Config, RawConfig
 
     model = Config(CONFIG)                     # legacy alias
     assert isinstance(model, AmplitudeModel)
@@ -35,8 +35,8 @@ def test_config_is_a_legacy_alias_for_the_model():
 
 
 def test_base_model_builds_from_raw_dict_without_config():
-    from ampfit.base_model import BaseModel
-    from ampfit.config_loader import Config, RawConfig, load_config
+    from tabpwa.base_model import BaseModel
+    from tabpwa.config_loader import Config, RawConfig, load_config
 
     dic = load_config(CONFIG)
     base = BaseModel(dic, CONFIG)
@@ -53,7 +53,7 @@ def test_base_model_builds_from_raw_dict_without_config():
 
 def test_base_model_module_is_leaf():
     """base_model must not import config_loader / amp_model / backends."""
-    from ampfit import base_model
+    from tabpwa import base_model
 
     mods = _imports(base_model)
     assert not any("config_loader" in m for m in mods), mods
@@ -63,7 +63,7 @@ def test_base_model_module_is_leaf():
 
 def test_base_model_carries_no_model_policy():
     """Model policy belongs to AmplitudeModel, not BaseModel."""
-    from ampfit.base_model import BaseModel
+    from tabpwa.base_model import BaseModel
 
     for attr in ("name", "params_transform_cls", "scalar_names",
                  "scalar_defaults", "data_layout", "build_params_transform"):
@@ -72,9 +72,9 @@ def test_base_model_carries_no_model_policy():
 
 
 def test_amplitude_model_is_a_base_model():
-    from ampfit.amp_model import AmplitudeModel, build_amplitude_model
-    from ampfit.base_model import BaseModel
-    from ampfit.config_loader import Config
+    from tabpwa.amp_model import AmplitudeModel, build_amplitude_model
+    from tabpwa.base_model import BaseModel
+    from tabpwa.config_loader import Config
 
     assert issubclass(AmplitudeModel, BaseModel)
     model = build_amplitude_model(Config(CONFIG))
@@ -84,8 +84,8 @@ def test_amplitude_model_is_a_base_model():
 
 
 def test_config_alias_and_factory_agree():
-    from ampfit.amp_model import build_amplitude_model
-    from ampfit.config_loader import Config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.config_loader import Config
 
     a = Config(CONFIG)                      # legacy alias
     b = build_amplitude_model(CONFIG)       # explicit factory
@@ -94,9 +94,9 @@ def test_config_alias_and_factory_agree():
 
 
 def test_fitter_keeps_the_model():
-    from ampfit import Fitter
-    from ampfit.amp_model import AmplitudeModel
-    from ampfit.config_loader import RawConfig
+    from tabpwa import Fitter
+    from tabpwa.amp_model import AmplitudeModel
+    from tabpwa.config_loader import RawConfig
 
     f = Fitter(CONFIG, backend="numpy_pwa")
     try:
@@ -109,8 +109,8 @@ def test_fitter_keeps_the_model():
 
 def test_display_split_tree_vs_params():
     """Decay/particle display on DecayTree; parameter labels on BaseModel."""
-    from ampfit.base_model import BaseModel
-    from ampfit.decay_tree import DecayTree
+    from tabpwa.base_model import BaseModel
+    from tabpwa.decay_tree import DecayTree
 
     for m in ("name_display_map", "display_decay", "display_chain"):
         assert hasattr(DecayTree, m), m

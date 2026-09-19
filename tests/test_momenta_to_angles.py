@@ -11,9 +11,9 @@ import math
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.helicity_angle import decay_chain_leaves
-from ampfit.momenta_to_angles import (_boost_4vector as boost,
+from tabpwa.config_loader import Config
+from tabpwa.helicity_angle import decay_chain_leaves
+from tabpwa.momenta_to_angles import (_boost_4vector as boost,
                                       build_node_momenta,
                                       decay_angles_from_momenta)
 
@@ -121,7 +121,7 @@ def test_back_to_back_and_rotation_invariance():
 
 def test_inverse_angles_to_momenta_roundtrip():
     """angles → 4-momenta → angles reproduces the Euler pairs."""
-    from ampfit.momenta_to_angles import angles_to_momenta
+    from tabpwa.momenta_to_angles import angles_to_momenta
 
     chain = _rho_chain()
     nv = len(chain.decays)
@@ -146,8 +146,8 @@ def test_aligns_with_original_momenta_to_data():
     """On the repo's own B→4π events the module reproduces the original
     momenta_to_data ρρ row-0 kinematics (shared-reference azimuths):
         th1 = θ₁, th2 = θ₂,  φ = φ₁ + φ₂."""
-    from ampfit.phasespace_b4pi import generate_b4pi
-    from ampfit.momenta_to_data import momenta_to_data
+    from tabpwa.phasespace_b4pi import generate_b4pi
+    from tabpwa.momenta_to_data import momenta_to_data
 
     chain = _rho_chain()
     labels = ['pip1', 'pim1', 'pip2', 'pim2']
@@ -170,9 +170,9 @@ def test_aligns_with_original_momenta_to_data():
 def test_momenta_to_data_angles_all_rows_match_original():
     """Original-layout output equals momenta_to_data for every one of the 24
     rows (all topologies x permutation/CP blocks)."""
-    from ampfit.phasespace_b4pi import generate_b4pi
-    from ampfit.momenta_to_data import momenta_to_data
-    from ampfit.momenta_to_angles import momenta_to_data_angles
+    from tabpwa.phasespace_b4pi import generate_b4pi
+    from tabpwa.momenta_to_data import momenta_to_data
+    from tabpwa.momenta_to_angles import momenta_to_data_angles
 
     ev = generate_b4pi(400, seed=2)
     a = momenta_to_data_angles(ev['momenta'])
@@ -185,9 +185,9 @@ def test_momenta_to_data_angles_all_rows_match_original():
 def test_chain_topology_original_rows_match_all_perm_blocks():
     """Nested (chain) rows: th1=θ(R1), th2=θ(R2), φ=φ₂+π for every
     identical-particle permutation block."""
-    from ampfit.phasespace_b4pi import generate_b4pi
-    from ampfit.momenta_to_data import momenta_to_data, _IDENTICAL_PERMS
-    from ampfit.momenta_to_angles import chain_original_triplet
+    from tabpwa.phasespace_b4pi import generate_b4pi
+    from tabpwa.momenta_to_data import momenta_to_data, _IDENTICAL_PERMS
+    from tabpwa.momenta_to_angles import chain_original_triplet
 
     cfg = Config('config_amp.yml')
     ch1 = [cc for cc in cfg.full_decay.chains
@@ -209,7 +209,7 @@ def test_chain_topology_original_rows_match_all_perm_blocks():
 
 def test_decay_angles_vectorized_matches_scalar():
     """Vectorized batch angle extraction equals the scalar per-event loop."""
-    from ampfit.momenta_to_angles import decay_angles_vectorized
+    from tabpwa.momenta_to_angles import decay_angles_vectorized
 
     cfg = Config('config_pwa.yml')
     ch = [cc for cc in cfg.full_decay.chains if 'MI1m' in str(cc)][0]

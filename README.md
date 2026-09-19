@@ -1,7 +1,33 @@
-# ampfit — Amplitude Analysis Fitting Framework
+# TabPWA — Tabulated Partial Wave Analysis
 
-A Python package for partial wave amplitude analysis with NumPy, CUDA, and ONNX Runtime backends,
-full Wirtinger-calculus gradients, parameter constraints, and a global Fitter class.
+A Python package for partial wave amplitude analysis with NumPy, C/CUDA, and ONNX Runtime
+backends, analytic (Wirtinger) gradients, parameter constraints, and a global `Fitter`.
+
+## The name: “Tab” = **tabulated**
+
+**TabPWA = Tabulated Partial Wave Analysis** — TensorFlow-free, and compatible with the
+physics conventions of [TFPWA](https://github.com/jiangyi15/tf-pwa).
+
+The “**Tab**” is the core design choice, not a decoration. Instead of evaluating the
+momentum-dependent factors on every event, `tabpwa` **samples them once at build time onto
+fixed grids**:
+
+- `fl_table` — Blatt–Weisskopf barrier / form factors `F_L(q)`;
+- `gamma_table` — running widths `Γ(m)`;
+- the angular basis and per-handle amplitude pieces.
+
+At fit time the per-event values are obtained by fast **Catmull–Rom interpolation** of those
+tables, so the kernels only recompute what actually changes each iteration (e.g. the
+Breit–Wigner propagator). This is what makes it fast without an autodiff framework: TFPWA
+computes the same physics directly through TensorFlow autodiff, whereas `tabpwa` precomputes
+the tables and propagates **exact analytic (Wirtinger) gradients** through the interpolation.
+
+The tables are built once per configuration by the model layer, then consumed by the pure
+**Kernel** layer; batching/normalisation live in the **Backend** layer and constraints + NLL +
+optimisation in the **Fitter** (the three-layer architecture). Sampling density is
+configurable through `build_defaults` (`n_interp`, `d`, `barrier`, `complex_tail`).
+
+Distribution name `TabPWA`, import name `tabpwa`.
 
 ## Installation
 
@@ -10,8 +36,8 @@ full Wirtinger-calculus gradients, parameter constraints, and a global Fitter cl
 pip install git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_pwa
 
 # Or with optional backends
-pip install "ampfit[onnx] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_pwa"
-pip install "ampfit[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_pwa"
+pip install "tabpwa[onnx] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_pwa"
+pip install "tabpwa[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter.git@interp_bw_pwa"
 
 # Install in development mode (local)
 pip install -e .
@@ -42,7 +68,7 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ### Python API
 
 ```python
-from ampfit import Fitter
+from tabpwa import Fitter
 
 # Backend selection via string shortcut (default: model's registered "default")
 fitter = Fitter("config_amp.yml")                         # config backend, else the model's "default" (TD → cuda64/cuda_v3, PWA → cuda_v4_pwa)
@@ -87,7 +113,7 @@ fitter.plot(result, prefix="plots/")
 ### Amplitude Fractions
 
 ```python
-from ampfit.amp_frac import AmplitudeFractions
+from tabpwa.amp_frac import AmplitudeFractions
 
 af = AmplitudeFractions(fitter, fit_result)
 
@@ -108,8 +134,8 @@ python scripts/calc_fractions.py fit_results.json -o fractions.csv
 ### Low-level: Direct kernel
 
 ```python
-from ampfit.amp_model import build_amplitude_model
-from ampfit.backends import create_backend
+from tabpwa.amp_model import build_amplitude_model
+from tabpwa.backends import create_backend
 
 kc = build_amplitude_model("config_amp.yml").build_kernel_config()
 
@@ -143,7 +169,7 @@ input (``dic`` / ``_config_path`` / ``backend_spec``).  The model derives the
 interpreted physics (decay tree, index/tables, base kernel config
 ``build_base_kernel_config()``) and owns the policy; ``Fitter`` builds it from
 a ``RawConfig`` and keeps it as ``fitter.model``.  Custom models subclass
-``ampfit.amp_model.AmplitudeModel``, register with
+``tabpwa.amp_model.AmplitudeModel``, register with
 ``@register_amplitude_model("name")``, and override ``build_kernel_config()``
 / ``build_params_transform()`` / ``build_event_data()``.
 
@@ -160,14 +186,14 @@ is rejected with the registered list.
 
 The Blatt–Weisskopf form factor of every decay vertex is baked into the kernel
 config's ``fl_table`` (every backend only interpolates it), so barrier forms
-are pluggable in pure Python: subclass ``ampfit.BarrierFactor``, register with
+are pluggable in pure Python: subclass ``tabpwa.BarrierFactor``, register with
 ``@register_barrier("name")``, and override ``factor(q)`` (extra parameters go
 in ``get_params()``).  Built-ins: ``"bw"`` (default, Blatt–Weisskopf) and
 ``"exp"`` (``exp(-(q·d)²/2)``).
 
 ```python
 import numpy as np
-from ampfit import BarrierFactor, register_barrier
+from tabpwa import BarrierFactor, register_barrier
 
 @register_barrier("myform")
 class MyBarrier(BarrierFactor):
@@ -185,12 +211,12 @@ decay:
 ```
 
 Build-time defaults come from the global build context, not the config.  The
-module ``ampfit.build_defaults`` exposes ``scope``, a ``with`` scope:
+module ``tabpwa.build_defaults`` exposes ``scope``, a ``with`` scope:
 the overrides apply only inside the scope, then it is back to the global
 defaults.
 
 ```python
-from ampfit.build_defaults import scope
+from tabpwa.build_defaults import scope
 
 with scope(n_interp=4000, d=1.5):
     kc = build_amplitude_model(cfg).build_kernel_config()
@@ -230,7 +256,7 @@ config key ``n_proj`` (default 1).
 | ``integrated_pwa`` | Gram-matrix norm (O(n²)) with the data NLL delegated to a base backend (default ``cuda_v4_pwa``) |
 
 ```python
-from ampfit.backends import create_backend
+from tabpwa.backends import create_backend
 
 be = create_backend("cuda_v4_pwa", kc)                 # fitted m0/g0
 be = create_backend({"name": "cuda_v5_pwa",             # group-log NLL

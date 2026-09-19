@@ -15,7 +15,7 @@ import sys
 # Add project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ampfit.particle_model.ck_matrix_disp_v2 import _compute_re_dispersion
+from tabpwa.particle_model.ck_matrix_disp_v2 import _compute_re_dispersion
 
 
 def main():

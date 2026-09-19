@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import build_particle
+from tabpwa.particle_model import build_particle
 
 
 class TestAmplitudeRaw:

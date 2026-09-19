@@ -38,7 +38,7 @@ def main():
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
-    from ampfit import Fitter
+    from tabpwa import Fitter
 
     # ── Load fitter and results ──────────────────────────────────
     f = Fitter(args.config, backend="numpy")

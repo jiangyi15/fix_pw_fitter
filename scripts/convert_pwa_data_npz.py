@@ -31,9 +31,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
-from ampfit.config_loader import load_config
-from ampfit.decay_tree import DecayTree
-from ampfit.pwa_build import block_orders, build_tree_event_data
+from tabpwa.config_loader import load_config
+from tabpwa.decay_tree import DecayTree
+from tabpwa.pwa_build import block_orders, build_tree_event_data
 
 
 def main():

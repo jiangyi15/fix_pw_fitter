@@ -4,8 +4,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import numpy as np
 import pytest
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
 
 CONFIG_FILE = "config_angle.yml"
 

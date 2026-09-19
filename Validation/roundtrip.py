@@ -85,7 +85,7 @@ def build_par(x):
         ret.append(tmp)
     return tf.stack(ret)
 
-# ── Load params (with scale reversal, matching ampfit values_from_dict) ──
+# ── Load params (with scale reversal, matching tabpwa values_from_dict) ──
 with open("pw_cfit5_td6_fix29/final_params_0.json") as f: pdat = json.load(f)
 
 def get_val(name):

@@ -14,11 +14,11 @@ import math
 import numpy as np
 import pytest
 
-from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data_tree, pwa_duplication_factors
-from ampfit.amp_model import build_amplitude_model
-from ampfit.numpy_pwa import NumpyPWA
-from ampfit.helicity_angle import (decay_chain_to_tree, tree_vertices,
+from tabpwa.config_loader import Config
+from tabpwa.pwa_build import pwa_event_data_tree, pwa_duplication_factors
+from tabpwa.amp_model import build_amplitude_model
+from tabpwa.numpy_pwa import NumpyPWA
+from tabpwa.helicity_angle import (decay_chain_to_tree, tree_vertices,
                                    amplitude)
 
 
@@ -132,7 +132,7 @@ def test_forward_positive_and_gradients(kc, data):
 
 def test_declaration_driven_row_blocks(cfg):
     """Row-block factors come from identical/cp declarations in the config."""
-    from ampfit.config_loader import row_block_factors
+    from tabpwa.config_loader import row_block_factors
 
     assert row_block_factors(cfg.dic) == (1, 1, 1)     # config_pwa: none
 
@@ -149,7 +149,7 @@ def test_declaration_driven_row_blocks(cfg):
 
 def test_build_all_index_routes_pure_pwa(cfg):
     """A single generic build_all_index emits the pure-PWA arrays (C==1)."""
-    from ampfit.config_loader import row_block_factors
+    from tabpwa.config_loader import row_block_factors
 
     assert row_block_factors(cfg.dic) == (1, 1, 1)
     c2 = Config("tests/config_pwa.yml")
@@ -169,7 +169,7 @@ def test_build_all_index_routes_pure_pwa(cfg):
 
 def test_generate_pwa_phsp_conserves_four_momentum(cfg):
     """Flat phsp via two-body products + inverse boost chain: on shell."""
-    from ampfit.pwa_build import generate_pwa_phsp
+    from tabpwa.pwa_build import generate_pwa_phsp
 
     chain = cfg.full_decay.get_partial_waves()[0][1]
     mom = generate_pwa_phsp(cfg, chain, 2000, seed=3)
@@ -189,8 +189,8 @@ def test_generate_pwa_phsp_conserves_four_momentum(cfg):
 def test_load_all_data_prefix_momenta(tmp_path):
     """load_all_data converts data/phsp 4-momentum files (tree-based fill)."""
     import yaml
-    from ampfit import Fitter
-    from ampfit.pwa_build import generate_pwa_phsp
+    from tabpwa import Fitter
+    from tabpwa.pwa_build import generate_pwa_phsp
 
     cfg0 = Config("tests/config_pwa.yml")
     chain = cfg0.full_decay.get_partial_waves()[0][1]
@@ -243,7 +243,7 @@ def test_load_all_data_prefix_momenta(tmp_path):
 def test_topo_index_from_decay_struct(cfg):
     """Topology axis enumerates ALL structural pairings (incl. without
     resonances) so adding a resonance later does not renumber anything."""
-    from ampfit.config_loader import Config as _C
+    from tabpwa.config_loader import Config as _C
 
     c2 = _C("tests/config_pwa.yml")
     # three declared pairings, even though only the pipi pairing has waves
@@ -263,7 +263,7 @@ def test_topo_index_from_decay_struct(cfg):
 
 def test_topo_index_from_name(cfg):
     """Structural decay-section name -> stable topology slot."""
-    from ampfit.config_loader import Config as _C
+    from tabpwa.config_loader import Config as _C
     c2 = _C("tests/config_pwa.yml")
     assert c2.topo_index_from_name("pipi") == 0
     assert c2.topo_index_from_name("pipeta") == 1
@@ -272,7 +272,7 @@ def test_topo_index_from_name(cfg):
 
 def test_topo_index_from_name_list(cfg):
     """List of internal decay cores selects multi-decay topologies."""
-    from ampfit.config_loader import Config as _C
+    from tabpwa.config_loader import Config as _C
     a = _C("config_angle.yml")
     assert a.topo_index_from_name(["pipi1", "pipi2"]) == 0      # rho-rho-like
     assert a.topo_index_from_name(["pipi1", "pipipi"]) == 1     # chain

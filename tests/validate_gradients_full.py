@@ -5,8 +5,8 @@ Compares NumpyKernel._compute() gradients vs numerical FD.
 """
 import numpy as np
 import sys
-from ampfit.config_loader import Config
-from ampfit.numpy_kernel import NumpyKernel
+from tabpwa.config_loader import Config
+from tabpwa.numpy_kernel import NumpyKernel
 
 NE = 500
 print("=== Loading config + kernel_config ===")
@@ -33,7 +33,7 @@ data = {
 print(f"  mass: {data['mass'].shape}, q: {data['q'].shape}, angle: {data['angle'].shape}")
 
 print("\n=== Building kernel params ===")
-from ampfit.fitter import Fitter
+from tabpwa.fitter import Fitter
 fitter = Fitter("config_angle.yml", backend="numpy")
 x0 = fitter.initial_values(seed=42)
 params, resolved = fitter.build_params(x0)

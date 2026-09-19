@@ -25,7 +25,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ampfit.particle_model import build_particle
+from tabpwa.particle_model import build_particle
 
 # ── Physics configuration (well-conditioned regime) ────────────────
 M0, G0 = 0.5, 1.0

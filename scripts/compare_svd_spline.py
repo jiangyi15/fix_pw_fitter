@@ -20,8 +20,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ampfit.particle_model import build_particle
-from ampfit.particle_model.spline_k_model import (
+from tabpwa.particle_model import build_particle
+from tabpwa.particle_model.spline_k_model import (
     KToSplineWeightsTransform, ExpSplineModel,
 )
 

@@ -19,12 +19,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 
-from ampfit.particle_model import ALL_MODELS, build_particle
-from ampfit.particle_model.svd_spline_k_model import (
+from tabpwa.particle_model import ALL_MODELS, build_particle
+from tabpwa.particle_model.svd_spline_k_model import (
     KToSVDWeightsTransform, SVDSplineKModel, ExpSplineSVDModel,
     M_PION, M_B_MESON,
 )
-from ampfit.particle_model.spline_k_model import (
+from tabpwa.particle_model.spline_k_model import (
     KToSplineWeightsTransform, spline_basis_matrix,
     spline_weights, spline_weight_deriv, ExpSplineModel,
 )
@@ -212,7 +212,7 @@ class TestSVDReduction:
 
     def test_gamma_rows_match_full_model(self, model):
         """Reduced gamma rows + reduced weights ≈ ExpSpline full gamma."""
-        from ampfit.particle_model.svd_spline_k_model import (
+        from tabpwa.particle_model.svd_spline_k_model import (
             KToSVDWeightsTransform)
 
         mg = np.linspace(0.35, 1.8, 500)

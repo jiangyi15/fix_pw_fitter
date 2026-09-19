@@ -32,8 +32,8 @@ _SCR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SRC)
 sys.path.insert(0, _SCR)
 
-from ampfit import Fitter
-from ampfit.rho_observables import (helicity_amplitudes,
+from tabpwa import Fitter
+from tabpwa.rho_observables import (helicity_amplitudes,
     obs_fL, obs_weak_phase, obs_cp_asym)
 
 

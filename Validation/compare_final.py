@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Final comparison: ampfit vs TFPWA reference.
+"""Final comparison: tabpwa vs TFPWA reference.
 Separates reference and kernel computations, then compares.
 All 112 waves verified: K factors, ck, A/Abar, P."""
 import numpy as np, json, glob, sys
@@ -24,11 +24,11 @@ data_all = np.concatenate([np.load(f) for f in sorted(glob.glob(
     key=lambda x: int(x.split('/')[-2].split('_')[-1]))], axis=-1)[:N_EVENTS]
 print(f"  data: {data_all.shape} ({data_all.shape[1]//2} entries × 2 orientations)")
 
-# 1b. Build reference ck from ampfit (same values, correct split)
+# 1b. Build reference ck from tabpwa (same values, correct split)
 import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src")); sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from ampfit.config_loader import Config
-from ampfit.backends import create_backend
-import ampfit.fitter as ft
+from tabpwa.config_loader import Config
+from tabpwa.backends import create_backend
+import tabpwa.fitter as ft
 
 config = Config(os.path.join(os.path.dirname(__file__), 'config_angle.yml'))
 kc = config.build_all_index(); be = create_backend("numpy", kc); kernel = be.kernel
@@ -90,11 +90,11 @@ print(f"  reference A = {A_ref[0].real:+.2f}{A_ref[0].imag:+.2f}j")
 print(f"  reference Abar = {Abar_ref[0].real:+.2f}{Abar_ref[0].imag:+.2f}j")
 
 # ═══════════════════════════════════════════════════════
-# PART 2: AMPFIT KERNEL
+# PART 2: TABPWA KERNEL
 # ═══════════════════════════════════════════════════════
 print()
 print("=" * 70)
-print("PART 2: Ampfit Kernel")
+print("PART 2: Tabpwa Kernel")
 print("=" * 70)
 
 # 2a. Load data

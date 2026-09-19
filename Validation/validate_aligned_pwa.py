@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 
-from ampfit.config_loader import Config
-from ampfit.pwa_build import pwa_event_data_tree
-from ampfit.momenta_to_angles import aligned_euler_from_momenta
+from tabpwa.config_loader import Config
+from tabpwa.pwa_build import pwa_event_data_tree
+from tabpwa.momenta_to_angles import aligned_euler_from_momenta
 
 CONFIG = """data:
     dat_order: [p, pim, pip, eta]
@@ -145,7 +145,7 @@ def run(tmp='/tmp/validate_aligned_pwa.yml'):
     check('angle buffer shape (n_events, n_topo, 9)',
           X.shape == (mom.shape[0], n_topo, 2 * n_decay + 3))
 
-    # 1) two ampfit paths agree per chain
+    # 1) two tabpwa paths agree per chain
     ref = aligned_euler_from_momenta(
         chains, {nm: mom[:, i] for i, nm in enumerate(
             ['p', 'pim', 'pip', 'eta'])}, ['p'])
@@ -155,7 +155,7 @@ def run(tmp='/tmp/validate_aligned_pwa.yml'):
           worst < 1e-8, f"max|d|={worst:.2e}")
 
     # 2) match the recorded tf-pwa numbers (mapped to our convention:
-    #    ampfit (alpha,beta,gamma) = tf (gamma, beta, alpha))
+    #    tabpwa (alpha,beta,gamma) = tf (gamma, beta, alpha))
     exp = TF_EULER[..., [2, 1, 0]]          # (3, 2, 3)
     got = np.stack([X[:, 0, 6:9], X[:, 1, 6:9]], axis=1)  # (3, 2, 3)
     diff = float(np.abs(got - exp).max())
