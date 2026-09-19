@@ -1,0 +1,79 @@
+data:
+    dat_order: [pip, pim, eta]
+    data: ./data_slice.npy
+    data_weight: ./phsp_weight_slice.npy
+    phsp: ./phsp_slice.npy
+    random_z: False
+    center_mmass: True
+
+decay:
+    jpsi:
+    - [pipi, eta]
+    pipi: [pip, pim]
+
+particle:
+    $top: jpsi
+    $finals: [pip, pim, eta]
+    pipi: [ MI0p, MI0m, MI1p, rho_omega2, MI2p, MI2m, MI3p, MI3m ]
+    jpsi:
+        J: 1
+        P: -1
+        spins: [-1, 1]
+        mass: 3.096813522559038
+    pip:
+        J: 0
+        P: -1
+        mass: 0.139567
+    pim:
+        J: 0
+        P: -1
+        mass: 0.139567
+    eta:
+        J: 0
+        P: -1
+        mass: 0.5478621409593663
+    MI0p:
+        J: 0
+        P: +1
+        mass: 0.7690
+        model: one
+    MI0m:
+        J: 0
+        P: -1
+        mass: 0.7690
+        model: one
+    MI1p:
+        J: 1
+        P: +1
+        mass: 0.7690
+        model: one
+    MI2p:
+        J: 2
+        P: +1
+        mass: 0.7690
+        model: one
+    MI2m:
+        J: 2
+        P: -1
+        mass: 0.7690
+        model: one
+    MI3p:
+        J: 3
+        P: +1
+        mass: 0.7690
+        model: one
+    MI3m:
+        J: 3
+        P: -1
+        mass: 0.7690
+        model: one
+    # Two-pole rho-omega product lineshape with fitted masses/widths.
+    rho_omega2:
+        J: 1
+        P: -1
+        mass: 0.775
+        width: 0.149
+        mass2: 0.78266
+        width2: 0.00868
+        model: RhoOmega2
+        float: [mass, width, mass2, width2]
