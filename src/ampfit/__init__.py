@@ -27,7 +27,13 @@ except Exception:
 from .fitter import Fitter
 from . import backends
 from . import constrain_plugins  # noqa: F401 — register constraint handlers
-from .bw_form_factor import form_factor as bw_form_factor
+from .bw_form_factor import (
+    BarrierFactor,
+    barrier_names,
+    build_barrier,
+    form_factor as bw_form_factor,
+    register_barrier,
+)
 
 __all__ = [
     "Config",
@@ -46,4 +52,8 @@ __all__ = [
     "Fitter",
     "backends",
     "bw_form_factor",
+    "BarrierFactor",
+    "register_barrier",
+    "build_barrier",
+    "barrier_names",
 ]

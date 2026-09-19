@@ -172,27 +172,53 @@ class BaseModel:
         q_max = math.sqrt( (m_max**2 - (m1+m2)**2)*(m_max**2-(m1+m2)**2) )/2/m_max
         return 0., q_max * 1.2  # 20% safety margin for sub-decay q values
 
-    def build_fl_table(self, l_list, n_interp=2000):
+    def _barrier(self, decay, L):
+        """Barrier factor for the *decay* vertex's orbital angular momentum.
+
+        ``barrier`` is a registered type name (``barrier: exp``) or a nested
+        spec (``barrier: {type: exp, d: 1.5, alpha: 2.0}``); a sibling
+        ``d: <radius>`` sets the default radius.  Defaults to ``bw`` / 3.0.
+        Two vertices with the same ``get_id()`` share one ``fl_table`` row.
         """
-        Build Blatt-Weisskopf form factor table with TFPWA normalization.
+        from ampfit.bw_form_factor import DEFAULT_BARRIER, build_barrier
 
-        Delegates to ``ampfit.utils.bw_form_factor`` for the per-point
-        calculation.
+        spec = getattr(decay, "barrier", DEFAULT_BARRIER)
+        if isinstance(spec, dict):
+            params = dict(spec)
+            name = params.pop("type", params.pop("name", DEFAULT_BARRIER))
+        else:
+            name, params = spec, {}
+        params.pop("L", None)                          # L is kinematic
+        params.setdefault("d", float(getattr(decay, "d", 3.0)))
+        return build_barrier(name, L=L, **params)
 
-        TFPWA normalizes form factors so that F(q0) = q0 at reference
-        momentum q0 = 1 GeV.  This ensures consistency with TFPWA
-        amplitudes.
+    def build_fl_table(self, forms, n_interp=2000):
+        """Build the barrier (form-factor) table.
+
+        *forms* is the ordered list of unique barrier instances
+        (:class:`~ampfit.bw_form_factor.BarrierFactor`); a bare ``L`` is
+        accepted for backward compatibility.  Every row is sampled on the
+        shared breakup-momentum grid and interpolated by the backends via
+        ``fl_type``.  The default ``bw`` form keeps the TFPWA normalisation
+        ``F_L(q0_ref) = q0_ref^L`` at ``q0_ref = 1 GeV``.
         """
-        from ampfit.bw_form_factor import form_factor as bw_form_factor
+        from ampfit.bw_form_factor import BarrierFactor, build_barrier
 
-        d = 3.0   # Barrier radius (GeV⁻¹)
-        q0 = 1.0  # Reference momentum (GeV)
+        q0 = 1.0  # Reference momentum (GeV) for the TFPWA normalisation
 
         q_min, q_max = self.get_max_q_range()
         q = np.linspace(q_min, q_max, n_interp)
         q = np.clip(q, 0, np.inf)
 
-        rows = [bw_form_factor(L, q, q0_ref=q0, d=d) for L in l_list]
+        rows = []
+        for form in forms:
+            if isinstance(form, BarrierFactor):
+                rows.append(form.factor(q))
+            elif isinstance(form, (tuple, list)):
+                kind, d, L = form
+                rows.append(build_barrier(kind, L=L, q0_ref=q0, d=d).factor(q))
+            else:
+                rows.append(build_barrier("bw", L=int(form), q0_ref=q0).factor(q))
         return np.stack(rows, axis=0), q[0], q[1] - q[0]
 
 
@@ -422,7 +448,8 @@ class BaseModel:
                             self.unique_gamma.append(g_id)
                         tmp.append(g_id)
                     bw_gamma[bw_id] = tmp
-                fl_id = (ls[idx][0], self.n_decay * topo + idx)
+                fl_id = (self._barrier(decay, ls[idx][0]),
+                         self.n_decay * topo + idx)
                 if fl_id not in self.unique_fl:
                     self.unique_fl.append(fl_id)
             projs = states if helicity else [0]
@@ -450,7 +477,8 @@ class BaseModel:
                     m_name = decay.core.name + "_mass"
                     m_idx = self.n_res * topo + idx - 1
                     bw_order.append(self.unique_bw.index((m_name, m_idx)))
-                fl_id = (ls[idx][0], self.n_decay * topo + idx)
+                fl_id = (self._barrier(decay, ls[idx][0]),
+                         self.n_decay * topo + idx)
                 fl_order.append(self.unique_fl.index(fl_id))
         # columns p-major: col = p*N + kk
         matrix_cols = []
@@ -495,20 +523,31 @@ class BaseModel:
             g0_mass_index.append(key[1])
         ret["g0_mass_index"] = np.stack(g0_mass_index)
         ret["g0_index"] = np.stack(g0_index)
+        # one table row per unique barrier variant (get_id), indexed by fl_type
+        unique_forms = []
+        for key in self.unique_fl:
+            if key[0] not in unique_forms:
+                unique_forms.append(key[0])
         fl_type = []
         fl_q_index = []
         for key in self.unique_fl:
-            fl_type.append(self.unique_l.index(key[0]))
+            fl_type.append(unique_forms.index(key[0]))
             fl_q_index.append(key[1])
         ret["fl_type"] = np.stack(fl_type)
         ret["fl_q_index"] = np.stack(fl_q_index)
+        ret["fl_l"] = np.array([b.L for b in unique_forms], dtype=int)
+        ret["fl_d"] = np.array([b.d for b in unique_forms], dtype=float)
+        ret["fl_forms"] = [b.name for b in unique_forms]
+        # full constructor kwargs per form (rebuilds the barrier exactly,
+        # including any extra parameters)
+        ret["fl_specs"] = [b.get_params() for b in unique_forms]
 
         gamma_table, g_min, g_delta = self.build_gamma_table()
         ret["gamma_table"] = np.stack(
             [gamma_table[i] for i in self.g0_phys_name], axis=0)
         ret["gamma_min"] = g_min
         ret["gamma_delta"] = g_delta
-        ret["fl_table"], ret["fl_min"], ret["fl_delta"] = self.build_fl_table(self.unique_l)
+        ret["fl_table"], ret["fl_min"], ret["fl_delta"] = self.build_fl_table(unique_forms)
         ret["ck_map"] = list(self.full_decay.get_partial_waves_params())
         # canonical per-event angle columns (phi-first) of the first chain —
         # the layout the event data builder must fill for pure-PWA models
@@ -580,7 +619,9 @@ class BaseModel:
         ret["n_cp"] = n_cp
         ret["n_blocks"] = C
 
-        for name in ["gamma_table","fl_table", "gamma_min", "gamma_delta", "fl_min", "fl_delta"]:
+        for name in ["gamma_table","fl_table", "gamma_min", "gamma_delta",
+                     "fl_min", "fl_delta", "fl_l", "fl_d", "fl_forms",
+                     "fl_specs"]:
             ret[name] = base[name]
 
         # ── cuda_v4_pwa: p-major projection duplication ─────────────────

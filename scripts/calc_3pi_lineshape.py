@@ -111,7 +111,8 @@ def main():
     _, resolved = f.build_params(np.asarray(r.x))
     kc = f.kernel_config
     p = int(kc["fl_order"][ck_ranges[0][0] * 3])
-    L = int(kc["fl_type"][p])
+    fi = int(kc["fl_type"][p])
+    L = int(kc["fl_l"][fi]) if "fl_l" in kc else fi
 
     def chunk_weight(mom):
         """Full weight |A|²·|D_R|²/(q·F_L²·m₃π) for one chunk of events."""

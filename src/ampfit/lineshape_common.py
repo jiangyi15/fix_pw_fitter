@@ -56,13 +56,20 @@ def resonance_model(f, res_name):
 
 
 def b_barrier_factor(f, chain_wave, qB):
-    """F_L(qB) — the Blatt-Weisskopf barrier of the B→Rπ decay for the
-    chain's first wave (L read from the kernel config)."""
-    from ampfit.bw_form_factor import form_factor
+    """F_L(qB) — the barrier factor of the B→Rπ decay for the chain's
+    first wave (form / L / parameters read from the kernel config)."""
+    from ampfit.bw_form_factor import build_barrier
     kc = f.kernel_config
     p = int(kc["fl_order"][chain_wave * 3])     # B decay (idx 0)
-    L = int(kc["fl_type"][p])
-    return form_factor(L, qB)
+    fi = int(kc["fl_type"][p])
+    if "fl_specs" in kc:                        # exact rebuild (any params)
+        spec = dict(kc["fl_specs"][fi])
+        return build_barrier(spec.pop("type"),
+                             L=int(kc["fl_l"][fi]), **spec).factor(qB)
+    name = kc["fl_forms"][fi] if "fl_forms" in kc else "bw"
+    L = int(kc["fl_l"][fi]) if "fl_l" in kc else fi
+    d = float(kc["fl_d"][fi]) if "fl_d" in kc else 3.0
+    return build_barrier(name, L=L, d=d).factor(qB)
 
 
 def inv_mass2(p):
