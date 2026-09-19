@@ -11,7 +11,7 @@ parameter groups exist, so there is no runtime "is scalar present?" branch.
 """
 import numpy as np
 
-from ampfit.param_constraint import CKProduct
+from ampfit.param_constraint import CKProduct, complex_tail
 
 
 class BuildKernelParams:
@@ -23,7 +23,8 @@ class BuildKernelParams:
 
     def __init__(self, model):
         self.model = model
-        self._pc = CKProduct(model.get_ck_map())
+        self.tail = complex_tail()
+        self._pc = CKProduct(model.get_ck_map(), tail=self.tail)
         self._m0_names = list(model.m0_phys_name)
         self._g0_names = list(model.g0_phys_name)
 
@@ -42,7 +43,8 @@ class BuildKernelParams:
         """
         bases = sorted({p for comb in self.model.get_ck_map()
                         for p in comb if isinstance(p, str)})
-        names = (sorted([b + "r" for b in bases] + [b + "i" for b in bases])
+        names = (sorted([b + self.tail[0] for b in bases]
+                        + [b + self.tail[1] for b in bases])
                  + list(self.model.m0_phys_name)
                  + list(self.model.g0_phys_name))
         return list(dict.fromkeys(names))

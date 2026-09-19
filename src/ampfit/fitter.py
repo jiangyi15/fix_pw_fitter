@@ -1341,8 +1341,8 @@ class Fitter:
                 if isinstance(p, str):
                     all_param_names.add(p)
         for p in sorted(all_param_names):
-            r_name = p + 'r'
-            i_name = p + 'i'
+            r_name = p + self._kernel_builder.tail[0]
+            i_name = p + self._kernel_builder.tail[1]
             if r_name in self._fixed_slots and i_name in self._fixed_slots:
                 if r_name not in out["value"]:
                     out["value"][r_name] = float(self._fixed_slots[r_name])
@@ -1476,8 +1476,8 @@ class Fitter:
         scale_data = dict(data.get("scale", {}))
         names = set(self.var_registry.flat_names)
         for key in list(scale_data):
-            if key not in names and key + 'r' in names:
-                scale_data[key + 'r'] = scale_data.pop(key)
+            if key not in names and key + self._kernel_builder.tail[0] in names:
+                scale_data[key + self._kernel_builder.tail[0]] = scale_data.pop(key)
         self.set_scale(scale_data, reset=True)
 
         # Re-apply bounds (before blind — offsets scale with the ranges)

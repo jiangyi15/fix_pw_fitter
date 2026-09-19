@@ -30,8 +30,8 @@ RHO_LS_NAMES = {
 def read_polar(resolved, base):
     """Read a complex value from the resolved dict (polar convention).
 
-    ``resolved[base + 'r']`` = magnitude *r*
-    ``resolved[base + 'i']`` = phase *θ*
+    ``resolved[base + <magnitude suffix>]`` = magnitude *r*
+    ``resolved[base + <phase suffix>]`` = phase *θ*
 
     Returns ``r·exp(i·θ)``.
     """

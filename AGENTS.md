@@ -121,7 +121,10 @@ interpolate it), so barrier **forms** are pluggable in pure Python:
 given overrides apply; on exit everything is back to the global defaults
 (`n_interp=2000`, `d=3.0`, `barrier="bw"`, in `build_defaults.DEFAULTS`).
 Recognised keys: `n_interp` (sampling of `fl_table` / `gamma_table`), `d`
-(Blatt-Weisskopf radius), `barrier` (default type).
+(Blatt-Weisskopf radius), `barrier` (default type), `complex_tail`
+(`(magnitude, phase)` suffixes naming a complex ck parameter's two slots —
+default `("r", "i")`, alternatively `("rho", "phi")`; captured when the model/
+transform is built, so set it before constructing the `Fitter`).
 Build code reads it when a particle/decay omits the value (`BaseModel._barrier`,
 `build_fl_table`, `build_gamma_table`, `particle_model.build_particle`), so
 config files stay physics-only.  A config may also carry a `defaults:` mapping

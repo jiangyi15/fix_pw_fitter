@@ -17,6 +17,8 @@ config files stay purely physics.  Built-in defaults:
 * ``n_interp`` — sampling points of the ``fl``/``gamma`` interpolation tables.
 * ``d`` — Blatt-Weisskopf radius used when a particle/decay omits it.
 * ``barrier`` — default barrier type used when a decay omits it.
+* ``complex_tail`` — ``(magnitude_suffix, phase_suffix)`` naming the two
+  real slots of a complex ck parameter (default ``("r", "i")``).
 
 ``contextvars``-backed, so scopes are isolated per thread/task.  Leaf module.
 """
@@ -29,6 +31,7 @@ DEFAULTS = {
     "n_interp": 2000,
     "d": 3.0,
     "barrier": "bw",
+    "complex_tail": ("r", "i"),
 }
 
 _state: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(

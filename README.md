@@ -198,7 +198,9 @@ with scope(n_interp=4000, d=1.5):
 ```
 
 Keys: ``n_interp`` (``fl``/``gamma`` table sampling), ``d`` (barrier radius),
-``barrier`` (default type).  A config may also set
+``barrier`` (default type), ``complex_tail`` (``(magnitude, phase)`` suffixes
+for a complex ck parameter's two slots — default ``("r", "i")``, or
+``("rho", "phi")``; set before constructing the ``Fitter``).  A config may also set
 ``defaults: {d: 1.5, n_interp: 4000}``; the model loads it as a *temporary*
 context for its own build, so config files stay physics-only.  The barrier
 forms themselves are model metadata (``fitter.model.fl_forms``); the kernel

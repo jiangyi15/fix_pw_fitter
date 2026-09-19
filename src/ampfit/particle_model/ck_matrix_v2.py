@@ -33,7 +33,7 @@ the lineshape calculators otherwise fold into their histogram weight.
 import json
 import numpy as np
 from .base import BaseModel, register_model
-from ampfit.param_constraint import Transform
+from ampfit.param_constraint import Transform, complex_tail, phase_name
 
 
 # ── reduced gamma computation ────────────────────────────────────
@@ -126,11 +126,12 @@ class _CKWidthTransform(Transform):
                  use_ref=False):
         self.width_name = width_name
         self.use_ref = use_ref
+        self.tail = complex_tail()
         if use_ref:
             in_names = [width_name]  # g_ls from reference, not free
         else:
             in_names = [width_name] + list(order_names) + \
-                       [n.rstrip('r') + 'i' for n in order_names]
+                       [phase_name(n, self.tail) for n in order_names]
         super().__init__(input_names=in_names, output_names=gamma_names)
         self.name = name
         self.order_names = list(order_names)
@@ -152,7 +153,7 @@ class _CKWidthTransform(Transform):
             ck = np.zeros(self.n_ck, dtype=complex)
             for a in range(self.n_ck):
                 r = d.get(self.order_names[a], self.ck_r0[a])
-                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                theta = d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a])
                 ck[a] = r * np.exp(1j * theta)
 
         raw = _raw_expanded(ck)
@@ -180,7 +181,7 @@ class _CKWidthTransform(Transform):
             ck = np.zeros(self.n_ck, dtype=complex)
             for a in range(self.n_ck):
                 r = d.get(self.order_names[a], self.ck_r0[a])
-                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                theta = d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a])
                 ck[a] = r * np.exp(1j * theta)
 
         # 2. Raw, N, scale
@@ -225,7 +226,7 @@ class _CKWidthTransform(Transform):
                 for a in range(n)
             ])
             theta_vals = np.array([
-                d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a])
                 for a in range(n)
             ])
 
@@ -274,7 +275,7 @@ class _CKWidthTransform(Transform):
                     A_t   += g_out * dt
 
                 grad[self.order_names[a]] = scale * A_r - (scale / N) * dN_dr * B
-                iname = self.order_names[a].rstrip('r') + 'i'
+                iname = phase_name(self.order_names[a], self.tail)
                 grad[iname] = scale * A_t - (scale / N) * dN_dt * B
 
         return grad
@@ -298,6 +299,7 @@ class CKMatrixModelV2(BaseModel):
 
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
+        self.tail = complex_tail()
 
         # ── load files ───────────────────────────────────────────
         gamma_data = np.load(kwargs["gamma_file"])
@@ -366,7 +368,7 @@ class CKMatrixModelV2(BaseModel):
             ref = ref_data.get("value") or ref_data
             ck_r = np.array([float(ref.get(n, self._ck0_r[i]))
                              for i, n in enumerate(self.order_names)])
-            ck_i = np.array([float(ref.get(n.rstrip('r') + 'i', self._ck0_i[i]))
+            ck_i = np.array([float(ref.get(phase_name(n, self.tail), self._ck0_i[i]))
                              for i, n in enumerate(self.order_names)])
             self._ref_ck = ck_r * np.exp(1j * ck_i)  # magnitude/phase convention
 

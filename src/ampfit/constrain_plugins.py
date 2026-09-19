@@ -74,6 +74,7 @@ def _handle_ck_redundancy(fitter, spec):
     Also fixes the first ``_total_0`` as overall amplitude reference.
     """
     seen_prefix = set()  # {(pos, prefix_tuple), ...}
+    mag, phase = fitter._kernel_builder.tail
     fixed = {}
     for comb in fitter.all_comb:
         for pos, term in enumerate(comb):
@@ -84,17 +85,17 @@ def _handle_ck_redundancy(fitter, spec):
             if key in seen_prefix:
                 continue  # ratio term — leave free
             seen_prefix.add(key)
-            r = term + "r"
+            r = term + mag
             if r not in fixed:
                 fixed[r] = 1.0
-                fixed[term + "i"] = 0.0
+                fixed[term + phase] = 0.0
 
     # Also fix the first _total_0 as overall reference
     for comb in fitter.all_comb:
         for term in comb:
             if isinstance(term, str) and "_total_0" in term:
-                fixed.setdefault(term + "r", 1.0)
-                fixed.setdefault(term + "i", 0.0)
+                fixed.setdefault(term + mag, 1.0)
+                fixed.setdefault(term + phase, 0.0)
                 break
         if any("_total_0" in t for t in comb if isinstance(t, str)):
             break
@@ -128,11 +129,12 @@ def _handle_cp_symmetry(fitter, spec):
     same_list = []
     free_list = []
     scale_list = {}
+    mag, phase = fitter._kernel_builder.tail
     for name, v in particle_chain.items():
         if name.endswith(("p", "m")):
             totals = [str(i).replace("+", ".") + "_total_0" for i in v]
-            same_list.append([i + "r" for i in totals])
-            same_list.append([i + "i" for i in totals])
+            same_list.append([i + mag for i in totals])
+            same_list.append([i + phase for i in totals])
 
     for pname, v1 in particle_decays.items():
         if not pname.endswith("p"):
@@ -152,15 +154,15 @@ def _handle_cp_symmetry(fitter, spec):
         for va, vb in zip(v1_sorted, v2_sorted):
             for ga, gb in zip(va.get_ls_names(), vb.get_ls_names()):
                 if fix_ref:
-                    free_list.append(ga + "r")
-                    free_list.append(ga + "i")
-                    free_list.append(gb + "r")
-                    free_list.append(gb + "i")
+                    free_list.append(ga + mag)
+                    free_list.append(ga + phase)
+                    free_list.append(gb + mag)
+                    free_list.append(gb + phase)
                 fix_ref = True
-                same_list.append([ga + "r", gb + "r"])
-                same_list.append([ga + "i", gb + "i"])
+                same_list.append([ga + mag, gb + mag])
+                same_list.append([ga + phase, gb + phase])
                 if va.outs[0]._model and int(va.outs[0]._model.kwargs.get("J", 0)) % 2 == 1:
-                    scale_list[gb + "r"] = -1
+                    scale_list[gb + mag] = -1
 
     # Apply: free → same → scale
     for rn in free_list:

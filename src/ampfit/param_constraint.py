@@ -23,6 +23,20 @@ import zlib
 
 import numpy as np
 
+DEFAULT_COMPLEX_TAIL = ("r", "i")
+
+
+def complex_tail():
+    """Active (magnitude_suffix, phase_suffix) for complex ck slots."""
+    from ampfit.build_defaults import get
+    return tuple(get("complex_tail", DEFAULT_COMPLEX_TAIL))
+
+
+def phase_name(mag_name, tail=None):
+    """Phase-slot name for a magnitude-slot name (e.g. 'xr'->'xi')."""
+    mag, phase = tuple(tail) if tail else complex_tail()
+    return mag_name[:-len(mag)] + phase if mag_name.endswith(mag) else mag_name
+
 
 class CKProduct:
     """Pure combinatorics: named values → partial-wave amplitudes (ck).
@@ -32,22 +46,24 @@ class CKProduct:
         ck[i] = ∏_{term ∈ comb[i]} term_value
     """
 
-    def __init__(self, all_comb):
+    def __init__(self, all_comb, tail=None):
         self.all_comb = list(all_comb)
         self.n_wave = len(all_comb)
+        self.tail = tuple(tail) if tail is not None else complex_tail()
 
     def _get_val(self, slot_dict, name):
         """Get the complex value for a term from slot-level dict.
         
-        If the dict has ``name + 'r'`` / ``name + 'i'`` slots, treat
+        If the dict has ``name + mag`` / ``name + phase`` slots, treat
         as a complex ck parameter: ``r·exp(j·θ)``.
         Otherwise use ``name`` directly (real/m0/g0/scalar).
         
         NOTE: coupling parameters not in slot_dict default to 0+0j.
         """
-        if name + 'r' in slot_dict:
-            r = slot_dict[name + 'r']
-            theta = slot_dict.get(name + 'i', 0.0)
+        mag, phase = self.tail
+        if name + mag in slot_dict:
+            r = slot_dict[name + mag]
+            theta = slot_dict.get(name + phase, 0.0)
             return r * np.exp(1j * theta)
         return slot_dict.get(name, 0.0 + 0.0j)
 
@@ -80,7 +96,7 @@ class CKProduct:
     def backprop_grad(self, slot_dict, grad_ck):
         """Gradient w.r.t. each slot from kernel's ``grad_ck``.
 
-        Returns ``{name_r: dQ/dr, name_i: dQ/dθ}`` for complex ck
+        Returns ``{name_mag: dQ/dr, name_phase: dQ/dθ}`` for complex ck
         params, ``{name: dQ/dval}`` for real params.
 
         Uses Wirtinger calculus: for a real-valued Q, the chain rule
@@ -91,6 +107,7 @@ class CKProduct:
         """
         ck = self.build_ck(slot_dict)
         grads = {}
+        mag, phase = self.tail
         for i, comb in enumerate(self.all_comb):
             counts = {}
             for term in comb:
@@ -98,10 +115,10 @@ class CKProduct:
                     counts[term] = counts.get(term, 0) + 1
             for name, order in counts.items():
                 dck = order * ck[i]
-                if name + 'r' in slot_dict:
-                    r = slot_dict[name + 'r']
-                    grads[name + 'r'] = grads.get(name + 'r', 0.0) + 2.0 * np.real(grad_ck[i] * dck / r)
-                    grads[name + 'i'] = grads.get(name + 'i', 0.0) + 2.0 * np.real(grad_ck[i] * dck * 1j)
+                if name + mag in slot_dict:
+                    r = slot_dict[name + mag]
+                    grads[name + mag] = grads.get(name + mag, 0.0) + 2.0 * np.real(grad_ck[i] * dck / r)
+                    grads[name + phase] = grads.get(name + phase, 0.0) + 2.0 * np.real(grad_ck[i] * dck * 1j)
                 else:
                     v = slot_dict.get(name, 1.0)
                     grads[name] = grads.get(name, 0.0) + 2.0 * np.real(grad_ck[i] * dck / v)
@@ -133,9 +150,10 @@ class VariableRegistry:
         self.add(name)
 
     def add_complex(self, base):
-        """Convenience: complex parameter → two slots ``base + 'r'``, ``base + 'i'``."""
-        self.add(base + 'r')
-        self.add(base + 'i')
+        """Convenience: complex parameter → two slots ``base + mag``, ``base + phase``."""
+        mag, phase = complex_tail()
+        self.add(base + mag)
+        self.add(base + phase)
 
     @property
     def names(self):
@@ -1435,12 +1453,12 @@ if __name__ == "__main__":
     fixed_tr = FixedOverride()
 
     # Build a slot-level dict (as produced by VariableRegistry.to_dict)
-    # ck params: {name_r: mag, name_i: phase}
+    # ck params: {name_mag: mag, name_phase: phase}
     np.random.seed(42)
     raw = {}
     for n in ck_names:
-        raw[n + 'r'] = np.random.uniform(0.5, 2.0)
-        raw[n + 'i'] = np.random.uniform(-np.pi, np.pi)
+        raw[n + pc.tail[0]] = np.random.uniform(0.5, 2.0)
+        raw[n + pc.tail[1]] = np.random.uniform(-np.pi, np.pi)
 
     # Test resolve pipeline on slot-level dict
     d = name_res.apply(raw)

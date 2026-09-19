@@ -33,7 +33,7 @@ At m = m_0: ReSigma = 0  -->  bw_dom = -i*m0*Gamma(m0)  -->  peak at m_0.
 import json
 import numpy as np
 from .base import BaseModel, register_model
-from ampfit.param_constraint import Transform
+from ampfit.param_constraint import Transform, complex_tail, phase_name
 
 
 # -- gamma table from M_ab matrix -----------------------------------
@@ -216,11 +216,12 @@ class _CKWidthDispTransform(Transform):
                  use_ref=False):
         self.width_name = width_name
         self.use_ref = use_ref
+        self.tail = complex_tail()
         if use_ref:
             in_names = [width_name]
         else:
             in_names = [width_name] + list(order_names) + \
-                       [n.rstrip('r') + 'i' for n in order_names]
+                       [phase_name(n, self.tail) for n in order_names]
         super().__init__(input_names=in_names, output_names=gamma_names)
         self.name = name
         self.order_names = list(order_names)
@@ -240,7 +241,7 @@ class _CKWidthDispTransform(Transform):
             ck = np.zeros(self.n_ck, dtype=complex)
             for a in range(self.n_ck):
                 r = d.get(self.order_names[a], self.ck_r0[a])
-                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                theta = d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a])
                 ck[a] = r * np.exp(1j * theta)
         raw = _raw_expanded(ck)
         N = np.dot(raw, self.gamma_at_m0)
@@ -264,7 +265,7 @@ class _CKWidthDispTransform(Transform):
             ck = np.zeros(self.n_ck, dtype=complex)
             for a in range(self.n_ck):
                 r = d.get(self.order_names[a], self.ck_r0[a])
-                theta = d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a])
+                theta = d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a])
                 ck[a] = r * np.exp(1j * theta)
         raw = _raw_expanded(ck)
         N = np.dot(raw, self.gamma_at_m0)
@@ -292,7 +293,7 @@ class _CKWidthDispTransform(Transform):
             r_signed = np.array(
                 [d.get(self.order_names[a], self.ck_r0[a]) for a in range(n)])
             theta_vals = np.array(
-                [d.get(self.order_names[a].rstrip('r') + 'i', self.ck_i0[a]) for a in range(n)])
+                [d.get(phase_name(self.order_names[a], self.tail), self.ck_i0[a]) for a in range(n)])
             for a in range(n):
                 dN_dr = 0.0; dN_dt = 0.0
                 A_r = 0.0; A_t = 0.0
@@ -329,7 +330,7 @@ class _CKWidthDispTransform(Transform):
                     A_r += g_out * dr
                     A_t += g_out * dt
                 grad[self.order_names[a]] = scale * A_r - (scale / N) * dN_dr * B
-                iname = self.order_names[a].rstrip('r') + 'i'
+                iname = phase_name(self.order_names[a], self.tail)
                 grad[iname] = scale * A_t - (scale / N) * dN_dt * B
         return grad
 
@@ -352,6 +353,7 @@ class CKMatrixDispModelV2(BaseModel):
 
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
+        self.tail = complex_tail()
 
         # -- load files --------------------------------------------
         gamma_data = np.load(kwargs["gamma_file"])
@@ -425,7 +427,7 @@ class CKMatrixDispModelV2(BaseModel):
             ref = ref_data.get("value") or ref_data
             ck_r = np.array([float(ref.get(n, self._ck0_r[i]))
                              for i, n in enumerate(self.order_names)])
-            ck_i = np.array([float(ref.get(n.rstrip('r') + 'i', self._ck0_i[i]))
+            ck_i = np.array([float(ref.get(phase_name(n, self.tail), self._ck0_i[i]))
                              for i, n in enumerate(self.order_names)])
             self._ref_ck = ck_r * np.exp(1j * ck_i)
 
