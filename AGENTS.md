@@ -324,4 +324,8 @@ Benchmarks:
 python tests/benchmark_backends.py       # cross-backend (8 backends)
 python tests/benchmark_cuda_v2_vs_v3.py  # v2 linear vs v3 Catmull-Rom
 python tests/benchmark_integrated.py     # Integrated vs CUDA via Fitter.get_nll()
+python tests/benchmark_pwa_kernels.py    # pure-PWA family on a synthetic kernel config:
+                                         # raw compute (P / NLL+grad) + full NLL
+                                         # (integrated_pwa base=cuda_v4_pwa_cache)
+                                         # --n-comp N --n-proj 2 --preset large -> 10^5-10^6
 ```
