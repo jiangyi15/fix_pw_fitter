@@ -63,6 +63,58 @@ def _boost_4vector(p4, beta):
     return np.array([E2, p2[0], p2[1], p2[2]])
 
 
+def _child_xz(zc, x0, z0):
+    """Child triad ``(xc, zc)`` from the parent triad ``(x0, z0)``.
+
+    Single shared implementation of the per-vertex triad (rotation image of
+    the parent x axis + daughter direction).  Works on ``(3,)`` or ``(N,3)``
+    inputs and returns the ``(2,3)`` / ``(N,2,3)`` stacked triad; degenerate
+    (collinear) events fall back to a reference axis.
+    """
+    zc = np.asarray(zc, dtype=float)
+    x0 = np.asarray(x0, dtype=float)
+    z0 = np.asarray(z0, dtype=float)
+    batched = zc.ndim == 2
+    if not batched:
+        zc, x0, z0 = zc[None], x0[None], z0[None]
+    dot = np.einsum('ni,ni->n', z0, zc)
+    xv = zc * dot[:, None] - z0          # R_y(theta)R_z(phi) image of parent x
+    n = np.linalg.norm(xv, axis=-1)
+    ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
+                   np.array([1.0, 0.0, 0.0]),
+                   np.array([0.0, 1.0, 0.0]))
+    fcross = _cross_vec(z0, ref)
+    fn = np.linalg.norm(fcross, axis=-1)
+    fallback = np.where((fn > 1e-12)[:, None],
+                        fcross / np.maximum(fn, 1e-12)[:, None],
+                        np.array([0.0, 1.0, 0.0]))
+    xc = np.where((n > 1e-9)[:, None],
+                  xv / np.maximum(n, 1e-12)[:, None], fallback)
+    if not batched:
+        xc, zc = xc[0], zc[0]
+    return np.stack([xc, zc], axis=0 if not batched else 1)
+
+
+def _subtree_sets(decays):
+    """Particle name -> set of subtree names (itself + all descendants)."""
+    subtree = {}
+
+    def collect(name):
+        if name in subtree:
+            return subtree[name]
+        out = {name}
+        for d in decays:
+            if d.core.name == name:
+                for o in d.outs:
+                    out |= collect(o.name)
+        subtree[name] = out
+        return out
+
+    for d in decays:
+        collect(d.core.name)
+    return subtree
+
+
 def _child_names(chain):
     return [str(o) for o in chain.decays[0].outs]
 
@@ -124,36 +176,7 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
     decays = chain.decays
     vmap = {d.core.name: i for i, d in enumerate(decays)}
 
-    # subtree members per particle (names incl itself)
-    subtree = {}
-
-    def collect(name):
-        if name in subtree:
-            return subtree[name]
-        out = {name}
-        for d in decays:
-            if d.core.name == name:
-                for o in d.outs:
-                    out |= collect(o.name)
-        subtree[name] = out
-        return out
-
-    for d in decays:
-        collect(d.core.name)
-
-    def child_xz(zc, x0, z0):
-        zc = np.asarray(zc, dtype=float)
-        xv = zc * float(z0 @ zc) - z0      # R_y(theta)R_z(phi) image of parent x
-        n = _norm(xv)
-        if n > 1e-9:
-            xc = xv / n
-        else:
-            ref = (np.array([1.0, 0.0, 0.0]) if abs(z0[0]) < 0.9
-                   else np.array([0.0, 1.0, 0.0]))
-            v = np.cross(z0, ref)
-            nv = _norm(v)
-            xc = v / nv if nv > 1e-12 else np.array([1.0, 0.0, 0.0])
-        return np.stack([xc, zc])
+    subtree = _subtree_sets(decays)
 
     angles = {}
 
@@ -179,8 +202,8 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
         z1b = _unit3(q1[1:])
         if z1b is None:
             z1b = -z1
-        t0 = child_xz(z1, x0, z0)
-        t1 = child_xz(z1b, x0, z0)
+        t0 = _child_xz(z1, x0, z0)
+        t1 = _child_xz(z1b, x0, z0)
 
         for c, tc in ((c0, t0), (c1, t1)):
             if c in vmap:                      # inner: descend (successive boost)
@@ -195,7 +218,6 @@ def decay_angles_from_momenta(chain, final_momenta, top_triad=None):
     top = decays[0].core.name
     rec(top, mom_cm, np.asarray(top_triad, dtype=float))
     return [angles[i] for i in range(len(decays))]
-
 
 
 def _two_body_momentum(M, m1, m2):
@@ -240,20 +262,6 @@ def angles_to_momenta(chain, angles, top_triad=None):
                 return [o.name for o in d.outs]
         return []
 
-    def child_xz(zc, x0, z0):
-        zc = np.asarray(zc, dtype=float)
-        xv = zc * float(z0 @ zc) - z0      # R_y(theta)R_z(phi) image of parent x
-        n = _norm(xv)
-        if n > 1e-9:
-            xc = xv / n
-        else:
-            ref = (np.array([1.0, 0.0, 0.0]) if abs(z0[0]) < 0.9
-                   else np.array([0.0, 1.0, 0.0]))
-            v = np.cross(z0, ref)
-            nv = _norm(v)
-            xc = v / nv if nv > 1e-12 else np.array([1.0, 0.0, 0.0])
-        return np.stack([xc, zc])
-
     for i, d in enumerate(decays):
         pname = d.core.name
         M = masses[pname]
@@ -271,12 +279,11 @@ def angles_to_momenta(chain, angles, top_triad=None):
         beta_p = p4[pname][1:] / p4[pname][0] if p4[pname][0] > 0 else np.zeros(3)
         p4[c0] = _boost_4vector(rest0, -beta_p)
         p4[c1] = _boost_4vector(rest1, -beta_p)
-        triad[c0] = child_xz(u, x0, z0)
-        triad[c1] = child_xz(-u, x0, z0)
+        triad[c0] = _child_xz(u, x0, z0)
+        triad[c1] = _child_xz(-u, x0, z0)
 
     return {o.name: p4[o.name] for d in decays for o in d.outs
             if o.name not in core_idx}
-
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +295,6 @@ def angles_to_momenta(chain, angles, top_triad=None):
 # event files this module provides the original 24-row layout directly
 # (delegating to tabpwa.momenta_to_data), which matches by construction for
 # every topology / identical-particle permutation / CP block.
-
 
 
 # ---------------------------------------------------------------------------
@@ -328,21 +334,7 @@ def _chain_total_rotations(chain, mom_name_arrays):
     mom = dict(zip(names, arrs))
     decays = chain.decays
     vmap = {d.core.name: i for i, d in enumerate(decays)}
-    subtree = {}
-
-    def collect(name):
-        if name in subtree:
-            return subtree[name]
-        out = {name}
-        for d in decays:
-            if d.core.name == name:
-                for o in d.outs:
-                    out |= collect(o.name)
-        subtree[name] = out
-        return out
-
-    for d in decays:
-        collect(d.core.name)
+    subtree = _subtree_sets(decays)
     core_names = {d.core.name for d in decays}
     leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
@@ -356,22 +348,6 @@ def _chain_total_rotations(chain, mom_name_arrays):
             tot = m if tot is None else tot + m
         if tot is not None:
             mom[name] = tot
-
-    def child_xz(zc, x0, z0):
-        dot = np.einsum('ni,ni->n', z0, zc)
-        xv = zc * dot[:, None] - z0
-        n = np.linalg.norm(xv, axis=-1)
-        ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
-                       np.tile([1.0, 0.0, 0.0], (N, 1)),
-                       np.tile([0.0, 1.0, 0.0], (N, 1)))
-        fcross = _cross_vec(z0, ref)
-        fn = np.linalg.norm(fcross, axis=-1)
-        fallback = np.where((fn > 1e-12)[:, None],
-                            fcross / np.maximum(fn, 1e-12)[:, None],
-                            np.tile([0.0, 1.0, 0.0], (N, 1)))
-        xc = np.where((n > 1e-9)[:, None],
-                      xv / np.maximum(n, 1e-12)[:, None], fallback)
-        return np.stack([xc, zc], axis=1)          # (N,2,3)
 
     Rtot = {}
     top = decays[0].core.name
@@ -394,7 +370,7 @@ def _chain_total_rotations(chain, mom_name_arrays):
         z1b = np.where(badb[:, None], -z1, z1b)
         M0 = _triad_to_matrix(T)
         for c, zc in ((c0, z1), (c1, z1b)):
-            tc = child_xz(zc, x0, z0)
+            tc = _child_xz(zc, x0, z0)
             Rv = np.matmul(_triad_to_matrix(tc), np.swapaxes(M0, -1, -2))
             Rtot[c] = np.matmul(Rv, Rparent)
             if c in vmap:
@@ -410,26 +386,6 @@ def _chain_total_rotations(chain, mom_name_arrays):
 
     rec(top, mom, top_T, Rtot[top])
     return Rtot
-
-
-def _rotation_matrix_to_su2(M):
-    """(...,3,3) proper rotation -> (...,2,2) SU(2), unit quaternion route."""
-    M = np.asarray(M, dtype=float)
-    q0 = 0.5 * np.sqrt(np.maximum(1.0 + M[..., 0, 0] + M[..., 1, 1]
-                                  + M[..., 2, 2], 0.0))
-    q1 = (M[..., 2, 1] - M[..., 1, 2]) / np.maximum(4 * q0, 1e-12)
-    q2 = (M[..., 0, 2] - M[..., 2, 0]) / np.maximum(4 * q0, 1e-12)
-    q3 = (M[..., 1, 0] - M[..., 0, 1]) / np.maximum(4 * q0, 1e-12)
-    neg = q0 < 0
-    for q in (q0, q1, q2, q3):
-        q = np.where(neg, -q, q)
-    sh = q0.shape
-    U = np.zeros(sh + (2, 2), dtype=np.complex128)
-    U[..., 0, 0] = q0 - 1j * q3
-    U[..., 0, 1] = -q2 - 1j * q1
-    U[..., 1, 0] = q2 - 1j * q1
-    U[..., 1, 1] = q0 + 1j * q3
-    return U
 
 
 def _massless_mask(p4, tol=1e-6):
@@ -461,21 +417,7 @@ def _chain_su2_frames(chain, mom_name_arrays):
     mom = dict(zip(names, arrs))
     decays = chain.decays
     vmap = {d.core.name: i for i, d in enumerate(decays)}
-    subtree = {}
-
-    def collect(name):
-        if name in subtree:
-            return subtree[name]
-        out = {name}
-        for d in decays:
-            if d.core.name == name:
-                for o in d.outs:
-                    out |= collect(o.name)
-        subtree[name] = out
-        return out
-
-    for d in decays:
-        collect(d.core.name)
+    subtree = _subtree_sets(decays)
     core_names = {d.core.name for d in decays}
     leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
@@ -493,22 +435,6 @@ def _chain_su2_frames(chain, mom_name_arrays):
     I = Identity(N)
     r_matrix = {decays[0].core.name: I}
     b_matrix = {decays[0].core.name: I}
-
-    def child_xz(zc, x0, z0):
-        dot = np.einsum('ni,ni->n', z0, zc)
-        xv = zc * dot[:, None] - z0
-        n = np.linalg.norm(xv, axis=-1)
-        ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
-                       np.tile([1.0, 0.0, 0.0], (N, 1)),
-                       np.tile([0.0, 1.0, 0.0], (N, 1)))
-        fcross = _cross_vec(z0, ref)
-        fn = np.linalg.norm(fcross, axis=-1)
-        fallback = np.where((fn > 1e-12)[:, None],
-                            fcross / np.maximum(fn, 1e-12)[:, None],
-                            np.tile([0.0, 1.0, 0.0], (N, 1)))
-        xc = np.where((n > 1e-9)[:, None],
-                      xv / np.maximum(n, 1e-12)[:, None], fallback)
-        return np.stack([xc, zc], axis=1)          # (N,2,3)
 
     top_T = np.stack([np.tile([1.0, 0.0, 0.0], (N, 1)),
                       np.tile([0.0, 0.0, 1.0], (N, 1))], axis=1)
@@ -533,7 +459,7 @@ def _chain_su2_frames(chain, mom_name_arrays):
         phi0 = np.arctan2(np.einsum('ni,ni->n', z1, y0),
                           np.einsum('ni,ni->n', z1, x0))
         for c, qc, slot in ((c0, q0, 0), (c1, q1, 1)):
-            tc = child_xz(-z1 if slot else z1, x0, z0)
+            tc = _child_xz(-z1 if slot else z1, x0, z0)
             # tf-pwa per-vertex SU2 from the daughter's helicity angles
             # (slot 1 uses phi0 - pi UNWRAPPED: wrapping would flip the
             #  SU(2) sign and break the tf-pwa branch)
@@ -603,21 +529,7 @@ def _cm_reference_frames(mom_name_arrays, spinful_names):
 
 def child_xz_cm(zc, x0, z0):
     """child_xz triad (xc, zc) used by _cm_reference_frames (batch)."""
-    N = zc.shape[0]
-    dot = np.einsum('ni,ni->n', z0, zc)
-    xv = zc * dot[:, None] - z0
-    n = np.linalg.norm(xv, axis=-1)
-    ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
-                   np.tile([1.0, 0.0, 0.0], (N, 1)),
-                   np.tile([0.0, 1.0, 0.0], (N, 1)))
-    fcross = _cross_vec(z0, ref)
-    fn = np.linalg.norm(fcross, axis=-1)
-    fallback = np.where((fn > 1e-12)[:, None],
-                        fcross / np.maximum(fn, 1e-12)[:, None],
-                        np.tile([0.0, 1.0, 0.0], (N, 1)))
-    xc = np.where((n > 1e-9)[:, None],
-                  xv / np.maximum(n, 1e-12)[:, None], fallback)
-    return xc
+    return _child_xz(zc, x0, z0)[0]
 
 
 def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
@@ -697,7 +609,6 @@ def aligned_euler_from_momenta(chains, mom_name_arrays, spinful_names,
             cols.append(np.stack([a, b, g], axis=-1))
         out[nm] = np.stack(cols, axis=1)                # (N, n_chains, 3)
     return out
-
 
 
 def momenta_to_data_angles(momenta, weight=None, frac=None, time=None):
@@ -799,21 +710,7 @@ def decay_angles_vectorized(chain, momenta):
     vmap = {d.core.name: i for i, d in enumerate(decays)}
 
     # inner node momenta = sum of descendant leaves (vectorized)
-    subtree = {}
-
-    def collect(name):
-        if name in subtree:
-            return subtree[name]
-        out = {name}
-        for d in decays:
-            if d.core.name == name:
-                for o in d.outs:
-                    out |= collect(o.name)
-        subtree[name] = out
-        return out
-
-    for d in decays:
-        collect(d.core.name)
+    subtree = _subtree_sets(decays)
     core_names = {d.core.name for d in decays}
     leaves_set = {o.name for d in decays for o in d.outs} - core_names
     for name in subtree:
@@ -828,20 +725,6 @@ def decay_angles_vectorized(chain, momenta):
         if tot is not None:
             mom[name] = tot
     N = arrs[0].shape[0]
-
-    def child_xz(zc, x0, z0):
-        dot = np.einsum('ni,ni->n', z0, zc)
-        xv = zc * dot[:, None] - z0      # rotation image of parent x
-        n = np.linalg.norm(xv, axis=-1)
-        ref = np.where((np.abs(z0[:, 0]) < 0.9)[:, None],
-                       np.tile([1.0, 0.0, 0.0], (N, 1)),
-                       np.tile([0.0, 1.0, 0.0], (N, 1)))
-        fcross = _cross_vec(z0, ref)
-        fn = np.linalg.norm(fcross, axis=-1)
-        fallback = np.where((fn > 1e-12)[:, None], fcross / np.maximum(fn, 1e-12)[:, None],
-                            np.tile([0.0, 1.0, 0.0], (N, 1)))
-        xc = np.where((n > 1e-9)[:, None], xv / np.maximum(n, 1e-12)[:, None], fallback)
-        return np.stack([xc, zc], axis=1)          # (N,2,3)
 
     phi = np.zeros((N, len(decays)))
     theta = np.zeros((N, len(decays)))
@@ -869,8 +752,8 @@ def decay_angles_vectorized(chain, momenta):
         z1b = _unit3_vec(q1[:, 1:])
         badb = np.linalg.norm(z1b, axis=-1) < 1e-12
         z1b = np.where(badb[:, None], -z1, z1b)
-        t0 = child_xz(z1, x0, z0)
-        t1 = child_xz(z1b, x0, z0)
+        t0 = _child_xz(z1, x0, z0)
+        t1 = _child_xz(z1b, x0, z0)
         for c, tc in ((c0, t0), (c1, t1)):
             if c in vmap:
                 qc = p4[c]
