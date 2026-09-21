@@ -35,6 +35,28 @@ class RawConfig:
         self.backend_spec = (self.dic.get("config") or {}).get("backend",
                                                               self.dic.get("backend"))
 
+    def to_dict(self):
+        """Deep copy of the raw config dict — safe to edit and rebuild from
+        (``build_amplitude_model(cfg.to_dict())`` / ``Fitter(cfg.to_dict())``)."""
+        import copy
+        return copy.deepcopy(self.dic)
+
+    def dump(self, path=None):
+        """Write the raw config as YAML; returns the path written."""
+        path = path or self._config_path
+        if not path:
+            raise ValueError("dump() needs a path (config was not loaded "
+                             "from a file)")
+        with open(path, "w") as f:
+            yaml.safe_dump(self.dic, f, sort_keys=False)
+        return path
+
+    def resonances(self):
+        """Intermediate particles: cores of ``decay`` entries except the top."""
+        dec = self.dic.get("decay", {})
+        top = self.dic.get("particle", {}).get("$top")
+        return [c for c in dec if c != top]
+
 
 def Config(filename):
     """Legacy alias: ``Config(path)`` returns the amplitude model.
