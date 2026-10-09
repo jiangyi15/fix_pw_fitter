@@ -48,6 +48,7 @@ def _run(config, backend, data, phsp, x0):
                                             "cuda_v4_pwa_s0"])
 @pytest.mark.parametrize("config", ["tests/config_pwa.yml",
                                     "tests/config_pwa_bw.yml",
+                                    "tests/config_pwa_bwr.yml",
                                     "tests/config_pwa_flatte.yml"])
 def test_one_bw_per_chain_parity(config, sorted_backend):
     f, data, phsp = _make_env(config)
