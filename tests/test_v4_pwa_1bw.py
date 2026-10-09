@@ -44,9 +44,11 @@ def _run(config, backend, data, phsp, x0):
 
 
 @pytest.mark.parametrize("sorted_backend", ["cuda_v4_pwa_1bw",
-                                            "cuda_v4_pwa_1bws"])
+                                            "cuda_v4_pwa_1bws",
+                                            "cuda_v4_pwa_s0"])
 @pytest.mark.parametrize("config", ["tests/config_pwa.yml",
-                                    "tests/config_pwa_bw.yml"])
+                                    "tests/config_pwa_bw.yml",
+                                    "tests/config_pwa_flatte.yml"])
 def test_one_bw_per_chain_parity(config, sorted_backend):
     f, data, phsp = _make_env(config)
     assert f.kernel_config["bw_order"].ndim == 1          # one slot per wave
@@ -64,12 +66,14 @@ def test_one_bw_per_chain_parity(config, sorted_backend):
         kk.free()
 
     nll_ref, nll_1bw = float(nll_ref), float(nll_1bw)
-    assert nll_1bw == nll_ref                             # bit-exact NLL
+    # 1bw is bit-exact; ag re-associates m0*m0 / m0*g0 -> <=1 ulp on the NLL
+    assert nll_1bw == pytest.approx(nll_ref, rel=1e-12, abs=1e-12)
     g_ref = np.asarray(grads_ref)
     g_1bw = np.asarray(grads_1bw)
-    # gradients: same per-wave arithmetic, but the two kernels are distinct
+    # gradients: same per-wave arithmetic, but the kernels are distinct
     # compilations (nvcc scheduling / FMA contraction) -> <=1-ulp scatter;
     # the m0/g0 blocks additionally regroup per-wave slots on the host
+    # (ag) or chain through (s0, mult) on the host
     np.testing.assert_allclose(g_1bw, g_ref, rtol=1e-12, atol=1e-12)
 
 

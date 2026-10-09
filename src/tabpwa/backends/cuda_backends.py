@@ -171,6 +171,24 @@ class CUDABackendV4PWA1BWS(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v4_pwa_s0", model="pwa")
+class CUDABackendV4PWAS0(_CUDABackend):
+    """CUDA v4 PWA — one BW per chain + direct pole parameters.
+
+    Sibling of :class:`CUDABackendV4PWA1BW`: the wrapper transforms the
+    fitted (m0, g0) into ``s0 = m0**2`` (per wave) and
+    ``mult = m0*g0`` (per merged gamma row) per call, so the device
+    formula is ``bw = m^2 - s0 - i*mult*G(m)``.  The device only
+    outputs dQ/ds0 and dQ/dmult (from the stored g_interp rows); the
+    m0/g0 gradients are chained on the host (2*m0*dQ/ds0 + g0*dQ/dmult,
+    m0*dQ/dmult).  No m0/g0 gradient algebra on the device and no
+    m0_index on the GPU at all.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_s0 import CUDAKernelV4PWAS0 as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa", model="pwa")
 class CUDABackendV5PWA(_CUDABackend):
     """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
