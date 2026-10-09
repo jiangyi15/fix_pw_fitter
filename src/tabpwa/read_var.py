@@ -354,3 +354,116 @@ def vars_from_config(cfg, section="plot"):
             _meta(entry), defaults)
         out.append((name, v))
     return out
+
+
+def _where_var(cfg, spec, env):
+    """Resolve a ``where: {name: spec}`` entry of a 2Dplot panel.
+
+    ``spec`` is ``[mass, topo]``, ``[angle, path, kind]`` or the string
+    key/name of an already-declared variable.
+    """
+    if isinstance(spec, str):
+        if spec not in env:
+            raise ValueError(f"where spec {spec!r} is not a declared "
+                             f"plot variable")
+        return env[spec]
+    kind0, rest = spec[0], list(spec[1:])
+    if kind0 in ("mass", "m"):
+        return MassVar(cfg, rest[0])
+    if kind0 in ("angle", "ang"):
+        return AngleVar(cfg, rest[0], rest[1])
+    raise ValueError(f"unknown where variable kind {kind0!r}")
+
+
+def plots_2d_from_config(cfg, section="plot"):
+    """2D pull panels from the config ``plot.2Dplot:`` section (tf-pwa style).
+
+        plot:
+          2Dplot:
+            dalitz_1:
+              x: m_pipi**2                # expression over declared names
+              y: m_pipeta**2
+              where: {t: [angle, pipi, cos(beta)]}   # optional extra names
+              add_dalitz_boundary: [pipi, pipeta]    # 2 resonance names,
+              # or 4 masses [m0, m1, m2, m3]; optional — no key = no curve
+              adaptive_binning: [[2, 2], [2, 2], [2, 2]]
+              dalitz_boundary_style: {color: gray, alpha: 0.5}
+              pull_scatter_style: {c: black, s: 1, alpha: 0.0}
+              xlabel / ylabel: axis labels (default: the x/y expressions;
+              a tf-pwa ``display: "A vs B"`` splits into the two labels
+              whenever xlabel/ylabel are not given)
+
+    ``add_dalitz_boundary: [a, b]`` follows tf-pwa ``get_dalitz``: *a* and
+    *b* are two decays sharing one parent and exactly one shared final; the
+    analytic curve bounds the region of the plotted variables under
+    (m(a)², m(b)²) — i.e. x/y must be squared masses, exactly like tf-pwa.
+
+    Returns ``[(panel_key, spec)]`` with
+    ``spec = {x, y, labels, binning, boundary, boundary_style,
+    scatter_style}``; ``x``/``y`` are :class:`ExprVar` readers.
+    """
+    plot = cfg.dic.get(section) or {}
+    if not isinstance(plot, dict):
+        return []
+    if "plot" in plot and not any(k in plot for k in
+                                  ("mass", "angle", "extra_vars", "2Dplot")):
+        plot = plot["plot"]
+    twod = plot.get("2Dplot") or {}
+    if not isinstance(twod, dict):
+        return []
+
+    env = {}
+    for key, v in vars_from_config(cfg, section):
+        env.setdefault(v.name, v)
+        env.setdefault(key, v)
+
+    out = []
+    for key, entry in twod.items():
+        if not isinstance(entry, dict) or "x" not in entry or "y" not in entry:
+            continue
+        env_e = dict(env)
+        for nm, spec in (entry.get("where") or {}).items():
+            env_e[nm] = _where_var(cfg, spec, env)
+        ex, ey = str(entry["x"]), str(entry["y"])
+        vx = ExprVar(ex, env_e, name=ex)
+        vy = ExprVar(ey, env_e, name=ey)
+
+        # axis labels: xlabel/ylabel, else tf-pwa's display "X vs Y" split
+        xlabel, ylabel = entry.get("xlabel"), entry.get("ylabel")
+        display = entry.get("display")
+        if display and "vs" in str(display):
+            left, _, right = str(display).partition("vs")
+            xlabel = xlabel if xlabel is not None else left.strip()
+            ylabel = ylabel if ylabel is not None else right.strip()
+
+        boundary = entry.get("add_dalitz_boundary")
+        if boundary is not None:
+            boundary = list(boundary)
+            if len(boundary) == 2:
+                if not all(isinstance(s, str) for s in boundary):
+                    raise ValueError(
+                        f"2Dplot {key!r}: add_dalitz_boundary with 2 entries "
+                        f"must be two particle names, got {boundary}")
+            elif len(boundary) == 4:
+                boundary = [float(m) for m in boundary]
+            else:
+                raise ValueError(
+                    f"2Dplot {key!r}: add_dalitz_boundary must be 2 particle "
+                    f"names or 4 masses, got {boundary}")
+
+        binning = entry.get("adaptive_binning")
+        if binning is not None:
+            binning = [[int(n) for n in level] for level in binning]
+        # else: None — config_2d_panels derives levels from the data size
+
+        out.append((key, {
+            "x": vx, "y": vy,
+            "labels": [xlabel if xlabel is not None else ex,
+                       ylabel if ylabel is not None else ey],
+            "binning": binning,
+            "boundary": boundary,
+            "boundary_style": entry.get("dalitz_boundary_style"),
+            "scatter_style": entry.get("pull_scatter_style"),
+            "plot_figs": entry.get("plot_figs"),
+        }))
+    return out

@@ -330,6 +330,13 @@ class DecayTree:
         self.topo_index = self._build_topo_from_struct()
         self.n_topo = len(self.topo_index)
 
+        # name -> topo nodes: leaf grouping of every structural decay
+        # name (build-time only; `topo_name_from_index` inverts this).
+        self.topo_nodes = {
+            name: tuple(sorted(set(self._node_leaves(name))))
+            for name in self.decay_spec
+            if name not in self.finals and name != self.top}
+
         # decay-symmetry declarations (data section): identical-particle
         # permutations x CP duplicate the event rows.
         (self.n_perm, self.n_cp, self.n_blocks,
@@ -416,17 +423,15 @@ class DecayTree:
             return get_topo_index(self.full)
         return struct_map
 
-    def topo_index_from_name(self, name):
-        """Topology slot of structural decay-section name(s).
+    def _node_leaves(self, name):
+        """Final-state leaves of one declared decay node / pairing label.
 
-        *name* may be a single intermediate pairing label (e.g. ``'pipeta'``)
-        or a *list* of the internal core labels of a chain (for models with
-        any number of decays, e.g. B→4π ``['rhoA', 'rhoB']``).  The slot is
-        found by matching the combined final-leaf grouping of those cores
-        against ``self.topo_index``.  Raises KeyError if nothing matches.
+        Shared walker behind :meth:`topo_index_from_name` /
+        :meth:`topo_name_from_index`; *name* is a key of ``decay_spec``
+        (a final name is its own single leaf).
         """
-        finals = self.finals
         d = self.decay_spec
+        finals = set(self.finals)
 
         def _outs_of(n):
             entry = d.get(n)
@@ -450,11 +455,59 @@ class DecayTree:
                 out += _leaves(o)
             return out
 
+        return _leaves(name)
+
+    def topo_index_from_name(self, name):
+        """Topology slot of structural decay-section name(s).
+
+        *name* may be a single intermediate pairing label (e.g. ``'pipeta'``)
+        or a *list* of the internal core labels of a chain (for models with
+        any number of decays, e.g. B→4π ``['rhoA', 'rhoB']``).  The slot is
+        found by combining the nodes (``topo_nodes``, name → leaf grouping)
+        of those names and matching against ``self.topo_index``.  Raises
+        KeyError if nothing matches.
+        """
         names = [name] if isinstance(name, str) else list(name)
-        groups = [tuple(sorted(set(_leaves(nm)))) for nm in names]
-        key = tuple(sorted(groups))
+        try:
+            key = tuple(sorted(self.topo_nodes[nm] for nm in names))
+        except KeyError as exc:
+            raise KeyError(
+                f"unknown decay name {exc} in {names!r}; known: "
+                f"{sorted(self.topo_nodes)}") from None
         if key in self.topo_index:
             return self.topo_index[key]
         raise KeyError(
-            f"no topology for decay names {names!r} (groups {groups}); "
+            f"no topology for decay names {names!r} (key {key}); "
             f"available: {self.topo_index}")
+
+    def topo_name_from_index(self, index):
+        """Structural name(s) of a topology slot — inverts
+        :meth:`topo_index_from_name` by reversing ``topo_nodes``
+        (name → nodes) into nodes → name.
+
+        Returns the single intermediate pairing label (``'pipeta'``) when
+        the topology groups one core, else the list of core labels
+        (``['rhoA', 'rhoB']``).  Raises KeyError for an unknown slot or
+        when a node grouping matches no declared decay name.
+        """
+        inv = {slot: key for key, slot in self.topo_index.items()}
+        if index not in inv:
+            raise KeyError(f"no topology slot {index!r}; available: "
+                           f"{sorted(inv)}")
+        nodes_to_names = {}
+        for name, nodes in self.topo_nodes.items():
+            nodes_to_names.setdefault(nodes, []).append(name)
+        labels, used = [], set()
+        for group in inv[index]:
+            for nm in nodes_to_names.get(group, ()):
+                if nm not in used:
+                    labels.append(nm)
+                    used.add(nm)
+                    break
+        if len(labels) != len(inv[index]):
+            missing = [g for g in inv[index]
+                       if not nodes_to_names.get(g)]
+            raise KeyError(
+                f"topology slot {index!r}: node grouping(s) {missing} "
+                f"match no declared decay name")
+        return labels[0] if len(labels) == 1 else labels

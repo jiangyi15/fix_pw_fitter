@@ -133,6 +133,110 @@ def adaptive_split_bound(datas, binning, base_bound=None):
         data_chain = new_data_chain
     return bound_chain, data_chain
 
+
+# ── analytic 3-body Dalitz boundary (tf-pwa add_dalitz_boundary) ───────────
+
+def kine_min_max(s12, m0, m1, m2, m3):
+    """Allowed ``(min, max)`` of s23 for given s12 in ``m0 → 1 + 2 + 3``.
+
+    Two-body kinematics in the s12 rest frame (numpy port of tf-pwa's
+    ``kine_min_max``).  s12 below/above the physical range is clamped.
+    """
+    m0, m1, m2, m3 = map(float, (m0, m1, m2, m3))
+    s12 = np.asarray(s12, dtype=float)
+    m12 = np.sqrt(s12)
+    m12 = np.where(m12 > m1 + m2, m12, m1 + m2)
+    m12 = np.where(m12 < m0 - m3, m12, m0 - m3)
+    e2 = 0.5 * (m12 * m12 - m1 * m1 + m2 * m2) / m12
+    e3 = 0.5 * (m0 * m0 - m12 * m12 - m3 * m3) / m12
+    p2 = np.sqrt(np.abs(e2 * e2 - m2 * m2))
+    p3 = np.sqrt(np.abs(e3 * e3 - m3 * m3))
+    return (e2 + e3) ** 2 - (p2 + p3) ** 2, (e2 + e3) ** 2 - (p2 - p3) ** 2
+
+
+def dalitz_boundary(m0, m1, m2, m3, N=1000):
+    """Upper/lower boundary curve of the Dalitz region in (s12, s23).
+
+    Scans s12 from ``(m1+m2)²`` to ``(m0−m3)²``; returns
+    ``(s12, s23_min, s23_max)`` in squared-mass units — plot x/y as
+    ``m**2`` (tf-pwa convention).
+    """
+    m0, m1, m2, m3 = map(float, (m0, m1, m2, m3))
+    if m0 - m3 <= m1 + m2:
+        raise ValueError(
+            f"no 3-body phase space: m0−m3 = {m0 - m3} ≤ m1+m2 = {m1 + m2}")
+    s12 = np.linspace((m1 + m2) ** 2, (m0 - m3) ** 2, int(N))
+    s23_lo, s23_hi = kine_min_max(s12, m0, m1, m2, m3)
+    return s12, s23_lo, s23_hi
+
+
+def dalitz_boundary_masses(cfg, a, b):
+    """Masses ``(m0, m1, m2, m3)`` behind ``add_dalitz_boundary: [a, b]``.
+
+    Pure node rule on the two systems *a* / *b*: their final-state leaf
+    sets share exactly **one** final (the common node part), each keeps
+    one differing final, and their union is the full final state of
+    their **common parent** — ``(A, B) + (B, C)`` of tf-pwa's
+    ``get_dalitz``.  The systems need not sit at the top: any internal
+    node works (then m0 is that parent's mass, not the top's).  The
+    tuple feeds :func:`dalitz_boundary` so the x axis is m(A,B)² = m(a)²
+    and the y axis m(B,C)² = m(b)².
+    """
+    tree = getattr(cfg, "decay_tree", cfg)
+    spec = tree.decay_spec
+    finals = set(tree.finals)
+    part = cfg.dic.get("particle") or {}
+
+    def mass(name):
+        try:
+            return float(part[name]["mass"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"no mass declared for particle {name!r}") \
+                from None
+
+    def leaves(name):
+        if name in finals:
+            return {name}
+        nodes = getattr(tree, "topo_nodes", {}).get(name)
+        if nodes is None and name in spec:
+            nodes = tuple(tree._node_leaves(name))   # e.g. the top
+        if nodes is None:
+            raise ValueError(
+                f"add_dalitz_boundary: {name!r} is neither a declared "
+                f"particle nor a decay node")
+        return set(nodes)
+
+    def daughters(core):
+        """Flattened daughter names (top entries may be pair-lists)."""
+        entry = spec.get(core)
+        if entry is None:
+            return []
+        if not isinstance(entry, list):
+            entry = [entry]
+        return [o for item in entry
+                for o in (item if isinstance(item, list) else [item])
+                if isinstance(o, str)]
+
+    parent = {o: core for core in spec for o in daughters(core)}
+    pa, pb = parent.get(a), parent.get(b)
+    if pa is None or pa != pb:
+        raise ValueError(
+            f"add_dalitz_boundary [{a!r}, {b!r}]: systems do not share a "
+            f"parent ({pa!r} vs {pb!r})")
+    la, lb = leaves(a), leaves(b)
+    same, d1, d2 = la & lb, la - lb, lb - la
+    if len(same) != 1 or len(d1) != 1 or len(d2) != 1:
+        raise ValueError(
+            f"add_dalitz_boundary [{a!r}, {b!r}]: systems do not follow "
+            f"the rule (A,B)+(B,C) — one shared final and one differing "
+            f"final each (leaves {sorted(la)} vs {sorted(lb)})")
+    if la | lb != leaves(pa):
+        raise ValueError(
+            f"add_dalitz_boundary [{a!r}, {b!r}]: union {sorted(la | lb)} "
+            f"is not the final state of the common parent {pa!r} "
+            f"({sorted(leaves(pa))})")
+    return mass(pa), mass(d1.pop()), mass(same.pop()), mass(d2.pop())
+
 def discover_groups(config, merge=None):
     """Return dict mapping display label → merged ck indices (B0+B0bar).
 
@@ -902,14 +1006,15 @@ class PWGroupPlotter:
                 output="plots/", data_weight_extra=None,
                 phsp_weight_extra=None, cmap="jet", plot_scatter=True,
                 scatter_style={"s": 1, "c": "black"}, scatter_step=1, fmt="png", ax=None,
-                x_range=None, y_range=None):
+                x_range=None, y_range=None,
+                boundary=None, boundary_style=None, plot_figs=None):
         """2D adaptive-bin pull plot: data scatter + total-fit pull grid.
 
         Splits the (var1, var2) plane adaptively (equal-quantile bins,
         following ``tf_pwa``'s ``plot_function_2dpull``).  Each bin is a
         rectangle colored by the pull::
 
-            pull = (sum w_data - sum w_fit) / sqrt(sum w_fit)
+            pull = (sum w_data - sum w_fit) / sqrt(sum w_data^2)
 
         where ``w_fit = P_total * scale`` (P_total already phsp_w-weighted
         by compute()) (+ bkg if present).
@@ -925,23 +1030,44 @@ class PWGroupPlotter:
             cmap: colormap for the pull rectangles.
             plot_scatter: draw data scatter points on top.
             scatter_style: dict passed to ``ax.scatter``.
+            boundary: analytic 3-body Dalitz boundary — either two system
+                names ``[a, b]`` (resolved via
+                :func:`dalitz_boundary_masses`, rule (A,B)+(B,C)) or four
+                masses ``[m0, m1, m2, m3]``.  The axes must carry the
+                corresponding squared masses (``m(a)**2`` vs ``m(b)**2``,
+                tf-pwa convention).  ``None`` = no curve.
+            boundary_style: dict merged over the default
+                ``{"color": "gray", "alpha": 0.5, "zorder": 3}``.
+            plot_figs: tf-pwa ``plot_figs`` selection — ``None`` (default)
+                draws only the pull panel as ``{prefix}.{fmt}``; a list
+                selects the figures to write: ``"pull"`` (adaptive pull,
+                ``{prefix}.{fmt}``), ``"data"`` (scatter),
+                ``"data_hist"`` (weighted 2D data histogram),
+                ``"fitted"`` (weighted 2D fit histogram, incl. bkg),
+                ``"sideband_hist"`` (bkg, only when bkg is present) — the
+                extras are saved as ``{prefix}_{name}.{fmt}``.  The
+                boundary curve is drawn on every selected figure.  Extras
+                require *output*; with an external *ax* only ``"pull"``
+                is drawn.
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_2d()")
-        if self._rec_active:
-            raise NotImplementedError(
-                "rec/original-row mode is supported by plot_var only")
         import matplotlib.pyplot as plt
         import matplotlib as mpl
         import matplotlib.patches as mpatches
 
         f = self.fitter
-        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        # rec mode: variables (and their weight vectors) read from the
+        # use_rec arrays — compute() has already reduced the weights to
+        # those rows, so rows align 1:1 with the reduced _P_total/_bkg_var.
+        dn = self.data_var_np if self.data_var_np is not None else f._data_np
+        pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
+        dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
         extra = np.asarray(1.0 if phsp_weight_extra is None
                            else phsp_weight_extra, dtype=float)
 
-        d1, d2 = varfun(f._data_np)
-        p1, p2 = varfun(f._phsp_np)
+        d1, d2 = varfun(dn)
+        p1, p2 = varfun(pv)
 
         # Data (cut zero weights)
         cut = dw != 0
@@ -958,54 +1084,123 @@ class PWGroupPlotter:
 
         xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
         ylo0, yhi0 = y_range if y_range is not None else (np.min(p2), np.max(p2))
-        base_bound = ((xlo0 - 1e-6, ylo0 - 1e-6),
-                      (xhi0 + 1e-6, yhi0 + 1e-6))
-        bounds, _ = adaptive_split_bound(np.array([x, y]), binning, base_bound)
+        # ── shared: boundary curve + axes on any figure ──────────────
+        def _finish(ax2, fig2, title):
+            if boundary is not None:
+                if (len(boundary) == 2
+                        and all(isinstance(s, str) for s in boundary)):
+                    masses = dalitz_boundary_masses(self.fitter.model,
+                                                    *boundary)
+                elif len(boundary) == 4:
+                    masses = [float(m) for m in boundary]
+                else:
+                    raise ValueError(
+                        "boundary must be 2 particle names or 4 masses "
+                        f"[m0, m1, m2, m3], got {boundary!r}")
+                s12, s23_lo, s23_hi = dalitz_boundary(*masses)
+                style = {"color": "gray", "alpha": 0.5, "zorder": 3}
+                if boundary_style:
+                    style.update(boundary_style)
+                ax2.plot(s12, s23_lo, **style)
+                ax2.plot(s12, s23_hi, **style)
+            ax2.set_xlim(xlo0, xhi0)
+            ax2.set_ylim(ylo0, yhi0)
+            ax2.set_xlabel(labels[0])
+            ax2.set_ylabel(labels[1])
+            if title is not None:
+                ax2.set_title(title)
 
-        pulls = []
-        for bnd in bounds:
-            xlo, ylo = bnd[0]
-            xhi, yhi = bnd[1]
-            mask_d = (x >= xlo) & (x < xhi) & (y >= ylo) & (y < yhi)
-            mask_p = (p1 >= xlo) & (p1 < xhi) & (p2 >= ylo) & (p2 < yhi)
-            ndata = float(np.sum(w[mask_d]))
-            nmc = float(np.sum(w_fit[mask_p]))
-            pulls.append((ndata - nmc) / np.sqrt(max(nmc, 1.0)))
+        figs = list(plot_figs) if plot_figs is not None else ["pull"]
 
-        max_weight = max(np.max(np.abs(pulls)), 5)
-        my_cmap = plt.get_cmap(cmap)
+        if "pull" in figs:
+            base_bound = ((xlo0 - 1e-6, ylo0 - 1e-6),
+                          (xhi0 + 1e-6, yhi0 + 1e-6))
+            bounds, _ = adaptive_split_bound(np.array([x, y]), binning,
+                                             base_bound)
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 5.5))
-        else:
-            fig = ax.get_figure()
-        if plot_scatter:
-            ax.scatter(x[::scatter_step], y[::scatter_step], **scatter_style)
-        for bnd, pull in zip(bounds, pulls):
-            xlo, ylo = bnd[0]
-            xhi, yhi = bnd[1]
-            rect = mpatches.Rectangle(
-                (xlo, ylo), xhi - xlo, yhi - ylo, linewidth=1,
-                facecolor=my_cmap(pull / max_weight / 2 + 0.5),
-                edgecolor="none", zorder=-1)
-            ax.add_patch(rect)
+            pulls = []
+            for bnd in bounds:
+                xlo, ylo = bnd[0]
+                xhi, yhi = bnd[1]
+                mask_d = (x >= xlo) & (x < xhi) & (y >= ylo) & (y < yhi)
+                mask_p = (p1 >= xlo) & (p1 < xhi) & (p2 >= ylo) & (p2 < yhi)
+                ndata = float(np.sum(w[mask_d]))
+                nmc = float(np.sum(w_fit[mask_p]))
+                # data-side statistical error of the bin (weighted):
+                # sqrt(sum w_data^2); the model is treated as exact
+                err = float(np.sum(w[mask_d] ** 2)) ** 0.5
+                pulls.append((ndata - nmc) / err if err > 0 else 0.0)
 
-        normal = mpl.colors.Normalize(vmin=-max_weight, vmax=max_weight)
-        im = mpl.cm.ScalarMappable(norm=normal, cmap=my_cmap)
-        fig.colorbar(im, ax=ax)
-        ax.set_title(r"$\chi^2/Nbins={:.2f}/{}$".format(
-            np.sum(np.abs(pulls) ** 2), len(bounds)))
-        ax.set_xlim(xlo0, xhi0)
-        ax.set_ylim(ylo0, yhi0)
-        ax.set_xlabel(labels[0])
-        ax.set_ylabel(labels[1])
+            max_weight = max(np.max(np.abs(pulls)), 5)
+            my_cmap = plt.get_cmap(cmap)
 
-        if output is not None:
-            path = os.path.join(output, prefix + "." + fmt)
-            fig.savefig(path, dpi=150, bbox_inches="tight")
             if ax is None:
-                plt.close(fig)
-            print(f"  saved {path}")
+                fig, ax = plt.subplots(figsize=(6, 5.5))
+            else:
+                fig = ax.get_figure()
+            if plot_scatter:
+                ax.scatter(x[::scatter_step], y[::scatter_step],
+                           **scatter_style)
+            for bnd, pull in zip(bounds, pulls):
+                xlo, ylo = bnd[0]
+                xhi, yhi = bnd[1]
+                rect = mpatches.Rectangle(
+                    (xlo, ylo), xhi - xlo, yhi - ylo, linewidth=1,
+                    facecolor=my_cmap(pull / max_weight / 2 + 0.5),
+                    edgecolor="none", zorder=-1)
+                ax.add_patch(rect)
+
+            normal = mpl.colors.Normalize(vmin=-max_weight, vmax=max_weight)
+            im = mpl.cm.ScalarMappable(norm=normal, cmap=my_cmap)
+            fig.colorbar(im, ax=ax)
+            _finish(ax, fig, r"$\chi^2/Nbins={:.2f}/{}$".format(
+                np.sum(np.abs(pulls) ** 2), len(bounds)))
+
+            if output is not None:
+                path = os.path.join(output, prefix + "." + fmt)
+                fig.savefig(path, dpi=150, bbox_inches="tight")
+                if ax is None:
+                    plt.close(fig)
+                print(f"  saved {path}")
+
+        # ── extra tf-pwa plot_figs (file-oriented; need output) ──────
+        if output is not None:
+            for name in [f for f in figs if f != "pull"]:
+                fig2, ax2 = plt.subplots(figsize=(6, 5.5))
+                title = None
+                if name == "data":
+                    ax2.scatter(x, y, s=1, c="black")
+                    title = "data"
+                elif name == "data_hist":
+                    h = ax2.hist2d(x, y, bins=100, weights=w, cmap=cmap,
+                                   cmin=1e-12)
+                    fig2.colorbar(h[3], ax=ax2)
+                    title = "data"
+                elif name == "fitted":
+                    h = ax2.hist2d(p1, p2, bins=100, weights=w_fit,
+                                   cmap=cmap, cmin=1e-12)
+                    fig2.colorbar(h[3], ax=ax2)
+                    title = "fitted"
+                elif name == "sideband_hist":
+                    if self._bkg_norm <= 0:
+                        plt.close(fig2)
+                        print(f"  sideband_hist skipped ({prefix}): "
+                              f"no background in the fit")
+                        continue
+                    h = ax2.hist2d(p1, p2, bins=100, weights=self._bkg_var,
+                                   cmap=cmap, cmin=1e-12)
+                    fig2.colorbar(h[3], ax=ax2)
+                    title = "sideband"
+                else:
+                    plt.close(fig2)
+                    raise ValueError(
+                        f"unknown plot_figs entry {name!r}; choose from "
+                        f"pull/data/data_hist/fitted/sideband_hist")
+                _finish(ax2, fig2, title)
+                path = os.path.join(output, f"{prefix}_{name}.{fmt}")
+                fig2.savefig(path, dpi=150, bbox_inches="tight")
+                plt.close(fig2)
+                print(f"  saved {path}")
 
 
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,

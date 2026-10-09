@@ -28,8 +28,8 @@ import numpy as np
 from tabpwa import Fitter
 from tabpwa.plot_pw_groups import PWGroupPlotter
 from tabpwa.plot_pwa_groups import (
-    config_plot_items, discover_pwa_groups, pwa_mass_varfun,
-    pwa_angle_varfun, angle_variable_labels, var_ranges)
+    config_plot_items, config_2d_panels, discover_pwa_groups,
+    pwa_mass_varfun, pwa_angle_varfun, angle_variable_labels, var_ranges)
 
 
 def main():
@@ -179,6 +179,14 @@ def main():
                 mc_uncert=args.mc_uncert,
                 ranges=var_ranges(data_np, phsp_np, pwa_angle_varfun))
 
+    # ── 2D adaptive pull panels from the config ``plot.2Dplot:`` section ──
+    for p in config_2d_panels(f.model, data_np):
+        plotter.plot_2d(
+            p["varfun"], p["labels"], p["stem"], binning=p["binning"],
+            output=args.output, fmt=args.format, boundary=p["boundary"],
+            boundary_style=p["boundary_style"],
+            scatter_style=p["scatter_style"] or {"s": 1, "c": "black"},
+            plot_figs=p["plot_figs"])
     print(f"  saved to {args.output}")
 
 

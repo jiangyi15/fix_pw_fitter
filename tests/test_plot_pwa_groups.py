@@ -156,3 +156,246 @@ def test_apply_plot_entry_priority(cfg_pwa):
     v3 = MassVar(cfg_pwa, "pipi").apply_plot_entry(
         {"bins": 40}, defaults)
     assert v3.nbins == 40 and v3.range == (0.0, 5.0)   # defaults retained
+
+
+# ── analytic 3-body Dalitz boundary (plot.2Dplot add_dalitz_boundary) ───────
+
+_M0, _M1, _M2, _M3 = (3.096813522559038, 0.139567, 0.139567, 0.5478621409593663)
+
+
+def test_dalitz_boundary_math():
+    from tabpwa.plot_pwa_groups import dalitz_boundary, kine_min_max
+    s12, lo, hi = dalitz_boundary(_M0, _M1, _M2, _M3, N=64)
+    assert s12[0] == pytest.approx((_M1 + _M2) ** 2)
+    assert s12[-1] == pytest.approx((_M0 - _M3) ** 2)
+    assert np.all(lo <= hi + 1e-12)
+    # the region touches both corner lines at a single (degenerate) point
+    assert lo[0] == pytest.approx(hi[0], abs=1e-9)
+    assert lo[-1] == pytest.approx(hi[-1], abs=1e-6)
+    # interior slice has a finite width and stays physical
+    assert lo[32] < hi[32]
+    assert np.all(lo > 0) and np.all(hi < (_M0 - _M1) ** 2 + 1e-9)
+    # kine_min_max clamps out-of-range s12 to the boundary endpoints
+    smin, smax = kine_min_max([0.0, s12[32], 1e6], _M0, _M1, _M2, _M3)
+    lo_pt = kine_min_max([(_M1 + _M2) ** 2], _M0, _M1, _M2, _M3)
+    hi_pt = kine_min_max([(_M0 - _M3) ** 2], _M0, _M1, _M2, _M3)
+    assert smin[0] == pytest.approx(lo_pt[0][0])
+    assert smax[0] == pytest.approx(lo_pt[1][0])
+    assert smin[2] == pytest.approx(hi_pt[0][0])
+    assert smax[2] == pytest.approx(hi_pt[1][0])
+
+
+def test_dalitz_boundary_masses_rule(cfg_pwa):
+    """[pipi, pipeta] = (pip,pim)+(pip,eta): B=pip shared, A=pim, C=eta."""
+    from tabpwa.plot_pwa_groups import dalitz_boundary_masses
+    m = dalitz_boundary_masses(cfg_pwa, "pipi", "pipeta")
+    assert m == pytest.approx((_M0, _M1, _M2, _M3))
+    # swapped order swaps A and C -> axes-transposed (same) region
+    m2 = dalitz_boundary_masses(cfg_pwa, "pipeta", "pipi")
+    assert m2 == pytest.approx((_M0, _M3, _M1, _M1))
+    # the second config panel: (pip,eta)+(pim,eta), shared eta
+    m3 = dalitz_boundary_masses(cfg_pwa, "pipeta", "pimeta")
+    assert m3 == pytest.approx((_M0, _M1, _M3, _M1))
+    with pytest.raises(ValueError, match="rule \\(A,B\\)\\+\\(B,C\\)"):
+        dalitz_boundary_masses(cfg_pwa, "pipi", "pipi")
+
+
+def test_plots_2d_from_config(cfg_pwa, pwa_events):
+    from tabpwa.read_var import plots_2d_from_config
+    panels = plots_2d_from_config(cfg_pwa)
+    assert [k for k, _ in panels] == ["dalitz_1", "dalitz_2"]
+    spec = dict(panels)["dalitz_1"]
+    assert spec["x"].name == "m_pipi**2" and spec["y"].name == "m_pipeta**2"
+    assert spec["boundary"] == ["pipi", "pipeta"]
+    assert spec["binning"] == [[2, 2]] * 4   # explicit in config
+    vx, vy = spec["x"].read(pwa_events), spec["y"].read(pwa_events)
+    assert vx.shape == vy.shape == (12,)
+    assert dict(panels)["dalitz_2"]["boundary"] == ["pipeta", "pimeta"]
+
+
+def test_auto_binning_for_small_samples(cfg_pwa, pwa_events):
+    """No adaptive_binning in the entry -> levels derived from N_data."""
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.plot_pwa_groups import config_2d_panels, auto_binning
+    assert auto_binning(200) == [[2, 2]] * 2          # small sample
+    assert auto_binning(20000) == [[2, 2]] * 4        # large sample (cap)
+    dic = dict(cfg_pwa.dic)
+    dic["plot"] = dict(cfg_pwa.dic["plot"])
+    dic["plot"]["2Dplot"] = {
+        "auto": {"x": "m_pipi**2", "y": "m_pipeta**2"}}   # no binning key
+    cfg2 = build_amplitude_model(dic)
+    panels = {p["key"]: p for p in config_2d_panels(cfg2, pwa_events)}
+    assert panels["auto"]["binning"] == auto_binning(12)  # 12 toy events
+
+
+def test_config_2d_panels_resolves_boundary(cfg_pwa, pwa_events):
+    from tabpwa.plot_pwa_groups import config_2d_panels
+    panels = {p["key"]: p for p in config_2d_panels(cfg_pwa, pwa_events)}
+    assert set(panels) == {"dalitz_1", "dalitz_2"}
+    assert panels["dalitz_1"]["boundary"] == pytest.approx(
+        [_M0, _M1, _M2, _M3])
+    v = panels["dalitz_1"]["varfun"](pwa_events)
+    assert len(v) == 2 and all(a.shape == (12,) for a in v)
+    assert panels["dalitz_1"]["scatter_style"] == {
+        "c": "black", "s": 1, "alpha": 0.0}
+
+
+
+
+# ── plot_2d drawing on a real Fitter (numpy_pwa, synthetic events) ─────────
+
+@pytest.fixture(scope="module")
+def real_plotter():
+    """Real Fitter + real compute(); only the event sample is synthetic."""
+    from tabpwa import Fitter, FitResult
+    from tabpwa.pwa_build import build_tree_event_data, generate_pwa_phsp
+    from tabpwa.plot_pw_groups import PWGroupPlotter
+
+    f = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
+    f.apply_constrains()
+    model, kc = f.model, f.kernel_config
+    tree = f.decay_tree
+    chain = tree.partial_waves()[0][1]
+    byt = {tree.topo_index[ch.topo_id()]: ch
+           for _, ch in tree.partial_waves()}
+    phsp = build_tree_event_data(
+        model, kc, byt, generate_pwa_phsp(model, chain, 1500, seed=41))
+    data = build_tree_event_data(
+        model, kc, byt, generate_pwa_phsp(model, chain, 1500, seed=42))
+    f.set_phsp(phsp)
+    f.set_data(data)
+    r = FitResult.from_x(f.initial_values(seed=43))
+    groups = {"ALL": list(range(len(model.full_decay.get_partial_waves())))}
+    return PWGroupPlotter(f, r, groups).compute()
+
+
+def test_plot_2d_boundary_draw(tmp_path, real_plotter):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    varfun = lambda d: [d["mass"][:, 0] ** 2, d["mass"][:, 1] ** 2]
+    real_plotter.plot_2d(varfun, ["x", "y"], "bnd_test", binning=[[2, 2]],
+                         output=str(tmp_path), boundary=[_M0, _M1, _M2, _M3])
+    assert (tmp_path / "bnd_test.png").exists()
+
+    # explicit ax + boundary resolved BY NAME through the real fitter.model
+    fig, ax = plt.subplots()
+    real_plotter.plot_2d(varfun, ["x", "y"], "bnd_ax", binning=[[2, 2]],
+                         output=None, ax=ax, boundary=["pipi", "pipeta"])
+    assert len(ax.lines) == 2
+    assert ax.lines[0].get_xdata()[0] == pytest.approx((_M1 + _M2) ** 2)
+    assert ax.lines[0].get_xdata()[-1] == pytest.approx((_M0 - _M3) ** 2)
+    plt.close(fig)
+
+    with pytest.raises(ValueError, match="2 particle names or 4 masses"):
+        real_plotter.plot_2d(varfun, ["x", "y"], "bad", output=None,
+                             boundary=[1.0, 2.0, 3.0])
+    plt.close("all")
+
+
+def test_plot_2d_plot_figs(tmp_path, real_plotter):
+    """plot_figs selects the written figures (tf-pwa semantics)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    varfun = lambda d: [d["mass"][:, 0] ** 2, d["mass"][:, 1] ** 2]
+    real_plotter.plot_2d(varfun, ["x", "y"], "pf", binning=[[2, 2]],
+                         output=str(tmp_path),
+                         plot_figs=["data_hist", "fitted", "pull"])
+    assert (tmp_path / "pf.png").exists()              # pull
+    assert (tmp_path / "pf_data_hist.png").exists()
+    assert (tmp_path / "pf_fitted.png").exists()
+    assert not (tmp_path / "pf_sideband_hist.png").exists()
+
+    # pull not requested -> only the extras; sideband skipped (no bkg)
+    real_plotter.plot_2d(varfun, ["x", "y"], "pf2", binning=[[2, 2]],
+                         output=str(tmp_path),
+                         plot_figs=["fitted", "sideband_hist"])
+    assert (tmp_path / "pf2_fitted.png").exists()
+    assert not (tmp_path / "pf2.png").exists()
+
+    with pytest.raises(ValueError, match="unknown plot_figs entry"):
+        real_plotter.plot_2d(varfun, ["x", "y"], "pf3", output=str(tmp_path),
+                             plot_figs=["nonsense"])
+    plt.close("all")
+
+
+def test_dalitz_boundary_internal_node():
+    """(A,B)+(B,C) at an internal node: m0 = the parent, not the top."""
+    from types import SimpleNamespace
+    from tabpwa.decay_tree import DecayTree
+    from tabpwa.plot_pwa_groups import dalitz_boundary_masses
+    # B0 -> D0 pi;  D0 -> (Rp -> pip pi0)(Rm -> pim pi0)
+    spec = {
+        "B0": ["D0", "pi"],
+        "D0": [["Rp", "pim"], ["Rm", "pip"]],
+        "Rp": ["pip", "pi0"],
+        "Rm": ["pim", "pi0"],
+    }
+    tree = DecayTree(spec, {"$top": "B0",
+                            "$finals": ["pip", "pim", "pi0", "pi"],
+                            **{p: {"J": 0} for p in
+                               ["B0", "D0", "Rp", "Rm", "pip", "pim",
+                                "pi0", "pi"]}})
+    cfg = SimpleNamespace(decay_tree=tree, dic={"particle": {
+        "B0": {"mass": 5.2796}, "D0": {"mass": 1.8648},
+        "pip": {"mass": 0.1396}, "pim": {"mass": 0.1396},
+        "pi0": {"mass": 0.1350}, "pi": {"mass": 0.1396}}})
+    # a/b are INTERNAL siblings: common parent D0, not the top
+    m = dalitz_boundary_masses(cfg, "Rp", "Rm")
+    assert m == pytest.approx((1.8648, 0.1396, 0.1350, 0.1396))
+    # union {pip,pim,pi0} != finals — the internal-parent check allows it
+    with pytest.raises(ValueError, match="share a parent"):
+        dalitz_boundary_masses(cfg, "Rp", "pi")
+
+
+def test_topo_name_from_index_roundtrip(cfg_pwa):
+    """topo_name_from_index inverts topo_index_from_name (nodes -> name)."""
+    tree = cfg_pwa.decay_tree
+    for name in ("pipi", "pipeta", "pimeta"):
+        slot = tree.topo_index_from_name(name)
+        assert tree.topo_name_from_index(slot) == name
+    with pytest.raises(KeyError, match="no topology slot"):
+        tree.topo_name_from_index(99)
+
+
+def test_topo_name_from_index_multicore():
+    """Two-core topology -> list of core labels (structural order)."""
+    from tabpwa.decay_tree import DecayTree
+    spec = {
+        "B0": [["rho1", "rho2"], ["rho3", "rho4"]],
+        "rho1": ["pip1", "pim1"], "rho2": ["pip2", "pim2"],
+        "rho3": ["pip1", "pim2"], "rho4": ["pip2", "pim1"],
+    }
+    tree = DecayTree(spec, {"$top": "B0", "$finals": [
+        "pip1", "pim1", "pip2", "pim2"], **{
+        p: {"J": 0} for p in
+        ["B0", "rho1", "rho2", "rho3", "rho4", "pip1", "pim1", "pip2",
+         "pim2"]}})
+    slot = tree.topo_index_from_name(["rho1", "rho2"])
+    names = tree.topo_name_from_index(slot)
+    assert isinstance(names, list) and len(names) == 2
+    # round-trip through the (sorted-group) canonical order
+    assert tree.topo_index_from_name(names) == slot
+    assert set(names) == {"rho1", "rho2"}
+
+
+def test_plots_2d_display_axis_labels(cfg_pwa):
+    """display "A vs B" splits into xlabel/ylabel; explicit keys win."""
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.read_var import plots_2d_from_config
+    dic = dict(cfg_pwa.dic)
+    dic["plot"] = dict(cfg_pwa.dic["plot"])
+    dic["plot"]["2Dplot"] = {
+        "p1": {"x": "m_pipi**2", "y": "m_pipeta**2",
+               "display": "$A$ vs $B$"},
+        "p2": {"x": "m_pipi**2", "y": "m_pipeta**2",
+               "display": "$A$ vs $B$", "xlabel": "X", "ylabel": "Y"},
+        "p3": {"x": "m_pipi**2", "y": "m_pipeta**2",
+               "display": "no split marker"}}
+    panels = dict(plots_2d_from_config(build_amplitude_model(dic)))
+    assert panels["p1"]["labels"] == ["$A$", "$B$"]
+    assert panels["p2"]["labels"] == ["X", "Y"]       # explicit wins
+    assert panels["p3"]["labels"] == ["m_pipi**2", "m_pipeta**2"]

@@ -33,7 +33,13 @@ import re
 
 import numpy as np
 
-from tabpwa.plot_pw_groups import PWGroupPlotter
+from tabpwa.plot_pw_groups import (PWGroupPlotter, dalitz_boundary,
+                                   dalitz_boundary_masses, kine_min_max)
+
+__all__ = ["discover_pwa_groups", "pwa_mass_varfun", "pwa_angle_varfun",
+           "angle_variable_labels", "var_ranges", "config_panels",
+           "config_plot_items", "config_2d_panels", "PWGroupPlotter",
+           "kine_min_max", "dalitz_boundary", "dalitz_boundary_masses"]
 
 _L_LETTERS = {0: "S", 1: "P", 2: "D", 3: "F", 4: "G", 5: "H"}
 
@@ -293,3 +299,60 @@ def _safe_stem(name):
     """Filename stem for a variable name."""
     import re
     return re.sub(r"[^\w.-]+", "_", name).strip("_") or "var"
+
+
+def auto_binning(n_data, max_levels=4):
+    """Adaptive [[2,2]] level count for a data sample of *n_data* events.
+
+    ``n = max(log4(N/50), 2)`` (the ``plot_2d_mass`` rule), capped at
+    *max_levels*: small samples get few bins (2 levels = 4 bins), large
+    ones up to 4 levels = 256 bins.
+    """
+    n = max(int(np.log(max(n_data, 1) / 50.0) / np.log(4)), 2)
+    return [[2, 2]] * min(n, max_levels)
+
+
+def config_2d_panels(cfg, data_np):
+    """Ready-to-plot 2D adaptive-pull panels from ``plot.2Dplot:``.
+
+    tf-pwa style entries (``x`` / ``y`` expressions, optional
+    ``add_dalitz_boundary`` of two system names — rule (A,B)+(B,C) — or
+    four masses, ``adaptive_binning`` levels, ``pull_scatter_style``,
+    ``dalitz_boundary_style``, ``xlabel`` / ``ylabel``).  Panels whose
+    variables cannot be read from the loaded arrays are skipped; boundary
+    name pairs are resolved to masses here so the panel carries only
+    numbers.  Without ``adaptive_binning`` the levels are derived from
+    the data size (:func:`auto_binning`) — small samples get few bins.
+
+    Returns a list of dicts with ``key, labels, varfun, binning,
+    boundary, boundary_style, scatter_style, plot_figs, stem`` — feed
+    each to ``PWGroupPlotter.plot_2d``.
+    """
+    from tabpwa.read_var import plots_2d_from_config
+
+    n_data = int(np.asarray(data_np["weight"]).shape[0])
+    out = []
+    for key, spec in plots_2d_from_config(cfg):
+        xv, yv = spec["x"], spec["y"]
+        try:
+            xv.read(data_np)
+            yv.read(data_np)
+        except (IndexError, ValueError):
+            continue          # topology not active in these arrays
+        boundary = spec["boundary"]
+        if (boundary is not None and len(boundary) == 2
+                and all(isinstance(s, str) for s in boundary)):
+            boundary = list(dalitz_boundary_masses(cfg, *boundary))
+        out.append({
+            "key": key,
+            "labels": spec["labels"],
+            "varfun": lambda x, xv=xv, yv=yv: [xv.read(x), yv.read(x)],
+            "binning": (spec["binning"] if spec["binning"] is not None
+                        else auto_binning(n_data)),
+            "boundary": boundary,
+            "boundary_style": spec["boundary_style"],
+            "scatter_style": spec["scatter_style"],
+            "plot_figs": spec["plot_figs"],
+            "stem": _safe_stem(key),
+        })
+    return out
