@@ -57,10 +57,8 @@ int cuda_get_device_name(char*,int);
 def _load_lib():
     """Load the v3 shared library, auto-building if source changed."""
     from tabpwa.cuda.build import ensure
-    ensure("kernels_v3.cu", "libcuda_kernels_v3.so")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    lib_path = os.path.join(script_dir, "libcuda_kernels_v3.so")
-    if not os.path.exists(lib_path):
+    lib_path = ensure("kernels_v3.cu", "libcuda_kernels_v3.so")
+    if not lib_path:
         raise RuntimeError(
             f"v3 CUDA library not found at {lib_path}. "
             "Build with: nvcc -shared -fPIC -o <path> kernels_v3.cu -lcudart"

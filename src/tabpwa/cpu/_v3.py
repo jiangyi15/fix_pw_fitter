@@ -53,13 +53,11 @@ void cpu_compute_v3(CPUContext*,CPUData*,
 
 def _load_lib():
     """Load the CPU v3 shared library, auto-building if source changed."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     from tabpwa.cpu.build import ensure
-    ensure("kernels_cpu_v3.c", "libcpu_kernels_v3.so")
-    lib_path = os.path.join(script_dir, "libcpu_kernels_v3.so")
-    if not os.path.exists(lib_path):
+    lib_path = ensure("kernels_cpu_v3.c", "libcpu_kernels_v3.so")
+    if not lib_path:
         raise RuntimeError(
-            f"CPU library not found at {lib_path}. "
+            "CPU library could not be built (kernels_cpu_v3.c). "
             "Build with: gcc -shared -fPIC -O3 -march=native "
             "-ffast-math -fopenmp -lm -o <path> kernels_cpu_v3.c"
         )

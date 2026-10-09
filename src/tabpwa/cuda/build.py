@@ -2,27 +2,44 @@
 """Build the CUDA shared libraries for tabpwa.
 
 Usage:
-    python -m tabpwa.cuda.build          # force rebuild all
-    from tabpwa.cuda.build import ensure; ensure()  # auto-update on import
+    python -m tabpwa.cuda.build                # force rebuild all
+    python -m tabpwa.cuda.build --tag sm86     # build one variation
+    python -m tabpwa.cuda.build --arch sm_70,sm_86   # fat binary
 
 Auto-detects nvcc and required compiler flags.  Auto-discovers all
-``kernels_*.cu`` files and builds them into ``libcuda_kernels_*.so``.
+``kernels_*.cu`` files and builds each into a shared library named by
+the machine's **variation tag**:
 
-Each .so has a companion .hash file (SHA-256 of the .cu source).
-On import, the loader checks the hash and auto-rebuilds if the source changed.
+    tag "" (default)   -> lib<base>.so          (plain, backward compatible)
+    tag "sm86"         -> lib<base>.sm86.so
+    tag "sm70_sm86"    -> lib<base>.sm70_sm86.so
+
+so one disk can carry binaries for several variations/machines side by
+side; set TABPWA_LIB_TAG per machine (or --tag) to pick a variation,
+leave it unset for the plain names.
+
+The tag comes from ONE source: the ``TABPWA_LIB_TAG`` environment
+variable (or ``--tag`` / :func:`set_tag`); unset means the empty tag
+and plain library names.  The compile itself always targets the local
+GPU (auto-detected arch flags), and each binary's companion hash file
+covers source + tag + nvcc version + schema, so a different
+toolchain under the same tag simply rebuilds.
 """
-import os, hashlib, subprocess, sys, glob
+import os, re, hashlib, subprocess, sys, glob
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+KEY_SCHEMA = "tabpwa-kernel-v2"        # bump to invalidate every cache
 
-# Auto-discover all kernel source files: kernels_*.cu → libcuda_kernels_*.so
+# Auto-discover all kernel source files: kernels_*.cu -> lib<base>.so
 VARIANTS = []
 for cu_path in sorted(glob.glob(os.path.join(SCRIPT_DIR, "kernels_*.cu"))):
     src_name = os.path.basename(cu_path)
-    lib_name = "libcuda_" + os.path.splitext(src_name)[0] + ".so"
-    VARIANTS.append((src_name, lib_name))
+    VARIANTS.append((src_name,
+                     "libcuda_" + os.path.splitext(src_name)[0] + ".so"))
 
-_override_arch = None  # set via set_arch() or --arch
+_override_arch = None   # set via set_arch() or --arch
+_override_tag = None    # set via set_tag() or --tag
+_tag_cache = {}
 
 
 # ── helpers ─────────────────────────────────────────────────────
@@ -31,10 +48,6 @@ def _cu_hash(src_name):
     """SHA-256 hex digest of a .cu source file."""
     path = os.path.join(SCRIPT_DIR, src_name)
     return hashlib.sha256(open(path, 'rb').read()).hexdigest()
-
-
-def _hash_path(src_name):
-    return os.path.join(SCRIPT_DIR, src_name + ".hash")
 
 
 def find_nvcc():
@@ -74,6 +87,14 @@ def set_arch(arch):
     """
     global _override_arch
     _override_arch = arch
+    _tag_cache.clear()
+
+
+def set_tag(tag):
+    """Override the variation tag (any string; ``""`` = plain names)."""
+    global _override_tag
+    _override_tag = tag
+    _tag_cache.clear()
 
 
 def _arch_flags(nvcc):
@@ -82,7 +103,6 @@ def _arch_flags(nvcc):
     Falls back to sm_86 (Ampere+) with optional sm_70 (Volta) for
     CUDA < 13, when nvidia-smi is not available.
     """
-    # Manual override via set_arch() or --arch flag
     if _override_arch:
         sms = _override_arch.replace('compute_', 'sm_').split(',')
         flags = []
@@ -100,8 +120,6 @@ def _arch_flags(nvcc):
             return [f'-arch={sm}']
     except Exception:
         pass
-    # Fallback: detect CUDA version for compatible arch list
-    import re
     r = subprocess.run([nvcc, '--version'], capture_output=True, text=True)
     m = re.search(r'release (\d+\.\d+)', r.stdout)
     cuda_ver = float(m.group(1)) if m else 0
@@ -111,81 +129,140 @@ def _arch_flags(nvcc):
     return flags
 
 
-# ── build one variant ───────────────────────────────────────────
+def resolve_tag():
+    """The variation tag (opaque string; ``""`` = plain library names).
 
-def _build_one(src_name, lib_name):
-    """Compile a single .cu → .so. Returns True on success."""
-    nvcc = find_nvcc()
-    if not nvcc:
-        return False
+    Purely label-based — NO device detection: ``set_tag()``/``--tag``
+    wins, else the ``TABPWA_LIB_TAG`` environment variable, else
+    ``""``.  (The compile flags still auto-target the local GPU; the
+    tag only namespaces the produced files.)
+    """
+    key = (_override_tag, os.environ.get("TABPWA_LIB_TAG"))
+    if key not in _tag_cache:
+        if _override_tag is not None:
+            _tag_cache[key] = _override_tag
+        else:
+            _tag_cache[key] = os.environ.get("TABPWA_LIB_TAG", "")
+    return _tag_cache[key]
 
-    gcc = detect_gcc()
-    script_dir = SCRIPT_DIR
-    base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
-    base.extend(_arch_flags(nvcc))
 
-    # Probe flags
-    probe_file = os.path.join(script_dir, VARIANTS[0][0])
-    probe_out = os.path.join(script_dir, '_probe.so')
+def lib_file_name(lib_name, tag=None):
+    """Shared-library file name for a variation tag.
+
+    ``tag=""`` keeps the plain name (backward compatible); a non-empty
+    tag is inserted before the extension.
+    """
+    if tag is None:
+        tag = resolve_tag()
+    stem, ext = os.path.splitext(lib_name)
+    return f"{stem}.{tag}{ext}" if tag else lib_name
+
+
+def _hash_path(src_name, tag=None):
+    if tag is None:
+        tag = resolve_tag()
+    return (os.path.join(SCRIPT_DIR, f"{src_name}.{tag}.hash") if tag
+            else os.path.join(SCRIPT_DIR, src_name + ".hash"))
+
+
+def _build_key(src_name, tag, nvcc):
+    """Digest of everything the binary depends on."""
+    h = hashlib.sha256()
+    h.update(open(os.path.join(SCRIPT_DIR, src_name), 'rb').read())
+    h.update((tag or "").encode())
+    h.update(KEY_SCHEMA.encode())
+    if nvcc:
+        r = subprocess.run([nvcc, '--version'], capture_output=True,
+                           text=True)
+        m = re.search(r"release (\S+)", r.stdout or "")
+        h.update((m.group(1) if m else "unknown").encode())
+        h.update(nvcc.encode())
+    return h.hexdigest()
+
+
+def detect_gcc_compat(base, probe_file, probe_src):
+    """Probe-compile; returns the extra flags needed (compiler fallbacks)."""
     extra = []
-    r = subprocess.run(base + ['-o', probe_out, probe_file],
+    r = subprocess.run(base + extra + ['-o', probe_file, probe_src],
                        capture_output=True, text=True)
     if r.returncode != 0:
         if 'unsupported' in r.stderr:
             extra.append('-allow-unsupported-compiler')
+        gcc = detect_gcc()
         if gcc:
             extra.extend(['-ccbin', gcc])
-        r2 = subprocess.run(base + extra + ['-o', probe_out, probe_file],
-                            capture_output=True, text=True)
-        if r2.returncode != 0:
-            if os.path.exists(probe_out):
-                os.remove(probe_out)
-            return False
-    if os.path.exists(probe_out):
-        os.remove(probe_out)
+    return extra
 
-    src_file = os.path.join(script_dir, src_name)
-    out_file = os.path.join(script_dir, lib_name)
-    cmd = base + extra + ['-o', out_file, src_file]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    return r.returncode == 0
+
+# ── build one variant ───────────────────────────────────────────
+
+def _build_one(src_name, out_file):
+    """Compile a single .cu -> the (already tag-suffixed) out_file."""
+    nvcc = find_nvcc()
+    if not nvcc:
+        return False
+
+    base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
+    base.extend(_arch_flags(nvcc))
+
+    probe_file = os.path.join(SCRIPT_DIR, '_probe.so')
+    probe_src = os.path.join(SCRIPT_DIR, VARIANTS[0][0])
+    try:
+        extra = detect_gcc_compat(base, probe_file, probe_src)
+        # probe once with the extra flags to validate the toolchain
+        r = subprocess.run(base + extra + ['-o', probe_file, probe_src],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return False
+        src_file = os.path.join(SCRIPT_DIR, src_name)
+        r = subprocess.run(base + extra + ['-o', out_file, src_file],
+                           capture_output=True, text=True)
+        return r.returncode == 0
+    finally:
+        if os.path.exists(probe_file):
+            os.remove(probe_file)
 
 
 # ── public API ──────────────────────────────────────────────────
 
 def ensure(src_name, lib_name):
-    """Rebuild *lib_name* if *src_name* changed or .hash is missing.
+    """Rebuild the tagged *lib_name* if the build key changed.
 
-    Returns True if .so is ready (up-to-date or freshly built), False on failure.
+    The key covers the .cu source AND the variation identity (tag +
+    nvcc version + schema), so a shared disk never accepts another
+    machine's binary.  ``lib_name`` is the BASE name; the actual file
+    is :func:`lib_file_name` of it (plain name for the default tag).
+
+    Returns the full path of the ready shared library, or None on failure.
     """
-    lib_path = os.path.join(SCRIPT_DIR, lib_name)
-    hash_path = _hash_path(src_name)
-    current = _cu_hash(src_name)
+    nvcc = find_nvcc()
+    tag = resolve_tag()
+    lib_path = os.path.join(SCRIPT_DIR, lib_file_name(lib_name, tag))
+    hash_path = _hash_path(src_name, tag)
+    current = _build_key(src_name, tag, nvcc)
 
     if os.path.exists(lib_path) and os.path.exists(hash_path):
         stored = open(hash_path).read().strip()
         if stored == current:
-            return True
+            return lib_path
 
-    print(f"tabpwa CUDA: rebuilding {lib_name} ({src_name} changed)")
-    ok = _build_one(src_name, lib_name)
-    if ok:
+    print(f"tabpwa CUDA: rebuilding {os.path.basename(lib_path)} "
+          f"({src_name} changed)")
+    if _build_one(src_name, lib_path):
         open(hash_path, 'w').write(current)
-    return ok
+        return lib_path
+    return None
 
 
 def build():
-    """Build all discovered kernel variants.  Returns True if all succeeded."""
+    """Build all discovered kernel variants for this machine's tag."""
     all_ok = True
     for src_name, lib_name in VARIANTS:
-        print(f"  Building {lib_name}...", end=' ')
+        print(f"  Building {lib_file_name(lib_name)}...", end=' ')
         sys.stdout.flush()
         ok = ensure(src_name, lib_name)
-        if ok:
-            print("✓")
-        else:
-            print("FAILED")
-            all_ok = False
+        print("✓" if ok else "FAILED")
+        all_ok = all_ok and bool(ok)
     return all_ok
 
 
@@ -194,19 +271,21 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build CUDA kernels for tabpwa")
     ap.add_argument("--arch", default=None,
                     help="Override GPU arch (e.g. 'sm_86' or 'sm_70,sm_86')")
+    ap.add_argument("--tag", default=None,
+                    help="Override the variation tag (labels the .so)")
     args = ap.parse_args()
 
     if args.arch:
         set_arch(args.arch)
+    if args.tag:
+        set_tag(args.tag)
 
-    # Force rebuild: ignore existing .hash files, rebuild all
+    # Force rebuild: drop the tag's hash files, rebuild everything
     print("tabpwa CUDA: force rebuilding all kernels")
-    for src_name, lib_name in VARIANTS:
-        hash_path = _hash_path(src_name)
-        if os.path.exists(hash_path):
-            os.remove(hash_path)
-        print(f"  Building {lib_name}...", end=' ')
-        sys.stdout.flush()
-        ok = ensure(src_name, lib_name)
-        print("✓" if ok else "FAILED")
+    tag = resolve_tag()
+    pattern = (f"*.{'*' if tag else ''}{tag}.hash" if tag
+               else "*.hash")
+    for hash_path in glob.glob(os.path.join(SCRIPT_DIR, pattern)):
+        os.remove(hash_path)
+    build()
     print("Done.")

@@ -5,8 +5,13 @@ Usage:
     python -m tabpwa.cpu.build          # force rebuild
     from tabpwa.cpu.build import ensure; ensure()  # auto-update on import
 
-Compiles kernels_cpu_v3.c → libcpu_kernels_v3.so via gcc.
-Uses SHA-256 hash tracking to auto-rebuild when source changes.
+Compiles kernels_cpu_v3.c → libcpu_kernels_v3.so via gcc (-march=native
+— binaries are machine-specific!).  Variation-tag aware: the tag comes
+from ONE source — the ``TABPWA_LIB_TAG`` environment variable (or
+:func:`set_tag`); unset means the empty tag and the plain library name.
+Each tag gets its own library and hash file, and the hash covers source
++ tag + gcc version, so a shared disk never runs another machine's
+binary.
 """
 import os, hashlib, subprocess, sys, glob
 
@@ -28,6 +33,30 @@ def _src_hash(src_name):
 
 def _hash_path(src_name):
     return os.path.join(SCRIPT_DIR, src_name + ".hash")
+
+
+_override_tag = None
+
+
+def set_tag(tag):
+    """Override the variation tag (any string; ``""`` = plain names)."""
+    global _override_tag
+    _override_tag = tag
+
+
+def resolve_tag():
+    """The variation tag: ``set_tag()`` > ``TABPWA_LIB_TAG`` env > ``""``."""
+    if _override_tag is not None:
+        return _override_tag
+    return os.environ.get("TABPWA_LIB_TAG", "")
+
+
+def lib_file_name(lib_name, tag=None):
+    """Library file name for the tag (``""`` keeps the plain name)."""
+    if tag is None:
+        tag = resolve_tag()
+    stem, ext = os.path.splitext(lib_name)
+    return f"{stem}.{tag}{ext}" if tag else lib_name
 
 
 def detect_gcc():
@@ -80,31 +109,41 @@ def _build_one(src_name, lib_name):
 
 
 def ensure(src_name, lib_name):
-    """Rebuild *lib_name* if *src_name* changed or .hash is missing.
+    """Rebuild the tagged *lib_name* if its build key changed.
 
-    Returns True if .so is ready (up-to-date or freshly built), False on failure.
+    The key covers the source, the tag and the gcc version.  Returns
+    the full path of the ready shared library, or None on failure.
     """
-    lib_path = os.path.join(SCRIPT_DIR, lib_name)
-    hash_path = _hash_path(src_name)
-    current = _src_hash(src_name)
+    tag = resolve_tag()
+    lib_path = os.path.join(SCRIPT_DIR, lib_file_name(lib_name, tag))
+    hash_path = _hash_path(src_name + (f".{tag}" if tag else ""))
+    gcc = detect_gcc()
+    import subprocess as _sp
+    ver = (_sp.run([gcc, '--version'], capture_output=True, text=True).stdout
+           if gcc else "nogcc")
+    current = hashlib.sha256(
+        open(os.path.join(SCRIPT_DIR, src_name), 'rb').read()
+        + (tag or "").encode() + ver.encode()).hexdigest()
 
     if os.path.exists(lib_path) and os.path.exists(hash_path):
         stored = open(hash_path).read().strip()
         if stored == current:
-            return True
+            return lib_path
 
-    print(f"tabpwa CPU: rebuilding {lib_name} ({src_name} changed)")
-    ok = _build_one(src_name, lib_name)
+    print(f"tabpwa CPU: rebuilding {os.path.basename(lib_path)} "
+          f"({src_name} changed)")
+    ok = _build_one(src_name, os.path.basename(lib_path))
     if ok:
         open(hash_path, 'w').write(current)
-    return ok
+        return lib_path
+    return None
 
 
 def build():
     """Build all discovered kernel variants.  Returns True if all succeeded."""
     all_ok = True
     for src_name, lib_name in VARIANTS:
-        print(f"  Building {lib_name}...", end=' ')
+        print(f"  Building {lib_file_name(lib_name)}...", end=' ')
         sys.stdout.flush()
         ok = ensure(src_name, lib_name)
         if ok:
@@ -121,7 +160,7 @@ if __name__ == "__main__":
         hash_path = _hash_path(src_name)
         if os.path.exists(hash_path):
             os.remove(hash_path)
-        print(f"  Building {lib_name}...", end=' ')
+        print(f"  Building {lib_file_name(lib_name)}...", end=' ')
         sys.stdout.flush()
         ok = ensure(src_name, lib_name)
         print("✓" if ok else "FAILED")

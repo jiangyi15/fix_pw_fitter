@@ -53,10 +53,8 @@ int cuda_get_device_name(char*,int);
 def _load_lib():
     """Load the mixed‑precision shared library, auto‑building if source changed."""
     from tabpwa.cuda.build import ensure
-    ensure("kernels_v3_mixed.cu", "libcuda_kernels_v3_mixed.so")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    lib_path = os.path.join(script_dir, "libcuda_kernels_v3_mixed.so")
-    if not os.path.exists(lib_path):
+    lib_path = ensure("kernels_v3_mixed.cu", "libcuda_kernels_v3_mixed.so")
+    if not lib_path:
         raise RuntimeError(
             f"Mixed CUDA library not found at {lib_path}. "
             "Build with: nvcc -shared --compiler-options '-fPIC' -arch=sm_86 "

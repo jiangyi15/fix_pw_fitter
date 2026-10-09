@@ -65,10 +65,8 @@ void cuda_enable_profile_v3(void*,int);
 
 def _load_lib():
     from tabpwa.cuda.build import ensure
-    ensure("kernels_v3_ampcache.cu", "libcuda_kernels_v3_ampcache.so")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    lib_path = os.path.join(script_dir, "libcuda_kernels_v3_ampcache.so")
-    if not os.path.exists(lib_path):
+    lib_path = ensure("kernels_v3_ampcache.cu", "libcuda_kernels_v3_ampcache.so")
+    if not lib_path:
         raise RuntimeError(
             f"v3 ampcache CUDA library not found at {lib_path}.")
     return _ffi.dlopen(lib_path)
