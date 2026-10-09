@@ -139,6 +139,38 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v4_pwa_1bw", model="pwa")
+class CUDABackendV4PWA1BW(_CUDABackend):
+    """CUDA v4 PWA, ONE BW PER CHAIN specialisation.
+
+    Same model and same config input as ``cuda_v4_pwa``; the wrapper
+    requires ``n_res == 1`` (top -> R + X, one resonance per chain) and
+    the kernel drops the per-wave BW product loop — the per-wave
+    propagator IS the single denominator.  Bit-identical to
+    ``cuda_v4_pwa`` at ``n_res == 1``; faster per iteration.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_1bw import CUDAKernelV4PWA1BW as K
+        return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_v4_pwa_1bws", model="pwa")
+class CUDABackendV4PWA1BWS(_CUDABackend):
+    """CUDA v4 PWA — one BW per chain + mass-sorted ``ck_order``.
+
+    Sibling of :class:`CUDABackendV4PWA1BW` (same constraint, SAME kernel
+    binary): the wrapper additionally reorders the base waves by (mass
+    column, m0 param) so every per-wave BW array is a non-decreasing run
+    (contiguous device access) and the m0/g0 gradient reductions become
+    vectorized bincounts.  Pure outside transform — ck in, gradients and
+    the Gram matrix un-permuted — so the two 1bw backends are directly
+    comparable.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_1bws import CUDAKernelV4PWA1BWS as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa", model="pwa")
 class CUDABackendV5PWA(_CUDABackend):
     """CUDA v5 PWA — same projection-sum PWA as cuda_v4_pwa, but the data
