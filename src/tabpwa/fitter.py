@@ -33,6 +33,8 @@ Usage:
 import time
 import numpy as np
 
+from .fit_result import FitResult
+
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
 
@@ -874,7 +876,8 @@ class Fitter:
             **kwargs: passed to scipy.optimize.minimize.
 
         Returns:
-            OptimizeResult from scipy.optimize.minimize.
+            :class:`tabpwa.fit_result.FitResult` wrapping the scipy
+            ``OptimizeResult`` (all optimizer fields preserved).
             For BFGS: result.hess_inv contains the inverse Hessian.
         """
         from scipy.optimize import minimize
@@ -932,7 +935,7 @@ class Fitter:
             callback=combined_cb,
             **kwargs
         )
-        return result
+        return FitResult.from_result(result)
 
     def fit_constrained(self, x0=None, maxiter=1000, ftol=1e-5, callback=None,
                         disp=True, constraints=None, **kwargs):
@@ -1287,23 +1290,20 @@ class Fitter:
             grad_scale: gradient scaling factor (default 1.0).
                         Matches archive's grad_sacle if used.
         """
+        # Normalize: flat x -> empty-status result; any attribute object
+        # (scipy OptimizeResult, FitResult, ...) -> FitResult.  From here
+        # on every field is a plain attribute (None = unknown).
         import json, os
-
-        # Accept flat x vector directly (for checkpoint saves)
         if isinstance(fit_result, np.ndarray):
-            x = fit_result
-            hess_inv = None
-            fun = float('nan')
-            jac = None
-            success = False
-            message = "No fit result"
+            res = FitResult.from_x(fit_result)
         else:
-            x = fit_result.x
-            hess_inv = getattr(fit_result, 'hess_inv', None)
-            fun = float(fit_result.fun)
-            jac = fit_result.jac
-            success = bool(fit_result.success)
-            message = str(fit_result.message)
+            res = FitResult.from_result(fit_result)
+        x = res.x
+        hess_inv = res.hess_inv
+        fun = float(res.fun) if res.fun is not None else float('nan')
+        jac = res.jac
+        success = bool(res.success or False)
+        message = str(res.message)
 
         flat_names = self.cm.var_registry.flat_names
         # Resolved physical values (post-constraints), converted to the
@@ -1425,15 +1425,14 @@ class Fitter:
                           (default), auto-detects ``_error_matrix.npy``.
 
         Returns:
-            SimpleNamespace with ``.x`` (and ``.hess_inv`` if the error
-            matrix was found).
+            :class:`tabpwa.fit_result.FitResult` with ``.x`` (and
+            ``.hess_inv`` if the error matrix was found).
         """
         import json, numpy as np, os
-        from types import SimpleNamespace
+        from tabpwa.fit_result import FitResult
         with open(json_path) as f:
             data = json.load(f)
-        res = SimpleNamespace()
-        res.x = self.values_from_dict(data.get("value", data))
+        res = FitResult.from_x(self.values_from_dict(data.get("value", data)))
         if hessian_path is None:
             auto_path = os.path.splitext(json_path)[0] + "_error_matrix.npy"
             if os.path.exists(auto_path):

@@ -25,6 +25,7 @@ except Exception:
     CUDAKernel = None
 
 from .fitter import Fitter
+from .fit_result import FitResult
 from . import backends
 from . import constrain_plugins  # noqa: F401 — register constraint handlers
 from .bw_form_factor import (
@@ -51,6 +52,7 @@ __all__ = [
     "GaussianPrior",
     "prior_from_dict",
     "Fitter",
+    "FitResult",
     "backends",
     "bw_form_factor",
     "BarrierFactor",
