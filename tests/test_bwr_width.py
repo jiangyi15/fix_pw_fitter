@@ -70,7 +70,7 @@ def env(tmp_path_factory):
     cfg = tmp_path_factory.mktemp("bwrs") / "config_pwa_bwrs.yml"
     cfg.write_text(text)
     for kind, path in (("std", STD_CFG), ("width", str(cfg))):
-        f = Fitter(path, backend="cuda_v4_pwa_1bw")
+        f = Fitter(path, backend="cuda_v4_pwa_s0c")
         f.apply_constrains()
         model, kc = f.model, f.kernel_config
         tree = f.decay_tree

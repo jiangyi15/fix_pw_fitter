@@ -1,0 +1,80 @@
+data:
+  dat_order:
+  - pip
+  - pim
+  - eta
+  data: ./data_slice.npy
+  data_weight: ./phsp_weight_slice.npy
+  phsp: ./phsp_slice.npy
+  random_z: false
+  center_mmass: true
+decay:
+  jpsi:
+  - - pipi
+    - eta
+  - - pipeta
+    - pim
+  - - pimeta
+    - pip
+  pipi:
+  - pip
+  - pim
+  pipeta:
+  - pip
+  - eta
+  pimeta:
+  - pim
+  - eta
+particle:
+  $top: jpsi
+  $finals:
+  - pip
+  - pim
+  - eta
+  pipi:
+  - MI1m
+  pipeta:
+  - testA
+  pimeta:
+  - testB
+  jpsi:
+    J: 1
+    P: -1
+    spins:
+    - -1
+    - 1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  MI1m:
+    J: 1
+    P: -1
+    mass: 0.769
+    model: BW
+    width: 0.15
+  testA:
+    J: 1
+    P: -1
+    mass: 0.98
+    model: BW
+    width: 0.1
+  testB:
+    J: 1
+    P: -1
+    mass: 1.2
+    model: BW
+    width: 0.15
+constrains:
+  decay:
+    fix_chain_idx: 0
+    fix_chain_val: 1

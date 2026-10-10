@@ -244,6 +244,22 @@ class CUDABackendV4PWAS0B(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v4_pwa_s0c", model="pwa")
+class CUDABackendV4PWAS0C(_CUDABackend):
+    """CUDA v4 PWA s0c — s0b with the uniform-coefficient format.
+
+    The denominator is the uniform basis sum ``BW_w = Σ_i M_wi·F_i``
+    (``F_0 = 1``, ``F_1 = m²``, ``F_l = -i·G_l``), so every fitted
+    coefficient shares one gradient formula.  K5+K6 fuse into one
+    grad_coeff kernel (the dQ_dbw_dom global round-trip is gone) and
+    K4/grad_coeff get the K3 multi-event scheduling (thread/warp per
+    event — no shared memory, no atomics, no block-per-event barriers).
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_s0c import CUDAKernelV4PWAS0C as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa_s0", model="pwa")
 class CUDABackendV5PWAS0(_CUDABackend):
     """CUDA v5 PWA s0 — one BW per chain + direct pole parameters +

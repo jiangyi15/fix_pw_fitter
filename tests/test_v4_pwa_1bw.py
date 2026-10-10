@@ -45,7 +45,9 @@ def _run(config, backend, data, phsp, x0):
 
 @pytest.mark.parametrize("sorted_backend", ["cuda_v4_pwa_1bw",
                                             "cuda_v4_pwa_1bws",
-                                            "cuda_v4_pwa_s0"])
+                                            "cuda_v4_pwa_s0",
+                                            "cuda_v4_pwa_s0b",
+                                            "cuda_v4_pwa_s0c"])
 @pytest.mark.parametrize("config", ["tests/config_pwa.yml",
                                     "tests/config_pwa_bw.yml",
                                     "tests/config_pwa_bwr.yml",
