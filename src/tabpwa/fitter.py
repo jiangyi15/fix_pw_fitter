@@ -849,6 +849,49 @@ class Fitter:
     # ------------------------------------------------------------------
     # Optimization
     # ------------------------------------------------------------------
+    def profile(self, result, param, delta_q=1.0, **kw):
+        """Profile-likelihood scan in the flat parameter space.
+
+        Minos-style predictor-corrector: the quadratic model (the BFGS
+        ``hess_inv``) predicts the profile path; each scan point is
+        corrected with Newton steps in the nuisance subspace so the path
+        tracks the true profile.  1-3 NLL+grad evaluations per scan
+        point instead of a full re-minimization.
+
+        Args:
+            result: a :class:`FitResult` (needs ``x`` and ``hess_inv``)
+                    or a flat parameter vector (``hess_inv`` required).
+            param: the flat parameter name or index to scan.
+            delta_q: the target ΔQ (1.0 → the 1σ Minos interval).
+            **kw: passed to :func:`tabpwa.profile.profile_scan`
+                  (max_points, max_corr, grow); ``h_inv=...`` overrides
+                  the curvature (a 2D array, e.g. from
+                  :func:`tabpwa.profile.fd_hessian`) and ``h_inv_fd=True``
+                  recomputes it by finite differences.
+
+        Returns:
+            A :class:`tabpwa.profile.ProfileResult` (the path and the
+            ΔQ crossings; ``interval`` gives the (lo, hi) values).
+        """
+        from .fit_result import FitResult
+        if not isinstance(result, FitResult):
+            result = FitResult.from_x(result)
+        x0 = np.asarray(result.x, float)
+        h_inv = kw.pop("h_inv", None)
+        if h_inv is not None:
+            h_inv = np.asarray(h_inv, float)
+        elif result.hess_inv is not None:
+            h_inv = np.asarray(result.hess_inv, float)
+        elif not kw.get("h_inv_fd", False):
+            raise ValueError(
+                "profile needs hess_inv — run fit() with the BFGS method "
+                "(the default) so result.hess_inv is populated, pass "
+                "h_inv=... explicitly, or set h_inv_fd=True")
+        names = self.cm.var_registry.flat_names
+        idx = names.index(param) if isinstance(param, str) else int(param)
+        from .profile import profile_scan
+        return profile_scan(self, x0, h_inv, idx, delta_q=delta_q, **kw)
+
     def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
             method='BFGS', disp=True, options=None, **kwargs):
         """Minimize NLL using BFGS (default) or any scipy optimizer.
@@ -871,8 +914,6 @@ class Fitter:
             callback: optional callback function(xk) called after each step.
             method: scipy.optimize.minimize method (default 'BFGS').
             disp: print convergence messages.
-            hess_inv0: initial inverse Hessian estimate (N×N) for BFGS warm-start.
-                       Speeds up convergence when a good estimate is available.
             **kwargs: passed to scipy.optimize.minimize.
 
         Returns:
@@ -1065,6 +1106,8 @@ class Fitter:
             H[i, j] = (grad_i(x+eps·eⱼ) - grad_i(x-eps·eⱼ)) / (2·eps)
 
         This requires ``2·N`` gradient evaluations (N = free params).
+        Shares the engine with :func:`tabpwa.numerics.fd_hess` (the
+        profile scan's ``h_inv_fd`` path uses the same matrix).
 
         The result can replace ``fit_result.hess_inv``::
 
@@ -1079,19 +1122,8 @@ class Fitter:
         Returns:
             ``(N, N)`` ndarray — the symmetric Hessian matrix d²(NLL)/dx².
         """
-        import numpy as np
-        n = len(x)
-        H = np.zeros((n, n))
-
-        for j in range(n):
-            xp = x.copy(); xp[j] += eps
-            _, gp = self.get_nll(xp)
-            xm = x.copy(); xm[j] -= eps
-            _, gm = self.get_nll(xm)
-            H[:, j] = (gp - gm) / (2 * eps)
-
-        # Symmetrise
-        return (H + H.T) / 2
+        from .numerics import fd_hess
+        return fd_hess(lambda z: self.get_nll(z)[1], x, eps=eps)
 
     # ------------------------------------------------------------------
     # Plotting
@@ -1896,21 +1928,16 @@ if __name__ == "__main__":
     print(f"grad_x range: [{grad_x.min():.4f}, {grad_x.max():.4f}]")
 
     # ---- Verify gradient numerically ----
-    eps = 1e-5
-    errs = []
-    for k in range(min(5, len(x0))):
-        xp = x0.copy()
-        xp[k] += eps
-        nll_p, _ = fitter.get_nll(xp)
-        xm = x0.copy()
-        xm[k] -= eps
-        nll_m, _ = fitter.get_nll(xm)
-        num = (nll_p - nll_m) / (2 * eps)
-        err = abs(grad_x[k] - num) / (max(abs(num), 1e-10) + 1e-10)
-        errs.append(err)
-        print(f"  x[{k:2d}]: ana={grad_x[k]:+.6e} num={num:+.6e} rel_err={err:.2e}")
+    from .numerics import fd_grad
+    k5 = min(5, len(x0))
+    num = fd_grad(lambda z: fitter.get_nll(z)[0], x0, eps=1e-5, idx=range(k5))
+    errs = np.abs(np.asarray(grad_x[:k5]) - num) / (np.abs(num) + 1e-10)
+    for k in range(k5):
+        print(f"  x[{k:2d}]: ana={grad_x[k]:+.6e} num={num[k]:+.6e} "
+              f"rel_err={errs[k]:.2e}")
 
-    print(f"\nMax relative error (first 5): {max(errs):.2e}")
-    print("✓ Fitter works!" if max(errs) < 0.05 else "⚠ Check gradient accuracy")
+    print(f"\nMax relative error (first 5): {errs.max():.2e}")
+    print("✓ Fitter works!" if errs.max() < 0.05
+          else "⚠ Check gradient accuracy")
 
     fitter.free()

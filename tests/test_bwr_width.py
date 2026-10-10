@@ -117,16 +117,15 @@ def test_same_params_same_nll(env):
 
 def test_bwrs_fitter_gradients_match_fd(env):
     """The full BWRS pipeline (transform included) has consistent grads."""
+    from tabpwa.numerics import fd_grad
+
     f = env["width"]
     x = env["x0"].copy()
     nll, grad = f.get_nll(x)
     names = f.cm.var_registry.flat_names
-    gdict = dict(zip(names, np.asarray(grad)))
     rng = np.random.RandomState(7)
-    for name in rng.choice(names, size=min(6, len(names)), replace=False):
-        i = names.index(name)
-        h = 1e-6 * (1.0 + abs(x[i]))
-        xp = x.copy(); xp[i] += h
-        xm = x.copy(); xm[i] -= h
-        fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * h)
-        assert gdict[name] == pytest.approx(fd, rel=1e-5, abs=1e-6), name
+    sel = rng.choice(len(names), size=min(6, len(names)), replace=False)
+    fd = fd_grad(lambda z: f.get_nll(z)[0], x,
+                 eps=1e-6 * (1.0 + np.abs(x)[sel]), idx=sel)
+    for c, i in enumerate(sel):
+        assert grad[i] == pytest.approx(fd[c], rel=1e-5, abs=1e-6), names[i]
