@@ -228,6 +228,22 @@ class CUDABackendV5PWA(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v4_pwa_s0b", model="pwa")
+class CUDABackendV4PWAS0B(_CUDABackend):
+    """CUDA v4 PWA s0b — s0 with device-side output accumulation.
+
+    Identical interface and math to :class:`CUDABackendV4PWAS0`; Q,
+    dNLL/dnorm and the gradient partials are tree-reduced into
+    persistent device accumulators, so the per-batch blocking D2H
+    copies and host-side cross-batch sums disappear (one small
+    blocking copy per call).  ~1.9x faster at the Fitter level
+    (20k events); summation order differs from s0 at ~1e-16.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_s0b import CUDAKernelV4PWAS0B as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa_s0", model="pwa")
 class CUDABackendV5PWAS0(_CUDABackend):
     """CUDA v5 PWA s0 — one BW per chain + direct pole parameters +
