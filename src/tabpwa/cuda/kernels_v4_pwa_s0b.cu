@@ -314,72 +314,121 @@ __global__ void pwa_amp_reduce_kernel(
     double* __restrict__ dnorm_out,
     double* __restrict__ dQ_dA_r, double* __restrict__ dQ_dA_i
 ) {
-    int event_idx = blockIdx.x;
-    int tid = threadIdx.x;
-    int block_sz = blockDim.x;
-    int n_base = n_wave / n_proj;      // N
+    // s0b: MULTI-EVENT scheduling.  The per-event work is tiny (N-term
+    // dot products), so one 256-thread block per event wastes the GPU
+    // on block scheduling and __syncthreads latency (measured: K3 runs
+    // ~200x above its traffic bound).  Small n_base: ONE THREAD per
+    // event (serial sum, no shared memory, no barriers).  Large n_base:
+    // one WARP per event (strided loads + shuffle reduction).  Both
+    // grid-stride over events; A_p is recomputed in a second pass for
+    // the dQ/dA write (no per-projection storage needed).
+    int n_base = n_wave / n_proj;
+    const int gtid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int gstride = gridDim.x * blockDim.x;
 
-    extern __shared__ double s_dyn[];
-    double* s_red_r = s_dyn;
-    double* s_red_i = s_dyn + block_sz;
-    double* sA_r = s_dyn + 2 * block_sz;
-    double* sA_i = s_dyn + 2 * block_sz + n_proj;
-
-    const double* cr = common_r + (size_t)event_idx * n_wave;
-    const double* ci = common_i + (size_t)event_idx * n_wave;
-
-    for (int p = 0; p < n_proj; p++) {
-        double ar = 0.0, ai = 0.0;
-        // A_p = Σ_k ck[k] · common[p·N + k]
-        for (int k = tid; k < n_base; k += block_sz) {
-            int w = p * n_base + k;
-            double ckr = ck_real[k], cki = ck_imag[k];
-            double cmr = cr[w], cmi = ci[w];
-            ar += ckr * cmr - cki * cmi;
-            ai += ckr * cmi + cki * cmr;
-        }
-        s_red_r[tid] = ar;
-        s_red_i[tid] = ai;
-        __syncthreads();
-        for (int s = block_sz / 2; s > 0; s >>= 1) {
-            if (tid < s) {
-                s_red_r[tid] += s_red_r[tid + s];
-                s_red_i[tid] += s_red_i[tid + s];
+    if (n_base <= 32) {
+        for (int event_idx = gtid; event_idx < n_events; event_idx += gstride) {
+            const double* cr = common_r + (size_t)event_idx * n_wave;
+            const double* ci = common_i + (size_t)event_idx * n_wave;
+            double P = 0.0;
+            for (int p = 0; p < n_proj; p++) {
+                double ar = 0.0, ai = 0.0;
+                for (int k = 0; k < n_base; k++) {
+                    int w = p * n_base + k;
+                    double ckr = ck_real[k], cki = ck_imag[k];
+                    double cmr = cr[w], cmi = ci[w];
+                    ar += ckr * cmr - cki * cmi;
+                    ai += ckr * cmi + cki * cmr;
+                }
+                P += ar * ar + ai * ai;
             }
-            __syncthreads();
+            P_out[event_idx] = P;
+            double wval = weight[event_idx];
+            double bkg_val = bkg[event_idx];
+            double dQ_dP;
+            if (use_norm == 0) {
+                Q_out[event_idx] = wval * P;
+                dQ_dP = wval;
+                dnorm_out[event_idx] = 0.0;
+            } else {
+                Q_out[event_idx] = -wval * log(P / norm + bkg_val);
+                dQ_dP = -wval / (P + bkg_val * norm);
+                dnorm_out[event_idx] = wval * P / (norm * (P + bkg_val * norm));
+            }
+            size_t ab = (size_t)event_idx * n_proj;
+            for (int p = 0; p < n_proj; p++) {
+                double ar = 0.0, ai = 0.0;
+                for (int k = 0; k < n_base; k++) {
+                    int w = p * n_base + k;
+                    double ckr = ck_real[k], cki = ck_imag[k];
+                    double cmr = cr[w], cmi = ci[w];
+                    ar += ckr * cmr - cki * cmi;
+                    ai += ckr * cmi + cki * cmr;
+                }
+                dQ_dA_r[ab + p] = dQ_dP * ar;
+                dQ_dA_i[ab + p] = -dQ_dP * ai;
+            }
         }
-        if (tid == 0) {
-            sA_r[p] = s_red_r[0];
-            sA_i[p] = s_red_i[0];
-        }
-        __syncthreads();    // protect s_red reuse + sA read after the loop
+        return;
     }
 
-    if (tid == 0) {
+    // ── large n_base: one warp per event, shuffle reduction ─────────
+    const int lane = threadIdx.x & 31;
+    const int warps_per_block = blockDim.x >> 5;
+    const int e0 = blockIdx.x * warps_per_block + (threadIdx.x >> 5);
+    const int estride = gridDim.x * warps_per_block;
+    for (int event_idx = e0; event_idx < n_events; event_idx += estride) {
+        const double* cr = common_r + (size_t)event_idx * n_wave;
+        const double* ci = common_i + (size_t)event_idx * n_wave;
         double P = 0.0;
         for (int p = 0; p < n_proj; p++) {
-            double ar = sA_r[p], ai = sA_i[p];
-            P += ar * ar + ai * ai;
+            double ar = 0.0, ai = 0.0;
+            for (int k = lane; k < n_base; k += 32) {
+                int w = p * n_base + k;
+                double ckr = ck_real[k], cki = ck_imag[k];
+                double cmr = cr[w], cmi = ci[w];
+                ar += ckr * cmr - cki * cmi;
+                ai += ckr * cmi + cki * cmr;
+            }
+            for (int off = 16; off > 0; off >>= 1) {
+                ar += __shfl_down_sync(0xffffffffu, ar, off);
+                ai += __shfl_down_sync(0xffffffffu, ai, off);
+            }
+            if (lane == 0) P += ar * ar + ai * ai;
         }
-        P_out[event_idx] = P;
-        double wval = weight[event_idx];
-        double bkg_val = bkg[event_idx];
-        double dQ_dP;
-        if (use_norm == 0) {
-            Q_out[event_idx] = wval * P;
-            dQ_dP = wval;
-            dnorm_out[event_idx] = 0.0;
-        } else {
-            Q_out[event_idx] = -wval * log(P / norm + bkg_val);
-            dQ_dP = -wval / (P + bkg_val * norm);
-            // native d(NLL)/d(norm) contribution of this event
-            dnorm_out[event_idx] = wval * P / (norm * (P + bkg_val * norm));
-        }
-        // dQ/dA_p = dQ/dP · conj(A_p)
-        size_t ab = (size_t)event_idx * n_proj;
-        for (int p = 0; p < n_proj; p++) {
-            dQ_dA_r[ab + p] = dQ_dP * sA_r[p];
-            dQ_dA_i[ab + p] = -dQ_dP * sA_i[p];
+        if (lane == 0) {
+            P_out[event_idx] = P;
+            double wval = weight[event_idx];
+            double bkg_val = bkg[event_idx];
+            double dQ_dP;
+            if (use_norm == 0) {
+                Q_out[event_idx] = wval * P;
+                dQ_dP = wval;
+                dnorm_out[event_idx] = 0.0;
+            } else {
+                Q_out[event_idx] = -wval * log(P / norm + bkg_val);
+                dQ_dP = -wval / (P + bkg_val * norm);
+                dnorm_out[event_idx] = wval * P / (norm * (P + bkg_val * norm));
+            }
+            size_t ab = (size_t)event_idx * n_proj;
+            for (int p = 0; p < n_proj; p++) {
+                double ar = 0.0, ai = 0.0;
+                for (int k = lane; k < n_base; k += 32) {
+                    int w = p * n_base + k;
+                    double ckr = ck_real[k], cki = ck_imag[k];
+                    double cmr = cr[w], cmi = ci[w];
+                    ar += ckr * cmr - cki * cmi;
+                    ai += ckr * cmi + cki * cmr;
+                }
+                for (int off = 16; off > 0; off >>= 1) {
+                    ar += __shfl_down_sync(0xffffffffu, ar, off);
+                    ai += __shfl_down_sync(0xffffffffu, ai, off);
+                }
+                if (lane == 0) {
+                    dQ_dA_r[ab + p] = dQ_dP * ar;
+                    dQ_dA_i[ab + p] = -dQ_dP * ai;
+                }
+            }
         }
     }
 }
@@ -855,8 +904,9 @@ void launch_compute_all(
 
     //── K3: PWA forward (P = Σ_p |A_p|², dQ/dA_p) ────────────────────
     {
-        size_t shmem = (2 * BLOCK_SIZE + 2 * P) * sizeof(double);
-        pwa_amp_reduce_kernel<<<ne, BLOCK_SIZE, shmem>>>(
+        int k3_grid = (ne + BLOCK_SIZE - 1) / BLOCK_SIZE;   // s0b: multi-event
+        if (k3_grid > 4096) k3_grid = 4096;
+        pwa_amp_reduce_kernel<<<k3_grid, BLOCK_SIZE>>>(
             data->common_amp_factor_real, data->common_amp_factor_imag,
             params->ck_real, params->ck_imag,
             data->weight, data->bkg,
