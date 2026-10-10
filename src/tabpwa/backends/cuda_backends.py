@@ -299,6 +299,43 @@ class CUDABackendV5PWAS0(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_s0c", model="pwa")
+class CUDABackendV5PWAS0C(_CUDABackend):
+    """CUDA v5 PWA s0c — the uniform-coefficient s0c kernel + log-sum NLL.
+
+    Combines :class:`CUDABackendV4PWAS0C` (uniform basis sum, fused
+    grad_coeff, multi-event scheduling, device accumulators, pinned
+    async upload, dedicated stream) with the cuda_v5 grouped log-sum
+    data NLL.  The per-group NLL/d(NLL)/dnorm accumulate ON DEVICE (no
+    host round-trip).  ``resolution_size=1`` with unit weights
+    reproduces the per-event v4 s0c NLL exactly.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_s0c import CUDAKernelV5PWAS0C as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_s0c kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda32_v4_pwa_cache", model="pwa")
 class CUDABackendV4PWACache32(_CUDABackend):
     """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
