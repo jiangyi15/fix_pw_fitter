@@ -99,6 +99,7 @@ void cuda_compute_v4(void*,void*,
 void cuda_gram_matrix_v4(void*,void*,
     const double*,const double*,double*,double*);
 int cuda_get_device_count();
+void cuda_s0b_set_flags();
 int cuda_get_device_name(char*,int);
 void* cuda_alloc(void**, size_t);
 void cuda_free(void*);
@@ -143,6 +144,9 @@ class CUDAKernelV4PWAS0B:
 
     def __init__(self, config, batch_size=50000, lib_path=None):
         self._lib = _load_lib()
+        # busy-wait sync BEFORE the primary context is created (no-op if
+        # another backend already created it in this process)
+        self._lib.cuda_s0b_set_flags()
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")

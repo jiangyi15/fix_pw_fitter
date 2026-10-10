@@ -806,6 +806,13 @@ typedef struct {
     // costs ~0.9 ms/call on this driver; pinned + cudaMemcpyAsync ~10 us
     double* h_ck_r; double* h_ck_i;
     double* h_s0; double* h_mult;
+    // s0b: dedicated NON-LEGACY stream — the legacy default stream's
+    // blocking copies carry ~1-2 ms of fixed driver latency on this
+    // system (measured: sync H2D 0.9 ms, blocking D2H 2.2 ms, both
+    // size-independent).  All per-iteration work runs on this stream;
+    // the one output sync per call is stream-scoped and cheap.
+    cudaStream_t stream;
+    double* acc_host;                   // pinned [acc_total] output staging
 } ComputeContext;
 
 typedef struct {
@@ -823,6 +830,15 @@ cudaError_t cuda_memcpy_to_host(void* dst, const void* src, size_t size) {
 }
 cudaError_t cuda_memset(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
 int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
+void cuda_s0b_set_flags() {
+    // s0b: busy-wait synchronization — the default (interrupt/blocking)
+    // sync costs ~1-2 ms per cudaStreamSynchronize on this driver
+    // (interrupt coalescing), dominating the per-call overhead.  Must be
+    // called BEFORE the primary context is created (first CUDA call in
+    // the process); silently ignored otherwise.
+    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
+}
+
 cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
@@ -836,6 +852,14 @@ cudaError_t cuda_get_device_name(char* name, int len) {
 void launch_reduce_sum(const double* input, double* output, int n) {
     int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     reduce_sum_kernel<<<grid_size, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(input, output, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_reduce_sum_stream(const double* input, double* output, int n,
+                              cudaStream_t stream) {
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    reduce_sum_kernel<<<grid_size, BLOCK_SIZE, BLOCK_SIZE * sizeof(double),
+                        stream>>>(input, output, n);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -857,6 +881,65 @@ void launch_reduce_sum_features_acc(const double* input, double* output,
     int n_events, int n_features) {
     reduce_sum_features_acc_kernel<<<n_features, BLOCK_SIZE, BLOCK_SIZE * sizeof(double)>>>(
         input, output, n_events, n_features);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// s0b: COALESCED chunked features-reduce.  The per-feature layout
+// [e·n_features + f] makes a fixed-feature scan stride n_features·8 B
+// (every read its own sector) at n_features-block parallelism — measured
+// ~10 ms at 300k events.  Instead (n_features <= 32): one block per
+// EVENT CHUNK; consecutive threads read consecutive flat elements
+// (perfectly coalesced) and accumulate into PRIVATE per-thread shared
+// slots [f·blockDim + tid] — no atomics during accumulation — then a
+// barrier tree reduces all features simultaneously and one global
+// atomicAdd per feature lands in the persistent accumulator.
+// n_features > 32 keeps the per-feature-block accumulate kernel (the
+// shared tile would exceed the 48 KB limit; large-nf tiling is future
+// work).
+__global__ void reduce_sum_features_tree_kernel(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    int n_events, int n_features, int chunk
+) {
+    extern __shared__ double sacc[];   // [f·blockDim.x + tid]
+    const int bd = blockDim.x;
+    const int tid = threadIdx.x;
+    const int c0 = blockIdx.x * chunk;
+    int c1 = c0 + chunk;
+    if (c1 > n_events) c1 = n_events;
+    for (int f = 0; f < n_features; f++) sacc[f * bd + tid] = 0.0;
+
+    const long long base = (long long)c0 * n_features;
+    const int total = (c1 - c0) * n_features;
+    for (int idx = tid; idx < total; idx += bd) {
+        int f = (int)(idx % n_features);
+        sacc[f * bd + tid] += input[base + idx];
+    }
+    __syncthreads();
+    for (int st = bd / 2; st > 0; st >>= 1) {
+        if (tid < st) {
+            for (int f = 0; f < n_features; f++)
+                sacc[f * bd + tid] += sacc[f * bd + tid + st];
+        }
+        __syncthreads();
+    }
+    if (tid < n_features) atomicAdd(&output[tid], sacc[tid * bd]);
+}
+
+void launch_reduce_sum_features_chunked(const double* input, double* output,
+    int n_events, int n_features, cudaStream_t stream) {
+    if (n_features <= 32) {
+        int chunk = 1024;
+        int n_chunks = (n_events + chunk - 1) / chunk;
+        if (n_chunks < 1) n_chunks = 1;
+        reduce_sum_features_tree_kernel<<<n_chunks, 128,
+            n_features * 128 * sizeof(double), stream>>>(
+            input, output, n_events, n_features, chunk);
+    } else {
+        reduce_sum_features_acc_kernel<<<n_features, BLOCK_SIZE,
+            BLOCK_SIZE * sizeof(double), stream>>>(
+            input, output, n_events, n_features);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -886,7 +969,7 @@ void launch_compute_all(
     //     angular part from the one-time cache
     {
         size_t shmem = ctx->n_mass * sizeof(double);
-        amp_cache_amp_kernel<<<ne, amp_t, shmem>>>(
+        amp_cache_amp_kernel<<<ne, amp_t, shmem, ctx->stream>>>(
             data->mass,
             ctx->mass_index,
             params->s0, params->mult,
@@ -906,7 +989,7 @@ void launch_compute_all(
     {
         int k3_grid = (ne + BLOCK_SIZE - 1) / BLOCK_SIZE;   // s0b: multi-event
         if (k3_grid > 4096) k3_grid = 4096;
-        pwa_amp_reduce_kernel<<<k3_grid, BLOCK_SIZE>>>(
+        pwa_amp_reduce_kernel<<<k3_grid, BLOCK_SIZE, 0, ctx->stream>>>(
             data->common_amp_factor_real, data->common_amp_factor_imag,
             params->ck_real, params->ck_imag,
             data->weight, data->bkg,
@@ -919,7 +1002,7 @@ void launch_compute_all(
     //── K4: ck gradient (projection-reduced partials, length N) ───────
     {
         size_t shmem = 2 * N * sizeof(double);
-        grad_ck_kernel_v4<<<ne, BLOCK_SIZE, shmem>>>(
+        grad_ck_kernel_v4<<<ne, BLOCK_SIZE, shmem, ctx->stream>>>(
             data->common_amp_factor_real, data->common_amp_factor_imag,
             data->dQ_dA_real, data->dQ_dA_imag,
             data->grad_ck_real_partial, data->grad_ck_imag_partial,
@@ -928,7 +1011,7 @@ void launch_compute_all(
     CUDA_CHECK(cudaGetLastError());
 
     //── K5: bw_dom / m0 gradients ────────────────────────────────────
-    grad_bw_dom_kernel_v4<<<ne, amp_t>>>(
+    grad_bw_dom_kernel_v4<<<ne, amp_t, 0, ctx->stream>>>(
         data->common_amp_factor_real, data->common_amp_factor_imag,
         data->dQ_dA_real, data->dQ_dA_imag,
         data->bw_dom_real, data->bw_dom_imag,
@@ -938,7 +1021,7 @@ void launch_compute_all(
         data->dQ_dbw_dom_real, data->dQ_dbw_dom_imag, ne);
     CUDA_CHECK(cudaGetLastError());
 
-    grad_mult_kernel<<<ne, BLOCK_SIZE>>>(
+    grad_mult_kernel<<<ne, BLOCK_SIZE, 0, ctx->stream>>>(
         data->dQ_dbw_dom_real, data->dQ_dbw_dom_imag,
         data->g_interp_real, data->g_interp_imag,
         ctx->gamma_col_idx,
@@ -958,6 +1041,7 @@ typedef struct {
     int ne; int nm; int nmom; int nat; int nac;
     float2* amp_cache;    // [ne · n_uniq], built at load_data
     int n_uniq;
+    double* h_P;          // s0b: pinned per-event P staging [ne]
 } DataHandle2;
 
 void cuda_free_context_v4(void* vctx);  // forward decl (used by create on error)
@@ -1055,6 +1139,10 @@ void* cuda_create_context_v4(
         CUDA_CHECK(cudaMallocHost(&c->h_s0, c->n_wave * sizeof(double)));
         CUDA_CHECK(cudaMallocHost(&c->h_mult,
                                   c->n_gamma_rows * sizeof(double)));
+        CUDA_CHECK(cudaStreamCreate(&c->stream));
+        int acc_total = 2 + 2 * (c->n_wave / c->n_proj) + c->n_wave
+                            + c->n_gamma_rows;
+        CUDA_CHECK(cudaMallocHost(&c->acc_host, acc_total * sizeof(double)));
     }
     return c;
 }
@@ -1094,6 +1182,8 @@ void cuda_free_context_v4(void* vctx) {
     if (c->h_ck_i) cudaFreeHost(c->h_ck_i);
     if (c->h_s0) cudaFreeHost(c->h_s0);
     if (c->h_mult) cudaFreeHost(c->h_mult);
+    if (c->acc_host) cudaFreeHost(c->acc_host);
+    if (c->stream) cudaStreamDestroy(c->stream);
     free(c);
 }
 
@@ -1116,6 +1206,7 @@ void* cuda_load_data_v4(void* vctx,
     h->w = (const double*)_up_dbl(wgt, ne);
     h->b = (const double*)_up_dbl(bkg, ne);
     h->ne = ne; h->nm = nmass; h->nmom = nmom; h->nat = nang; h->nac = nac;
+    CUDA_CHECK(cudaMallocHost(&h->h_P, (size_t)ne * sizeof(double)));   // s0b
 
     if (c_ctx) {
         if (!alloc_handle_amp_cache(c_ctx, h)) goto fail;
@@ -1150,6 +1241,7 @@ void* cuda_load_data_v4(void* vctx,
 fail:
     cudaFree((void*)h->m); cudaFree((void*)h->w); cudaFree((void*)h->b);
     if (h->amp_cache) cudaFree(h->amp_cache);
+    if (h->h_P) cudaFreeHost(h->h_P);
     free(h);
     return NULL;
 }
@@ -1160,6 +1252,7 @@ void cuda_free_data_v4(void* vh) {
     cudaFree((void*)h->m);
     cudaFree((void*)h->w); cudaFree((void*)h->b);
     if (h->amp_cache) cudaFree(h->amp_cache);
+    if (h->h_P) cudaFreeHost(h->h_P);
     free(h);
 }
 
@@ -1181,7 +1274,7 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
     int fill_b = c->n_uniq;
     if (fill_b < 256) fill_b = 256;
     if (fill_b > 1024) fill_b = 1024;
-    amp_cache_fill_kernel<<<n_events, fill_b, shmem>>>(
+    amp_cache_fill_kernel<<<n_events, fill_b, shmem, c->stream>>>(
         ang, c->angle_index,
         c->angle_k, c->angle_b,
         c->matrix_angle_real, c->matrix_angle_imag,
@@ -1220,13 +1313,13 @@ void cuda_compute_v4(void* vctx, void* vdh,
     memcpy(c->h_s0, s0, c->n_wave * sizeof(double));
     memcpy(c->h_mult, mult, c->n_gamma_rows * sizeof(double));
     cudaMemcpyAsync(c->p_ck_r, c->h_ck_r, N * sizeof(double),
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, c->stream);
     cudaMemcpyAsync(c->p_ck_i, c->h_ck_i, N * sizeof(double),
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, c->stream);
     cudaMemcpyAsync(c->p_s0, c->h_s0, c->n_wave * sizeof(double),
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, c->stream);
     cudaMemcpyAsync(c->p_mult, c->h_mult, c->n_gamma_rows * sizeof(double),
-                    cudaMemcpyHostToDevice);
+                    cudaMemcpyHostToDevice, c->stream);
 
 
     ComputeData s;
@@ -1250,13 +1343,13 @@ void cuda_compute_v4(void* vctx, void* vdh,
     }
 
     *oQ = 0; *oDn = 0;
-    cudaMemset(c->acc_buf, 0, (2 + 2 * N + nw + ng) * 8);   // s0b
+    cudaMemsetAsync(c->acc_buf, 0, (2 + 2 * N + nw + ng) * 8, c->stream);
     if (oP != NULL) memset(oP, 0, ne * 8);
     memset(ogck_r, 0, N * 8); memset(ogck_i, 0, N * 8);
     memset(ogs0, 0, nw * 8); memset(ogmult, 0, ng * 8);
 
 
-    double* Ph = (double*)malloc(bs * 8);   // P copy only (s0b)
+    // s0b: P goes through the handle's pinned staging — no host buffer
     // s0b: Q/dnorm/gradients accumulate on device — no per-batch host bufs
     const int acc_total = 2 + 2 * N + nw + ng;
     const int off_gck_r = 2, off_gck_i = 2 + N;
@@ -1280,37 +1373,41 @@ void cuda_compute_v4(void* vctx, void* vdh,
         // s0b: everything accumulates on device (tree reductions,
         // atomicAdd / +=) — no blocking D2H copies inside the batch loop.
         // Per-event P is still copied out when the caller asks for it.
-        if (oP != NULL) {
-            cudaMemcpy(Ph, d.P_out, nb * 8, cudaMemcpyDeviceToHost);
-            memcpy(oP + st, Ph, nb * 8);
+        if (oP != NULL) {   // s0b: async into the handle's pinned staging
+            cudaMemcpyAsync(h->h_P + st, d.P_out, nb * 8,
+                            cudaMemcpyDeviceToHost, c->stream);
         }
 
-        launch_reduce_sum(d.Q_out, c->acc_buf + 0, nb);
-        launch_reduce_sum(d.dnorm_out, c->acc_buf + 1, nb);
-        launch_reduce_sum_features_acc(d.grad_ck_real_partial,
-                                       c->acc_buf + off_gck_r, nb, N);
-        launch_reduce_sum_features_acc(d.grad_ck_imag_partial,
-                                       c->acc_buf + off_gck_i, nb, N);
-        launch_reduce_sum_features_acc(d.grad_s0_partial,
-                                       c->acc_buf + off_gs0, nb, nw);
-        launch_reduce_sum_features_acc(d.grad_mult_partial,
-                                       c->acc_buf + off_gmult, nb, ng);
+        launch_reduce_sum_stream(d.Q_out, c->acc_buf + 0, nb, c->stream);
+        launch_reduce_sum_stream(d.dnorm_out, c->acc_buf + 1, nb, c->stream);
+        launch_reduce_sum_features_chunked(d.grad_ck_real_partial,
+                                           c->acc_buf + off_gck_r, nb, N,
+                                           c->stream);
+        launch_reduce_sum_features_chunked(d.grad_ck_imag_partial,
+                                           c->acc_buf + off_gck_i, nb, N,
+                                           c->stream);
+        launch_reduce_sum_features_chunked(d.grad_s0_partial,
+                                           c->acc_buf + off_gs0, nb, nw,
+                                           c->stream);
+        launch_reduce_sum_features_chunked(d.grad_mult_partial,
+                                           c->acc_buf + off_gmult, nb, ng,
+                                           c->stream);
     }
 
-    // s0b: ONE blocking D2H copy per call, then scatter to the outputs
+    // s0b: ONE stream-scoped sync per call; the outputs were collected
+    // asynchronously into pinned staging
     {
-        double* acc_host = (double*)malloc(acc_total * 8);
-        cudaMemcpy(acc_host, c->acc_buf, acc_total * 8,
-                   cudaMemcpyDeviceToHost);
-        *oQ += acc_host[0];
-        *oDn += acc_host[1];
-        for (int j = 0; j < N; j++) ogck_r[j] += acc_host[off_gck_r + j];
-        for (int j = 0; j < N; j++) ogck_i[j] += acc_host[off_gck_i + j];
-        for (int j = 0; j < nw; j++) ogs0[j] += acc_host[off_gs0 + j];
-        for (int j = 0; j < ng; j++) ogmult[j] += acc_host[off_gmult + j];
-        free(acc_host);
+        cudaMemcpyAsync(c->acc_host, c->acc_buf, acc_total * 8,
+                        cudaMemcpyDeviceToHost, c->stream);
+        cudaStreamSynchronize(c->stream);
+        *oQ += c->acc_host[0];
+        *oDn += c->acc_host[1];
+        for (int j = 0; j < N; j++) ogck_r[j] += c->acc_host[off_gck_r + j];
+        for (int j = 0; j < N; j++) ogck_i[j] += c->acc_host[off_gck_i + j];
+        for (int j = 0; j < nw; j++) ogs0[j] += c->acc_host[off_gs0 + j];
+        for (int j = 0; j < ng; j++) ogmult[j] += c->acc_host[off_gmult + j];
+        if (oP != NULL) memcpy(oP, h->h_P, ne * 8);
     }
-
     if (!c->scratch) {
         #define F(p) do { if(s.p) cudaFree(s.p); } while(0)
         F(g_interp_real); F(g_interp_imag); F(dQ_dbw_dom_real); F(dQ_dbw_dom_imag); F(g_bw_real); F(g_bw_imag);
@@ -1324,7 +1421,7 @@ void cuda_compute_v4(void* vctx, void* vdh,
        
         #undef F
     }
-    free(Ph);
+
 
 }
 
