@@ -67,11 +67,29 @@ class _PolyMock:
         return float(q), g
 
 
+def test_interp_inverse():
+    """The crossing inversion (PCHIP + brentq): exact at the nodes,
+    O(step³) between them; None when never reached."""
+    from tabpwa.numerics import interp_inverse
+
+    xs = np.linspace(0.0, 2.0, 11)          # y = x³
+    ys = xs ** 3
+    # level at a node → exact
+    assert interp_inverse(xs, ys, 1.0) == pytest.approx(1.0)
+    # level between nodes: PCHIP cubic accuracy
+    level = 1.1
+    x_true = level ** (1.0 / 3.0)
+    got = interp_inverse(xs, ys, level)
+    assert got == pytest.approx(x_true, abs=2e-3), (got, x_true)
+    # never reached
+    assert interp_inverse(xs, ys, 99.0) is None
+
+
 def test_profile_scan_quadratic_exact():
     m = _PolyMock(n=6, seed=1)
     idx = 2
     Sii = m.S[idx, idx]
-    expect = np.sqrt(2.0 * Sii)          # the ΔQ = 1 crossing
+    expect = np.sqrt(Sii)                # the ΔQ = 0.5 crossing IS the gaussian σ
 
     # exact h_inv: the prediction IS the profile path — every point
     # sits on the closed-form parabola
@@ -80,9 +98,11 @@ def test_profile_scan_quadratic_exact():
         assert abs((q - prof.q_min) - d * d / (2.0 * Sii)) < 1e-9
     # crossings: linear interpolation between scan points on a convex
     # parabola underestimates by the chord sagitta (~3% at grow=1.6)
-    assert abs(prof.cross_hi - expect) < 0.05 * expect
-    assert abs(prof.cross_lo + expect) < 0.05 * expect
-    lo, hi = prof.interval
+    clo, chi = prof.crossing()
+    # PCHIP inversion: ~0.3% on the coarse adaptive grid
+    assert abs(chi - expect) < 5e-3 * expect
+    assert abs(clo + expect) < 5e-3 * expect
+    lo, hi = prof.interval()
     assert lo == pytest.approx(m.x_hat[idx] - expect, rel=0.05)
     assert hi == pytest.approx(m.x_hat[idx] + expect, rel=0.05)
 
@@ -90,8 +110,49 @@ def test_profile_scan_quadratic_exact():
     # exact to roundoff for these polynomials, same crossings
     prof_fd = profile_scan(m, m.x_hat, None, idx, delta_q=1.0,
                            h_inv_fd=True)
-    assert abs(prof_fd.cross_hi - expect) < 0.05 * expect
-    assert abs(prof_fd.cross_lo + expect) < 0.05 * expect
+    assert abs(prof_fd.crossing()[1] - expect) < 5e-3 * expect
+    assert abs(prof_fd.crossing()[0] + expect) < 5e-3 * expect
+
+
+def test_profile_scan_edges():
+    """The edge-driven entry: scan from the minimum to explicit left/
+    right edges — the last point of each side sits exactly on its
+    edge, the anchor sits at (x̂, 0), and ΔQ stays closed-form."""
+    m = _PolyMock(n=6, seed=1)
+    idx = 2
+    Sii = m.S[idx, idx]
+    xh = m.x_hat
+
+    r = profile_scan(m, xh, m.S, idx, delta_q=1.0,
+                     edges=(-0.4, 0.7), max_points=10)
+    assert r.delta[0] == pytest.approx(-0.4)      # exactly the left edge
+    assert r.delta[-1] == pytest.approx(0.7)      # exactly the right edge
+    # the anchor: Δ=0 with ΔQ=0, and x_vals reads x̂ + delta
+    k0 = int(np.argmin(np.abs(r.delta)))
+    assert r.delta[k0] == 0.0
+    assert r.dq[k0] == pytest.approx(0.0, abs=1e-12)
+    np.testing.assert_allclose(r.x_vals, xh[idx] + r.delta)
+    for d, q in zip(r.delta, r.q):
+        assert abs((q - r.q_min) - d * d / (2.0 * Sii)) < 1e-9
+
+    # one-sided: the None side is skipped (no points, no crossing)
+    r1 = profile_scan(m, xh, m.S, idx, delta_q=1.0,
+                      edges=(None, 0.5), max_points=10)
+    assert (np.asarray(r1.delta) < 0).sum() == 0
+    assert r1.crossing()[0] is None
+    assert r1.delta[-1] == pytest.approx(0.5)
+
+    # explicit step: uniform spacing, edges exact, anchor at zero
+    r2 = profile_scan(m, xh, m.S, idx, delta_q=1.0,
+                      edges=(-0.4, 0.7), step=0.1)
+    dm = np.asarray(r2.delta)
+    minus = dm[dm < 0]
+    plus = dm[dm > 0]
+    # path order: left edge → min → right edge
+    np.testing.assert_allclose(minus, [-0.4, -0.3, -0.2, -0.1])
+    np.testing.assert_allclose(plus, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+    for d, q in zip(dm, r2.q):
+        assert abs((q - r2.q_min) - d * d / (2.0 * Sii)) < 1e-9
 
 
 def test_profile_scan_nonquadratic_matches_bruteforce():
@@ -99,7 +160,8 @@ def test_profile_scan_nonquadratic_matches_bruteforce():
     idx = 1
     prof = profile_scan(m, m.x_hat, None, idx, delta_q=1.0,
                         max_points=8, h_inv_fd=True)
-    assert prof.cross_hi is not None and prof.cross_lo is not None, \
+    clo, chi = prof.crossing(1.0)
+    assert chi is not None and clo is not None, \
         "the scan did not reach ΔQ = 1"
 
     from scipy.optimize import minimize as _minimize
@@ -116,8 +178,7 @@ def test_profile_scan_nonquadratic_matches_bruteforce():
             return q, g[mask]
         return nui
 
-    for delta in (0.5 * prof.cross_hi, prof.cross_hi,
-                  1.5 * prof.cross_hi):
+    for delta in (0.5 * chi, chi, 1.5 * chi):
         k = int(np.argmin(np.abs(pd - delta)))
         # polish FROM the corrected point: can full BFGS improve on it?
         r = _minimize(make_nui(pd[k]), np.asarray(prof.x[k])[mask],
@@ -135,7 +196,8 @@ def test_profile_scan_strongly_nonquadratic():
     idx = 1
     prof = profile_scan(m, m.x_hat, None, idx, delta_q=1.0,
                         max_points=12, h_inv_fd=True)
-    assert prof.cross_hi is not None and prof.cross_lo is not None, \
+    clo, chi = prof.crossing(1.0)
+    assert chi is not None and clo is not None, \
         "the scan did not reach ΔQ = 1"
 
     # the mock IS strongly non-quadratic: S = H⁻¹ is the exact
@@ -151,26 +213,24 @@ def test_profile_scan_strongly_nonquadratic():
     rp, rm = float(ratios[ip]), float(ratios[im])
     # the stiff side is monotone → its outermost point is the max; the
     # soft side peaks mid-scan (the quartic re-stiffens it far out) →
-    # take the min over all points
+    # take the min over all points (nanmin: the Δ=0 anchor is 0/0)
     assert max(rp, rm) > 1.05, (
         f"no stiff side: ratios {rp:.3f}/{rm:.3f}")
-    assert float(np.min(ratios)) < 0.85, (
-        f"no soft side: min ratio {np.min(ratios):.3f}")
+    assert float(np.nanmin(ratios)) < 0.85, (
+        f"no soft side: min ratio {np.nanmin(ratios):.3f}")
     # the stiff side rises faster → the narrower ΔQ = 1 interval
     if rp > rm:
-        assert prof.cross_hi < abs(prof.cross_lo), (
-            f"stiff + side but crossings not skewed: "
-            f"{prof.cross_lo:+.4f}/{prof.cross_hi:+.4f}")
+        assert chi < abs(clo), (
+            f"stiff + side but crossings not skewed: {clo:+.4f}/{chi:+.4f}")
     else:
-        assert prof.cross_hi > abs(prof.cross_lo), (
-            f"stiff − side but crossings not skewed: "
-            f"{prof.cross_lo:+.4f}/{prof.cross_hi:+.4f}")
+        assert chi > abs(clo), (
+            f"stiff − side but crossings not skewed: {clo:+.4f}/{chi:+.4f}")
 
     # and the corrected points still sit on the TRUE profile
     from scipy.optimize import minimize as _minimize
     mask = np.ones(len(m.x_hat), bool)
     mask[idx] = False
-    for d in (prof.cross_hi, prof.cross_lo):
+    for d in (chi, clo):
         k = int(np.argmin(np.abs(pd - d)))
         def nui(x_n, dd=pd[k]):
             x = m.x_hat.copy()
@@ -217,7 +277,8 @@ def test_profile_matches_bruteforce():
         # coarse for an accurate prediction — the FD path (2N gradient
         # evals, once) makes the corrections converge in 1-2 steps
         prof = f.profile(res, PARAM, delta_q=1.0, max_points=10, h_inv_fd=True)
-        assert prof.cross_hi is not None and prof.cross_lo is not None, \
+        clo, chi = prof.crossing(1.0)
+        assert chi is not None and clo is not None, \
             "the scan did not reach ΔQ = 1"
 
         # brute force: fix the parameter, re-minimize the NUISANCE
@@ -239,8 +300,7 @@ def test_profile_matches_bruteforce():
 
         # the profile point nearest each brute-force offset
         prof_delta = np.asarray(prof.delta)
-        for delta in (0.5 * prof.cross_hi, prof.cross_hi,
-                      1.5 * prof.cross_hi):
+        for delta in (0.5 * chi, chi, 1.5 * chi):
             k = int(np.argmin(np.abs(prof_delta - delta)))
             # start the polish FROM the corrected profile point (a fair
             # comparison: can full BFGS improve on the correction?)
@@ -272,7 +332,8 @@ def test_profile_width_vs_bruteforce():
         Sii = S_fd[idx, idx]
         prof = f.profile(res, "MI1m_width", delta_q=1.0, max_points=12,
                          h_inv=S_fd)
-        assert prof.cross_hi is not None and prof.cross_lo is not None, \
+        clo, chi = prof.crossing(1.0)
+        assert chi is not None and clo is not None, \
             "the scan did not reach ΔQ = 1"
         pd = np.asarray(prof.delta)
         ratios = (np.asarray(prof.q) - prof.q_min) / (pd * pd / (2.0 * Sii))
@@ -294,8 +355,7 @@ def test_profile_width_vs_bruteforce():
                 return q, g[mask]
             return nll_nuisance
 
-        for delta in (prof.cross_hi, 1.5 * prof.cross_hi,
-                      prof.cross_lo, 1.5 * prof.cross_lo):
+        for delta in (chi, 1.5 * chi, clo, 1.5 * clo):
             k = int(np.argmin(np.abs(pd - delta)))
             r = _minimize(make_nll_nuisance(pd[k]),
                           np.asarray(prof.x[k])[mask],
@@ -319,9 +379,8 @@ def test_profile_crossings_near_gaussian():
         # BFGS is still coarse
         S_fd, _diag = fd_hessian(f, x_hat)
         gauss = np.sqrt(S_fd[idx, idx])
-        prof = f.profile(res, PARAM, delta_q=1.0, max_points=12,
-                         h_inv=S_fd)
-        lo, hi = prof.interval
+        prof = f.profile(res, PARAM, max_points=12, h_inv=S_fd)
+        lo, hi = prof.interval()
         assert hi is not None and lo is not None
         # the true profile can be asymmetric and wider than the
         # quadratic estimate; stay within ~40% of it for this toy

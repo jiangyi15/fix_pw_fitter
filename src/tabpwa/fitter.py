@@ -849,30 +849,9 @@ class Fitter:
     # ------------------------------------------------------------------
     # Optimization
     # ------------------------------------------------------------------
-    def profile(self, result, param, delta_q=1.0, **kw):
-        """Profile-likelihood scan in the flat parameter space.
-
-        Minos-style predictor-corrector: the quadratic model (the BFGS
-        ``hess_inv``) predicts the profile path; each scan point is
-        corrected with Newton steps in the nuisance subspace so the path
-        tracks the true profile.  1-3 NLL+grad evaluations per scan
-        point instead of a full re-minimization.
-
-        Args:
-            result: a :class:`FitResult` (needs ``x`` and ``hess_inv``)
-                    or a flat parameter vector (``hess_inv`` required).
-            param: the flat parameter name or index to scan.
-            delta_q: the target ΔQ (1.0 → the 1σ Minos interval).
-            **kw: passed to :func:`tabpwa.profile.profile_scan`
-                  (max_points, max_corr, grow); ``h_inv=...`` overrides
-                  the curvature (a 2D array, e.g. from
-                  :func:`tabpwa.profile.fd_hessian`) and ``h_inv_fd=True``
-                  recomputes it by finite differences.
-
-        Returns:
-            A :class:`tabpwa.profile.ProfileResult` (the path and the
-            ΔQ crossings; ``interval`` gives the (lo, hi) values).
-        """
+    def _profile_setup(self, result, param, kw):
+        """Common prolog for profile()/profile_scan(): result →
+        (x0, h_inv, idx), popping h_inv / h_inv_fd out of *kw*."""
         from .fit_result import FitResult
         if not isinstance(result, FitResult):
             result = FitResult.from_x(result)
@@ -889,8 +868,78 @@ class Fitter:
                 "h_inv=... explicitly, or set h_inv_fd=True")
         names = self.cm.var_registry.flat_names
         idx = names.index(param) if isinstance(param, str) else int(param)
+        return x0, h_inv, idx
+
+    def _profile(self, result, param, delta_q, edges, kw):
+        x0, h_inv, idx = self._profile_setup(result, param, kw)
         from .profile import profile_scan
-        return profile_scan(self, x0, h_inv, idx, delta_q=delta_q, **kw)
+        return profile_scan(self, x0, h_inv, idx, delta_q=delta_q,
+                            edges=edges, **kw)
+
+    def profile(self, result, param, delta_q=0.5, **kw):
+        """Profile-likelihood scan in the flat parameter space.
+
+        Minos-style predictor-corrector: the quadratic model (the BFGS
+        ``hess_inv``) predicts the profile path; each scan point is
+        corrected with Newton steps in the nuisance subspace so the path
+        tracks the true profile.  1-3 NLL+grad evaluations per scan
+        point instead of a full re-minimization.  Each direction stops
+        at ΔQ (0.5 by default); use :meth:`profile_scan` to scan to
+        explicit left/right edges instead.
+
+        Args:
+            result: a :class:`FitResult` (needs ``x`` and ``hess_inv``)
+                    or a flat parameter vector (``hess_inv`` required).
+            param: the flat parameter name or index to scan.
+            delta_q: the target ΔQ (0.5 → the 1σ Minos interval:
+                    ΔNLL = ½·χ²₁(68.3%)).
+            **kw: passed to :func:`tabpwa.profile.profile_scan`
+                  (max_points, max_corr, grow); ``h_inv=...`` overrides
+                  the curvature (a 2D array, e.g. from
+                  :func:`tabpwa.profile.fd_hessian`) and ``h_inv_fd=True``
+                  recomputes it by finite differences.
+
+        Returns:
+            A :class:`tabpwa.profile.ProfileResult` — the profile path;
+            ``interval(level)`` gives the (lo, hi) values where the
+            scaled NLL crosses the level (default 0.5).
+        """
+        return self._profile(result, param, delta_q, None, kw)
+
+    def profile_scan(self, result, param, lo, hi, step=None, **kw):
+        """Profile-likelihood scan from the minimum to left/right edges.
+
+        The on-profile walk (the same predictor-corrector as
+        :meth:`profile`) from the fitted value out to explicit edges —
+        the usable entry for 1D likelihood plots.  Named
+        ``profile_scan`` (not ``scan``): a bare scan usually means a
+        plain NLL scan, not the Minos walk.
+
+        Args:
+            result: a :class:`FitResult` or flat parameter vector (the
+                minimum; as in :meth:`profile`).
+            param: the flat parameter name or index to scan.
+            lo, hi: the ABSOLUTE flat parameter values of the left and
+                right edges (lo < fit value < hi; a None side is
+                skipped).
+            step: the uniform scan-point spacing (parameter units) —
+                the interval resolution; each side ends exactly on its
+                edge.  None keeps the adaptive d0/grow scheme.
+            **kw: as in :meth:`profile` (max_points, max_corr, grow,
+                h_inv, h_inv_fd).
+
+        Returns:
+            A :class:`tabpwa.profile.ProfileResult` — ``x_vals``/``dq``
+            are the plot-ready (x, scaled-NLL) arrays with the minimum
+            anchor at (x̂, 0).  No ΔQ crossings here — for a Minos
+            interval use :meth:`profile`.
+        """
+        x0, h_inv, idx = self._profile_setup(result, param, kw)
+        from .profile import profile_scan
+        offs = (None if lo is None else float(lo) - x0[idx],
+                None if hi is None else float(hi) - x0[idx])
+        return profile_scan(self, x0, h_inv, idx, edges=offs, step=step,
+                            **kw)
 
     def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
             method='BFGS', disp=True, options=None, **kwargs):

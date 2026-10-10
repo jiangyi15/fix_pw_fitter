@@ -20,42 +20,64 @@ physical parameters are the same likelihood with the transform removed.
 
 import numpy as np
 
-from .numerics import fd_hess
+from .numerics import fd_hess, interp_inverse
 
 
 class ProfileResult:
-    """One profile scan: the corrected path and the ΔQ crossings.
+    """One profile scan: the corrected path — a curve.  The ΔQ level
+    and its crossings are queried on demand (:meth:`crossing`,
+    :meth:`interval`), not baked in.
 
     Attributes:
         idx, name: the scanned flat parameter (index and name).
         q_min: the NLL at the start point.
-        delta_q: the target ΔQ (1.0 → the 1σ Minos interval).
-        delta: signed scan offsets (x̂_i + delta = the parameter value).
+        delta: signed scan offsets (x̂_i + delta = the parameter value);
+            the path reads left edge → minimum anchor (Δ=0) → right
+            edge.
         q: the corrected NLL at each point.
         x: the corrected flat parameter vectors.
-        cross_lo, cross_hi: the signed Δ where Q − q_min = delta_q
-            (None when the scan did not reach the target).
     """
 
-    def __init__(self, idx, name, x0, q_min, delta_q,
-                 delta, q, xs, cross_lo, cross_hi):
+    def __init__(self, idx, name, x0, q_min, delta, q, xs):
         self.idx = idx
         self.name = name
         self.x0 = np.asarray(x0, float)
         self.q_min = float(q_min)
-        self.delta_q = float(delta_q)
         self.delta = np.asarray(delta, float)
         self.q = np.asarray(q, float)
         self.x = list(xs)
-        self.cross_lo = cross_lo
-        self.cross_hi = cross_hi
 
     @property
-    def interval(self):
-        """The (lo, hi) parameter values at the ΔQ crossing."""
-        lo = None if self.cross_lo is None else self.x0[self.idx] + self.cross_lo
-        hi = None if self.cross_hi is None else self.x0[self.idx] + self.cross_hi
+    def x_vals(self):
+        """The scanned parameter values (``x0[idx] + delta``) — the
+        plot x-axis; the minimum anchor sits at ``x0[idx]``."""
+        return self.x0[self.idx] + self.delta
+
+    @property
+    def dq(self):
+        """The scaled NLL (``q − q_min``) — the plot y-axis; the
+        minimum anchor sits at 0."""
+        return self.q - self.q_min
+
+    def crossing(self, delta_q=0.5):
+        """The signed ``(Δ_lo, Δ_hi)`` where the scaled NLL crosses
+        ``delta_q`` — PCHIP (monotone cubic) inversion of the sampled
+        curve, per side; a side never reaching the level gives None.
+        """
+        d = self.delta
+        dq = self.dq
+        minus = d <= 0
+        plus = d >= 0
+        # each side outward from the anchor (dq growing)
+        lo = interp_inverse(d[minus][::-1], dq[minus][::-1], delta_q)
+        hi = interp_inverse(d[plus], dq[plus], delta_q)
         return lo, hi
+
+    def interval(self, delta_q=0.5):
+        """The (lo, hi) parameter values at the ΔQ crossing."""
+        lo, hi = self.crossing(delta_q)
+        return (None if lo is None else self.x0[self.idx] + lo,
+                None if hi is None else self.x0[self.idx] + hi)
 
 
 def fd_hessian(fitter, x0, damp=1e-8):
@@ -81,23 +103,9 @@ def fd_hessian(fitter, x0, damp=1e-8):
     return h_inv, diag
 
 
-def _crossing(pts, q_min, delta_q):
-    """Linear interpolation of the signed Δ where q − q_min = delta_q."""
-    ds = np.array([p[0] for p in pts], float)
-    dq = np.array([p[1] for p in pts], float) - q_min
-    hit = np.nonzero(dq >= delta_q)[0]
-    if not len(hit):
-        return None
-    k = int(hit[0])
-    if k == 0 or dq[k] == dq[k - 1]:
-        return float(ds[k])
-    t = (delta_q - dq[k - 1]) / (dq[k] - dq[k - 1])
-    return float(ds[k - 1] + t * (ds[k] - ds[k - 1]))
-
-
-def profile_scan(fitter, x0, h_inv, idx, delta_q=1.0,
+def profile_scan(fitter, x0, h_inv, idx, delta_q=0.5,
                  max_points=30, max_corr=15, grow=1.6, h_inv_fd=False,
-                 g_tol=1e-6):
+                 g_tol=1e-6, edges=None, step=None):
     """Predictor-corrector profile scan of flat parameter ``idx``.
 
     Args:
@@ -105,7 +113,8 @@ def profile_scan(fitter, x0, h_inv, idx, delta_q=1.0,
         x0: the start point (the fit minimum).
         h_inv: the inverse Hessian at ``x0`` (the BFGS ``hess_inv``).
         idx: the flat parameter index to scan.
-        delta_q: the target ΔQ (1.0 → the 1σ interval).
+        delta_q: the target ΔQ (0.5 → the 1σ Minos interval:
+            ΔNLL = ½·χ²₁(68.3%) — MINUIT's ERRORDEF for a likelihood).
         max_points: the per-direction scan-point budget.
         max_corr: the Newton-correction budget per point (the loop
             exits early once the nuisance gradient is below ``g_tol``
@@ -115,6 +124,17 @@ def profile_scan(fitter, x0, h_inv, idx, delta_q=1.0,
         grow: the step-growth factor per point (the corrections keep
             the path on the true profile, so the step can grow
             steadily; a rare over-correction just wastes a point).
+        edges: optional ``(lo, hi)`` scan EDGES as signed offsets from
+            ``x0[idx]`` (lo < 0 < hi; a side whose edge is None is
+            skipped).  When given, each present side scans from the
+            minimum out to its edge — the last point sits exactly on
+            the edge — instead of stopping at ΔQ.  The returned path
+            always carries the minimum anchor (Δ=0, q=q_min) between
+            the two sides.
+        step: uniform scan-point spacing (in parameter units) for the
+            edge-driven sides — the interval resolution.  Requires the
+            edges; ``None`` keeps the adaptive scheme (``d0`` then
+            ``grow`` steps), where ``delta_q`` is the stop level.
 
     Returns:
         A :class:`ProfileResult`.
@@ -178,12 +198,44 @@ def profile_scan(fitter, x0, h_inv, idx, delta_q=1.0,
         return q, x, corr_norm
 
     def scan(direction):
+        edge = (None if edges is None
+                else edges[0] if direction < 0 else edges[1])
+        edge = None if edge is None else abs(float(edge))
+        if step is not None:
+            if edge is None:
+                raise ValueError(
+                    "profile_scan: step requires an edge on that side")
+            # full steps strictly inside the edge (integer count —
+            # arange accumulates float error and can emit the edge)
+            k = int(np.floor(edge / step + 1e-9))
+            ds = [step * i for i in range(1, k + 1)]
+            if ds and edge - ds[-1] <= 1e-12 * max(step, edge):
+                ds[-1] = edge            # the last step IS the edge
+            else:
+                ds.append(edge)          # partial step → exact edge
+            if len(ds) > max_points:
+                raise ValueError(
+                    f"profile_scan: step={step} to edge={edge:.4g} gives "
+                    f"{len(ds)} points > max_points={max_points}")
+            pts = []
+            for d in ds:
+                q, x, _cn = point(direction, d)
+                pts.append((direction * d, q, x))
+            return pts
         pts = []
         delta = d0
         while len(pts) < max_points:
+            if edge is not None and delta > edge:
+                delta = edge             # the last point exactly on the edge
             q, x, corr_norm = point(direction, delta)
             pts.append((direction * delta, q, x))
-            if q - q_min >= delta_q:
+            # an explicit edge owns the stopping: the side scans to the
+            # edge even past ΔQ (the crossings use whatever it reached);
+            # without an edge the ΔQ rule stops the side
+            if edge is not None:
+                if delta >= edge:
+                    break
+            elif q - q_min >= delta_q:
                 break
             # the corrections keep the point on the true profile — the
             # step can grow steadily (the correction magnitude is NOT a
@@ -193,12 +245,14 @@ def profile_scan(fitter, x0, h_inv, idx, delta_q=1.0,
             delta *= grow
         return pts
 
-    pts_plus = scan(+1.0)
-    pts_minus = scan(-1.0)
-    pts = pts_minus[::-1] + pts_plus
+    edge_lo = None if edges is None else edges[0]
+    edge_hi = None if edges is None else edges[1]
+    pts_plus = scan(+1.0) if edge_hi is not None or edges is None else []
+    pts_minus = scan(-1.0) if edge_lo is not None or edges is None else []
+    # the minimum anchor between the sides (Δ=0, q=q_min) — the path
+    # reads "min to left/right edge" as one array
+    pts = pts_minus[::-1] + [(0.0, q_min, x0.copy())] + pts_plus
     delta = [p[0] for p in pts]
     q = [p[1] for p in pts]
     xs = [p[2] for p in pts]
-    return ProfileResult(idx, None, x0, q_min, delta_q, delta, q, xs,
-                         _crossing(pts_minus, q_min, delta_q),
-                         _crossing(pts_plus, q_min, delta_q))
+    return ProfileResult(idx, None, x0, q_min, delta, q, xs)
