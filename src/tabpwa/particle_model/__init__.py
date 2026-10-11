@@ -31,6 +31,7 @@ from . import bwr_model        # noqa: F401 — register BWR model
 from . import ck_matrix_v2     # noqa: F401 — register ck_matrix_v2 model
 from . import rho_omega_model  # noqa: F401 — register RhoOmega model
 from . import rho_omega2_model  # noqa: F401 — register RhoOmega2 model
+from . import rho_omega_bwr_model  # noqa: F401 — register RhoOmegaBWR model
 from . import interp_k_model    # noqa: F401 — InterpKModel base class
 from . import exp_model         # noqa: F401 — register Exp model
 from . import spline_k_model    # noqa: F401 — SplineKModel + ExpSpline
