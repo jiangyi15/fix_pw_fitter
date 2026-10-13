@@ -69,9 +69,20 @@ def _wave_names(f, n):
     return waves[:n]
 
 
-def _pretty(label, waves):
-    """Replace 'ck_<i>' with the wave name in a physical item label."""
-    return re.sub(r"ck_(\d+)", lambda m: waves[int(m.group(1))], label)
+def _pretty(name, waves):
+    """Replace 'ck_<i>' with the wave name in a physical item name."""
+    return re.sub(r"ck_(\d+)", lambda m: waves[int(m.group(1))], name)
+
+
+def _fmt(terms, waves):
+    """Format (coefficient, item) terms into a display string."""
+    if len(terms) == 1 and abs(terms[0][0] - 1.0) < 1e-6:
+        return _pretty(terms[0][1], waves)          # a pure item
+    parts = []
+    for idx, (c, name) in enumerate(terms):
+        nm = _pretty(name, waves)
+        parts.append(f"{c:.3f}{nm}" if idx == 0 else f"{c:+.3f}{nm}")
+    return "".join(parts) or "0"
 
 
 def _edges(mass, args):
@@ -129,13 +140,17 @@ def main():
     am = f.angular_moments()
     waves = _wave_names(f, am.n_wave)
 
-    labels, _rows = am.physical_basis()
-    labels = [_pretty(lab, waves) for lab in labels]
+    terms, _rows = am.physical_basis()
+    labels = [_fmt(t, waves) for t in terms]
 
     edges = _edges(mass, args)
     print(f"config={args.config}  data={args.data or '<config>'}  "
           f"n_events={len(mass)}  angles={kinds}")
     print(f"waves={waves} ({len(labels)})")
+    print("basis elements:")
+    for k, t in enumerate(terms):
+        parts = "  ".join(f"{c:+.3f} {_pretty(nm, waves)}" for c, nm in t)
+        print(f"  basis_{k}: {parts}")
     print(f"mass bins: {edges[0]:.4g} .. {edges[-1]:.4g} "
           f"({len(edges) - 1} bins)")
     header = f"{'m_lo':>8} {'m_hi':>8} {'N':>8}  "
@@ -179,14 +194,18 @@ def main():
             ax.errorbar(centers, ys, xerr=halfw, yerr=es, fmt="o", ms=4,
                         lw=1.2, capsize=2.5, color="C0")
             ax.set_xlabel("mass")
-            ax.set_ylabel(lab)
-            ax.set_title(lab)
+            ax.set_ylabel("value")
+            lines = [(_pretty(nm, waves) if abs(c - 1.0) < 1e-6
+                      else f"{c:.3f} {_pretty(nm, waves)}")
+                     for c, nm in terms[k]]
+            ax.text(0.97, 0.97, "\n".join(lines),
+                    transform=ax.transAxes, ha="right", va="top", fontsize=8)
             ax.grid(alpha=0.3)
             fig.tight_layout()
             fn = os.path.join(args.plot, f"basis_{k}.png")
             fig.savefig(fn, dpi=130)
             plt.close(fig)
-            print("plot:", fn)
+            print(f"plot: {fn}  =  {lab}")
 
     f.free()
 

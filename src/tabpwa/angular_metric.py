@@ -627,9 +627,9 @@ class AngularMoments:
         (an explicit item combination).
 
         Returns:
-            ``(labels, coeffs)`` — for each basis element the readable
-            label and its coefficients over the physical items (the
-            ``wpairs`` order: |ck|^2 / Re / Im).
+            ``(labels, coeffs)`` — ``coeffs`` is the (rank, n_items) real
+            coefficient matrix; ``labels[i]`` is the list of
+            ``(coefficient, item)`` pairs that make up element ``i``.
         """
         from scipy.linalg import qr as _qr
         Ur = self.spectrum[0]
@@ -653,21 +653,12 @@ class AngularMoments:
         tol = 1e-9 * max(float(dR.max()), 1e-300)
         keep = [int(p) for k, p in enumerate(piv) if dR[k] > tol][:self.rank]
 
-        def _label(row):
-            terms = []
-            for j in range(m):
-                coef = row[j] / scales[j]      # scales[j] is the item's scale
-                if abs(coef) > 1e-6:
-                    terms.append((coef, names[j]))
-            if len(terms) == 1 and abs(terms[0][0] - 1.0) < 1e-6:
-                return terms[0][1]             # a pure, fully-identified item
-            out = ""
-            for idx, (c, nm) in enumerate(terms):
-                out += f"{c:.3f}{nm}" if idx == 0 else f"{c:+.3f}{nm}"
-            return out or "0"
+        def _terms(row):
+            return [(float(row[j] / scales[j]), names[j]) for j in range(m)
+                    if abs(row[j] / scales[j]) > 1e-6]
 
         rows = [scales[a] * (P @ eye[a]) for a in keep]
-        labels = [_label(r) for r in rows]
+        labels = [_terms(r) for r in rows]
         return labels, np.array(rows)
 
     def physical_basis_observables(self, data_angles, weights=None):
