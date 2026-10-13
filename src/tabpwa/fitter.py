@@ -941,6 +941,52 @@ class Fitter:
         return profile_scan(self, x0, h_inv, idx, edges=offs, step=step,
                             **kw)
 
+    # ------------------------------------------------------------------
+    # Angular moment method (one-chain models)
+    # ------------------------------------------------------------------
+    def angular_moments(self):
+        """The :class:`tabpwa.angular_metric.AngularMoments` analyzer
+        for this model, built from the kernel config (one-chain
+        models).  Provides the analytic angular integrals and the
+        moment-method solve — see :meth:`solve_ckck`."""
+        from .angular_metric import AngularMoments
+        kc = self.kernel_config
+        return AngularMoments(kc["matrix_angle"],
+                              int(kc.get("n_proj_base", 1)),
+                              kc["angle_k"], kc["angle_b"],
+                              [kind for _, kind in kc.get("variables", [])])
+
+    def solve_ckck(self, data_angles, weights=None):
+        """Wave-pair coefficients ``ck ck'*`` from toy data — the
+        moment method (no likelihood fit, no normalization step).
+
+        Solves the linear moment system through the analytic angular
+        metric; with the direct-sum data moments the normalization is
+        inherent (``sum kappa Int w == sum_data W == N_data``).  For
+        data distributed as ``eps(x) . P(x)`` pass
+        ``weights = 1/eps(x)`` per event — the efficiency cancels.
+
+        Args:
+            data_angles: (n_data, n_comp) canonical angle columns of
+                the data events.
+            weights: optional (n_data,) per-event weights.
+
+        Returns:
+            ``(kappa, waves)`` — the (N, N) complex Hermitian
+            ``ck ck'*`` matrix and the wave-name list labeling its
+            rows/columns (the base-wave order of ``ck``).
+        """
+        am = self.angular_moments()
+        kappa = am.solve(data_angles, weights=weights)
+        waves = []
+        for entry in self.kernel_config["ck_map"]:
+            # the third element is the decay-chain label
+            # (e.g. ``MI1m->pip.pim_g_ls_0``) — the wave name is its
+            # prefix; fall back to the full ck parameter base name
+            label = entry[2] if len(entry) > 2 else entry[0]
+            waves.append(label.split("->")[0])
+        return kappa, waves
+
     def fit(self, x0=None, maxiter=1000, ftol=1e-5, gtol=1e-3, callback=None,
             method='BFGS', disp=True, options=None, **kwargs):
         """Minimize NLL using BFGS (default) or any scipy optimizer.
