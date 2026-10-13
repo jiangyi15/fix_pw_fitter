@@ -435,93 +435,16 @@ def test_mode_kappa_map():
         f.free()
 
 
-def test_physical_observables_report():
-    """Observables recombined into physical ck_m ck_n* products: the
-    identifiable items match the solved kappa exactly, the unmeasurable
-    ones are flagged by the residual."""
-    f = Fitter(CFG, backend="numpy_pwa")
-    f.apply_constrains()
-    try:
-        am = f.angular_moments()
-        kinds = [kk for _, kk in f.kernel_config["variables"]]
-        ck = np.array([1.0, 0.8, 0.3], complex)
-        rng = np.random.default_rng(31)
-
-        def flat(n):
-            a = np.empty((n, len(kinds)))
-            for c, kind in enumerate(kinds):
-                a[:, c] = (rng.uniform(0, 2 * np.pi, n) if kind == "phi"
-                           else np.arccos(rng.uniform(-1, 1, n)))
-            return a
-
-        def intensity(a):
-            return am.intensity(np.outer(ck, ck.conj()), a)
-
-        cap = intensity(flat(500_000)).max()
-        acc, n = [], 0
-        while n < 100_000:
-            a = flat(100_000)
-            pv = intensity(a)
-            if pv.max() >= cap:
-                cap = pv.max() * 1.05
-                continue
-            keep = a[rng.uniform(0, cap, 100_000) < pv]
-            acc.append(keep)
-            n += len(keep)
-        toy = np.concatenate(acc)[:100_000]
-
-        items = [("abs", 0, 0), ("abs", 1, 1), ("abs", 2, 2),
-                 ("re", 0, 1), ("re", 0, 2), ("re", 1, 2), ("im", 0, 1)]
-        labels, vals, errs, resid = am.physical_observables(items, toy)
-        kappa = am.solve(toy)
-
-        for lab, v, e, r in zip(labels, vals, errs, resid):
-            print(f"  {lab:16s} = {v:12.4f} +- {e:8.4f}  residual={r:.3f}")
-        # the identifiable items (residual ~ 0) equal the kappa entries
-        expected = [kappa[0, 0].real, kappa[1, 1].real, kappa[2, 2].real,
-                    kappa[0, 1].real, kappa[0, 2].real, kappa[1, 2].real]
-        for i, exp in enumerate(expected):
-            if resid[i] < 1e-8:
-                assert vals[i] == pytest.approx(exp, rel=1e-8)
-        # truth ratios among FULLY identified items (Re(01), Re(12)):
-        # Re(ck_1 ck_2*)/Re(ck_0 ck_1*) == (0.8*0.3)/(1*0.8) = 0.3
-        assert resid[3] < 1e-8 and resid[5] < 1e-8
-        assert vals[5] / vals[3] == pytest.approx(0.3, rel=0.10)
-        # the imaginary products are unmeasurable in this config
-        assert resid[6] == pytest.approx(1.0, abs=1e-6)
-        assert errs[6] == pytest.approx(0.0, abs=1e-8)
-    finally:
-        f.free()
-
-
 def test_physical_basis():
     """A basis of the observable space made of physical ck ck'* sums:
-    rank elements, each fully identified (residual 0), each an explicit
-    combination of the physical items."""
+    rank elements, each fully identified, each an explicit combination
+    of the physical items."""
     f = Fitter(CFG, backend="numpy_pwa")
     f.apply_constrains()
     try:
         am = f.angular_moments()
-        labels, coeffs, resid = am.physical_basis()
+        labels, coeffs = am.physical_basis()
         assert len(labels) == am.rank          # counts, no leftover
-        # `resid` is 0 for every returned basis element by construction;
-        # verify the residual machinery independently instead: an Im
-        # product is unmeasurable (~1), an identified diagonal is 0
-        m = len(am.wpairs)
-        _labs, _alphas, res = am.physical_functionals(
-            [("im", 0, 1), ("abs", 0, 0)])
-        _Ur = am.spectrum[0]
-        _vim = np.zeros(m); _vim[am.wpairs.index((0, 1, "im"))] = 1.0
-        _vab = np.zeros(m); _vab[am.wpairs.index((0, 0, "re"))] = 1.0
-        np.testing.assert_allclose(
-            res[0],
-            np.linalg.norm(_vim - _Ur @ (_Ur.T @ _vim)) / np.linalg.norm(_vim),
-            atol=1e-10)
-        np.testing.assert_allclose(
-            res[1],
-            np.linalg.norm(_vab - _Ur @ (_Ur.T @ _vab)) / np.linalg.norm(_vab),
-            atol=1e-10)
-        assert res[0] > 0.9            # Im product: unmeasurable
         Ur = am.spectrum[0]
         P = Ur @ Ur.T
         for c in coeffs:                        # every element in-span
@@ -539,11 +462,14 @@ def test_physical_basis():
             return a
 
         a = flat(30_000)
-        labs2, vals, errs, r2 = am.physical_basis_observables(a)
+        labs2, vals, errs = am.physical_basis_observables(a)
         assert labs2 == labels
-        alpha = coeffs @ Ur                         # basis -> gamma recombos
+        # each measured value IS the slot functional row . c_est — check
+        # against the direct coefficient estimate (would catch any
+        # missing mode weighting, e.g. 1/s^2)
+        c_est = am.solver @ am.basis(a).sum(axis=0)
         np.testing.assert_allclose(
-            vals, alpha @ am.modes(a), rtol=1e-8, atol=1e-8)
+            vals, coeffs @ c_est, rtol=1e-8, atol=1e-8)
         assert np.all(errs > 0)
     finally:
         f.free()

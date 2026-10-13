@@ -615,139 +615,77 @@ class AngularMoments:
 
     def physical_basis(self):
         """A basis of the observable space made of PHYSICAL items: each
-        element is an explicit sum of ``ck_m ck_n*`` products and is
-        individually identified (residual 0) — ``rank`` elements, no
-        leftover.
+        element is an explicit sum of ``ck_m ck_n*`` products that is
+        FULLY measurable — ``rank`` elements, no leftover.
 
-        The construction: every physical item (``|ck_m|^2``, ``Re``,
-        ``Im``) is projected onto the identifiable subspace; the exact
-        singles are taken first, then the projections of the rest are
-        completed by a rank-revealing QR, giving a basis of the whole
-        observable space.
+        The columns are the projected items ``P . v_a``; a rank-revealing
+        (pivoted) QR on the UNIT items picks the independent set directly
+        — no separate ordering is needed: a unit projected item has norm
+        ``sqrt(1 - residual^2)``, maximal (1) at residual 0, so the pivot
+        order puts the fully-measurable items first.  Those appear as
+        single items; the remaining dimensions as their projection
+        (an explicit item combination).
 
         Returns:
-            ``(labels, coeffs, residual)`` — for each basis element
-            the label, its coefficients over the physical items (the
-            slot coordinates: |ck|^2 / Re / Im in ``wpairs`` order) and
-            the residual (0 for every kept element — anything with a
-            non-zero out-of-span part is part of the discarded halos,
-            not of the basis).
+            ``(labels, coeffs)`` — for each basis element the readable
+            label and its coefficients over the physical items (the
+            ``wpairs`` order: |ck|^2 / Re / Im).
         """
+        from scipy.linalg import qr as _qr
         Ur = self.spectrum[0]
         P = Ur @ Ur.T
-
-        # the physical items in SLOT (wpairs) order — index-aligned with
-        # the returned coefficient vectors
-        wpos = {w: i for i, w in enumerate(self.wpairs)}
-        items = []
-        kind_rank = []
-        for (m, n, kind) in self.wpairs:
-            if kind == "re" and m == n:
-                label, rank_k = f"|ck_{m}|^2", 0
-            elif kind == "re":
-                label, rank_k = f"Re(ck_{m} ck_{n}*)", 1
-            else:
-                label, rank_k = f"Im(ck_{m} ck_{n}*)", 2
-            items.append((label, wpos[(m, n, kind)]))
-            kind_rank.append(rank_k)
-        # order: KIND first — the diagonal |ck_m|^2 terms are kept in
-        # preference (they are the physical wave magnitudes), then Re,
-        # then Im; within each kind the identified items first, then
-        # slot order.  The QR below reads the columns in this order, so
-        # the kept basis prefers the diagonals wherever they can be
-        # resolved.
-        def _resid(a):
-            e = np.eye(len(self.wpairs))[items[a][1]]
-            return np.linalg.norm(e - P @ e)
-        order = sorted(range(len(items)),
-                       key=lambda a: (kind_rank[a], round(_resid(a), 6), a))
-
-        # rank-revealing QR over the projected items (columns in the
-        # priority order): the QR diagonal is the independence measure
-        # — |R_kk| ~ 0 marks a dependent (or unmeasurable) item — so
-        # the kept basis needs no hand-rolled Gram-Schmidt
         m = len(self.wpairs)
-        A = np.stack([P @ np.eye(m)[items[a][1]] for a in order], axis=1)
-        _Q, R = np.linalg.qr(A)
+
+        # item names + physical scales (abs = 1, re = +1/2, im = -1/2)
+        names, scales = [], []
+        for (a, b, kind) in self.wpairs:
+            if kind == "re" and a == b:
+                names.append(f"|ck_{a}|^2"); scales.append(1.0)
+            elif kind == "re":
+                names.append(f"Re(ck_{a} ck_{b}*)"); scales.append(0.5)
+            else:
+                names.append(f"Im(ck_{a} ck_{b}*)"); scales.append(-0.5)
+
+        eye = np.eye(m)
+        A = np.stack([P @ eye[a] for a in range(m)], axis=1)
+        _Q, R, piv = _qr(A, pivoting=True, mode="economic")
         dR = np.abs(np.diag(R))
         tol = 1e-9 * max(float(dR.max()), 1e-300)
-        keep = [k for k in range(len(order)) if dR[k] > tol][:self.rank]
-        labels = [items[order[k]][0] for k in keep]
-        rows = [A[:, k] for k in keep]
-        return labels, np.array(rows), np.zeros(len(rows))
+        keep = [int(p) for k, p in enumerate(piv) if dR[k] > tol][:self.rank]
+
+        def _label(row):
+            terms = []
+            for j in range(m):
+                coef = row[j] / scales[j]      # scales[j] is the item's scale
+                if abs(coef) > 1e-6:
+                    terms.append((coef, names[j]))
+            if len(terms) == 1 and abs(terms[0][0] - 1.0) < 1e-6:
+                return terms[0][1]             # a pure, fully-identified item
+            out = ""
+            for idx, (c, nm) in enumerate(terms):
+                out += f"{c:.3f}{nm}" if idx == 0 else f"{c:+.3f}{nm}"
+            return out or "0"
+
+        rows = [scales[a] * (P @ eye[a]) for a in keep]
+        labels = [_label(r) for r in rows]
+        return labels, np.array(rows)
 
     def physical_basis_observables(self, data_angles, weights=None):
         """Measure the :meth:`physical_basis` elements from data.
 
         Returns:
-            ``(labels, values, errors, residual)`` — the same shape as
-            :meth:`physical_functionals`; residual is 0 for the basis
-            (every element is identified).
+            ``(labels, values, errors)`` — the value and exact
+            Poisson(1) error of every :meth:`physical_basis` element.
         """
-        labels, rows, _ = self.physical_basis()
-        Ur = self.spectrum[0]
-        alpha = (rows @ Ur)                 # (n_basis, rank) recombos
-        ow = self.mode_weights(data_angles, weights=weights)
-        values = alpha @ ow.sum(axis=0)
-        errors = np.sqrt(((ow @ alpha.T) ** 2).sum(axis=0))
-        return labels, values, errors, np.zeros(len(labels))
-
-    def physical_functionals(self, items):
-        """Represent physical ``ck_m ck_n*`` products as combinations of
-        the observables — the general form of "a·gamma_1 + b·gamma_3
-        = Re(ck_1 ck_2*)".
-
-        Args:
-            items: iterable of ``(kind, m, n)`` with kind in
-                ``'abs'`` (``|ck_m|^2``, requires m == n), ``'re'``
-                (``Re(ck_m ck_n*)``) or ``'im'`` (``Im(ck_m ck_n*)``).
-
-        Returns:
-            ``(labels, alpha, residual)`` — for each item the label
-            string, the observable combination ``alpha`` (length
-            ``rank``) with ``value = alpha @ gamma``, and ``residual``
-            the *relative* unidentifiable part (0 = exactly fixed by
-            the angular data; >0 = that fraction of the item lives in
-            the null space and no data of this kind can measure it).
-        """
+        labels, rows = self.physical_basis()
         Ur, s2r = self.spectrum
-        wpos = {w: i for i, w in enumerate(self.wpairs)}
-        labels, alphas, res = [], [], []
-        for kind, m, n in items:
-            v = np.zeros(len(self.wpairs))
-            if kind == "abs":
-                assert m == n
-                v[wpos[(m, n, "re")]] = 1.0
-                label = f"|ck_{m}|^2"
-            elif kind == "re":
-                v[wpos[(m, n, "re")]] = 0.5
-                label = f"Re(ck_{m} ck_{n}*)"
-            elif kind == "im":
-                v[wpos[(m, n, "im")]] = -0.5
-                label = f"Im(ck_{m} ck_{n}*)"
-            else:
-                raise ValueError(f"unknown kind {kind!r} (abs|re|im)")
-            alpha = (Ur.T @ v) / s2r
-            resid = np.linalg.norm(v - Ur @ (Ur.T @ v)) / np.linalg.norm(v)
-            labels.append(label)
-            alphas.append(alpha)
-            res.append(float(resid))
-        return labels, np.array(alphas), np.array(res)
-
-    def physical_observables(self, items, data_angles, weights=None):
-        """Measure the requested physical ``ck_m ck_n*`` products
-        directly from data — the observable sums recombined into
-        readable physics, with the exact Poisson(1) errors.
-
-        Returns:
-            ``(labels, values, errors, residual)`` — see
-            :meth:`physical_functionals` for the items and *residual*.
-        """
-        labels, alpha, residual = self.physical_functionals(items)
+        # a basis row is a SLOT-space functional: its value is
+        # rows . c_est = (rows@Ur) diag(1/s2) gamma (NOT (rows@Ur) gamma)
+        alpha = (rows @ Ur) / s2r           # (n_basis, rank) item recombos
         ow = self.mode_weights(data_angles, weights=weights)
         values = alpha @ ow.sum(axis=0)
         errors = np.sqrt(((ow @ alpha.T) ** 2).sum(axis=0))
-        return labels, values, errors, residual
+        return labels, values, errors
 
     def _ck_reference(self, ck):
         """The global-phase reference slot: the largest-|ck| wave
