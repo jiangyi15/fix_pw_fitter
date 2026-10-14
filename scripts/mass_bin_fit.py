@@ -11,10 +11,16 @@ plot ``|ck|`` (and the phase relative to a reference wave) versus mass.
         --data data_pwa.npz --phsp phsp.npz --bin-width 0.15 \\
         -o fit_ck.csv --plot plots/
 
+Heavy work is **resumable**: a checkpoint ``<output>.ckpt.npz`` is written
+after every bin, and a re-run skips the bins already present (``--fresh`` to
+ignore it, ``--ckpt PATH`` to relocate it).
+
 The overall ``|ck|`` scale is a **gauge** (the likelihood uses ``P/∫P``, so it
-is scale-invariant — see ``--free-ref``).  The scale-free, well-defined output
-is the per-wave **fit fraction** ``R_m = Σ w|A_m|² / Σ w|Σ A|²`` and its
-uncertainty (propagated from the fit covariance via ``AmplitudeFractions``).
+is scale-invariant — see ``--free-ref``).  The scale-free, well-defined outputs
+are the per-wave **fit fraction** ``R_m = Σ w|A_m|² / Σ w|Σ A|²`` and the
+**yield** ``R_m · N_bin`` (``N_bin`` = the bin's data sample size), each with
+uncertainties (fraction propagated from the fit covariance via
+``AmplitudeFractions``; yield also carries the data Poisson ``√N``).
 
 Notes
 -----
@@ -39,6 +45,8 @@ from tabpwa import Fitter
 from tabpwa.amp_frac import AmplitudeFractions
 from mass_bin_moments import _edges, _wave_names
 
+_NB = 8          # per-wave numeric blocks in a row: mag,merr,dphi,perr,frac,ferr,yld,yerr
+
 
 def _load(f, path, n_comp):
     """Kernel event dict from a .npz (precomputed) or a (N, n_finals, 4) .npy."""
@@ -56,6 +64,48 @@ def _load(f, path, n_comp):
 def _subset(d, mask):
     return {k: (v[mask] if isinstance(v, np.ndarray) and v.shape[:1] == mask.shape else v)
             for k, v in d.items()}
+
+
+def _flat(row):
+    lo, hi, nw = row[:3]
+    return np.concatenate([[lo, hi, nw], *row[3:]])
+
+
+def _unflat(v, n):
+    return (float(v[0]), float(v[1]), float(v[2]),
+            *[np.asarray(v[3 + i * n:3 + (i + 1) * n], float) for i in range(_NB)])
+
+
+def _make_plots(rows, waves, plotdir, no_phase, verbose=True):
+    """(Re)write the |ck| / fraction / yield / phase plots from *rows*."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    os.makedirs(plotdir, exist_ok=True)
+    centers = np.array([0.5 * (lo + hi) for lo, hi, *_ in rows])
+    halfw = np.array([0.5 * (hi - lo) for lo, hi, *_ in rows])
+    ylab = {"mag": "|ck|", "frac": "fit fraction",
+            "yield": "yield (events)", "phase": "arg(ck) - arg(ck_ref)"}
+    for tag, iy, ie in (("mag", 3, 4), ("frac", 7, 8), ("yield", 9, 10),
+                        ("phase", 5, 6)):
+        if tag == "phase" and no_phase:
+            continue
+        fig, ax = plt.subplots(figsize=(6.4, 4.4))
+        for m, wv in enumerate(waves):
+            ys = np.array([r[iy][m] for r in rows], float)
+            es = np.array([r[ie][m] for r in rows], float)
+            ax.errorbar(centers, ys, xerr=halfw, yerr=es, fmt="o-",
+                        ms=4, lw=1.2, capsize=2.5, label=wv)
+        ax.set_xlabel("mass")
+        ax.set_ylabel(ylab[tag])
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fn = os.path.join(plotdir, f"fit_ck_{tag}.png")
+        fig.savefig(fn, dpi=130)
+        plt.close(fig)
+        if verbose:
+            print("plot:", fn)
 
 
 def main():
@@ -80,6 +130,9 @@ def main():
                          "scale is FLAT under the normalised likelihood — "
                          "expect erratic |ck|)")
     ap.add_argument("--no-phase", action="store_true")
+    ap.add_argument("--ckpt", default=None,
+                    help="checkpoint npz (default: <output>.ckpt.npz)")
+    ap.add_argument("--fresh", action="store_true", help="ignore any checkpoint")
     ap.add_argument("-o", "--output", default=None)
     ap.add_argument("--plot", default=None)
     args = ap.parse_args()
@@ -108,8 +161,25 @@ def main():
           f"free={f.free_param_names()}")
     print(f"mass bins: {edges[0]:.4g} .. {edges[-1]:.4g} ({len(edges) - 1} bins)")
 
-    rows = []
+    ckpt = args.ckpt or (args.output or "mass_bin_fit") + ".ckpt.npz"
+    res = {}
+    if os.path.exists(ckpt) and not args.fresh:
+        d = np.load(ckpt, allow_pickle=True)
+        if list(d["waves"]) == list(waves) and d["rows"].shape[1] == 3 + _NB * n_wave:
+            for v in d["rows"]:
+                r = _unflat(v, n_wave)
+                res[(round(r[0], 9), round(r[1], 9))] = r
+            print(f"resume: {len(res)} bins already done ({ckpt})")
+        else:
+            print(f"ignore checkpoint (waves/shape mismatch): {ckpt}")
+
+    def _save():
+        np.savez(ckpt, rows=np.array([_flat(res[k]) for k in sorted(res)]),
+                 waves=np.array(waves), ref=args.ref)
+
     for lo, hi in zip(edges[:-1], edges[1:]):
+        if (round(lo, 9), round(hi, 9)) in res:
+            continue
         dm = (M >= lo) & (M < hi)
         pm = (Mp >= lo) & (Mp < hi)
         nw = float(w[dm].sum())
@@ -119,31 +189,36 @@ def main():
         f.set_phsp(_subset(phsp, pm))
         f.set_data(_subset(data, dm))
         if args.verbose:
-            res = f.fit(f.initial_values(), maxiter=args.maxiter)
+            res_fit = f.fit(f.initial_values(), maxiter=args.maxiter)
         else:
             with contextlib.redirect_stdout(io.StringIO()):
-                res = f.fit(f.initial_values(), maxiter=args.maxiter)
-        ck = f.build_params(res.x)[0]["ck"]
-        unc = f.get_uncertainties(res)
+                res_fit = f.fit(f.initial_values(), maxiter=args.maxiter)
+        ck = f.build_params(res_fit.x)[0]["ck"]
+        unc = f.get_uncertainties(res_fit)
         mag = np.abs(ck)
         dphi = np.angle(ck) - np.angle(ck[args.ref])
         merr = np.array([unc.get(f"{total[i]}r", (0.0, 0.0))[1] for i in range(n_wave)])
         perr = np.array([unc.get(f"{total[i]}i", (0.0, 0.0))[1] for i in range(n_wave)])
-        # scale-free output: per-wave fit fraction + propagated uncertainty
-        fv, fe = AmplitudeFractions(f, res).fractions([[i] for i in range(n_wave)])
+        fv, fe = AmplitudeFractions(f, res_fit).fractions([[i] for i in range(n_wave)])
         frac, ferr = np.asarray(fv, float), np.asarray(fe, float)
         ntot = float(dm.sum())                  # data sample size in the bin
-        yld = frac * ntot                       # scale the fractions -> yields
+        yld = frac * ntot                       # fractions -> yields
         # error: shape (N·d(frac)) and the data Poisson(N) both propagated
         yerr = np.sqrt((ntot * ferr) ** 2 + frac ** 2 * ntot)
-        rows.append((lo, hi, nw, mag, merr, dphi, perr, frac, ferr, yld, yerr))
+        row = (lo, hi, nw, mag, merr, dphi, perr, frac, ferr, yld, yerr)
+        res[(round(lo, 9), round(hi, 9))] = row
+        _save()                                 # incremental checkpoint
+        if args.plot:                           # keep plots current on disk
+            _make_plots([res[k] for k in sorted(res)], waves, args.plot,
+                        args.no_phase, verbose=False)
         cells = "  ".join(f"|{waves[i]}|={mag[i]:6.3f}  Y={yld[i]:7.1f}±{yerr[i]:.1f}"
                           for i in range(n_wave))
-        print(f"{lo:>7.3f} {hi:>7.3f} {nw:>7.0f}  nit={getattr(res, 'nit', -1):>3} "
-              f"{'ok' if res.success else 'FAIL'}  {cells}   [{time.time()-t0:.1f}s]")
+        print(f"{lo:>7.3f} {hi:>7.3f} {nw:>7.0f}  nit={getattr(res_fit, 'nit', -1):>3} "
+              f"{'ok' if res_fit.success else 'FAIL'}  {cells}   [{time.time()-t0:.1f}s]")
 
-    if not rows:
+    if not res:
         raise SystemExit("no bins passed --min-counts")
+    rows = [res[k] for k in sorted(res)]
 
     if args.output:
         cols = ["m_lo", "m_hi", "n_events"]
@@ -164,33 +239,7 @@ def main():
         print(f"\nwrote {args.output} ({len(rows)} bins x {len(cols)} cols)")
 
     if args.plot and rows:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        os.makedirs(args.plot, exist_ok=True)
-        centers = np.array([0.5 * (lo + hi) for lo, hi, *_ in rows])
-        halfw = np.array([0.5 * (hi - lo) for lo, hi, *_ in rows])
-        for tag, iy, ie in (("mag", 3, 4), ("frac", 7, 8), ("yield", 9, 10),
-                            ("phase", 5, 6)):
-            if tag == "phase" and args.no_phase:
-                continue
-            fig, ax = plt.subplots(figsize=(6.4, 4.4))
-            for m, wv in enumerate(waves):
-                ys = np.array([r[iy][m] for r in rows], float)
-                es = np.array([r[ie][m] for r in rows], float)
-                ax.errorbar(centers, ys, xerr=halfw, yerr=es, fmt="o-",
-                            ms=4, lw=1.2, capsize=2.5, label=wv)
-            ax.set_xlabel("mass")
-            ax.set_ylabel({"mag": "|ck|", "frac": "fit fraction",
-                           "yield": "yield (events)",
-                           "phase": "arg(ck) - arg(ck_ref)"}[tag])
-            ax.legend(fontsize=8)
-            ax.grid(alpha=0.3)
-            fig.tight_layout()
-            fn = os.path.join(args.plot, f"fit_ck_{tag}.png")
-            fig.savefig(fn, dpi=130)
-            plt.close(fig)
-            print("plot:", fn)
+        _make_plots(rows, waves, args.plot, args.no_phase)
 
     f.free()
 
