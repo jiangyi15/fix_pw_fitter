@@ -21,12 +21,15 @@ vector to every projection; ``L`` can never be baked into the config
 arrays (they are fixed at ``load_data``).  A CUDA port therefore requires
 a kernel-side change (e.g. the rho contraction in the reduce kernel);
 until then this backend is the numpy reference.
+Registered as ``"numpy_polarised"`` for the model — ``polarised_pwa``
+has NO ``"default"`` backend: constructing a ``Fitter`` without an
+explicit ``backend=`` fails, by design (the numpy reference must never
+be picked up silently; pass ``backend="numpy_polarised"`` explicitly).
 """
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("polarised", model="polarised_pwa")
-@register_backend("default", model="polarised_pwa")
+@register_backend("numpy_polarised", model="polarised_pwa")
 class PolarisedBackend(ComputeBackend):
     """numpy_pwa + the spin-density-matrix intensity contraction."""
 

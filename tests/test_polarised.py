@@ -36,7 +36,7 @@ def _put(fitter, n, seed):
 
 
 def test_model_and_params_registered():
-    f = Fitter(_cfg(), backend="polarised")
+    f = Fitter(_cfg(), backend="numpy_polarised")
     assert f.model.name == "polarised_pwa"
     names = f.model.scalar_names
     assert names[:3] == ["jpsi_px", "jpsi_py", "jpsi_pz"]   # top prefix
@@ -48,7 +48,7 @@ def test_model_and_params_registered():
 
 def test_zero_polarisation_matches_pwa():
     f_pwa = Fitter(CFG, backend="numpy_pwa")
-    f_pol = Fitter(_cfg(), backend="polarised")
+    f_pol = Fitter(_cfg(), backend="numpy_polarised")
     _put(f_pwa, 80, 1)
     _put(f_pol, 80, 1)
 
@@ -65,7 +65,7 @@ def test_zero_polarisation_matches_pwa():
 
 
 def test_spin_gradients_match_fd():
-    f = Fitter(_cfg(), backend="polarised")
+    f = Fitter(_cfg(), backend="numpy_polarised")
     _put(f, 100, 2)
     x = f.initial_values(seed=2)
     free = f.free_param_names()
@@ -80,11 +80,18 @@ def test_spin_gradients_match_fd():
         assert num == pytest.approx(g[idx], rel=1e-4, abs=1e-6), name
 
 
+def test_no_default_backend():
+    """polarised_pwa has no default backend: constructing a Fitter without
+    an explicit ``backend=`` fails loudly (never a silent numpy fallback)."""
+    with pytest.raises(ValueError, match="'default' is not registered"):
+        Fitter(_cfg())
+
+
 def test_polarisation_scan_identifiability():
     """The NLL responds to the polarisation: with distinct data/phsp event
     sets the px direction is identifiable (non-degenerate scan)."""
     cfg = _cfg()
-    f_true = Fitter(cfg, backend="polarised")
+    f_true = Fitter(cfg, backend="numpy_polarised")
     _put(f_true, 400, 1)
     x0 = f_true.initial_values(seed=5)
     free = f_true.free_param_names()
@@ -100,7 +107,7 @@ def test_polarisation_scan_identifiability():
 
 
 def test_load_fit_dispatch_polarised(tmp_path):
-    f = load_fit(_cfg(), backend="polarised", load_data=False)
+    f = load_fit(_cfg(), backend="numpy_polarised", load_data=False)
     assert isinstance(f, Fitter)
     assert f.model.name == "polarised_pwa"
 

@@ -224,8 +224,10 @@ Positivity is not enforced (bounds via `var_range` if needed).
   through the params dict as `scalar` (the legacy scalar mechanism —
   the norm chain and constraint combination treat them like the
   existing scalars; no `Fitter` changes needed).
-* Backend: `polarised` (`backends/polarised_backend.py`, the default for
-  this model) — the numpy reference: `NumpyPolarisedPWA`
+* Backend: `numpy_polarised` (registered name; **no `default` is
+  registered for this model** — a `Fitter` without an explicit
+  `backend=` fails by design, never a silent numpy fallback) — the numpy
+  reference: `NumpyPolarisedPWA`
   (`numpy_pwa.py`; `NumpyPWA` itself is rho-free) contracts `rho`
   directly and returns the finished `grads["scalar"]` per-parameter
   gradients (internally contracting the raw dQ/dρ with the generators).
