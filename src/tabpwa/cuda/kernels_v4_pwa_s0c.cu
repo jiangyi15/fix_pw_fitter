@@ -276,6 +276,11 @@ __global__ void amp_cache_amp_kernel(
     double* s_us_i = s_dyn_bw2 + n_mass + n_uslot;
     for (int i = tid; i < n_mass; i += blockDim.x)
         s_mass[i] = mass[event_idx * n_mass + i];
+    // s_mass must be COMPLETE before the s_us interp reads other
+    // threads' columns (uslot_col < n_mass from sibling threads) —
+    // the missing barrier left scheduling-dependent stale reads
+    // (wrong BW for layout-shifted waves; cf. v4/v5_pwa_s0b/s0).
+    __syncthreads();
     for (int u = tid; u < n_uslot; u += blockDim.x) {
         complex z = interp_complex_device(
             gamma_table_real, gamma_table_imag, uslot_row[u],

@@ -177,3 +177,80 @@ def test_v5_s0c_group_grads_match_finite_difference(pwa_small):
     finally:
         h5.free(); hp.free()
         k5.free()
+
+
+def test_v5_s0c_mid_insert_zero_coupling_invariant():
+    """Mid-inserting a zero-coupled chain next to a multi-row wave is inert.
+
+    Regression: the s0c CUDA kernels missed the ``__syncthreads`` between
+    the shared ``s_mass`` fill and the uslot interpolation — threads read
+    sibling threads' mass columns before they were stored, and the stales
+    corrupted the BW of layout-shifted waves (observed as a large NLL
+    shift from inserting a ``rho5_2350``-like 1-row chain into a config
+    whose 8-row ``RhoOmegaBWR`` chain sits before it).  Invariants:
+
+    1. the un-normalised NLL of the extended config equals the base
+       config exactly (the new chain contributes exactly zero).
+    """
+    import copy
+    import numpy as np
+
+    from tabpwa.config_loader import load_config
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.cuda._v5_pwa_s0c import CUDAKernelV5PWAS0C as KV5S0C
+
+    base = load_config("tests/config_rho_omega2.yml")   # 6-row RhoOmega2 mid-list
+    ext = copy.deepcopy(base)
+    ext["particle"]["tbwr"] = dict(J=1, P=-1, mass=1.69, width=0.16,
+                                   model="BWR")
+    lst = list(ext["particle"]["pipi"])
+    lst.insert(lst.index("rho_omega2") + 1, "tbwr")     # mid-order insert
+    ext["particle"]["pipi"] = lst
+
+    mA, mB = build_amplitude_model(base), build_amplitude_model(ext)
+    kA, kB = mA.build_kernel_config(), mB.build_kernel_config()
+
+    val = lambda n: 0.8 + 0.4 * (abs(hash(n)) % 997) / 997.0
+    def params_for(model, kc):
+        m0 = np.array([val(n) for n in model.m0_phys_name])
+        g0 = np.array([val(n) for n in model.g0_phys_name])
+        n_proj = int(kc.get("n_proj", 1))
+        N = kc["matrix_angle"].shape[1] // n_proj
+        ck = np.array([val(t[0]) + 1j * val(t[0] + "i") for t in kc["ck_map"]])
+        new = {t[0] for t in kc["ck_map"]} - {u[0] for u in
+                                             mA.build_kernel_config()["ck_map"]}
+        for i, t in enumerate(kc["ck_map"]):
+            if t[0] in new:
+                ck[i] = 0j                               # r = 0
+        return {"ck": ck, "m0": m0, "g0": g0}
+
+    pA, pB = params_for(mA, kA), params_for(mB, kB)
+
+    gmin = float(kB["gamma_min"]); gdel = float(kB["gamma_delta"])
+    gbins = np.asarray(kB["gamma_table"]).shape[-1]
+    n_at = int(np.max(kB["angle_index"])) + 1
+    nac = int(np.asarray(kB["angle_k"]).shape[-1])
+    n_q = int(np.max(kB["fl_q_index"])) + 1
+    ne = 1024
+    rs = np.random.RandomState(7)
+    data = {"mass": (gmin + 0.05) + (0.9 * gdel * gbins)
+            * rs.rand(ne, 1),
+            "q": np.abs(rs.randn(ne, n_q)) + 0.3,
+            "angle": rs.uniform(-np.pi, np.pi, size=(ne, n_at * nac)),
+            "weight": np.ones(ne), "bkg": np.ones(ne)}
+
+    kA_c = _make(KV5S0C, kA)
+    if kA_c is None:
+        pytest.skip("no CUDA device")
+    kB_c = _make(KV5S0C, kB)
+    kB_c.resolution_size = 1
+    try:
+        hA, hB = kA_c.load_data(data), kB_c.load_data(data)
+        QA, _gA, _ = kA_c.compute(pA, hA, norm=None)
+        QB, _gB, _P = kB_c.compute(pB, hB, norm=None)
+        # zero-coupling insert: identical likelihood bitwise
+        assert QA == pytest.approx(QB, rel=0, abs=1e-12 * abs(QA))
+    finally:
+        kA_c.free()
+        if "kB_c" in locals():
+            kB_c.free()
