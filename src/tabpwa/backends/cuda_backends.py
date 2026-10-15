@@ -139,23 +139,6 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_pslot", model="pwa")
-class CUDABackendV4Pslot(_CUDABackend):
-    """CUDA v4 PWA with PER-SLOT ck — sibling of :class:`CUDABackendV4PWA`.
-
-    Same projection-sum intensity ``P(e) = Σ_p |A_p(e)|²`` but the coupling
-    array is per-slot: ``ck`` has length n_wave = n_proj·N, entry (p, t)
-    reads ``ck[p·N + t]``, and the ck-gradient writes each slot with NO
-    cross-projection accumulation (gradient length n_wave).  The angular
-    cache, BW/m0/g0 chain, norm/dnorm and batching are identical to
-    ``cuda_v4_pwa``.  Installed by the polarised wrapper via
-    ``create_backend("cuda_v4_pwa_pslot", expanded_kc, model="pwa")``.
-    """
-    def _make_kernel(self, kc, bs):
-        from tabpwa.cuda._v4_pwa_pslot import CUDAKernelV4Pslot as K
-        return K(kc, batch_size=bs)
-
-
 @register_backend("cuda_v4_pwa_1bw", model="pwa")
 class CUDABackendV4PWA1BW(_CUDABackend):
     """CUDA v4 PWA, ONE BW PER CHAIN specialisation.
