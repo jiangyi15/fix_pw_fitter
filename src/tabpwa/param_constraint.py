@@ -1102,52 +1102,74 @@ class ConstraintManager:
 
     def set_mass_width_transforms(self, transforms, reset=True):
         if reset:
+            # names that only the OLD transforms brought in must go too
+            old_inputs = {n for t in self.mass_width_transforms
+                          for n in t.input_names}
             self.mass_width_transforms.clear()
             # Don't clear _all_names — it also holds m0/g0/scalar names.
             # Only remove names that were added by a previous call.
             self._all_names = [n for n in self._all_names
-                               if not any(n in tr.input_names
-                                          for tr in self.mass_width_transforms)]
+                               if n not in old_inputs]
+
         # Snapshot of transforms registered by EARLIER calls (other configs):
         # only those can be replaced.  Transforms of THIS call are appended
         # in order untouched — the model may legitimately list several
         # transforms producing the same family (TD models).
-        pre_existing = list(self.mass_width_transforms)
-        kept = list(pre_existing)
+        pre = [(self._transform_sig(t), t, True)
+               for t in self.mass_width_transforms]
+        kept = list(pre)                       # [(sig, transform, from_earlier)]
         replaced_names = []
         for tr in transforms:
-            if tr is not None:
-                # Shared-cm case: a later config's transform REPLACES an
-                # earlier config's for the same parameter(s) (latest wins).
-                # Identity = the OUTPUT names it produces: two transforms
-                # producing the same parameter are alternatives, while a
-                # transform consuming another's output is a legitimate
-                # producer→consumer chain (kept, in order).
-                outs_n = set(tr.output_names)
-                still, dropped = [], []
-                for old in kept:
-                    if old in pre_existing and (set(old.output_names)
-                                                & outs_n):
-                        dropped.append(old)
-                    else:
-                        still.append(old)
-                if dropped:
-                    for old in dropped:
-                        replaced_names.extend(old.output_names)
-                kept = still + [tr]
-                input_set = set(tr.input_names)
-                for name in tr.input_names:
-                    if name not in self._all_names:
-                        self._all_names.append(name)
-                for name in tr.output_names:
-                    if name not in input_set and name in self._all_names:
-                        self._all_names.remove(name)
-        self.mass_width_transforms[:] = kept
+            if tr is None:
+                continue
+            sig = self._transform_sig(tr)
+            if any(s == sig for s, _t, _pre in kept):
+                continue          # identical to a registered transform — no-op
+
+            # Shared-cm case: a later config's transform REPLACES an earlier
+            # config's for the same parameter(s) (latest wins).  Identity is
+            # the OUTPUT names it produces: two transforms producing the same
+            # parameter are alternatives, while a transform consuming
+            # another's output is a legitimate producer→consumer chain.
+            outs_n = set(tr.output_names)
+            still, dropped = [], []
+            for item in kept:
+                _s, t, from_earlier = item
+                if from_earlier and (set(t.output_names) & outs_n):
+                    dropped.append(item)
+                else:
+                    still.append(item)
+            if dropped:
+                for _s, t, _p in dropped:
+                    replaced_names.extend(t.output_names)
+            kept = still + [(sig, tr, False)]
+            input_set = set(tr.input_names)
+            for name in tr.input_names:
+                if name not in self._all_names:
+                    self._all_names.append(name)
+            for name in tr.output_names:
+                if name not in input_set and name in self._all_names:
+                    self._all_names.remove(name)
+        self.mass_width_transforms[:] = [t for _s, t, _p in kept]
         if replaced_names:
             warnings.warn(
                 f"mass/width transform(s) for shared parameter(s) replaced "
                 f"(latest wins): {sorted(set(replaced_names))}", stacklevel=2)
         self._rebuild()
+        return sorted(set(replaced_names))
+
+    @staticmethod
+    def _transform_sig(tr):
+        """Structural identity of a transform (for de-duplication)."""
+        try:
+            d = tr.to_dict()
+        except Exception:
+            d = None
+        if d is not None:
+            return (type(tr).__name__, repr(sorted(d.items(), key=str)))
+        state = repr(sorted((k, repr(v)) for k, v in vars(tr).items()
+                            if k != "_last_input"))
+        return (type(tr).__name__, state)
 
     def add_transform(self, tr):
         """Register a custom Transform at the end of the resolve pipeline.

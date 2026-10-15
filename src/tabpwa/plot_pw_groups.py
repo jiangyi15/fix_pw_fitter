@@ -516,7 +516,10 @@ class PWGroupPlotter:
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
         dw = dn["weight"] * (1.0 if data_weight_extra is None
                              else data_weight_extra)
-        extra = float(1.0 if phsp_weight_extra is None else phsp_weight_extra)
+        # may be a per-event array (documented for cut/tag weights) —
+        # matches the pre-refactor plot_var handling
+        extra = np.asarray(1.0 if phsp_weight_extra is None
+                           else phsp_weight_extra, dtype=float)
         purity = f._purity if f._purity is not None else 1.0
         data_total = float(np.sum(dw))
         bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm

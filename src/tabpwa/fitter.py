@@ -210,8 +210,10 @@ class Fitter:
         # Never reset: on a SHARED cm a reset would wipe the other configs'
         # mass/width transforms; on the private cm there is nothing to wipe
         # on this single call.  Same-name collisions are handled per name
-        # inside set_mass_width_transforms (latest wins).
-        self.cm.set_mass_width_transforms(transforms, reset=False)
+        # inside set_mass_width_transforms (latest wins); the returned list
+        # names the replaced parameters (JointFitter turns it into a strict
+        # same-topo error).
+        return self.cm.set_mass_width_transforms(transforms, reset=False)
 
     def add_prior(self, prior):
         """Add an NLL prior (penalty) to the fit.
@@ -2082,7 +2084,7 @@ def load_fit(source, backend=None, load_data=True, cm=None, strict=True):
         return SameTopoJointFitter(source, backend=backend,
                                    load_data=load_data, cm=cm, strict=strict)
 
-    fitter = Fitter(source, backend=backend)
+    fitter = Fitter(source, backend=backend, cm=cm)
     fitter.apply_constrains()
     if load_data:
         fitter.load_all_data()

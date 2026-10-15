@@ -283,3 +283,52 @@ def test_joint_broadcast_dotted_diff_and_empty_error(tmp_path):
     bad["broadcast"] = []
     with pytest.raises(ValueError, match="empty 'broadcast'"):
         ConfigBroadcast(bad)
+
+
+def test_cm_mass_width_transform_dedupe_and_replace():
+    """Identical mass/width transforms dedupe silently; differing ones
+    for the same name replace with a warning (shared-cm auto-deal)."""
+    import warnings
+
+    from tabpwa.param_constraint import ConstraintManager, LinearTransform
+
+    cm = ConstraintManager([])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")            # first add must be silent
+        cm.set_mass_width_transforms([LinearTransform("X_mass", 1.0, 0.0)],
+                                     reset=False)
+    assert len(cm.mass_width_transforms) == 1
+
+    # identical re-registration: deduped, no warning
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        cm.set_mass_width_transforms(
+            [LinearTransform("X_mass", 1.0, 0.0)], reset=False)
+    assert not [x for x in rec if "replaced" in str(x.message)]
+    assert len(cm.mass_width_transforms) == 1
+
+    # differing transform for the same name: replaced, with a warning
+    with pytest.warns(UserWarning, match="replaced"):
+        cm.set_mass_width_transforms(
+            [LinearTransform("X_mass", 2.0, 0.5)], reset=False)
+    assert len(cm.mass_width_transforms) == 1
+    assert cm.mass_width_transforms[0].factor == 2.0
+    assert cm.mass_width_transforms[0].bias == 0.5
+
+
+def test_joint_shared_fixed_release_warns(tmp_path):
+    """A config whose `free_var` unfixes a shared name warns, and the
+    name leaves the joint fixed set (explicit user intent)."""
+    dic = yaml.safe_load(open(CFG))
+    a = copy.deepcopy(dic)
+    b = copy.deepcopy(dic)
+    a.setdefault("constrains", {})["fix_var"] = {"MI2p_mass": 1.4}
+    b.setdefault("constrains", {})["free_var"] = ["MI2p_mass"]
+    pa, pb = _write(tmp_path, "a.yml", a), _write(tmp_path, "b.yml", b)
+
+    joint = JointFitter()
+    joint.add_config(pa, backend="numpy_pwa", load_data=False)
+    with pytest.warns(RuntimeWarning, match="RELEASED"):
+        joint.add_config(pb, backend="numpy_pwa", load_data=False)
+    assert "MI2p_mass" not in joint.cm.fixed_slots
+    assert "MI2p_mass" in joint.free_param_names()

@@ -99,6 +99,9 @@ class JointFitter:
         self.fitters = []
         self._last_xk = None
         self.log = []
+        # names whose mass/width transforms were replaced while adding
+        # configs (SameTopoJointFitter turns this into a strict error)
+        self._replacements = []
 
         if configs is None:
             items = []
@@ -157,6 +160,7 @@ class JointFitter:
         f.apply_constrains()
         if load_data:
             f.load_all_data()
+        self._replacements.extend(f.setup_mass_width_transforms() or [])
 
         # ── auto-deal reports ─────────────────────────────────────
         for name, val in self.cm.fixed_slots.items():
@@ -164,6 +168,11 @@ class JointFitter:
                 self._warn(
                     f"shared fixed value of {name!r} replaced: "
                     f"{prev_fixed[name]:.6g} -> {val:.6g} (latest wins)")
+        for name in prev_fixed:
+            if name not in self.cm.fixed_slots:
+                self._warn(
+                    f"shared fixed {name!r} was RELEASED by this config "
+                    f"(no longer fixed in the joint cm)")
 
         now_bounds = self.cm.bounds.to_dict()
         for name, spec in prev_bounds.items():
@@ -415,6 +424,17 @@ class SameTopoJointFitter(JointFitter):
         for label, cfg in ConfigBroadcast.items(cb):
             self.add_config(cfg, backend=backend, load_data=load_data,
                             label=label or None)
+        if self._replacements:
+            names = sorted(set(self._replacements))
+            msg = (f"SameTopoJointFitter: variants replace mass/width "
+                   f"transforms for shared parameter(s) {names} — the "
+                   f"variants differ in particle model, so the same "
+                   f"parameter would follow different physics per dataset. "
+                   f"Align the configs, or pass strict=False to accept the "
+                   f"latest-wins merge.")
+            if strict:
+                raise ValueError(msg)
+            self._warn(msg)
 
     @staticmethod
     def _check_same_decay(cb):

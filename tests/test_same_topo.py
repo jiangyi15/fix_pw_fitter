@@ -55,6 +55,21 @@ def test_same_topo_accepts_same_decay_and_reports():
     report = joint.nll_report()
     assert list(report) == joint.dataset_labels()
     assert sum(report.values()) == pytest.approx(total, rel=0, abs=1e-9)
+    assert joint._replacements == []   # identical configs: no replacements
+
+
+def test_load_fit_forwards_cm():
+    from tabpwa.param_constraint import ConstraintManager
+
+    shared = ConstraintManager([])
+    plain = load_fit(CFG, backend="numpy_pwa", load_data=False, cm=shared)
+    assert plain.cm is shared
+
+    cfg = _template(broadcast=[{"purity": 1.0}, {"purity": 0.9}])
+    joint = load_fit(cfg, backend="numpy_pwa", load_data=False, cm=shared)
+    assert isinstance(joint, SameTopoJointFitter)
+    assert joint.cm is shared
+    assert joint._replacements == []
 
 
 def test_same_topo_rejects_different_decay():

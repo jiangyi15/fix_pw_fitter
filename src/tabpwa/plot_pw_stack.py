@@ -88,9 +88,13 @@ class PWStackPlotter:
             return [np.concatenate([s[key][i] for s in per])
                     for i in range(n_var)]
 
+        # group curves need the label in EVERY dataset — intersect over all
+        # (not just dataset 0), and report anything that gets dropped
         common = [lbl for lbl in per[0]["w_groups"]
                   if all(lbl in s["w_groups"] for s in per)]
-        dropped = [lbl for lbl in per[0]["w_groups"] if lbl not in common]
+        dropped = [lbl for s in per for lbl in s["w_groups"]
+                   if lbl not in common]
+        dropped = sorted(set(dropped))
         if dropped:
             warnings.warn(
                 f"PWStackPlotter: group(s) {dropped} are not present in "

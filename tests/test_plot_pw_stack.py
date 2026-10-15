@@ -72,6 +72,28 @@ def test_merged_samples_are_the_sum_of_the_parts():
     assert np.allclose(m1["w_data"], sp.plotters[0].var_samples(VARFUN)["w_data"])
 
 
+def test_var_samples_accepts_per_event_phsp_weight_extra():
+    """Regression: `phsp_weight_extra` as a per-event array must work in
+    var_samples (documented input; crashed as a scalar cast after the
+    plot_var refactor)."""
+    joint, fa, fb = _joint_two()
+    x = joint.initial_values(seed=9)
+    extra = np.ones(len(fa._phsp_np["weight"]))
+
+    sp = PWStackPlotter([(fa, x, {})], labels=["A"]).compute()
+    h = sp.plotters[0]
+    smp = h.var_samples(VARFUN, phsp_weight_extra=extra)   # must not raise
+    plain = h.var_samples(VARFUN)
+
+    assert all(np.array_equal(a, b) for a, b
+               in zip(smp["x_data"], plain["x_data"]))
+    assert all(np.array_equal(a, b) for a, b
+               in zip(smp["x_model"], plain["x_model"]))
+    assert np.allclose(smp["w_data"], plain["w_data"])
+    assert np.allclose(smp["w_model"], plain["w_model"])   # extra ≡ ones
+    assert len(smp["w_model"]) == len(plain["w_model"])
+
+
 def test_stack_plotter_draws_stacked_and_overlay(tmp_path):
     joint, fa, fb = _joint_two()
     x = joint.initial_values(seed=6)
