@@ -73,6 +73,30 @@ Auto-detection priority:
 1. `nvidia-smi` → exact `-arch=sm_XY` for the installed GPU
 2. `nvcc --version` → fat binary: `sm_70+sm_86` (CUDA < 13) or `sm_86` only (CUDA ≥ 13)
 
+## Kernel policy
+
+**Never modify a working kernel.**  A kernel that works (tests green, in
+use) is immutable: no edits, no signature changes, no "small" tweaks.
+The only allowed actions are:
+
+1. **New copy** — implement a new standalone kernel: add a new C source
+   (`.cu`) by copying the existing kernel's source into it, **replace**
+   the kernel content with the new variant, and **relink** every
+   exported C symbol to the new name (suffix the function names, e.g.
+   `..._v4` → `..._<variant>`) so the new `.so` links beside the old
+   one; mirror the Python wrapper module (`_<name>.py`) the same way.
+   Every existing kernel file and its tests stay byte-identical.
+2. **Fix a broken kernel** — a kernel whose tests fail / that does not
+   work may be repaired in place.
+3. **Replace a working kernel** — build the new implementation as a new
+   copy first (case 1: new C source, symbols relinked, tests green),
+   then swap it in wholesale to take over the old kernel's file/name
+   (same API).  The old kernel is superseded, never edited
+   incrementally, and its previous copy stays available for rollback.
+
+If a task seems to require touching a working kernel, the design is
+wrong — state that instead of editing.
+
 ## Amplitude models
 
 `amp_model` in the config (top-level, or legacy `data.amp_model`) selects an
