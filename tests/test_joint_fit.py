@@ -153,3 +153,26 @@ def test_joint_fit_smoke():
     assert np.isfinite(res.fun)
     assert len(res.x) == len(joint.free_param_names())
     assert res.fun <= n0 + 1e-6
+
+
+def test_joint_init_from_configs():
+    """JointFitter([...]) builds every config up front."""
+    joint = JointFitter([CFG, (CFG, "numpy_pwa")], backend="numpy_pwa",
+                        load_data=False)
+    assert joint.n_models == 2
+    for f in joint.fitters:
+        _put(f, 60, seed=31)
+    x = joint.initial_values(seed=2)
+    n, g = joint.get_nll(x)
+    assert np.isfinite(n)
+    assert len(g) == len(joint.free_param_names())
+    assert n == pytest.approx(2.0 * joint.fitters[0].get_nll(x)[0],
+                              rel=1e-12, abs=1e-9)
+
+    # spec-dict form and the single-config (non-list) form
+    j2 = JointFitter([{"config": CFG}, CFG], backend="numpy_pwa",
+                     load_data=False)
+    assert j2.n_models == 2
+    j3 = JointFitter(CFG, backend="numpy_pwa", load_data=False)
+    assert j3.n_models == 1
+    assert j3.param_names == joint.param_names

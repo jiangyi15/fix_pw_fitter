@@ -32,12 +32,18 @@ blind                     ONE frame — call :meth:`set_blind` here only
 
 Usage::
 
-    joint = JointFitter()
-    joint.add_config("channelA.yml", backend="cuda_v5_pwa_s0c")
-    joint.add_config("channelB.yml", backend="cuda_v5_pwa_s0c")
+    from tabpwa.joint_fit import JointFitter
+
+    joint = JointFitter(["channelA.yml", "channelB.yml"],
+                        backend="cuda_v5_pwa_s0c")
     x0 = joint.initial_values(seed=1)
     print(joint.get_nll(x0)[0])          # Σ over both datasets
     result = joint.fit(x0, maxiter=2000)
+
+    # per-config backends / lazy building also work:
+    joint = JointFitter([("channelA.yml", "cuda_v5_pwa_s0c"),
+                         {"config": "channelB.yml", "backend": "cpu_v3"}])
+    # or: joint = JointFitter(); joint.add_config("channelA.yml", backend=…)
 """
 import os
 import time
@@ -49,12 +55,46 @@ import numpy as np
 class JointFitter:
     """Simultaneous fit over N configs sharing one constraint manager."""
 
-    def __init__(self, fitters=None, cm=None):
+    def __init__(self, configs=None, backend=None, load_data=True, cm=None):
+        """Build the joint fit.
+
+        Args:
+            configs: a config path / config dict, or a list of them.  Each
+                entry may also be ``(config, backend)`` for a per-config
+                backend, or a spec dict ``{"config": …, "backend": …,
+                "load_data": …}``.  ``None`` starts empty (use
+                :meth:`add_config` / :meth:`add_fitter`).
+            backend: backend spec applied to every config that does not
+                carry its own (see :class:`~tabpwa.fitter.Fitter`).
+            load_data: call each fitter's ``load_all_data()`` (the
+                config's ``data:`` section) while adding it.
+            cm: optional pre-made shared
+                :class:`~tabpwa.param_constraint.ConstraintManager`.
+        """
         from tabpwa.param_constraint import ConstraintManager
         self.cm = cm if cm is not None else ConstraintManager([])
-        self.fitters = list(fitters) if fitters else []
+        self.fitters = []
         self._last_xk = None
         self.log = []
+
+        if configs is None:
+            items = []
+        elif isinstance(configs, (str, dict)):
+            items = [configs]
+        else:
+            items = list(configs)
+
+        for item in items:
+            be, ld = backend, load_data
+            spec = item
+            if (isinstance(item, dict) and "config" in item
+                    and "decay" not in item):
+                spec = item["config"]
+                be = item.get("backend", backend)
+                ld = item.get("load_data", load_data)
+            elif isinstance(item, (tuple, list)) and len(item) == 2:
+                spec, be = item
+            self.add_config(spec, backend=be, load_data=ld)
 
     # ── build ─────────────────────────────────────────────────────
 
@@ -113,7 +153,10 @@ class JointFitter:
 
     @staticmethod
     def _label_for(config_file, i):
-        base = os.path.basename(str(config_file)) or f"cfg{i}"
+        if isinstance(config_file, dict):
+            base = "cfg"
+        else:
+            base = os.path.basename(str(config_file)) or "cfg"
         return f"{i}:{base}"
 
     def add_fitter(self, fitter):

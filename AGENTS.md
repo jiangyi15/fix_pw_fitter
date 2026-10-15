@@ -120,9 +120,8 @@ SAME flat-`x` slot by construction — no slicing/aliasing/remap layer:
 
 ```python
 from tabpwa.joint_fit import JointFitter
-joint = JointFitter()
-joint.add_config("channelA.yml", backend="cuda_v5_pwa_s0c")
-joint.add_config("channelB.yml", backend="cuda_v5_pwa_s0c")
+joint = JointFitter(["channelA.yml", "channelB.yml"],
+                    backend="cuda_v5_pwa_s0c")   # or add_config later
 x0 = joint.initial_values(seed=1)
 nll, grad = joint.get_nll(x0)      # Σ_i NLL_i, index-aligned gradients
 result = joint.fit(x0, maxiter=2000)
