@@ -121,6 +121,9 @@ def main():
     ap.add_argument("--m-range", type=float, nargs=2, default=None, metavar=("LO", "HI"))
     ap.add_argument("--min-counts", type=float, default=0.0)
     ap.add_argument("--maxiter", type=int, default=1000)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="seed for the FIRST fitted bin's start; later bins "
+                         "warm-start from the previous bin's fit")
     ap.add_argument("--verbose", action="store_true",
                     help="let the fit print its per-iteration tracker")
     ap.add_argument("--ref", type=int, default=0,
@@ -162,23 +165,38 @@ def main():
     print(f"mass bins: {edges[0]:.4g} .. {edges[-1]:.4g} ({len(edges) - 1} bins)")
 
     ckpt = args.ckpt or (args.output or "mass_bin_fit") + ".ckpt.npz"
-    res = {}
+    nfree = len(f.free_param_names())
+    res, xmap = {}, {}          # (lo,hi) -> row tuple  /  -> fitted free x
     if os.path.exists(ckpt) and not args.fresh:
         d = np.load(ckpt, allow_pickle=True)
         if list(d["waves"]) == list(waves) and d["rows"].shape[1] == 3 + _NB * n_wave:
+            keys = []
             for v in d["rows"]:
                 r = _unflat(v, n_wave)
-                res[(round(r[0], 9), round(r[1], 9))] = r
+                k = (round(r[0], 9), round(r[1], 9))
+                res[k] = r
+                keys.append(k)
+            if "xs" in d.files and d["xs"].shape == (len(keys), nfree):
+                for k, xv in zip(keys, d["xs"]):
+                    xmap[k] = np.asarray(xv, float)
             print(f"resume: {len(res)} bins already done ({ckpt})")
         else:
             print(f"ignore checkpoint (waves/shape mismatch): {ckpt}")
 
     def _save():
-        np.savez(ckpt, rows=np.array([_flat(res[k]) for k in sorted(res)]),
+        keys = sorted(res)
+        xs = (np.array([xmap.get(k, np.full(nfree, np.nan)) for k in keys])
+              if keys else np.zeros((0, nfree)))
+        np.savez(ckpt, rows=np.array([_flat(res[k]) for k in keys]), xs=xs,
                  waves=np.array(waves), ref=args.ref)
 
+    x_prev = None
     for lo, hi in zip(edges[:-1], edges[1:]):
-        if (round(lo, 9), round(hi, 9)) in res:
+        key = (round(lo, 9), round(hi, 9))
+        if key in res:
+            x = xmap.get(key)
+            if x is not None and not np.isnan(x).any():
+                x_prev = x
             continue
         dm = (M >= lo) & (M < hi)
         pm = (Mp >= lo) & (Mp < hi)
@@ -188,11 +206,13 @@ def main():
         t0 = time.time()
         f.set_phsp(_subset(phsp, pm))
         f.set_data(_subset(data, dm))
+        start = x_prev if x_prev is not None else f.initial_values(seed=args.seed)
         if args.verbose:
-            res_fit = f.fit(f.initial_values(), maxiter=args.maxiter)
+            res_fit = f.fit(start, maxiter=args.maxiter)
         else:
             with contextlib.redirect_stdout(io.StringIO()):
-                res_fit = f.fit(f.initial_values(), maxiter=args.maxiter)
+                res_fit = f.fit(start, maxiter=args.maxiter)
+        x_prev = res_fit.x
         ck = f.build_params(res_fit.x)[0]["ck"]
         unc = f.get_uncertainties(res_fit)
         mag = np.abs(ck)
@@ -206,7 +226,8 @@ def main():
         # error: shape (N·d(frac)) and the data Poisson(N) both propagated
         yerr = np.sqrt((ntot * ferr) ** 2 + frac ** 2 * ntot)
         row = (lo, hi, nw, mag, merr, dphi, perr, frac, ferr, yld, yerr)
-        res[(round(lo, 9), round(hi, 9))] = row
+        res[key] = row
+        xmap[key] = res_fit.x
         _save()                                 # incremental checkpoint
         if args.plot:                           # keep plots current on disk
             _make_plots([res[k] for k in sorted(res)], waves, args.plot,
