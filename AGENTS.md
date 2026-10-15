@@ -227,8 +227,8 @@ Positivity is not enforced (bounds via `var_range` if needed).
 * Backend: `polarised` (`backends/polarised_backend.py`, the default for
   this model) — the numpy reference: `NumpyPolarisedPWA`
   (`numpy_pwa.py`; `NumpyPWA` itself is rho-free) contracts `rho`
-  directly and returns `grads["drho"] = Σ_e dQ/dP·A_j·conj(A_j')`; the
-  wrapper contracts it with the generators into `grads["scalar"]`.
+  directly and returns the finished `grads["scalar"]` per-parameter
+  gradients (internally contracting the raw dQ/dρ with the generators).
   CUDA: **not expressible through the unmodified kernels** — the
   shared-ck projection-sum interface applies ONE `ck` vector to every
   projection, but the per-projection mixing weights `L[j,m]` of

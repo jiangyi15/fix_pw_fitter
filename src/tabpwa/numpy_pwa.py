@@ -186,13 +186,13 @@ class NumpyPolarisedPWA(NumpyPWA):
     (``sum_j |A_j(e)|^2``).
 
     Gradients: ``dQ/dA`` follows the rho contraction
-    (``dQ_dP * conj(A) @ rho.T``), and ``grads["drho"] = sum_e dQ/dP *
-    A_j * conj(A_l)`` (the raw dQ/drho matrix) — the backend contracts
-    it with the generators into the per-parameter ``scalar`` gradients.
+    (``dQ_dP * conj(A) @ rho.T``), and ``grads["scalar"]`` carries the
+    finished per-parameter gradients: the raw ``dQ/drho`` (``sum_e
+    dQ/dP * A_j * conj(A_l)``) contracted with the generators ``G_l``.
     """
 
     def compute(self, params, data_handle, norm=None, return_p=True):
-        from tabpwa.spin_density import rho_matrix
+        from tabpwa.spin_density import generators, rho_matrix
 
         k = self._nk
         n_wave = self.n_wave
@@ -296,9 +296,13 @@ class NumpyPolarisedPWA(NumpyPWA):
         else:
             self._last_dnorm = None
 
-        # spin-density raw gradient: dQ/drho[j,l] = sum_e dQ/dP * A_j * conj(A_l)
-        # (the backend contracts it with the generators G_l)
+        # spin-density parameter gradients: dQ/drho[j,l] = sum_e dQ/dP *
+        # A_j * conj(A_l)  (the intensity is linear in rho), contracted
+        # with the generators G_l:  rho = I + sum_l p_l*G_l
+        # =>  dQ/dp_l = Re sum_{j,l'} G_l[j,l'] * dQ/drho[j,l']
         grads = {"ck": grad_ck, "m0": grad_m0, "g0": grad_g0}
-        grads["drho"] = np.einsum("e,ejl->jl", dQ_dP,
-                                  A[:, :, None] * np.conj(A)[..., None, :])
+        drho = np.einsum("e,ejl->jl", dQ_dP,
+                         A[:, :, None] * np.conj(A)[..., None, :])
+        grads["scalar"] = np.array(
+            [float(np.real(np.sum(g * drho))) for g in generators(P)])
         return Q, grads, (P_e if return_p else None)

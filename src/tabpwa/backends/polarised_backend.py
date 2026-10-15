@@ -1,15 +1,17 @@
 """`polarised` backend — the spin-density (``polarised_pwa``) backend.
 
-Wraps the rho-aware :class:`~tabpwa.numpy_pwa.NumpyPolarisedPWA` kernel:
-params ``{ck, m0, g0, scalar}`` with the intensity
+Thin registration wrapper around the rho-aware
+:class:`~tabpwa.numpy_pwa.NumpyPolarisedPWA` kernel: params
+``{ck, m0, g0, scalar}`` with the intensity
 
     P(e) = sum_{j,j'} rho[j,j'] * A_j(e) * conj(A_j'(e)),
     rho  = I + sum_l p_l * G_l  (trace-P Hermitian generators),
 
 ``scalar`` being the fitted polarisation parameters.  All-zero ``scalar``
 reproduces the plain projection-sum ``pwa`` intensity exactly.  The
-kernel returns the raw ``dQ/drho`` matrix; this wrapper contracts it
-with the generators into the per-parameter ``scalar`` gradients.
+kernel returns the finished per-parameter gradients
+``{ck, m0, g0, scalar}`` — ``scalar`` being dQ/dp_l, already contracted
+with the generators.
 
 Note: this contraction cannot be expressed through the *unmodified*
 shared-ck projection-sum kernels (v4/numpy_pwa) — the per-projection
@@ -20,8 +22,6 @@ arrays (they are fixed at ``load_data``).  A CUDA port therefore requires
 a kernel-side change (e.g. the rho contraction in the reduce kernel);
 until then this backend is the numpy reference.
 """
-import numpy as np
-
 from .core import ComputeBackend, register_backend
 
 
@@ -37,12 +37,7 @@ class PolarisedBackend(ComputeBackend):
                 names).
         """
         from tabpwa.numpy_pwa import NumpyPolarisedPWA
-        from tabpwa.spin_density import generators
-
         self.kernel = NumpyPolarisedPWA(kernel_config)
-        sd = kernel_config.get("spin_density") or {}
-        self._n_j = int(sd.get("n_j", 0))
-        self._gen = generators(self._n_j)
 
     def load_data(self, data_np):
         return self.kernel.load_data(data_np)
@@ -50,14 +45,12 @@ class PolarisedBackend(ComputeBackend):
     def compute(self, params, data_handle, norm=None, return_p=True):
         """NLL/grads with ``P = sum rho[j,j'] A_j conj(A_j')``.
 
-        Returns grads ``{ck, m0, g0, scalar, norm}`` — ``scalar`` is the
+        Returns grads ``{ck, m0, g0, scalar}`` (+ ``norm`` when the
+        gradient w.r.t. the norm is available) — ``scalar`` is the
         gradient w.r.t. the polarisation parameters.
         """
         Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
                                           return_p=True)
-        drho = grads.pop("drho")
-        grads["scalar"] = np.array([float(np.real(np.sum(g * drho)))
-                                    for g in self._gen])
         if norm is not None:
             # native dnorm from the kernel (no host-array slot)
             grads["norm"] = float(self.kernel._last_dnorm)
