@@ -142,11 +142,14 @@ config explicitly unfreezes), **bounds are intersected**, scale and
 mass/width transforms are replaced per name (never stacked), alias
 groups (`var_equal`) union-merge, defaults merge.  The per-name
 transform replace lives in `ConstraintManager.set_mass_width_transforms`
-/`set_scale` and only replaces transforms registered by *earlier* calls
-(a model may legitimately list several transforms producing the same
-family within one call — TD models), so single-config behaviour is
-unchanged.  `setup_mass_width_transforms` therefore always calls with
-`reset=False`; a shared cm must never be reset by a joining config.
+/`set_scale`: identity is the transform's **output names** (two
+transforms producing the same parameter are alternatives; a transform
+consuming another's output is a legitimate chain), and only transforms
+registered by *earlier* calls are eligible (a model may legitimately
+list several transforms producing the same family within one call — TD
+models), so single-config behaviour is unchanged.
+`setup_mass_width_transforms` therefore always calls with `reset=False`;
+a shared cm must never be reset by a joining config.
 
 ### Barrier factors & build-time defaults
 

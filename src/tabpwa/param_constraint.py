@@ -1119,25 +1119,23 @@ class ConstraintManager:
             if tr is not None:
                 # Shared-cm case: a later config's transform REPLACES an
                 # earlier config's for the same parameter(s) (latest wins).
-                # Collision = same INPUT name (both consume it) or same
-                # OUTPUT name (both produce it); an old output feeding a
-                # new input is a legitimate chain, not a collision.
-                ins_n = set(tr.input_names)
+                # Identity = the OUTPUT names it produces: two transforms
+                # producing the same parameter are alternatives, while a
+                # transform consuming another's output is a legitimate
+                # producer→consumer chain (kept, in order).
                 outs_n = set(tr.output_names)
                 still, dropped = [], []
                 for old in kept:
-                    if (old in pre_existing
-                            and (set(old.input_names) & ins_n
-                                 or set(old.output_names) & outs_n)):
+                    if old in pre_existing and (set(old.output_names)
+                                                & outs_n):
                         dropped.append(old)
                     else:
                         still.append(old)
                 if dropped:
                     for old in dropped:
-                        replaced_names.extend(
-                            set(old.input_names) | set(old.output_names))
+                        replaced_names.extend(old.output_names)
                 kept = still + [tr]
-                input_set = ins_n
+                input_set = set(tr.input_names)
                 for name in tr.input_names:
                     if name not in self._all_names:
                         self._all_names.append(name)

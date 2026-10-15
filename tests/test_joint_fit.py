@@ -62,6 +62,10 @@ def test_joint_two_copies_share_slots_and_double():
     # registry is cm.var_registry.flat_names)
     assert joint.param_names == single.cm.var_registry.flat_names
     assert len(joint.param_names) < len(single.param_names())
+    # mass/width transforms are de-duplicated by their OUTPUT names: the
+    # second config replaces, never stacks, the shared resonance's ones
+    assert (len(joint.cm.mass_width_transforms)
+            == len(single.cm.mass_width_transforms))
 
     _put(single, 120, seed=1)
     _put(fa, 120, seed=1)
