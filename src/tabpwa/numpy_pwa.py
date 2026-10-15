@@ -72,7 +72,16 @@ class NumpyPWA:
         self.free()
 
     # -- forward + gradients ----------------------------------------------
-    def compute(self, params, data_handle, norm=None, return_p=True):
+    def compute(self, params, data_handle, norm=None, return_p=True,
+                rho=None):
+        """Compute NLL/grads; ``rho`` adds a spin-density contraction.
+
+        With ``rho`` (a Hermitian ``(n_j, n_j)`` matrix) the intensity is
+        ``P(e) = sum_{j,j'} rho[j,j'] * A_j(e) * conj(A_j'(e))`` instead of
+        ``sum_j |A_j(e)|^2``; ``grads["drho"]`` returns
+        ``sum_e dQ/dP * conj(A_j) * A_j'`` for the rho chain.  ``rho=None``
+        (default) is the plain projection-sum model.
+        """
         k = self._nk
         n_wave = self.n_wave
         P = self.n_proj
@@ -122,7 +131,12 @@ class NumpyPWA:
         # ~10x faster than materialising ck per entry (numpy: (ne,P,N)@ck
         # loops per event, this does one contiguous matvec).
         A = (cm.reshape(ne * P, N) @ ck).reshape(ne, P)  # (ne, P) = A_p
-        P_e = np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
+        if rho is None:
+            P_e = np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
+        else:
+            # P(e) = sum_{j,j'} rho[j,j'] * A_j * conj(A_j')  (Hermitian)
+            P_e = np.real(np.einsum("jl,ejl->e", rho,
+                                    A[..., None] * np.conj(A)[..., None, :]))
 
         weight = data.get("weight", np.ones(ne))
         bkg = data.get("bkg", 1.0)
@@ -134,8 +148,12 @@ class NumpyPWA:
             dQ_dP = -weight / (P_e + bkg * norm)
 
         # ── back-prop through the projection sum ──────────────────────────
-        # ∂Q/∂A_p = dQ/dP · conj(A_p);  entry w=(p,k) takes the A_p gradient
-        dQ_dA = dQ_dP[:, None] * np.conj(A)              # (ne, P)
+        # ∂Q/∂A_p = dQ/dP · sum_j' rho[p,j'] * conj(A_j');  entry w=(p,k)
+        # takes the A_p gradient
+        if rho is None:
+            dQ_dA = dQ_dP[:, None] * np.conj(A)              # (ne, P)
+        else:
+            dQ_dA = dQ_dP[:, None] * (np.conj(A) @ rho.T)    # (ne, P)
         # S[e,k] = Σ_p dQ_dA[e,p]·a_{p,k}(e) — project P away up front:
         # the BW propagators (and fl_q/mass) are identical across projections
         # (p-major duplication), so only the angular part differs and every
@@ -169,4 +187,9 @@ class NumpyPWA:
             self._last_dnorm = None
 
         grads = {"ck": grad_ck, "m0": grad_m0, "g0": grad_g0}
+        if rho is not None:
+            # chain input for the spin-density parameters:
+            #   dQ/drho[j,l] = sum_e dQ/dP * A_j * conj(A_l)
+            grads["drho"] = np.einsum("e,ejl->jl", dQ_dP,
+                                      A[:, :, None] * np.conj(A)[..., None, :])
         return Q, grads, (P_e if return_p else None)

@@ -13,9 +13,12 @@ class NumpyPWABackend(ComputeBackend):
     def load_data(self, data_np):
         return self.kernel.load_data(data_np)
 
-    def compute(self, params, data_handle, norm=None, return_p=True):
+    def compute(self, params, data_handle, norm=None, return_p=True,
+                rho=None):
+        """``rho`` (optional Hermitian matrix) enables the spin-density
+        intensity contraction for the polarised wrapper backend."""
         Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
-                                          return_p=True)
+                                          return_p=True, rho=rho)
         if norm is not None:
             # native dnorm from the kernel (no host-array slot)
             grads["norm"] = float(self.kernel._last_dnorm)

@@ -28,7 +28,8 @@ import numpy as np
 
 from tabpwa.base_model import BaseModel
 from tabpwa.kernel_params import (
-    BuildKernelParams, PWAKernelParams, FlavourTagMixKernelParams)
+    BuildKernelParams, PWAKernelParams, FlavourTagMixKernelParams,
+    PolarisedKernelParams)
 
 # Legacy time/mixing scalar parameters (D0-D0bar flavour-tagged mixing).
 LEGACY_SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod",
@@ -212,6 +213,55 @@ class PWA(AmplitudeModel):
         kc["g0_names"] = g0
         return kc
 
+
+
+@register_amplitude_model("polarised_pwa")
+class PolarisedPWA(PWA):
+    """Projection-sum PWA with a fitted spin-density matrix.
+
+    The intensity couples the top's helicity projections through a spin
+    density matrix ``rho = I + sum_l p_l * G_l`` (the default basis is the
+    trace-P Hermitian generators, auto-built from the top's helicity
+    states; zero parameters reproduces ``pwa`` exactly).  The polarisation
+    parameters are declared as model scalars — nothing to configure beyond
+    ``amp_model: polarised_pwa`` (fixing/freeing them is the constraint
+    system's job).  Currently the top must carry >= 2 helicity states.
+    """
+    name = "polarised_pwa"
+    params_transform_cls = PolarisedKernelParams
+
+    def _n_j(self):
+        """Projection count: ``len(spins)`` of the top particle."""
+        spins = self.dic["particle"].get(self.top, {}).get("spins") or []
+        if spins:
+            return len(spins)
+        states = self._helicity_top_states()
+        if len(states) < 2:
+            raise ValueError(
+                "polarised_pwa: the top has < 2 helicity states — nothing "
+                "to polarise; use amp_model: pwa")
+        return len(states)
+
+    @property
+    def scalar_names(self):
+        explicit = self.dic.get("scalar_names")
+        if explicit is not None:
+            return list(explicit)
+        from tabpwa.spin_density import polarisation_names
+        return polarisation_names(self._n_j(), prefix=self.top)
+
+    @property
+    def scalar_defaults(self):
+        return {n: 0.0 for n in self.scalar_names}
+
+    def build_kernel_config(self):
+        """PWA kernel config plus the spin-density meta for the backend."""
+        kc = super().build_kernel_config()
+        from tabpwa.spin_density import polarisation_names
+        P = self._n_j()
+        kc["spin_density"] = {"n_j": P,
+                              "names": polarisation_names(P, prefix=self.top)}
+        return kc
 
 
 @register_amplitude_model("flavour_tag_mix", "flour_tag_mix", "p4_directly")

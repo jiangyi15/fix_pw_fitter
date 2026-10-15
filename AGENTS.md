@@ -205,6 +205,36 @@ data points and model curve).  All drawing lives in
 `PWGroupPlotter.plot_var` and `PWStackPlotter.plot_var` are thin callers
 and no plot code is tied to a fitter.
 
+#### Polarised PWA (`amp_model: polarised_pwa`)
+
+Projection-sum PWA with a fitted spin-density matrix.  The intensity
+couples the top's helicity projections through
+`rho = I + sum_l p_l * G_l` — the default basis is the P²−1 traceless
+Hermitian generators over the top's helicity states
+(`Tr(G_a G_b) = 2 delta_ab`; P = `len(spins)` of the top).  The
+polarisation parameters are declared as model scalars, auto-named
+`{top}_px`, `{top}_py`, `{top}_pz` (+ `{top}_p4`, ... beyond two
+states) — nothing to configure beyond `amp_model: polarised_pwa`;
+fixing/freeing them is the constraint system's job.  Zero parameters =>
+`rho = I` => exactly the plain `pwa` intensity (validation anchor).
+Positivity is not enforced (bounds via `var_range` if needed).
+
+* `tabpwa/spin_density.py` — the generator basis + `rho_matrix`.
+* `PolarisedKernelParams` (`kernel_params.py`) — the spin params travel
+  through the params dict as `scalar` (the legacy scalar mechanism —
+  the norm chain and constraint combination treat them like the
+  existing scalars; no `Fitter` changes needed).
+* Backend: `polarised` (`backends/polarised_backend.py`, the default for
+  this model) — the numpy reference: the per-projection amplitudes are
+  contracted with `rho` directly (`numpy_pwa.compute(rho=...)`, which
+  also returns `grads["drho"] = Σ_e dQ/dP·A_j·conj(A_l)` for the
+  chain).  CUDA: not implemented yet (would expose the per-projection
+  amplitudes/`dQ_dA` from the reduce kernel).
+* Identifiability note: the params are measurable only where the
+  helicity projections differ per event; fixtures whose projections are
+  identical (e.g. identical angle columns) leave the spin params
+  unidentifiable (the FD test documents this).
+
 Same-name collisions auto-deal deterministically (latest registration
 wins, `Warning` lines in `joint.log`): fixed values merge (later value
 replaces), a name fixed by ANY config stays fixed (`free_var` in a

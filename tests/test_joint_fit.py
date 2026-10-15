@@ -190,7 +190,6 @@ def test_joint_add_config_is_single_and_returns_fitter():
     assert isinstance(f, Fitter) and j.n_models == 2
     assert f._joint_label == "my-variant"
 
-
 def test_joint_variants_added_from_outside_loop():
     """Config variants stay outside: expand, then add each config."""
     from tabpwa.config_broadcast import ConfigBroadcast, scan

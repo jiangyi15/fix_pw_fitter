@@ -79,6 +79,44 @@ class PWAKernelParams(BuildKernelParams):
     """Pure projection-sum PWA: ck / m0 / g0 only — no scalar group."""
 
 
+class PolarisedKernelParams(BuildKernelParams):
+    """Polarised PWA: ck / m0 / g0 plus the spin-density parameters.
+
+    The spin parameters are model-declared scalars (``model.scalar_names``
+    / ``scalar_defaults`` — the same mechanism as the legacy mixing
+    model).  The backend transforms them into the intensity contraction.
+    """
+
+    def __init__(self, model):
+        super().__init__(model)
+        self.spin_names = list(model.scalar_names)   # policy from the model
+
+    def param_names(self):
+        # Dedup again: a spin name could collide with a ck/m0/g0 name.
+        return list(dict.fromkeys(
+            super().param_names() + list(self.spin_names)))
+
+    def param_defaults(self):
+        model_defaults = self.model.scalar_defaults or {}
+        return {n: float(model_defaults.get(n, 0.0))
+                for n in self.spin_names}
+
+    def forward(self, resolved):
+        out = super().forward(resolved)
+        out["scalar"] = np.array([resolved[n] for n in self.spin_names])
+        return out
+
+    def backward(self, total_grads, resolved):
+        grad_dict = super().backward(total_grads, resolved)
+        scalar_g = total_grads.get("scalar")
+        if scalar_g is not None:
+            arr = np.asarray(scalar_g)
+            for i, name in enumerate(self.spin_names):
+                if i < len(arr):
+                    grad_dict[name] = grad_dict.get(name, 0.0) + arr[i]
+        return grad_dict
+
+
 class FlavourTagMixKernelParams(BuildKernelParams):
     """Legacy time/mixing model: adds the config's scalar parameters."""
 
