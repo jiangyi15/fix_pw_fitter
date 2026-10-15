@@ -19,6 +19,7 @@ and ``backward(grad_dict)`` (gradient backpropagation):
     flat = registry.flat_gradient(x, grad)
 """
 
+import warnings
 import zlib
 
 import numpy as np
@@ -1047,7 +1048,16 @@ class ConstraintManager:
                 factor, bias = val[0], val[1] if len(val) > 1 else 0.0
             else:
                 factor, bias = val, 0.0
-            self.scale_transforms.append(LinearTransform(name, factor, bias))
+            # Shared-cm case: a later config's scale for the same name
+            # REPLACES the earlier transform (latest wins) instead of
+            # stacking two linear maps on one parameter.
+            tr = LinearTransform(name, factor, bias)
+            for i, old in enumerate(self.scale_transforms):
+                if old.name == name:
+                    self.scale_transforms[i] = tr
+                    break
+            else:
+                self.scale_transforms.append(tr)
         self._rebuild()
 
     def set_blind(self, names, seed, scale=1.0, reset=False):
@@ -1098,16 +1108,47 @@ class ConstraintManager:
             self._all_names = [n for n in self._all_names
                                if not any(n in tr.input_names
                                           for tr in self.mass_width_transforms)]
+        # Snapshot of transforms registered by EARLIER calls (other configs):
+        # only those can be replaced.  Transforms of THIS call are appended
+        # in order untouched — the model may legitimately list several
+        # transforms producing the same family (TD models).
+        pre_existing = list(self.mass_width_transforms)
+        kept = list(pre_existing)
+        replaced_names = []
         for tr in transforms:
             if tr is not None:
-                self.mass_width_transforms.append(tr)
-                input_set = set(tr.input_names)
+                # Shared-cm case: a later config's transform REPLACES an
+                # earlier config's for the same parameter(s) (latest wins).
+                # Collision = same INPUT name (both consume it) or same
+                # OUTPUT name (both produce it); an old output feeding a
+                # new input is a legitimate chain, not a collision.
+                ins_n = set(tr.input_names)
+                outs_n = set(tr.output_names)
+                still, dropped = [], []
+                for old in kept:
+                    if (old in pre_existing
+                            and (set(old.input_names) & ins_n
+                                 or set(old.output_names) & outs_n)):
+                        dropped.append(old)
+                    else:
+                        still.append(old)
+                if dropped:
+                    for old in dropped:
+                        replaced_names.extend(
+                            set(old.input_names) | set(old.output_names))
+                kept = still + [tr]
+                input_set = ins_n
                 for name in tr.input_names:
                     if name not in self._all_names:
                         self._all_names.append(name)
                 for name in tr.output_names:
                     if name not in input_set and name in self._all_names:
                         self._all_names.remove(name)
+        self.mass_width_transforms[:] = kept
+        if replaced_names:
+            warnings.warn(
+                f"mass/width transform(s) for shared parameter(s) replaced "
+                f"(latest wins): {sorted(set(replaced_names))}", stacklevel=2)
         self._rebuild()
 
     def add_transform(self, tr):
@@ -1137,6 +1178,23 @@ class ConstraintManager:
     def unset_range(self, name):
         self.bounds.unset(name)
         self._rebuild()
+
+    def register_names(self, names):
+        """Grow the managed name list (shared-cm registration).
+
+        Idempotent per name: a name already present keeps its slot.
+        Used by :class:`~tabpwa.joint_fit.JointFitter` to inject a shared
+        constraint manager across several configs — same-name parameters
+        from different models then resolve to the SAME slot, which is
+        exactly the "same x-space" the joint fit needs.
+        """
+        added = False
+        for name in names:
+            if name not in self._all_names:
+                self._all_names.append(name)
+                added = True
+        if added:
+            self._rebuild()
 
     # ── forward pipeline ───────────────────────────────────────
 

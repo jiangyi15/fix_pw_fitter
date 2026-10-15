@@ -43,7 +43,7 @@ class Fitter:
     default_constrains = {"ck_redundancy": {}, "cp_symmetry": {}, "cp_symmetry_mass": {},
                           "mass_width_bounds": {}}
 
-    def __init__(self, config_file="config_angle.yml", backend=None):
+    def __init__(self, config_file="config_angle.yml", backend=None, cm=None):
         """Load config, create kernel and parameter constraint.
 
         Args:
@@ -55,6 +55,13 @@ class Fitter:
                          {"name": "integrated", "base": "cuda_v3_cache"}
 
                      where ``"base"`` is itself a recursive backend spec.
+            cm: optional shared
+                     :class:`~tabpwa.param_constraint.ConstraintManager`
+                     (used by :class:`~tabpwa.joint_fit.JointFitter`).
+                     When given, this model's parameter names are
+                     registered into the shared registry and the fitter
+                     uses it instead of building a private one — same-name
+                     parameters across configs then share one x-slot.
         """
         from tabpwa.config_loader import RawConfig
         from tabpwa.amp_model import build_amplitude_model
@@ -94,8 +101,14 @@ class Fitter:
         # the scalars), so the fitter treats every parameter generically.
         self._kernel_builder = self.model.build_params_transform()
 
-        # Standalone constraint manager — flat name list, no type distinction.
-        self.cm = ConstraintManager(self._kernel_builder.param_names())
+        # Constraint manager — flat name list, no type distinction.
+        # An externally-owned (shared) cm is injected by JointFitter for
+        # simultaneous multi-config fits: the model's names are registered
+        # into it, so same-name params from different configs share a slot
+        # (a no-op for the private cm created here).
+        self.cm = cm if cm is not None else ConstraintManager(
+            self._kernel_builder.param_names())
+        self.cm.register_names(self._kernel_builder.param_names())
         # Auto-register mass/width transforms from particle models
         self.setup_mass_width_transforms()
 
@@ -194,7 +207,11 @@ class Fitter:
                 tfm = model.make_mass_width_transform()
                 if tfm is not None:
                     transforms.append(tfm)
-        self.cm.set_mass_width_transforms(transforms)
+        # Never reset: on a SHARED cm a reset would wipe the other configs'
+        # mass/width transforms; on the private cm there is nothing to wipe
+        # on this single call.  Same-name collisions are handled per name
+        # inside set_mass_width_transforms (latest wins).
+        self.cm.set_mass_width_transforms(transforms, reset=False)
 
     def add_prior(self, prior):
         """Add an NLL prior (penalty) to the fit.
@@ -657,7 +674,12 @@ class Fitter:
         # Model-declared parameter defaults (generic; e.g. legacy scalars).
         for name, val in self._kernel_builder.param_defaults().items():
             d.setdefault(name, float(val))
-        self.cm.set_defaults(d)
+        # Merge (not replace) so a SHARED cm keeps the other configs'
+        # defaults; same name → latest wins, which is a no-op for the
+        # private-cm single-config flow.
+        merged = dict(self.cm.defaults)
+        merged.update(d)
+        self.cm.set_defaults(merged)
 
     def _check_data_loaded(self):
         """Raise if data or phsp not set."""

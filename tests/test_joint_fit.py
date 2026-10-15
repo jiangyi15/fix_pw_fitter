@@ -1,0 +1,151 @@
+"""JointFitter — simultaneous multi-config fit on ONE shared x-space.
+
+CPU only (``numpy_pwa`` backend): the feature under test is the shared
+constraint manager and the summed objective, not the kernels.
+
+Covered:
+1. two copies of one config collapse to ONE registry (no doubled slots),
+   and the joint NLL/grad is exactly 2x the single fitter's;
+2. a shared parameter moves BOTH models (gradient chain over the shared
+   slot agrees with finite differences);
+3. ``fix_var`` on a shared name: union-merge, later value wins + WARN;
+4. differing bound windows on a shared name: intersected + WARN.
+"""
+import copy
+
+import numpy as np
+import pytest
+import yaml
+
+from tabpwa import Fitter
+from tabpwa.joint_fit import JointFitter
+
+CFG = "tests/config_pwa_bw.yml"
+
+
+def _synth(fitter, n, seed):
+    """Kernel-shaped synthetic data inside the gamma-table grid."""
+    kc = fitter.kernel_config
+    rs = np.random.RandomState(seed)
+    n_at = int(np.max(kc["angle_index"])) + 1 if len(kc["angle_index"]) else 1
+    nac = int(np.asarray(kc["angle_k"]).shape[-1])
+    n_mass = int(np.max(kc["mass_index"])) + 1
+    n_q = int(np.max(kc["fl_q_index"])) + 1
+    gmin = float(kc["gamma_min"])
+    gspan = float(kc["gamma_delta"]) * (np.asarray(kc["gamma_table"]).shape[-1])
+    return {"mass": (gmin + 0.05) + (0.9 * gspan - 0.1) * rs.rand(n, n_mass),
+            "q": np.abs(rs.randn(n, n_q)) + 0.3,
+            "angle": rs.uniform(-np.pi, np.pi, size=(n, n_at * nac)),
+            "weight": np.ones(n), "bkg": np.ones(n)}
+
+
+def _put(fitter, n, seed):
+    fitter.set_phsp(_synth(fitter, n, seed + 100))
+    fitter.set_data(_synth(fitter, n, seed))
+
+
+def _write(tmp_path, name, dic):
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump(dic, sort_keys=False))
+    return str(p)
+
+
+def test_joint_two_copies_share_slots_and_double():
+    single = Fitter(CFG, backend="numpy_pwa")
+    single.apply_constrains()
+    joint = JointFitter()
+    fa = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+    fb = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+
+    # one shared registry — same names, same order, no doubled slots
+    # (Fitter.param_names() is the raw builder list; the constrained
+    # registry is cm.var_registry.flat_names)
+    assert joint.param_names == single.cm.var_registry.flat_names
+    assert len(joint.param_names) < len(single.param_names())
+
+    _put(single, 120, seed=1)
+    _put(fa, 120, seed=1)
+    _put(fb, 120, seed=1)
+
+    x = joint.initial_values(seed=3)
+    n_single, g_single = single.get_nll(x)
+    n_joint, g_joint = joint.get_nll(x)
+    assert n_joint == pytest.approx(2.0 * n_single, rel=0, abs=1e-9)
+    assert np.allclose(g_joint, 2.0 * g_single, rtol=1e-12, atol=1e-12)
+    # report-frame round trip through the shared pipeline
+    assert np.allclose(joint.values_from_dict({"value": joint.values_dict(x)}),
+                       x, atol=1e-8)
+
+
+def test_joint_shared_parameter_moves_both_models():
+    joint = JointFitter()
+    fa = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+    fb = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+    _put(fa, 100, seed=11)          # different datasets
+    _put(fb, 100, seed=12)
+
+    x = joint.initial_values(seed=4)
+    name = next(n for n in joint.free_param_names() if n.endswith("_mass"))
+    idx = joint.param_names.index(name)
+
+    eps = 1e-6
+    xp, xm = x.copy(), x.copy()
+    xp[idx] += eps
+    xm[idx] -= eps
+    num = (joint.get_nll(xp)[0] - joint.get_nll(xm)[0]) / (2 * eps)
+    _n, g = joint.get_nll(x)
+    assert num == pytest.approx(g[idx], rel=1e-3, abs=1e-4)
+
+    # the shared slot really is shared: BOTH models feel the shift
+    dA = fa.get_nll(xp)[0] - fa.get_nll(xm)[0]
+    dB = fb.get_nll(xp)[0] - fb.get_nll(xm)[0]
+    assert abs(dA) > 1e-12 and abs(dB) > 1e-12
+
+
+def test_joint_fixed_value_union_latest_wins(tmp_path):
+    dic = yaml.safe_load(open(CFG))
+    a = copy.deepcopy(dic)
+    b = copy.deepcopy(dic)
+    a.setdefault("constrains", {})["fix_var"] = {"MI2p_mass": 1.2}
+    b.setdefault("constrains", {})["fix_var"] = {"MI2p_mass": 1.4}
+    pa, pb = _write(tmp_path, "a.yml", a), _write(tmp_path, "b.yml", b)
+
+    joint = JointFitter()
+    joint.add_config(pa, backend="numpy_pwa", load_data=False)
+    with pytest.warns(RuntimeWarning, match="shared fixed"):
+        joint.add_config(pb, backend="numpy_pwa", load_data=False)
+
+    assert joint.cm.fixed_slots["MI2p_mass"] == 1.4      # latest wins
+    assert "MI2p_mass" not in joint.free_param_names()   # union-fixed
+
+
+def test_joint_bounds_intersect(tmp_path):
+    dic = yaml.safe_load(open(CFG))
+    a = copy.deepcopy(dic)
+    b = copy.deepcopy(dic)
+    a.setdefault("constrains", {})["var_range"] = {"MI2p_mass": [1.1, 1.5]}
+    b.setdefault("constrains", {})["var_range"] = {"MI2p_mass": [1.3, 1.7]}
+    pa, pb = _write(tmp_path, "a.yml", a), _write(tmp_path, "b.yml", b)
+
+    joint = JointFitter()
+    joint.add_config(pa, backend="numpy_pwa", load_data=False)
+    with pytest.warns(RuntimeWarning, match="intersected"):
+        joint.add_config(pb, backend="numpy_pwa", load_data=False)
+
+    spec = joint.cm.bounds.to_dict()["MI2p_mass"]
+    assert (spec["low"], spec["high"]) == (1.3, 1.5)
+
+
+def test_joint_fit_smoke():
+    joint = JointFitter()
+    fa = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+    fb = joint.add_config(CFG, backend="numpy_pwa", load_data=False)
+    _put(fa, 60, seed=21)
+    _put(fb, 60, seed=22)
+
+    x0 = joint.initial_values(seed=5)
+    n0 = joint.get_nll(x0)[0]
+    res = joint.fit(x0, maxiter=3, disp=False)
+    assert np.isfinite(res.fun)
+    assert len(res.x) == len(joint.free_param_names())
+    assert res.fun <= n0 + 1e-6

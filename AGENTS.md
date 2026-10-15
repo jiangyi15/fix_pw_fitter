@@ -108,6 +108,46 @@ per-model defaults — e.g. `cuda_v4_pwa` is also registered as `"default"` for
 `backends_for_model(model.name)` for the allowed set and
 `create_backend(..., model=model.name)` resolves `"default"` per model.
 
+### JointFitter — simultaneous fit over several configs (`tabpwa/joint_fit.py`)
+
+Simultaneous fits need ONE parameter space: a config pair that both
+speak about `rho770_mass` must optimise one variable.  Instead of
+merging constraint managers, the shared `ConstraintManager` is created
+once and **injected** into every sub-`Fitter`
+(`Fitter(cfg, cm=shared)`): each model registers its names into it
+(`cm.register_names`), so a name present in two configs lands in the
+SAME flat-`x` slot by construction — no slicing/aliasing/remap layer:
+
+```python
+from tabpwa.joint_fit import JointFitter
+joint = JointFitter()
+joint.add_config("channelA.yml", backend="cuda_v5_pwa_s0c")
+joint.add_config("channelB.yml", backend="cuda_v5_pwa_s0c")
+x0 = joint.initial_values(seed=1)
+nll, grad = joint.get_nll(x0)      # Σ_i NLL_i, index-aligned gradients
+result = joint.fit(x0, maxiter=2000)
+```
+
+`get_nll` sums per-model NLL and gradients: each `Fitter.get_nll(x)`
+returns a flat gradient over the *shared* registry (names another model
+does not own are zero there via `cm.full_gradient`'s name lookup), so
+the sum is a plain element-wise add.  `values_from_dict` /
+`load_fixed_from_dict` / `values_dict` operate on the union; one blind
+frame (`joint.set_blind`) covers the whole fit.
+
+Same-name collisions auto-deal deterministically (latest registration
+wins, `Warning` lines in `joint.log`): fixed values merge (later value
+replaces), a name fixed by ANY config stays fixed (`free_var` in a
+config explicitly unfreezes), **bounds are intersected**, scale and
+mass/width transforms are replaced per name (never stacked), alias
+groups (`var_equal`) union-merge, defaults merge.  The per-name
+transform replace lives in `ConstraintManager.set_mass_width_transforms`
+/`set_scale` and only replaces transforms registered by *earlier* calls
+(a model may legitimately list several transforms producing the same
+family within one call — TD models), so single-config behaviour is
+unchanged.  `setup_mass_width_transforms` therefore always calls with
+`reset=False`; a shared cm must never be reset by a joining config.
+
 ### Barrier factors & build-time defaults
 
 The Blatt-Weisskopf form factor `F_L(q)` of every decay vertex is baked into

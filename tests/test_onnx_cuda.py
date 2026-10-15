@@ -15,7 +15,12 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
-import onnxruntime as ort
+import pytest
+
+# Skip the whole module when onnxruntime is not installed instead of
+# failing collection (the ONNX backend is optional).
+ort = pytest.importorskip("onnxruntime",
+                          reason="onnxruntime not installed")
 
 
 # Build ONNX model from config (matches how onnx_backend.py does it).
