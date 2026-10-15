@@ -73,10 +73,22 @@ def test_load_fit_forwards_cm():
 
 
 def test_same_topo_rejects_different_decay():
+    # default forbidden=("decay",): the template is rejected by
+    # ConfigBroadcast itself (the broadcast must not touch decay)
     cfg = _template(broadcast=[{"purity": 1.0},
                                {"decay": {"jpsi": [["pip", "pim"]]}}])
-    with pytest.raises(ValueError, match="different 'decay' section"):
+    with pytest.raises(ValueError, match="forbidden key"):
         SameTopoJointFitter(cfg, backend="numpy_pwa", load_data=False)
+
+    # forbidden=() disables that check: the SameTopo safety net
+    # (deep decay equality) fires instead
+    cfg2 = _template(
+        forbidden=(),
+        broadcast=[{"purity": 1.0},
+                   {"decay": {"jpsi": [["pip", "pim"]]}}])
+    with pytest.raises(ValueError, match="different 'decay' section"):
+        SameTopoJointFitter(cfg2, backend="numpy_pwa", load_data=False,
+                            forbidden=())
 
 
 def test_same_topo_single_config_ok():

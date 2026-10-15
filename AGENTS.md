@@ -167,7 +167,11 @@ product, auto `key=value` labels).  Relative `.npy`/`.npz` paths inside
 `data:` resolve against the config's directory (variants are handed to
 `Fitter` as dicts).  `JointFitter.add_config` always builds **one**
 Fitter and takes an optional `label`.  A stray `broadcast:` key is
-ignored by `Fitter` itself.
+ignored by `Fitter` itself.  Diffs must not touch *forbidden* top-level
+keys — default `("decay",)` (all variants share the decay topology);
+configurable via `ConfigBroadcast(source, forbidden=(…))` (`()` disables;
+`SameTopoJointFitter` keeps the default and keeps its deep decay-equality
+safety net).
 
 #### SameTopoJointFitter and `load_fit`
 

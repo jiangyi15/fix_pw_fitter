@@ -21,6 +21,13 @@ otherwise resolve against the CWD).
 The optional ``label`` key names a variant (used for logs/labels) and
 never lands in the expanded config.
 
+**Forbidden keys**: by default diffs must not touch ``decay`` (all
+variants share the decay topology) — a diff mentioning a forbidden key
+(nested or dotted) raises ``ValueError``.  The list is an input setting:
+``ConfigBroadcast(source, forbidden=(...))`` (``()`` disables the check;
+e.g. ``("decay", "particle")`` protects both).  Different topologies
+belong in separate configs (plain ``Fitter`` / base ``JointFitter``).
+
 No ``broadcast`` key → one config, the source unchanged.
 
 Programmatic scans inject the list into the template with :func:`scan`
@@ -104,7 +111,7 @@ class ConfigBroadcast:
 
     scan = staticmethod(scan)
 
-    def __init__(self, source):
+    def __init__(self, source, forbidden=("decay",)):
         """Args:
             source: config path or raw config dict.  The variants live in
                 its ``broadcast:`` list (a diff dict per config; an entry
@@ -112,6 +119,10 @@ class ConfigBroadcast:
                 Put a :func:`scan` grid there for programmatic scans::
 
                     cfg["broadcast"] = scan({"data.purity": [0.9, 0.95]})
+            forbidden: top-level keys that diffs must not touch
+                (default ``("decay",)`` — all variants share the decay
+                topology; a diff mentioning one raises ``ValueError``).
+                Pass ``()`` to disable the check.
         """
         if source is None:
             source = {}
@@ -122,6 +133,7 @@ class ConfigBroadcast:
             self.base = source
             self.base_dir = ""
         self.source = source
+        self.forbidden = tuple(forbidden or ())
 
         patched = self.base.get("broadcast")
         self._patches = []          # [(patch, label_or_None)]
@@ -132,6 +144,15 @@ class ConfigBroadcast:
                 raise ValueError(
                     "'broadcast' must be a list of dict diffs, e.g. "
                     "[{data: {...}}, {data: {...}, purity: 0.9}]")
+            for p in patched:
+                for key in p:
+                    root = key.split(".")[0]
+                    if root in self.forbidden:
+                        raise ValueError(
+                            f"'broadcast' diffs must not touch forbidden "
+                            f"key(s) {sorted(self.forbidden)} (got "
+                            f"{key!r}): all variants share these sections. "
+                            f"Use separate configs for different setups.")
             # ``label`` is metadata, not part of the config
             self._patches = [({k: v for k, v in p.items() if k != "label"},
                               p.get("label")) for p in patched]

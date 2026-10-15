@@ -94,6 +94,28 @@ def test_has_broadcast_flag():
     assert ConfigBroadcast.has_broadcast(empty) is True   # present → error at build
 
 
+def test_forbidden_keys_setting():
+    """The forbidden key set is an input setting (default: `decay`)."""
+    # default: decay is forbidden (nested and dotted forms)
+    with pytest.raises(ValueError, match="forbidden key"):
+        ConfigBroadcast({**BASE, "broadcast": [{"decay": {"a": 1}}]})
+    with pytest.raises(ValueError, match="forbidden key"):
+        ConfigBroadcast({**BASE, "broadcast": [{"data.data_arr": "x.npz"},
+                                               {"decay.jpsi": [["pip", "pim"]]}]})
+    # disabled with forbidden=()
+    cb = ConfigBroadcast({**BASE, "broadcast": [{"decay": {"a": 1}}]},
+                         forbidden=())
+    assert cb.expand()[0]["decay"] == {"a": 1}
+    # a custom forbidden set protects other sections instead
+    with pytest.raises(ValueError, match="forbidden key"):
+        ConfigBroadcast({**BASE, "broadcast": [{"particle": {"jpsi": {}}}]},
+                        forbidden=("particle",))
+    # non-forbidden keys are unaffected
+    cb2 = ConfigBroadcast({**BASE, "broadcast": [{"particle": {"jpsi": {}}}]},
+                          forbidden=("decay",))
+    assert cb2.expand()[0]["particle"]["jpsi"] == {}
+
+
 def test_class_items_entry_point():
     base = copy.deepcopy(BASE)
     base["broadcast"] = [

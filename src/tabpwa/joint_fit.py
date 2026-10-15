@@ -406,19 +406,23 @@ class SameTopoJointFitter(JointFitter):
     """
 
     def __init__(self, template, backend=None, load_data=True, cm=None,
-                 strict=True):
+                 strict=True, forbidden=("decay",)):
         """Args:
             template: config path or dict carrying ``broadcast:`` (or not:
                 then this is a one-config joint fit).
             backend, load_data, cm: as in :class:`JointFitter`.
             strict: verify the decay equality across variants (raise on
                 mismatch with a hint to use the plain ``JointFitter``).
+            forbidden: top-level keys the template's ``broadcast:`` diffs
+                must not touch (passed to
+                :class:`~tabpwa.config_broadcast.ConfigBroadcast`).
         """
         from tabpwa.config_broadcast import ConfigBroadcast
 
         super().__init__(cm=cm)
         self.template = template
-        cb = ConfigBroadcast(template)
+        self.forbidden = tuple(forbidden or ())
+        cb = ConfigBroadcast(template, forbidden=self.forbidden)
         if strict:
             self._check_same_decay(cb)
         for label, cfg in ConfigBroadcast.items(cb):
@@ -438,6 +442,12 @@ class SameTopoJointFitter(JointFitter):
 
     @staticmethod
     def _check_same_decay(cb):
+        """Safety net: variant ``decay`` sections must be deep-equal.
+
+        Normally guaranteed by :class:`ConfigBroadcast`, which rejects
+        broadcast diffs that touch ``decay`` — this re-check exists so a
+        future code path cannot silently bypass the same-topo guarantee.
+        """
         variants = cb.expand()
         if len(variants) < 2:
             return
