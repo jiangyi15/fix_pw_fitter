@@ -44,6 +44,27 @@ Usage::
     joint = JointFitter([("channelA.yml", "cuda_v5_pwa_s0c"),
                          {"config": "channelB.yml", "backend": "cpu_v3"}])
     # or: joint = JointFitter(); joint.add_config("channelA.yml", backend=…)
+
+Same model, several datasets — expand the config variants *outside*
+(`tabpwa.config_broadcast.ConfigBroadcast`, one diff per variant) and add
+each one; they share the same model/cm and therefore one x-space::
+
+    from tabpwa.config_broadcast import ConfigBroadcast
+
+    joint = JointFitter()
+    for label, cfg in ConfigBroadcast.items("multi.yml"):
+        joint.add_config(cfg, backend="cuda_v5_pwa_s0c", label=label)
+
+where ``multi.yml`` carries
+
+.. code-block:: yaml
+
+    data:
+      dat_order: [pip, pim, eta]
+      phsp_arr: shared_phsp.npz
+    broadcast:
+      - {data: {data_arr: run1.npz}}
+      - {data: {data_arr: run2.npz}, purity: 0.93, label: run2}
 """
 import os
 import time
@@ -61,9 +82,11 @@ class JointFitter:
         Args:
             configs: a config path / config dict, or a list of them.  Each
                 entry may also be ``(config, backend)`` for a per-config
-                backend, or a spec dict ``{"config": …, "backend": …,
-                "load_data": …}``.  ``None`` starts empty (use
-                :meth:`add_config` / :meth:`add_fitter`).
+                backend, or a spec dict
+                ``{"config": …, "backend": …, "load_data": …}``.  ``None``
+                starts empty (use :meth:`add_config` / :meth:`add_fitter`).
+                Config *variants* are expanded outside (see
+                :mod:`tabpwa.config_broadcast`).
             backend: backend spec applied to every config that does not
                 carry its own (see :class:`~tabpwa.fitter.Fitter`).
             load_data: call each fitter's ``load_all_data()`` (the
@@ -103,12 +126,28 @@ class JointFitter:
         self.log.append(line)
         warnings.warn(line, RuntimeWarning, stacklevel=3)
 
-    def add_config(self, config_file, backend=None, load_data=True):
-        """Build a sub-Fitter against the shared cm and add it.
+    def add_config(self, config_file, backend=None, load_data=True,
+                   label=None):
+        """Build one sub-Fitter against the shared cm and add it.
 
-        ``load_data=True`` calls the fitter's own ``load_all_data()``
-        (the config's ``data:`` section).  Returns the new sub-Fitter.
+        ``config_file`` is a single config (path or dict) — config
+        *variants* stay outside the JointFitter: expand them at the call
+        site and add each result here, e.g.::
+
+            from tabpwa.config_broadcast import ConfigBroadcast
+            for lbl, cfg in ConfigBroadcast.items("multi.yml"):
+                joint.add_config(cfg, backend="cuda_v5_pwa_s0c", label=lbl)
+
+        ``label`` is an optional name for logs (``f._joint_label``); by
+        default it is ``"<i>:<basename>"``.  ``load_data=True`` calls the
+        fitter's own ``load_all_data()`` (the config's ``data:`` section).
+        Returns the new sub-Fitter.
         """
+        return self._add_single(config_file, backend=backend,
+                                load_data=load_data, label=label)
+
+    def _add_single(self, config_file, backend=None, load_data=True,
+                    label=None):
         from tabpwa.fitter import Fitter
 
         prev_fixed = dict(self.cm.fixed_slots)
@@ -147,7 +186,8 @@ class JointFitter:
                     f"bounds of shared {name!r} intersected to "
                     f"[{lo:.4g}, {hi:.4g}]")
 
-        f._joint_label = self._label_for(config_file, len(self.fitters))
+        f._joint_label = (label if label is not None
+                          else self._label_for(config_file, len(self.fitters)))
         self.fitters.append(f)
         return f
 
@@ -334,3 +374,107 @@ class JointFitter:
         labels = ", ".join(getattr(f, "_joint_label", "?") for f in self.fitters)
         return (f"JointFitter(n_models={self.n_models}, "
                 f"n_free={len(self.free_param_names())}, [{labels}])")
+
+
+class SameTopoJointFitter(JointFitter):
+    """Joint fit over one template whose variants share the decay topology.
+
+    The template's ``broadcast:`` list defines the variants; **only the
+    ``decay`` section** must be identical across them (the particle level
+    is free — different resonance content, ``dat_order``, constraints and
+    backends are all allowed).  The shared decay guarantees identical
+    observables, which is what makes stacked/grid plots and per-dataset
+    reports well-defined; parameters bind wherever their names coincide
+    (from one template that is everything).
+
+    Usage::
+
+        joint = SameTopoJointFitter("template.yml",
+                                    backend="cuda_v5_pwa_s0c")
+        res = joint.fit()
+        print(joint.nll_report(res.x))
+        joint.stack_plotter(res, output="plots/").plot_common(stacked=True)
+    """
+
+    def __init__(self, template, backend=None, load_data=True, cm=None,
+                 strict=True):
+        """Args:
+            template: config path or dict carrying ``broadcast:`` (or not:
+                then this is a one-config joint fit).
+            backend, load_data, cm: as in :class:`JointFitter`.
+            strict: verify the decay equality across variants (raise on
+                mismatch with a hint to use the plain ``JointFitter``).
+        """
+        from tabpwa.config_broadcast import ConfigBroadcast
+
+        super().__init__(cm=cm)
+        self.template = template
+        cb = ConfigBroadcast(template)
+        if strict:
+            self._check_same_decay(cb)
+        for label, cfg in ConfigBroadcast.items(cb):
+            self.add_config(cfg, backend=backend, load_data=load_data,
+                            label=label or None)
+
+    @staticmethod
+    def _check_same_decay(cb):
+        variants = cb.expand()
+        if len(variants) < 2:
+            return
+        ref = variants[0].get("decay")
+        for i, variant in enumerate(variants[1:], start=1):
+            if variant.get("decay") != ref:
+                raise ValueError(
+                    f"SameTopoJointFitter: variant {i} ({cb.labels()[i]}) "
+                    f"has a different 'decay' section than variant 0 — "
+                    f"the variants must share the decay topology.  Use the "
+                    f"plain JointFitter to combine different topologies.")
+
+    # ── same-topo extras ──────────────────────────────────────────
+
+    def dataset_labels(self):
+        """Per-sub-fitter labels (order matches ``self.fitters``)."""
+        return [getattr(f, "_joint_label", f"cfg{i}")
+                for i, f in enumerate(self.fitters)]
+
+    def nll_report(self, x=None):
+        """Per-dataset NLL breakdown ``{label: value}`` at *x*.
+
+        ``x=None`` uses the last evaluated vector (e.g. the fit result);
+        raises when neither is available.
+        """
+        if x is None:
+            x = self._last_xk
+        if x is None:
+            raise ValueError("nll_report needs x (or a prior evaluation)")
+        return {lbl: float(v) for lbl, v in
+                zip(self.dataset_labels(), self.get_nll_by_model(x))}
+
+    def wave_report(self):
+        """Per-variant wave counts (particle content may differ)."""
+        return {lbl: len(f.all_comb)
+                for lbl, f in zip(self.dataset_labels(), self.fitters)}
+
+    def stack_plotter(self, result=None, groups=None, output="plots/"):
+        """A :class:`~tabpwa.plot_pw_stack.PWStackPlotter` over the variants.
+
+        ``result`` supplies the shared ``x`` (a ``FitResult`` or a flat
+        vector); ``None`` uses the last evaluated one.  ``groups`` is a
+        single dict for all variants or one per variant (``None`` → no
+        group curves, totals only).
+        """
+        from tabpwa.plot_pw_stack import PWStackPlotter
+
+        x = result.x if hasattr(result, "x") else result
+        if x is None:
+            x = self._last_xk
+        if x is None:
+            raise ValueError("stack_plotter needs a result/x (or a prior "
+                             "evaluation)")
+        if isinstance(groups, list):
+            per = groups
+        else:
+            per = [groups if groups is not None else {} for _ in self.fitters]
+        entries = [(f, x, g) for f, g in zip(self.fitters, per)]
+        return PWStackPlotter(entries, labels=self.dataset_labels(),
+                              output=output)

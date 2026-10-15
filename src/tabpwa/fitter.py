@@ -2058,3 +2058,32 @@ if __name__ == "__main__":
           else "⚠ Check gradient accuracy")
 
     fitter.free()
+
+
+def load_fit(source, backend=None, load_data=True, cm=None, strict=True):
+    """Auto-load a fit session from *source* (config path or dict).
+
+    The config form decides the class:
+
+    * a template carrying ``broadcast:`` → a
+      :class:`~tabpwa.joint_fit.SameTopoJointFitter` over its variants
+      (one shared model/cm);
+    * anything else → a plain :class:`Fitter`, with
+      ``apply_constrains()`` called and (``load_data=True``) the config's
+      datasets loaded.
+
+    ``Fitter`` itself ignores a stray ``broadcast:`` key; this is the
+    entry point that honours it.
+    """
+    from tabpwa.config_broadcast import ConfigBroadcast
+
+    if ConfigBroadcast.has_broadcast(source):
+        from tabpwa.joint_fit import SameTopoJointFitter
+        return SameTopoJointFitter(source, backend=backend,
+                                   load_data=load_data, cm=cm, strict=strict)
+
+    fitter = Fitter(source, backend=backend)
+    fitter.apply_constrains()
+    if load_data:
+        fitter.load_all_data()
+    return fitter

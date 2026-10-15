@@ -9,6 +9,10 @@ import os
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
+from .plot_pw_draw import (bin_edges, draw_overlay_figure, draw_var_figure,
+                           draw_var_panel, hide_unused, make_var_axes,
+                           panel_axes, save_figure)
+
 
 # ── same-charge-pair variables (B → (π⁺π⁺)(π⁻π⁻)) ────────────────
 
@@ -485,6 +489,52 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
+    def var_samples(self, varfun, data_weight_extra=None,
+                    phsp_weight_extra=None):
+        """Weighted variable samples (pre-binning) — the plot data.
+
+        Exactly the arrays :meth:`plot_var` histograms, exposed so several
+        datasets can be *merged before binning* (see
+        :class:`~tabpwa.plot_pw_stack.PWStackPlotter`).  Per requested
+        sub-variable (lists, one entry per sub-variable):
+
+        * ``x_data`` / ``w_data``   — data values and their weights,
+        * ``x_model`` / ``w_model`` — model values (phsp rows) and weights
+          (already ``phsp_w·P`` reduced and scale-normalised by
+          :meth:`compute`),
+        * ``x_bkg`` / ``w_bkg``     — background values and weights,
+        * ``w_groups``              — ``{group_label: weights}`` (signal
+          only; group-summed to the variable rows),
+
+        plus ``meta`` with the per-dataset ``scale``, ``bkg_scale``,
+        ``n_var`` and the group labels.
+        """
+        if not self._ready:
+            raise RuntimeError("call .compute() before .var_samples()")
+        f = self.fitter
+        dn = self.data_var_np if self.data_var_np is not None else f._data_np
+        pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
+        dw = dn["weight"] * (1.0 if data_weight_extra is None
+                             else data_weight_extra)
+        extra = float(1.0 if phsp_weight_extra is None else phsp_weight_extra)
+        purity = f._purity if f._purity is not None else 1.0
+        data_total = float(np.sum(dw))
+        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
+                     if self._bkg_norm > 0 else 0.0)
+        x_data = varfun(dn)
+        x_phsp = varfun(pv)
+        return {
+            "x_data": list(x_data), "w_data": dw,
+            "x_model": list(x_phsp),
+            "w_model": self._P_total * extra * self._scale,
+            "x_bkg": list(x_phsp),
+            "w_bkg": self._bkg_var * extra * bkg_scale,
+            "w_groups": {lbl: Pg * extra * self._scale
+                         for lbl, Pg in zip(self.labels, self._P_groups)},
+            "meta": {"scale": self._scale, "bkg_scale": bkg_scale,
+                     "n_var": len(x_data), "labels": list(self.labels)},
+        }
+
     def compute_coefficients(self, phsp_weight_extra=None):
         """Compute time-integral coefficients I, Ī, J.
 
@@ -586,189 +636,17 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        dn = self.data_var_np if self.data_var_np is not None else f._data_np
-        pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        extra = np.asarray(1.0 if phsp_weight_extra is None
-                           else phsp_weight_extra, dtype=float)
         colors = colors or plt.cm.tab20(np.linspace(0, 1, len(self.labels)))
         glabels = group_labels or self.labels
 
-        # Background normalisation (constant across subplots) — computed on
-        # the phsp (weight) rows in compute() and scaled from there.
-        purity = f._purity if f._purity is not None else 1.0
-        data_total = float(np.sum(dw))
-        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
-                     if self._bkg_norm > 0 else 0.0)
-
-        var_data = varfun(dn)
-        var_phsp = varfun(pv)
-        n_var = len(var_data)
-
-        n_cols = min(3, n_var)
-        n_rows = (n_var + n_cols - 1) // n_cols
-        if show_pull:
-            import matplotlib.gridspec as mgs
-            fig = plt.figure(figsize=(6 * n_cols, 6 * n_rows))
-            gs = mgs.GridSpec(2 * n_rows, n_cols, figure=fig,
-                              height_ratios=[3, 1] * n_rows, hspace=0)
-            axes = np.empty((2 * n_rows, n_cols), dtype=object)
-            for r in range(2 * n_rows):
-                for c in range(n_cols):
-                    axes[r, c] = fig.add_subplot(gs[r, c])
-            # Share x within each column
-            for r in range(1, 2 * n_rows):
-                for c in range(n_cols):
-                    axes[r, c].sharex(axes[0, c])
-        else:
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.5 * n_rows),
-                                     squeeze=False)
-
-        for i in range(n_var):
-            row, col = divmod(i, n_cols)
-            ax = axes[2 * row, col] if show_pull else axes[row, col]
-            ax_pull = axes[2 * row + 1, col] if show_pull else None
-            d = var_data[i]
-            p = var_phsp[i]
-            xlo, xhi = (ranges[i] if ranges else (lo, hi))
-            n_bins = max(1, int(round((xhi - xlo) / bin_width)))
-            xhi = xlo + n_bins * bin_width
-            bins = np.linspace(xlo, xhi, n_bins + 1)
-            bin_c = (bins[:-1] + bins[1:]) / 2
-
-            dy, _ = np.histogram(d, bins=bins, weights=dw)
-            dw2, _ = np.histogram(d, bins=bins, weights=dw ** 2)
-
-            # Signal — self._P_total/_P_groups are already phsp_w-weighted
-            # (and group-summed to the variable rows) by compute()
-            sig, _ = np.histogram(p, bins=bins,
-                                  weights=self._P_total * extra
-                                  * self._scale)
-
-            # Background (filled area) — phsp_w·bkg reduced from the phsp rows
-            bkg_y, _ = np.histogram(p, bins=bins,
-                                    weights=self._bkg_var * extra
-                                    * bkg_scale)
-
-            # Total fit = signal + background
-            tot = sig + bkg_y
-
-            # Pull variance per bin: data always; optional MC (model) term
-            #   var = Σ_data w² + (Σ_sig w² + Σ_bkg w² if mc_uncert)
-            # treating each weighted component as independent Poisson.
-            pull_var = dw2.copy()
-            if mc_uncert:
-                sig2, _ = np.histogram(
-                    p, bins=bins,
-                    weights=(self._P_total * extra * self._scale) ** 2)
-                bkg2, _ = np.histogram(
-                    p, bins=bins,
-                    weights=(self._bkg_var * extra * bkg_scale) ** 2)
-                pull_var = pull_var + sig2 + bkg2
-
-            # Partial waves (signal only)
-            gys = [np.histogram(p, bins=bins,
-                                weights=Pg * extra * self._scale)[0]
-                   for Pg in self._P_groups]
-
-            # Pull = (data - model) / sqrt(var)
-            pull = np.divide(dy - tot, np.sqrt(pull_var),
-                             where=pull_var > 0, out=np.zeros_like(dy))
-
-            ax.errorbar(bin_c, dy, yerr=np.sqrt(dw2),
-                        fmt='o', color='black', markersize=3, capsize=2,
-                        label='data' if legend and i == 0 else None)
-            # Background fill
-            ax.fill_between(bin_c, 0, bkg_y, step='mid', alpha=0.3,
-                            color='C3', edgecolor='none', linewidth=0,
-                            label='bkg' if legend and i == 0 else None)
-            # Total fit step (signal + bkg)
-            ax.step(bin_c, tot, where='mid', color='grey', linewidth=2,
-                    label='total fit' if legend and i == 0 else None)
-            # Partial wave groups (signal only) — binned KDE: Σ wi·G(x−xi)
-            for gy, c, lab, zo in zip(gys, colors, glabels, self._zorders):
-                if smooth_sigma is not None and smooth_sigma > 0:
-                    x_fine = np.linspace(xlo, xhi, n_bins * 10)
-                    dx = bin_c[:, None] - x_fine[None, :]
-                    sigma = smooth_sigma * bin_width
-                    gy_fine = np.dot(gy, np.exp(-0.5 * (dx / sigma)**2))
-                    gy_fine *= bin_width / (np.sqrt(2 * np.pi) * sigma)
-                    ax.plot(x_fine, gy_fine, '-', color=c, linewidth=1.5,
-                            label=lab if legend and i == 0 else None, zorder=zo)
-                else:
-                    ax.step(bin_c, gy, where='mid', color=c, linewidth=1.5,
-                            label=lab if legend and i == 0 else None, zorder=zo)
-
-            ax.grid(True, alpha=0.3)
-            ax.set_xlim(xlo, xhi)
-            ax.set_ylim(0, None)
-            if show_pull:
-                ax.tick_params(labelbottom=False)
-            if i == 0:
-                bw = (xhi - xlo) / n_bins
-                yl = f"Events / ({bw:.3f})" if not unit else f"Events / ({bw:.3f} {unit})"
-                ax.set_ylabel(yl)
-            ax.tick_params(labelsize=8)
-
-            # Pull (data - model) / σ  — only when show_pull=True
-            if show_pull:
-                pull_den = np.clip(np.sqrt(pull_var), 1.0, None)
-                pull = (dy - tot) / pull_den
-                pmax = max(np.nanmax(np.abs(pull)), 5)
-                ax.set_title(rf"$\chi^2$/ndf = {np.sum(pull**2):.1f}/"
-                             rf"{np.sum(pull_var > 0)}"
-                             + (" (data+MC)" if mc_uncert else ""),
-                             fontsize=8)
-                ax.tick_params(direction="in")
-                ax_pull.bar(bin_c, pull, width=np.diff(bins), alpha=0.5,
-                            color='grey', edgecolor='none')
-                ax_pull.axhline(y=0, color='black', linewidth=0.5)
-                ax_pull.axhline(y=3, color='red', linestyle=':', linewidth=0.8)
-                ax_pull.axhline(y=-3, color='red', linestyle=':', linewidth=0.8)
-                ax_pull.axhline(y=5, color='red', linestyle=':', linewidth=0.5)
-                ax_pull.axhline(y=-5, color='red', linestyle=':', linewidth=0.5)
-                ax_pull.set_ylim(-pmax, pmax)
-                ax_pull.set_xlim(xlo, xhi)
-                ax_pull.minorticks_on()
-                ax_pull.tick_params(direction="in")
-                ax_pull.set_ylabel("pull", fontsize=8)
-                ax_pull.tick_params(labelsize=7)
-                # X-label on bottom row
-                if row == n_rows - 1 or i + n_cols >= n_var:
-                    xl = labels[i]
-                    if unit:
-                        xl = f"{xl} ({unit})"
-                    ax_pull.set_xlabel(xl, fontsize=8)
-                else:
-                    ax_pull.tick_params(labelbottom=False)
-            else:
-                xl = labels[i]
-                if unit:
-                    xl = f"{xl} ({unit})"
-                ax.set_xlabel(xl)
-
-        # Hide unused subplots
-        n_total = n_rows * n_cols
-        # Hide unused subplots
-        n_grid_rows = 2 * n_rows if show_pull else n_rows
-        for j in range(i + 1, n_rows * n_cols):
-            r, c = divmod(j, n_cols)
-            if show_pull:
-                axes[2 * r, c].set_visible(False)
-                axes[2 * r + 1, c].set_visible(False)
-            else:
-                axes[r, c].set_visible(False)
-
-        if show_pull:
-            fig.subplots_adjust(hspace=0)
-
-        if legend:
-            fig.axes[0].legend(fontsize=7, ncol=2)
-
-        path = os.path.join(output, prefix + "." + fmt)
-        fig.savefig(path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        print(f"  saved {path}")
+        # the plot data (pre-binning weighted samples) — shared with
+        # PWStackPlotter so merged datasets bin exactly the same arrays
+        smp = self.var_samples(varfun, data_weight_extra, phsp_weight_extra)
+        return draw_var_figure(
+            smp, labels, lo, hi, bin_width, prefix, ranges=ranges,
+            legend=legend, output=output, fmt=fmt, group_labels=glabels,
+            colors=colors, zorders=self._zorders, smooth_sigma=smooth_sigma,
+            unit=unit, show_pull=show_pull, mc_uncert=mc_uncert)
 
     def plot_asymmetry(self, varfun, labels, lo, hi,
                        n_bins, prefix, tag_data=None, tag_phsp=None,

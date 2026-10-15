@@ -24,7 +24,7 @@ try:                       # public alias for the CUDA v3 kernel
 except Exception:
     CUDAKernel = None
 
-from .fitter import Fitter
+from .fitter import Fitter, load_fit
 from .fit_result import FitResult
 from . import backends
 from . import constrain_plugins  # noqa: F401 — register constraint handlers
@@ -52,6 +52,7 @@ __all__ = [
     "GaussianPrior",
     "prior_from_dict",
     "Fitter",
+    "load_fit",
     "FitResult",
     "backends",
     "bw_form_factor",

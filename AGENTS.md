@@ -134,6 +134,73 @@ the sum is a plain element-wise add.  `values_from_dict` /
 `load_fixed_from_dict` / `values_dict` operate on the union; one blind
 frame (`joint.set_blind`) covers the whole fit.
 
+Same model, several datasets: keep the variant expansion **outside** the
+joint fit — `tabpwa/config_broadcast.py` (`ConfigBroadcast`) turns a
+template config into N configs from its own `broadcast:` list, then just
+add each one (they share the model/cm, hence one x-space):
+
+```python
+from tabpwa.config_broadcast import ConfigBroadcast, scan
+
+joint = JointFitter()
+for label, cfg in ConfigBroadcast.items("multi.yml"):
+    joint.add_config(cfg, backend="cuda_v5_pwa_s0c", label=label)
+```
+
+```yaml
+data:
+  dat_order: [pip, pim, eta]
+  phsp_arr: shared_phsp.npz
+broadcast:
+  - {data: {data_arr: run1.npz}}
+  - {data: {data_arr: run2.npz}, purity: 0.93, label: run2}
+```
+
+`ConfigBroadcast(template)` is a standalone helper: a container
+(`len(cb)`, `for cfg in cb`, `cb[i]`) with `labels()`, `pairs()`,
+`expand()`, plus the class-level consumer entry
+(`ConfigBroadcast.items(source)` → `[(label, config), …]`) and
+`has_broadcast(source)` (the form test).  One concept — a diff list in
+the template; for a scan, pre-compute the list and put it there:
+`cfg["broadcast"] = scan({"data.purity": [0.9, 0.95]})` (cartesian
+product, auto `key=value` labels).  Relative `.npy`/`.npz` paths inside
+`data:` resolve against the config's directory (variants are handed to
+`Fitter` as dicts).  `JointFitter.add_config` always builds **one**
+Fitter and takes an optional `label`.  A stray `broadcast:` key is
+ignored by `Fitter` itself.
+
+#### SameTopoJointFitter and `load_fit`
+
+`SameTopoJointFitter(template, …)` (`joint_fit.py`) owns the broadcast
+for the common case: the variants must share the **`decay` section only**
+(particle content, `dat_order`, constraints and backends are free — the
+check is `strict=True` by default).  The shared decay guarantees equal
+observables, so it adds `dataset_labels()`, `nll_report(x)`,
+`wave_report()` and `stack_plotter(result, groups=…)`.
+
+`load_fit(source, …)` (`from tabpwa import load_fit`) is the auto-loader:
+a template carrying `broadcast:` → `SameTopoJointFitter`, anything else →
+a plain `Fitter` (constraints applied, datasets loaded):
+
+```python
+joint = load_fit("multi.yml", backend="cuda_v5_pwa_s0c")
+res = joint.fit(); print(joint.nll_report(res.x))
+joint.stack_plotter(res).plot_common(stacked=True)
+```
+
+#### Stacked plots (`tabpwa/plot_pw_stack.py`, `plot_pw_draw.py`)
+
+`PWGroupPlotter.var_samples(...)` exposes the **pre-binning plot data**
+(weighted samples for data/model/background/groups); `PWStackPlotter`
+merges those arrays over datasets and **bins once**, so nothing forces
+the datasets to share axes (`stacked=True` = Σ data, `√Σw²` errors, Σ
+model/background; `stacked=False` = one colour per dataset with its own
+data points and model curve).  All drawing lives in
+`plot_pw_draw.py` (`bin_edges`, `make_var_axes`, `draw_var_panel`,
+`draw_var_figure`, `draw_overlay_figure`, `save_figure`), so
+`PWGroupPlotter.plot_var` and `PWStackPlotter.plot_var` are thin callers
+and no plot code is tied to a fitter.
+
 Same-name collisions auto-deal deterministically (latest registration
 wins, `Warning` lines in `joint.log`): fixed values merge (later value
 replaces), a name fixed by ANY config stays fixed (`free_var` in a
