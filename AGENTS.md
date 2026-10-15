@@ -80,19 +80,19 @@ use) is immutable: no edits, no signature changes, no "small" tweaks.
 The only allowed actions are:
 
 1. **New copy** — implement a new standalone kernel: add a new C source
-   (`.cu`) by copying the existing kernel's source into it, **replace**
-   the kernel content with the new variant, and **relink** every
-   exported C symbol to the new name (suffix the function names, e.g.
-   `..._v4` → `..._<variant>`) so the new `.so` links beside the old
-   one; mirror the Python wrapper module (`_<name>.py`) the same way.
-   Every existing kernel file and its tests stay byte-identical.
+   (`.cu`) by copying the existing kernel's source into it and
+   **adapting** the content to the new variant under its own new symbol
+   names; mirror the Python wrapper module (`_<name>.py`) the same way.
+   The copy links beside the old kernel — every existing kernel file
+   and its tests stay byte-identical.
 2. **Fix a broken kernel** — a kernel whose tests fail / that does not
    work may be repaired in place.
-3. **Replace a working kernel** — build the new implementation as a new
-   copy first (case 1: new C source, symbols relinked, tests green),
-   then swap it in wholesale to take over the old kernel's file/name
-   (same API).  The old kernel is superseded, never edited
-   incrementally, and its previous copy stays available for rollback.
+3. **Replace a working kernel** — take a green case-1 copy and make it
+   **replace** the old kernel: **relink** the copied symbols to the old
+   kernel's names and swap the files in wholesale (same API), so the
+   new implementation takes over.  The old kernel is superseded, never
+   edited incrementally, and its previous copy stays available for
+   rollback.
 
 If a task seems to require touching a working kernel, the design is
 wrong — state that instead of editing.
@@ -248,21 +248,24 @@ Positivity is not enforced (bounds via `var_range` if needed).
   through the params dict as `scalar` (the legacy scalar mechanism —
   the norm chain and constraint combination treat them like the
   existing scalars; no `Fitter` changes needed).
-* Backend: `numpy_polarised` (registered name; **no `default` is
-  registered for this model** — a `Fitter` without an explicit
-  `backend=` fails by design, never a silent numpy fallback) — the numpy
-  reference: `NumpyPolarisedPWA`
-  (`numpy_pwa.py`; `NumpyPWA` itself is rho-free) contracts `rho`
-  directly and returns the finished `grads["scalar"]` per-parameter
-  gradients (internally contracting the raw dQ/dρ with the generators).
-  CUDA: **not expressible through the unmodified kernels** — the
-  shared-ck projection-sum interface applies ONE `ck` vector to every
-  projection, but the per-projection mixing weights `L[j,m]` of
-  `rho = L·Lᴴ` differ per projection and change every iteration, and
-  `L` can never be baked into the config arrays (fixed at
-  `load_data`).  A CUDA port therefore requires a kernel-side change
-  (e.g. the rho contraction in the reduce kernel) — deliberately not
-  implemented (kernels stay untouched).
+* Backend: `cuda_polarised` is the **default** (with `numpy_polarised`
+  explicit-only, never a silent fallback) — a standalone kernel
+  (`kernels_polarised.cu` + `_polarised.py`, a case-1 copy of the v4
+  ampcache machinery, symbols relinked `..._polarised`; existing
+  kernels untouched) whose reduce computes the ρ-contraction directly:
+  `P_e = Re Σ_{p,p'} ρ[p,p']·A_p·conj(A_p')`, `dQ_dA =
+  dQ_dP·(ρ·conj(A))`, and the generator basis (uploaded at context
+  creation) yields finished `grads["scalar"]` in-kernel (no raw dQ/dρ
+  in the API).  ρ is built host-side from `scalar` per call; no Gram
+  path (the norm runs via the full-forward phsp pass).
+  `numpy_polarised` — the CPU reference: `NumpyPolarisedPWA`
+  (`numpy_pwa.py`; `NumpyPWA` itself is rho-free), same
+  contraction/finished-scalar-grads contract.  Why a standalone kernel:
+  the shared-ck projection-sum interface applies ONE `ck` vector to
+  every projection, while the ρ-contraction's per-projection mixing
+  weights differ per projection and change every iteration —
+  inexpressible without kernel-side changes (kernel policy case 1;
+  existing kernels stay untouched).
 * Identifiability note: the params are measurable only where the
   helicity projections differ per event; fixtures whose projections are
   identical (e.g. identical angle columns) leave the spin params

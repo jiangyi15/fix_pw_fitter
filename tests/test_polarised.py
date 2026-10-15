@@ -80,11 +80,15 @@ def test_spin_gradients_match_fd():
         assert num == pytest.approx(g[idx], rel=1e-4, abs=1e-6), name
 
 
-def test_no_default_backend():
-    """polarised_pwa has no default backend: constructing a Fitter without
-    an explicit ``backend=`` fails loudly (never a silent numpy fallback)."""
-    with pytest.raises(ValueError, match="'default' is not registered"):
-        Fitter(_cfg())
+def test_default_backend_is_cuda():
+    """polarised_pwa's default backend is the CUDA one — never a silent
+    numpy fallback (the numpy reference stays explicit-only)."""
+    from tabpwa.backends.cuda_backends import CUDAPolarisedBackend
+    try:
+        f = Fitter(_cfg())
+    except (RuntimeError, OSError) as e:
+        pytest.skip(f"no usable CUDA device/library: {e}")
+    assert isinstance(f.backend, CUDAPolarisedBackend)
 
 
 def test_polarisation_scan_identifiability():

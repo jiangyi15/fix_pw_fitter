@@ -365,3 +365,53 @@ class CUDABackendV4PWACache(_CUDABackend):
     def _make_kernel(self, kc, bs):
         from tabpwa.cuda._v4_pwa_cache import CUDAKernelV4PWACache as K
         return K(kc, batch_size=bs)
+
+
+@register_backend("cuda_polarised", model="polarised_pwa")
+@register_backend("default", model="polarised_pwa")
+class CUDAPolarisedBackend(_CUDABackend):
+    """CUDA polarised backend — the spin-density (``polarised_pwa``) model.
+
+    Standalone kernel (``cuda_polarised``): the shared-ck projection-sum
+    forward with the reduce contraction
+
+        P(e) = Re Σ_{p,p'} rho[p,p']·A_p·conj(A_p')
+
+    and back-prop through that contraction.  ``rho`` is built HOST-side
+    per call from the polarisation parameters
+    (``rho = I + Σ_l p_l·G_l``, :func:`tabpwa.spin_density.rho_matrix`);
+    the generator basis is uploaded once at kernel construction.  The
+    returned grads are FINISHED per-parameter gradients
+    ``{ck, m0, g0, scalar}`` — ``scalar`` is dQ/dp_l, already contracted
+    with the generators (no raw dQ/dρ leaves the kernel).  With all-zero
+    ``scalar`` this reproduces ``cuda_v4_pwa`` exactly.
+    """
+
+    def __init__(self, kernel_config, batch_size=50000):
+        from tabpwa.spin_density import generators
+
+        sd = kernel_config.get("spin_density") or {}
+        self._P = int(sd.get("n_j", int(kernel_config.get("n_proj", 1))))
+        self._gen = np.asarray(generators(self._P), dtype=complex)
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._polarised import CUDAKernelPolarised as K
+        return K(kc, gen=self._gen, batch_size=bs)
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        from tabpwa.spin_density import rho_matrix
+
+        rho = rho_matrix(np.asarray(params["scalar"], dtype=float),
+                         self._P)
+        Q, grads, P = self.kernel.compute(params, data_handle, rho=rho,
+                                          norm=norm, return_p=return_p)
+        if norm is not None:
+            native = self.kernel._last_dnorm
+            if native is None:
+                raise RuntimeError(
+                    f"{type(self).__name__}: kernel did not provide a "
+                    f"native dNLL/dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(native)
+        return Q, grads, P
