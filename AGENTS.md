@@ -17,6 +17,7 @@ python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 | **Integrated** | `{"name": "integrated", "base": "cuda_v3_cache"}` | Gram matrix O(n²) norm + base backend for data NLL. TD model only (`n_blocks=8`); pure PWA uses `integrated_pwa`. Default base `cuda_v3_cache`. |
 | **v3 amp-cache** | `cuda_v3_ampcache` | v3 sparse + per-handle cache of the minimal-set angular amplitudes (`Amp = fa·fl`, 272 unique/event). Forward per wave = `ck·Amp_slot[w]/bw_p`, so only the BW propagator is recomputed each iteration (m0/g0 stay fitted, grads flow). momentum/angle are uploaded only transiently for the fill and **not kept** on the GPU. fp64 fill → float2 store (constant over fit). ~1.7× faster than sparse per iteration. |
 | **v4 PWA** | `cuda_v4_pwa` | No time/mixing/scalars: `P = Σ_p |Σ_k ck_k·a_{p,k}|²`. Derived from ampcache (same angular cache + per-iteration BW). All projections share one `ck`; the projection only changes the angular part. Wave entries stored p-major: `n_wave = n_proj·N`, `ck` length `N = n_wave/n_proj`. Config key `n_proj` (default 1). |
+| **v4 PWA pslot** | `cuda_v4_pwa_pslot` | `cuda_v4_pwa` with **per-slot ck**: `ck` has length `n_wave = n_proj·N` (entry `(p, t)` reads `ck[p·N + t]`) and the ck-gradient writes each slot with NO cross-projection accumulation; the `Σ_p |A_p|²` reduce, BW/m0/g0 chains, angular cache and batching are unchanged. Backs the polarised wrapper's Cholesky expansion (`ck''[m,j,k] = L[j,m]·ck[k]` — the shared-ck v4 interface cannot express per-projection mixing weights). CPU siblings: `NumpyPWAPslot` (`numpy_pwa.py`) + `numpy_pslot` backend. Fixture `tests/test_pwa_cuda_pslot.py` (run alone — shared-GPU multi-file segfault, pre-existing). |
 | **v4 PWA cache** | `cuda_v4_pwa_cache` | Same pure-PWA model, **full-amplitude cache for fixed m0/g0** (fpwfitter-style): C keeps only weight/bkg + the cached `common[e, p·N+k]`; mass/momentum/angle never live in C — the Python DataHandle retains them and builds the cache on the FIRST `compute()` from the params m0/g0 (Python-level `_filled` flag; no C-side state). Verified bit-equal to `cuda_v4_pwa` at fixed m0/g0 (Q/P/ck-grad; m0/g0 grads zero). **Strictly fixed-m0/g0**: no auto refill/switch; later m0/g0 changes raise ValueError — float masses/widths ⇒ use `cuda_v4_pwa`. |
 | **v4 PWA 1bw** | `cuda_v4_pwa_1bw` | One BW **per chain** specialisation of `cuda_v4_pwa` (`top → R + X`, `n_res == 1` enforced by the wrapper — multi-BW chains raise). Same config input and conversion; the kernel drops the per-wave BW product loop (the propagator IS the single denominator) and gives every wave its OWN BW slot — the wrapper merges `matrix_gamma` (gamma→bw) with `bw_order` (bw→wave) into per-wave `m0_index`/`mass_index`/gamma rows (`row_start` ranges): no `bw_order` indirection, contiguous BW
   arrays, no atomics, and the running-width interpolation is FUSED into the BW kernel (separate g_bw launch removed). NLL bit-exact vs `cuda_v4_pwa`, gradients ≤1 ulp (separate compilation) — e.g. `config_pwa.yml`-style models; `tests/config_pwa_bw.yml` is the free-m0/g0 fixture. Sibling
@@ -225,11 +226,21 @@ Positivity is not enforced (bounds via `var_range` if needed).
   the norm chain and constraint combination treat them like the
   existing scalars; no `Fitter` changes needed).
 * Backend: `polarised` (`backends/polarised_backend.py`, the default for
-  this model) — the numpy reference: the per-projection amplitudes are
-  contracted with `rho` directly (`numpy_pwa.compute(rho=...)`, which
-  also returns `grads["drho"] = Σ_e dQ/dP·A_j·conj(A_l)` for the
-  chain).  CUDA: not implemented yet (would expose the per-projection
-  amplitudes/`dQ_dA` from the reduce kernel).
+  this model), two paths:
+  - direct (default): the numpy reference — `NumpyPolarisedPWA`
+    (`numpy_pwa.py`; `NumpyPWA` itself is rho-free) contracts `rho`
+    directly and returns `grads["drho"] = Σ_e dQ/dP·A_j·conj(A_j')`; the
+    wrapper contracts it with the generators into `grads["scalar"]`.
+  - `base=` wrap: `backend={"name": "polarised", "base":
+    "cuda_v4_pwa_pslot"}` (or `"numpy_pslot"`) — the wrapper expands the
+    config via `_projection_duplicate(kc, P)` (`n_proj` stays P,
+    `n_wave → P²·N`), transforms `ck''[m,j,k] = L[j,m]·ck[k]`
+    (`L = chol(rho)`) and delegates to the per-slot-ck base (the
+    shared-ck projection-sum interface cannot express the per-projection
+    mixing weights); grads chain back through `L`, spin grads via the
+    Cholesky adjoint (holomorphic convention), m0/g0 passthrough.
+    pslot == direct verified at nonzero spin (numpy ~1e-12; CUDA
+    end-to-end in `tests/test_pwa_cuda_pslot.py`).
 * Identifiability note: the params are measurable only where the
   helicity projections differ per event; fixtures whose projections are
   identical (e.g. identical angle columns) leave the spin params

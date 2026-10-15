@@ -114,3 +114,91 @@ def test_generators_traceless_hermitian():
             assert abs(np.trace(g).real) < 1e-12         # traceless
         assert rho_matrix(np.zeros(P * P - 1), P) == pytest.approx(
             np.eye(P))
+
+
+# ── per-slot-ck (numpy_pslot) base for the polarised expansion ──────────
+from tabpwa.numpy_pwa import NumpyPWA, NumpyPWAPslot  # noqa: E402
+from tabpwa.backends.polarised_backend import (  # noqa: E402
+    _expand_polarised_config)
+
+
+def _params(kc, seed):
+    """Random shared-ck ``{ck, m0, g0}`` sized from *kc* (unique sizes)."""
+    rs = np.random.RandomState(seed)
+    P = int(kc["n_proj"])
+    N = np.asarray(kc["matrix_angle"]).shape[1] // P
+    ck = rs.randn(N) + 1j * rs.randn(N)
+    m0 = np.abs(rs.randn(int(np.max(kc["m0_index"])) + 1)) + 1.0
+    g0 = np.abs(rs.randn(int(np.max(kc["g0_index"])) + 1)) + 0.5
+    return P, N, ck, m0, g0
+
+
+def test_numpy_pslot_matches_pwa_when_ck_replicated():
+    """The per-slot-ck kernel on the p-major-expanded config reproduces the
+    plain shared-ck projection sum when the per-slot couplings are the
+    identity embedding ``ck''[m,j,k] = δ_{mj}·ck[k]`` (i.e. each slot pair
+    carries the same ck)."""
+    f_pol = Fitter(_cfg(), backend="polarised")
+    kc = f_pol.kernel_config
+    P, N, ck, m0, g0 = _params(kc, 7)
+    expanded = _expand_polarised_config(kc)
+    assert expanded["matrix_angle"].shape[1] == P * P * N
+
+    k_plain = NumpyPWA(kc)
+    k_pslot = NumpyPWAPslot(expanded)
+    data = _synth(f_pol, 60, 3)
+    h_plain = k_plain.load_data(data)
+    h_pslot = k_pslot.load_data(data)
+
+    # identity embedding: ck''[m, j, k] = δ_{mj}·ck[k]
+    ck2 = np.zeros((P, P, N), dtype=complex)
+    for m in range(P):
+        ck2[m, m, :] = ck
+
+    Q1, g1, _ = k_plain.compute({"ck": ck, "m0": m0, "g0": g0}, h_plain,
+                                norm=None)
+    Q2, g2, _ = k_pslot.compute({"ck": ck2.reshape(-1), "m0": m0, "g0": g0},
+                                h_pslot, norm=None)
+
+    assert Q2 == pytest.approx(Q1, rel=1e-12)
+    # per-slot ck grads reshaped (P, P, N): only the δ diagonal feeds the
+    # shared ck, so the diagonal over (m, j) must sum to the plain grad.
+    diag = g2["ck"].reshape(P, P, N)[np.arange(P), np.arange(P), :].sum(0)
+    assert np.allclose(diag, g1["ck"], rtol=1e-12, atol=1e-12)
+    assert np.allclose(g2["m0"], g1["m0"], rtol=1e-10, atol=1e-12)
+    assert np.allclose(g2["g0"], g1["g0"], rtol=1e-10, atol=1e-12)
+
+
+def test_polarised_pslot_path_zero_spin_matches_pwa():
+    """The Cholesky/per-slot expansion with zero spin (rho = I) is exactly
+    the plain pwa — NLL and the shared ck/m0/g0 gradients."""
+    f_pwa = Fitter(CFG, backend="numpy_pwa")
+    f_pol = Fitter(_cfg(), backend={"name": "polarised",
+                                    "base": "numpy_pslot"})
+    _put(f_pwa, 80, 1)
+    _put(f_pol, 80, 1)
+
+    xA = f_pwa.initial_values(seed=1)
+    xB = f_pol.initial_values(seed=1)[:len(xA)].copy()   # same prefix order
+    nA, gA = f_pwa.get_nll(xA)
+    nB, gB = f_pol.get_nll(xB)
+    assert nB == pytest.approx(nA, rel=1e-12)
+    assert np.allclose(gB[:len(xA)], gA, atol=1e-9)
+
+
+def test_polarised_pslot_fd_spin_grads():
+    """Finite-difference arbitration of the pslot Cholesky adjoint: the
+    jpsi_px/jpsi_py/jpsi_pz gradients must match numerical derivatives."""
+    f = Fitter(_cfg(), backend={"name": "polarised", "base": "numpy_pslot"})
+    _put(f, 100, 2)
+    x = f.initial_values(seed=2)
+    free = f.free_param_names()
+    n, g = f.get_nll(x)
+    eps = 1e-6
+    for name in ("jpsi_px", "jpsi_py", "jpsi_pz"):
+        idx = free.index(name)
+        xp, xm = x.copy(), x.copy()
+        xp[idx] += eps
+        xm[idx] -= eps
+        num = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * eps)
+        assert num == pytest.approx(g[idx], rel=1e-4, abs=1e-6), name
