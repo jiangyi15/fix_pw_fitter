@@ -238,19 +238,42 @@ def test_v5_s0c_mid_insert_zero_coupling_invariant():
             "q": np.abs(rs.randn(ne, n_q)) + 0.3,
             "angle": rs.uniform(-np.pi, np.pi, size=(ne, n_at * nac)),
             "weight": np.ones(ne), "bkg": np.ones(ne)}
+    phsp = {"mass": (gmin + 0.05) + (0.9 * gdel * gbins)
+            * rs.rand(ne + 37, 1),
+            "q": np.abs(rs.randn(ne + 37, n_q)) + 0.3,
+            "angle": rs.uniform(-np.pi, np.pi, size=(ne + 37, n_at * nac)),
+            "weight": np.ones(ne + 37), "bkg": np.zeros(ne + 37)}
 
     kA_c = _make(KV5S0C, kA)
     if kA_c is None:
         pytest.skip("no CUDA device")
     kB_c = _make(KV5S0C, kB)
-    kB_c.resolution_size = 1
     try:
         hA, hB = kA_c.load_data(data), kB_c.load_data(data)
         QA, _gA, _ = kA_c.compute(pA, hA, norm=None)
         QB, _gB, _P = kB_c.compute(pB, hB, norm=None)
         # zero-coupling insert: identical likelihood bitwise
         assert QA == pytest.approx(QB, rel=0, abs=1e-12 * abs(QA))
+
+        # the reported configuration: resolution grouping + norm path —
+        # the per-row probability must be inert under the insert too
+        kB_c.resolution_size = 10
+        kA_c.resolution_size = 10
+        hpA, hpB = kA_c.load_data(phsp), kB_c.load_data(phsp)
+        try:
+            normA = float(kA_c.compute(pA, hpA, norm=None)[0])
+            normB = float(kB_c.compute(pB, hpB, norm=None)[0])
+            assert normB == pytest.approx(normA, rel=1e-12)
+            _QnA, _gA2, PA = kA_c.compute(pA, hA, norm=normA)
+            _QnB, _gB2, PB = kB_c.compute(pB, hB, norm=normB)
+            assert np.max(np.abs(PB - PA)) < 1e-12 * np.max(np.abs(PA))
+            QnA, _gA3, _ = kA_c.compute(pA, hA, norm=normA)
+            QnB, _gB3, _ = kB_c.compute(pB, hB, norm=normB)
+            assert QnB == pytest.approx(QnA, rel=0, abs=1e-12 * abs(QnA))
+        finally:
+            hpA.free(); hpB.free()
     finally:
+        hA.free(); hB.free()
         kA_c.free()
         if "kB_c" in locals():
             kB_c.free()
