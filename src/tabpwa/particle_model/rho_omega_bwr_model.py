@@ -59,7 +59,7 @@ YAML usage::
 import numpy as np
 
 from .base import BaseModel, register_model
-from .gs_rho_model import _gamma_run, _two_body_cm_mom
+from .gs_rho_model import GSModelBase, _gamma_run, _two_body_cm_mom
 from tabpwa.param_constraint import Transform
 
 
@@ -152,7 +152,7 @@ class RhoOmegaBWRWeightsTransform(Transform):
 
 
 @register_model("RhoOmegaBWR")
-class RhoOmegaBWRModel(BaseModel):
+class RhoOmegaBWRModel(GSModelBase):
     """Running-width BWR rho x constant-width BW omega, fitted.
 
     ``gamma(m)`` returns the fixed 8-row basis
@@ -196,6 +196,7 @@ class RhoOmegaBWRModel(BaseModel):
 
     def gamma(self, m):
         """The fixed 8-row basis; ``gamma(u)`` from the running width."""
+        self._ensure_shape_params()
         m_arr = np.asarray(m, dtype=float)
         u = m_arr ** 2
         ones = np.ones_like(u, dtype=complex)
@@ -203,21 +204,10 @@ class RhoOmegaBWRModel(BaseModel):
         # running-width shape — q0 at the config reference mass
         # (the same convention as BWR / GS_rho: the fitted width is
         # Gamma at that reference)
-        M = float(self.kwargs.get("M", self.kwargs.get("mass",
-                                                       self._DEF_MASS)))
-        L = int(self.kwargs.get("L", 1))
-        d = float(self.kwargs.get("d", 3.0))
-        dm2 = float(self.kwargs.get("daug2Mass", self._def_m2))
-        dm3 = float(self.kwargs.get("daug3Mass", self._def_m3))
-        if self._parent and self._parent._decays:
-            d1 = float(self._parent._decays[0].outs[0].mass)
-            d2 = float(self._parent._decays[0].outs[1].mass)
-            q = _two_body_cm_mom(m_arr, d1, d2)
-            q0 = _two_body_cm_mom(M, d1, d2)
-        else:
-            q = _two_body_cm_mom(m_arr, dm2, dm3)
-            q0 = _two_body_cm_mom(M, dm2, dm3)
-        gam = np.asarray(_gamma_run(m_arr, 1.0, q, q0, L, M, d),
+        q = _two_body_cm_mom(m_arr, self._dm2, self._dm3)
+        q0 = _two_body_cm_mom(self._M_ref, self._dm2, self._dm3)
+        gam = np.asarray(_gamma_run(m_arr, 1.0, q, q0, self._L, self._M_ref,
+                                    self._bw_d),
                          dtype=float).astype(complex)
 
         return [ones,

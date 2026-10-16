@@ -63,7 +63,7 @@ YAML usage::
 import numpy as np
 
 from .base import BaseModel, register_model
-from .gs_rho_model import _gamma_run, _two_body_cm_mom, _fs_fun
+from .gs_rho_model import GSModelBase, _gamma_run, _two_body_cm_mom, _fs_fun
 from tabpwa.param_constraint import Transform
 
 
@@ -156,7 +156,7 @@ class RhoOmegaGSWeightsTransform(Transform):
 
 
 @register_model("RhoOmegaGS")
-class RhoOmegaGSModel(BaseModel):
+class RhoOmegaGSModel(GSModelBase):
     """GS rho x constant-width BW omega, fitted.
 
     ``gamma(m)`` returns the fixed 8-row basis
@@ -202,26 +202,16 @@ class RhoOmegaGSModel(BaseModel):
 
     def _g_row(self, m):
         """The single complex GS unit ``g(m) = gamma(m) + i.fs(m)/M_ref``."""
+        self._ensure_shape_params()
         m_arr = np.asarray(m, dtype=float)
-        M = float(self.kwargs.get("M", self.kwargs.get("mass",
-                                                       self._DEF_MASS)))
-        L = int(self.kwargs.get("L", 1))
-        d = float(self.kwargs.get("d", 3.0))
-        dm2 = float(self.kwargs.get("daug2Mass", self._def_m2))
-        dm3 = float(self.kwargs.get("daug3Mass", self._def_m3))
-        if self._parent and self._parent._decays:
-            d1 = float(self._parent._decays[0].outs[0].mass)
-            d2 = float(self._parent._decays[0].outs[1].mass)
-            q = _two_body_cm_mom(m_arr, d1, d2)
-            q0 = _two_body_cm_mom(M, d1, d2)
-        else:
-            q = _two_body_cm_mom(m_arr, dm2, dm3)
-            q0 = _two_body_cm_mom(M, dm2, dm3)
-        gam = np.asarray(_gamma_run(m_arr, 1.0, q, q0, L, M, d),
+        q = _two_body_cm_mom(m_arr, self._dm2, self._dm3)
+        q0 = _two_body_cm_mom(self._M_ref, self._dm2, self._dm3)
+        gam = np.asarray(_gamma_run(m_arr, 1.0, q, q0, self._L, self._M_ref,
+                                    self._bw_d),
                          dtype=float)
-        fs = np.asarray(_fs_fun(m_arr ** 2, M ** 2, 1.0, dm2, dm3),
-                        dtype=float)
-        return gam + 1j * fs / M
+        fs = np.asarray(_fs_fun(m_arr ** 2, self._M_ref ** 2, 1.0,
+                                self._dm2, self._dm3), dtype=float)
+        return gam + 1j * fs / self._M_ref
 
     def gamma(self, m):
         """The fixed 8-row basis; ``g`` at the config reference mass."""
@@ -270,10 +260,9 @@ class RhoOmegaGSModel(BaseModel):
         the reference), not of a fully rebuilt GS.  (The omega pole is
         trivially ``(mass2, width2)`` — constant width.)
         """
-        m0 = float(self.kwargs.get("mass", self._DEF_MASS)) if mass is None \
-            else float(mass)
-        g0 = float(self.kwargs.get("width", self._DEF_WIDTH)) if width is None \
-            else float(width)
+        self._ensure_shape_params()
+        m0 = self._M_ref if mass is None else float(mass)
+        g0 = self._g0 if width is None else float(width)
 
         # the model's own packed GS row: g = gamma + i.fs/m0_ref
         def g_row(mm):

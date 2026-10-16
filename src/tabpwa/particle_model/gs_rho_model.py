@@ -130,6 +130,58 @@ def _bprime(L, q, q0, d):
     return num / den
 
 
+# ── GS-family shape-parameter preparation ───────────────────────
+# The reference scale (M_ref, q0/k0) and daughter masses are resolved
+# ONCE — on the first gamma/fixed_shape call — from the model config and
+# the decay tree (when attached by then), then cached on the model.
+# The shape functions never read the config at call time.
+
+class GSModelBase(BaseModel):
+    """Shared GS-family base: one-time shape-parameter preparation.
+
+    Mixin for the GS-family models (``GS_rho``, ``RhoOmega``,
+    ``RhoOmegaBWR``, ``RhoOmegaGS``).  On the first shape call, the
+    reference scale and daughter masses are resolved from the model
+    config and the decay tree (when attached by then), cached on the
+    instance, and reused afterwards — the shape functions never read the
+    config at call time.  Subclasses may override the ``_DEF_*`` /
+    ``_def_*`` class attributes for their defaults.
+    """
+
+    _DEF_MASS = 0.775
+    _DEF_WIDTH = 0.149
+    _def_m2 = 0.13957039
+    _def_m3 = 0.1349768
+
+    def _ensure_shape_params(self):
+        """Resolve the shape parameters once (idempotent); later calls are no-ops.
+
+        Reads the model config and the decay-tree daughter masses (when
+        the tree is attached at the time of the first call) and stores
+        the result as instance attributes (``_M_ref``, ``_g0``, ``_L``,
+        ``_bw_d``, ``_dm2``, ``_dm3``, ``_m_om``, ``_w_om``).
+        """
+        if getattr(self, "_gs_ready", False):
+            return
+        kwargs = self.kwargs
+        self._M_ref = float(kwargs.get("M", kwargs.get("mass",
+                                                       self._DEF_MASS)))
+        self._g0 = float(kwargs.get("width", self._DEF_WIDTH))
+        self._L = int(kwargs.get("L", 1))
+        self._bw_d = float(kwargs.get("d", 3.0))
+        self._dm2 = float(kwargs.get("daug2Mass", self._def_m2))
+        self._dm3 = float(kwargs.get("daug3Mass", self._def_m3))
+        self._m_om = float(kwargs.get("omega_mass",
+                                      kwargs.get("mass2", 0.78266)))
+        self._w_om = float(kwargs.get("omega_width",
+                                      kwargs.get("width2", 0.00868)))
+        parent = getattr(self, "_parent", None)
+        if parent is not None and getattr(parent, "_decays", None):
+            self._dm2 = float(parent._decays[0].outs[0].mass)
+            self._dm3 = float(parent._decays[0].outs[1].mass)
+        self._gs_ready = True
+
+
 def _gamma_run(m, g0, q, q0, L, m0, d):
     """Running width Γ(m) for the relativistic BW."""
     qq0 = (q / q0) ** (2 * L + 1)
@@ -142,7 +194,7 @@ def _gamma_run(m, g0, q, q0, L, m0, d):
 
 
 @register_model("GS_rho")
-class GSRhoModel(BaseModel):
+class GSRhoModel(GSModelBase):
     """Gounaris-Sakurai lineshape for the rho(770) resonance.
 
     The ``gamma(m)`` return value encodes both the running width
@@ -162,37 +214,28 @@ class GSRhoModel(BaseModel):
         daug3Mass     — second daughter mass (default π⁰, 0.1349768)
     """
 
-    # Default daughter masses (π⁺, π⁰)
-    _def_m2 = 0.13957039
-    _def_m3 = 0.1349768
-
     def get_defaults(self):
         return {f"{self.name}_mass": float(self.kwargs.get("mass", 0.775)),
                 f"{self.name}_width": float(self.kwargs.get("width", 0.149))}
 
     def gamma(self, m):
-        M  = float(self.kwargs.get("M",  self.kwargs.get("mass",  0.775)))
-        g0 = float(self.kwargs.get("width", 0.149))
-        L  = int(self.kwargs.get("L", 1))
-        d  = float(self.kwargs.get("d", 3.0))
-        m2 = float(self.kwargs.get("daug2Mass", self._def_m2))
-        m3 = float(self.kwargs.get("daug3Mass", self._def_m3))
+        self._ensure_shape_params()
+        M  = self._M_ref
+        L  = self._L
+        d  = self._bw_d
+        m2 = self._dm2
+        m3 = self._dm3
 
-        # Breakup momenta — both q and q0 use decay tree masses (consistent with TFPWA)
-        if self._parent and self._parent._decays:
-            d1 = float(self._parent._decays[0].outs[0].mass)
-            d2 = float(self._parent._decays[0].outs[1].mass)
-            q  = _two_body_cm_mom(m, d1, d2)
-            q0 = _two_body_cm_mom(M, d1, d2)
-        else:
-            q  = _two_body_cm_mom(m, m2, m3)
-            q0 = _two_body_cm_mom(M, m2, m3)
+        # Breakup momenta — the same daughters the fs term uses (prepared
+        # once; decay-tree masses when the tree is attached)
+        q  = _two_body_cm_mom(m, m2, m3)
+        q0 = _two_body_cm_mom(M, m2, m3)
 
         # Running width (without the g0 factor)
         gamma_run = _gamma_run(m, 1.0, q, q0, L, M, d)
 
-        # Mass-shift term — uses PDG masses (c_daug2Mass/c_daug3Mass in TFPWA)
-        fs_val = _fs_fun(m ** 2, M ** 2, 1.0, self._def_m2, self._def_m3)
+        # Mass-shift term — same daughter masses as the running width
+        fs_val = _fs_fun(m ** 2, M ** 2, 1.0, m2, m3)
 
         # gamma(m) = Gamma(m)/g0 + i * fs(m²) / m0
         # _fs_fun(gam=1) returns fs_without_g0 coupling.

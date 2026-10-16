@@ -23,42 +23,37 @@ YAML usage::
 """
 import numpy as np
 from .models_builtin import FixedShapeModel, register_model
-from .gs_rho_model import _two_body_cm_mom, _gamma_run, _fs_fun
+from .gs_rho_model import GSModelBase, _two_body_cm_mom, _gamma_run, _fs_fun
 
 _DEF_M2 = 0.13957039  # π⁺
 _DEF_M3 = 0.1349768   # π⁰
 
 
 @register_model("RhoOmega")
-class RhoOmegaModel(FixedShapeModel):
+class RhoOmegaModel(GSModelBase, FixedShapeModel):
     """GS ρ(770) × BW ω(782) interference lineshape.
 
     ``fixed_shape(m)`` returns the product GS(m)·BW(m).
     """
 
     def fixed_shape(self, m):
-        M     = float(self.kwargs.get("M",  self.kwargs.get("mass",  0.775)))
-        g0    = float(self.kwargs.get("width", 0.149))
-        L     = int(self.kwargs.get("L", 1))
-        d     = float(self.kwargs.get("d", 3.0))
-        m2    = float(self.kwargs.get("daug2Mass", _DEF_M2))
-        m3    = float(self.kwargs.get("daug3Mass", _DEF_M3))
-        m_om  = float(self.kwargs.get("omega_mass", 0.78266))
-        w_om  = float(self.kwargs.get("omega_width", 0.00868))
+        self._ensure_shape_params()
+        M    = self._M_ref
+        g0   = self._g0
+        L    = self._L
+        d    = self._bw_d
+        m2   = self._dm2
+        m3   = self._dm3
+        m_om = self._m_om
+        w_om = self._w_om
 
         # ── Breakup momenta ─────────────────────────────────────
-        if self._parent and self._parent._decays:
-            d1 = float(self._parent._decays[0].outs[0].mass)
-            d2 = float(self._parent._decays[0].outs[1].mass)
-            q  = _two_body_cm_mom(m, d1, d2)
-            q0 = _two_body_cm_mom(M, d1, d2)
-        else:
-            q  = _two_body_cm_mom(m, m2, m3)
-            q0 = _two_body_cm_mom(M, m2, m3)
+        q  = _two_body_cm_mom(m, m2, m3)
+        q0 = _two_body_cm_mom(M, m2, m3)
 
         # ── GS rho denominator ──────────────────────────────────
         gamma_gs = _gamma_run(m, 1.0, q, q0, L, M, d)
-        fs_val   = _fs_fun(m ** 2, M ** 2, 1.0, _DEF_M2, _DEF_M3)
+        fs_val   = _fs_fun(m ** 2, M ** 2, 1.0, m2, m3)
         d_gs = (M ** 2 - m ** 2) - 1j * M * g0 * (gamma_gs + 1j * fs_val / M)
 
         # ── BW omega denominator ─────────────────────────────────
