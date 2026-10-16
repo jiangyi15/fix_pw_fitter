@@ -346,6 +346,35 @@ Those five are genuine kernel inputs and stay in the kernel config.  The
 model as `BaseModel.fl_forms` (a list of `BarrierFactor`); `fl_type` indexes
 it.
 
+### Dispersive line-shape base (design — not yet implemented)
+
+General base for lineshape models whose propagator **real part** comes
+from the dispersion relation of an absorptive part (the GS construction,
+generalised).  Intended for new dispersive models; `GS_rho` keeps its
+exact closed form and serves as the validation oracle.
+
+* **Subclass hook**: `im_pi_over_gamma0(s)` — the absorptive self-energy
+  `Im Π(s)` at `Γ0 = 1`, including the kinematic loop factor (for the ρ:
+  `M_ref²·q³·B'²/(√s·q0³)`); threshold `s_th = (dm2 + dm3)²` from the
+  prepared daughters.
+* **Base, once per instance**: tabulates `Im Π` on an internal s-grid and
+  computes `Re Π` at each node as the **exact per-segment PV integral of
+  the linear interpolant**:
+
+      Re Π(u) − Re Π(M_ref²) = ((u − M_ref²)/π) · Σ_seg ∫ (a + b·s')·[1/(u−s') − 1/(M_ref²−s')] ds'
+
+  (the subtraction factor `(M_ref² − u)` pulled out via `1/a − 1/b`; each
+  segment integral is closed-form — logs; PV regularised by
+  subtract-and-add at `s' = u`; the difference kernel makes the tail
+  convergent even for `Γ(m) ~ √s`).
+* **`gamma(m)`** returns the packed row
+  `[Im Π/Γ0](m) + i·[Re Π/Γ0](m)/M_ref` — Im exact from the hook, Re
+  interpolated from the precomputed table (the kernel re-interpolates
+  onto its own grid as usual).
+* **Validation oracle**: with the ππ p-wave `Im Π` (the GS integrand),
+  the numeric `Re Π` must reproduce the closed form
+  `Γ0·M_ref²/k0³·[k²·Δh + (M_ref²−u)·k0²·h′]` at grid accuracy.
+
 ## Three-Layer Architecture
 
 ```
