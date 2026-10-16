@@ -200,15 +200,9 @@ class RhoOmegaGSModel(BaseModel):
     def get_gamma_name(self):
         return [f"{self.name}_w{k}" for k in range(8)]
 
-    def gamma(self, m):
-        """The fixed 8-row basis; ``g`` at the config reference mass."""
+    def _g_row(self, m):
+        """The single complex GS unit ``g(m) = gamma(m) + i.fs(m)/M_ref``."""
         m_arr = np.asarray(m, dtype=float)
-        u = m_arr ** 2
-        ones = np.ones_like(u, dtype=complex)
-
-        # shape functions at the config reference mass (fixed basis —
-        # the same convention as RhoOmegaBWR / GS_rho: the fitted width
-        # is Gamma at that reference)
         M = float(self.kwargs.get("M", self.kwargs.get("mass",
                                                        self._DEF_MASS)))
         L = int(self.kwargs.get("L", 1))
@@ -225,8 +219,16 @@ class RhoOmegaGSModel(BaseModel):
             q0 = _two_body_cm_mom(M, dm2, dm3)
         gam = np.asarray(_gamma_run(m_arr, 1.0, q, q0, L, M, d),
                          dtype=float)
-        fs = np.asarray(_fs_fun(u, M ** 2, 1.0, dm2, dm3), dtype=float)
-        g = gam + 1j * fs / M                      # the complex GS unit
+        fs = np.asarray(_fs_fun(m_arr ** 2, M ** 2, 1.0, dm2, dm3),
+                        dtype=float)
+        return gam + 1j * fs / M
+
+    def gamma(self, m):
+        """The fixed 8-row basis; ``g`` at the config reference mass."""
+        m_arr = np.asarray(m, dtype=float)
+        u = m_arr ** 2
+        ones = np.ones_like(u, dtype=complex)
+        g = self._g_row(m_arr)
 
         return [ones,
                 u.astype(complex),
@@ -257,9 +259,10 @@ class RhoOmegaGSModel(BaseModel):
         Reads the fit parameters (defaults: the config ``mass``/``width``)
         and solves ``Re D_rho(m) = 0`` — the mass at which the propagator
         is purely imaginary — by fixed-point iteration on
-        ``u = m0^2 + Gamma0*fs(u)/m0_ref`` (the shapes are the frozen
-        reference ones, exactly what the kernel sees).  Returns the mass
-        and the width at that point::
+        ``u = m0^2 + m0.Gamma0.Im g(u)`` using the model's own packed row
+        ``g(m)`` (the shapes are the frozen reference ones, exactly what
+        the kernel sees).  Returns the mass and the width at that
+        point::
 
             D_rho(m_pole) = -i * m_pole * Gamma_pole
 
@@ -271,25 +274,16 @@ class RhoOmegaGSModel(BaseModel):
             else float(mass)
         g0 = float(self.kwargs.get("width", self._DEF_WIDTH)) if width is None \
             else float(width)
-        M = float(self.kwargs.get("M", self.kwargs.get("mass", self._DEF_MASS)))
-        L = int(self.kwargs.get("L", 1))
-        d = float(self.kwargs.get("d", 3.0))
-        dm2 = float(self.kwargs.get("daug2Mass", self._def_m2))
-        dm3 = float(self.kwargs.get("daug3Mass", self._def_m3))
-        if self._parent and self._parent._decays:
-            d1 = float(self._parent._decays[0].outs[0].mass)
-            d2 = float(self._parent._decays[0].outs[1].mass)
-            q_of = lambda mm: _two_body_cm_mom(mm, d1, d2)
-        else:
-            q_of = lambda mm: _two_body_cm_mom(mm, dm2, dm3)
-        q0 = q_of(M)
-        gam = lambda mm: float(_gamma_run(mm, 1.0, q_of(mm), q0, L, M, d))
-        fs = lambda mm: float(_fs_fun(mm ** 2, M ** 2, 1.0, dm2, dm3))
 
-        # fixed point: Re D_rho = 0  <=>  u = m0^2 + (m0/m0_ref).g0*fs(u)
+        # the model's own packed GS row: g = gamma + i.fs/m0_ref
+        def g_row(mm):
+            return complex(self._g_row(mm))
+
+        # fixed point: Re D_rho = 0
+        #   0 = m0^2 - u - i.m0.g0.g(u)  <=>  u = m0^2 + m0.g0.Im g(u)
         u = m0 * m0
         for _ in range(500):
-            u_new = m0 * m0 + (m0 / M) * g0 * fs(u)
+            u_new = m0 * m0 + m0 * g0 * g_row(np.sqrt(u)).imag
             if abs(u_new - u) < 1e-14 * (1.0 + abs(u)):
                 u = u_new
                 break
@@ -298,5 +292,6 @@ class RhoOmegaGSModel(BaseModel):
             raise ValueError("rho_pole: fixed point did not converge "
                              f"(m0={m0}, Gamma0={g0})")
         m_pole = float(np.sqrt(u))
-        gamma_pole = m0 * g0 * gam(m_pole) / m_pole
+        g_pole = g_row(m_pole)
+        gamma_pole = m0 * g0 * g_pole.real / m_pole
         return m_pole, gamma_pole
