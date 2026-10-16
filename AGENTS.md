@@ -367,10 +367,13 @@ exact closed form and serves as the validation oracle.
   segment integral is closed-form — logs; PV regularised by
   subtract-and-add at `s' = u`; the difference kernel makes the tail
   convergent even for `Γ(m) ~ √s`).
-* **`gamma(m)`** returns the packed row
-  `[Im Π/Γ0](m) + i·[Re Π/Γ0](m)/M_ref` — Im exact from the hook, Re
-  interpolated from the precomputed table (the kernel re-interpolates
-  onto its own grid as usual).
+* **`gamma(m)`** returns the packed complex unit row
+  `[Im Π/Γ0](m) + i·[Re Π/(Γ0·M_ref)](m)` — Re and Im carry the **same**
+  factor (both pieces are dimensionless shapes; the `M_ref` in the
+  Re-piece's denominator belongs to the unit's `(q0, m0_ref)` scale
+  definition).  Im is exact from the hook, Re interpolated from the
+  precomputed table (the kernel re-interpolates onto its own grid as
+  usual).
 * **Validation oracle**: with the ππ p-wave `Im Π` (the GS integrand),
   the numeric `Re Π` must reproduce the closed form
   `Γ0·M_ref²/k0³·[k²·Δh + (M_ref²−u)·k0²·h′]` at grid accuracy.
