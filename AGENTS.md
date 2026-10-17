@@ -10,6 +10,13 @@ pip install -e .
 python run_fit.py --fit --maxiter 1000 --backend integrated  # or explicit
 ```
 
+## Commit hygiene
+
+Never chain a commit with the test/check commands.  Run the tests as a
+separate step, verify green, then commit as a **single standalone git
+command**.  A red or incomplete verification must never be committed,
+and a commit must never ride on the tail of a test pipeline.
+
 ## Backend Selection
 
 | Backend | Flag | Note |
