@@ -454,7 +454,12 @@ class Transform:
         """Apply :meth:`inverse` and return the updated dict.
 
         Only entries in ``input_names`` may change; values for other keys
-        are preserved from the input *d*.
+        are preserved from the input *d*.  Rule (per input name): the
+        outputs do not override the inputs — an input that is **not**
+        also an output keeps the value already in *d* (the inverse, which
+        may be an identity stub or only partially defined, must not
+        clobber it); a name that is both input and output takes the
+        inverse's value (the pass-through replace).
         """
         saved = {k: v for k, v in d.items() if k not in self.input_names}
         try:
@@ -463,6 +468,10 @@ class Transform:
             return d
         for k, v in saved.items():
             result[k] = v
+        outputs = set(self.output_names)
+        for k in self.input_names:
+            if k in d and k not in outputs:
+                result[k] = d[k]     # input-only: the caller's value wins
         return result
 
     def to_dict(self):
