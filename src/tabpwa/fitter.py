@@ -574,6 +574,11 @@ class Fitter:
         reverses constraints via ``cm.inverse()`` and inverts bound
         transforms to get optimizer-space x.
 
+        The full saved dict is passed through the inverse chain
+        unfiltered — the transforms may need inputs beyond the flat
+        registry (e.g. fixed or derived parameters), and the float
+        cast happens only at the x assignment.
+
         Args:
             data: dict from save_params() JSON (keys 'value', 'error', ...).
 
@@ -585,11 +590,11 @@ class Fitter:
         # Start from deterministic defaults, then override with JSON
         x = self.reinitial()
 
-        # Build physical dict from JSON, unblind it (report → model frame),
-        # and invert the full pipeline (incl. blind⁻¹) to get x.
-        phys = {name: float(values[name]) for name in names if name in values}
-        if phys:
-            raw = self.cm.inverse(self.cm.unblind_result(phys))
+        if values:
+            # full dict, unfiltered/uncast: the inverse chain reads by
+            # name — the transforms may need inputs beyond the flat
+            # registry
+            raw = self.cm.inverse(self.cm.unblind_result(dict(values)))
             for i, name in enumerate(names):
                 if name in raw:
                     x[i] = float(raw[name])
