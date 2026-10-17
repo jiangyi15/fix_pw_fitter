@@ -212,16 +212,21 @@ def test_transform_backward_fd():
         assert ana[name] == pytest.approx(num, rel=1e-6, abs=1e-9)
 
 
-def test_transform_inverse_roundtrip():
+def test_transform_inverse_not_supported():
+    """The derived weights are not invertible back to the physical
+    parameters: the transform declares _has_inverse = False and its
+    inverse raises NotImplementedError — the physical params round-trip
+    via input preservation instead."""
     model = _model()
     tr = _transform(model)
     d = _params_dict(model)
+    assert tr.has_inverse is False
+    with pytest.raises(NotImplementedError):
+        tr.inverse(d)
+    # the physical params round-trip via apply_forward's input retention
     resolved = tr.apply_forward(d)
-    inv = tr.inverse(resolved)
-    for name in tr.input_names:
-        assert inv[name] == pytest.approx(d[name], rel=1e-15)
-    # missing inputs -> empty dict (no spurious reconstruction)
-    assert tr.inverse({n: 0.0 for n in tr.output_names}) == {}
+    for n in tr.input_names:
+        assert resolved[n] == pytest.approx(d[n], rel=1e-15)
 
 
 def test_defaults_and_registration():
