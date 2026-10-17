@@ -50,11 +50,6 @@ from tabpwa.param_constraint import Transform
 
 
 class RhoOmegaWeightsTransform(Transform):
-    # the derived weights are NOT invertible back to the physical
-    # parameters — the physical params are preserved through the
-    # dict round-trip (apply_forward retains non-output keys), so
-    # inverse() is only an identity-on-inputs pass-through stub.
-    _has_inverse = False
     """Transform: ``(m_rho, Gamma_rho, m_omega, Gamma_omega)`` -> 6 weights.
 
     Reads ``{p}_mass`` (kernel m0), ``{p}_width``, ``{p}_mass2`` and
@@ -67,7 +62,10 @@ class RhoOmegaWeightsTransform(Transform):
     is the exact analytic derivative of the weights w.r.t. the four inputs.
     """
 
-    _has_inverse = True
+    # the derived weights are NOT invertible back to the physical
+    # parameters — they are preserved through the dict round-trip
+    # (apply_forward retains non-output keys)
+    _has_inverse = False
 
     def __init__(self, mass_name, width_name, mass2_name, width2_name):
         p = mass_name[:-len("_mass")] if mass_name.endswith("_mass") else mass_name
@@ -154,19 +152,6 @@ class RhoOmegaWeightsTransform(Transform):
             self.width2_name: combine(dc0_dg2, dc1_dg2, zero),
         }
 
-    def inverse(self, d):
-        """Identity on the inputs when present (``interp_k_model`` style).
-
-        The four physical inputs are pass-through keys in the resolved dict
-        (``apply_forward`` preserves non-output keys), so the common case is
-        simply returning them.  Without them there is no reliable way to
-        recover the masses/widths from the weights alone — return an empty
-        dict (callers then keep their existing values).
-        """
-        names = self.input_names
-        if all(n in d for n in names):
-            return {n: float(d[n]) for n in names}
-        return {}
 
 
 @register_model("RhoOmega2")

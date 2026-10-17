@@ -64,11 +64,6 @@ from tabpwa.param_constraint import Transform
 
 
 class RhoOmegaBWRWeightsTransform(Transform):
-    # the derived weights are NOT invertible back to the physical
-    # parameters — the physical params are preserved through the
-    # dict round-trip (apply_forward retains non-output keys), so
-    # inverse() is only an identity-on-inputs pass-through stub.
-    _has_inverse = False
     """Transform: ``(m_rho, Gamma0, m_omega, Gamma_omega)`` -> 8 weights.
 
     Reads ``{p}_mass`` (kernel m0), ``{p}_width`` (Gamma0), ``{p}_mass2``
@@ -81,7 +76,10 @@ class RhoOmegaBWRWeightsTransform(Transform):
     is the exact analytic derivative of the weights w.r.t. the four inputs.
     """
 
-    _has_inverse = True
+    # the derived weights are NOT invertible back to the physical
+    # parameters — they are preserved through the dict round-trip
+    # (apply_forward retains non-output keys)
+    _has_inverse = False
 
     def __init__(self, mass_name, width_name, mass2_name, width2_name):
         p = mass_name[:-len("_mass")] if mass_name.endswith("_mass") else mass_name
@@ -148,12 +146,6 @@ class RhoOmegaBWRWeightsTransform(Transform):
             out[3] += gk * dw[3]
         return dict(zip(self.input_names, out))
 
-    def inverse(self, d):
-        """Identity on the inputs when present (``RhoOmega2`` style)."""
-        names = self.input_names
-        if all(n in d for n in names):
-            return {n: float(d[n]) for n in names}
-        return {}
 
 
 @register_model("RhoOmegaBWR")
