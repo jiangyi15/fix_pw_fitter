@@ -50,6 +50,11 @@ from tabpwa.param_constraint import Transform
 
 
 class RhoOmegaWeightsTransform(Transform):
+    # the derived weights are NOT invertible back to the physical
+    # parameters — the physical params are preserved through the
+    # dict round-trip (apply_forward retains non-output keys), so
+    # inverse() is only an identity-on-inputs pass-through stub.
+    _has_inverse = False
     """Transform: ``(m_rho, Gamma_rho, m_omega, Gamma_omega)`` -> 6 weights.
 
     Reads ``{p}_mass`` (kernel m0), ``{p}_width``, ``{p}_mass2`` and
