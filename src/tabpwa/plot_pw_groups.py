@@ -910,7 +910,10 @@ class PWGroupPlotter:
             data_weight_extra, phsp_weight_extra: optional weights.
             cmap: colormap for the pull rectangles.
             plot_scatter: draw data scatter points on top.
-            scatter_style: dict passed to ``ax.scatter``.
+            scatter_style: dict passed to ``ax.scatter``.  The point
+                layer is rasterized by default (tiny pdf/svg files for
+                multi-million-event scatters); pass
+                ``{"rasterized": false}`` to keep the points vector.
             boundary: analytic 3-body Dalitz boundary — either two system
                 names ``[a, b]`` (resolved via
                 :func:`dalitz_boundary_masses`, rule (A,B)+(B,C)) or four
@@ -993,6 +996,15 @@ class PWGroupPlotter:
 
         figs = list(plot_figs) if plot_figs is not None else ["pull"]
 
+        # rasterize the point layer by default: a multi-million-row data
+        # scatter saved to pdf/svg otherwise emits one vector marker per
+        # event (~8 MB files); rasterizing embeds the points as a
+        # dpi=150 bitmap (~100-300 KB) while the pull rectangles,
+        # colorbar, boundary and labels stay vector.  Override per
+        # config via scatter_style (e.g. rasterized: false).
+        sc_style = {"s": 1, "c": "black", "rasterized": True}
+        sc_style.update(scatter_style or {})
+
         if "pull" in figs:
             base_bound = ((xlo0 - 1e-6, ylo0 - 1e-6),
                           (xhi0 + 1e-6, yhi0 + 1e-6))
@@ -1021,7 +1033,7 @@ class PWGroupPlotter:
                 fig = ax.get_figure()
             if plot_scatter:
                 ax.scatter(x[::scatter_step], y[::scatter_step],
-                           **scatter_style)
+                           **sc_style)
             for bnd, pull in zip(bounds, pulls):
                 xlo, ylo = bnd[0]
                 xhi, yhi = bnd[1]
@@ -1050,7 +1062,7 @@ class PWGroupPlotter:
                 fig2, ax2 = plt.subplots(figsize=(6, 5.5))
                 title = None
                 if name == "data":
-                    ax2.scatter(x, y, s=1, c="black")
+                    ax2.scatter(x, y, **sc_style)
                     title = "data"
                 elif name == "data_hist":
                     h = ax2.hist2d(x, y, bins=100, weights=w, cmap=cmap,
