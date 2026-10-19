@@ -222,7 +222,7 @@ def test_chain_angular_table_reproduces_cache():
     from tabpwa.helicity_angle import (chain_angular_table, evaluate_table)
     from tabpwa.angular_formula import cache_formula
 
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     ch = [cc for cc in cfg.full_decay.chains if 'rhoA' in str(cc)][0]
     tbl = chain_angular_table(ch)
     assert tbl['variables'] == [(2, 'phi'), (1, 'theta'), (2, 'theta')]
@@ -263,7 +263,7 @@ def test_chain_angular_table_self_consistent():
     from tabpwa.helicity_angle import (chain_angular_table, evaluate_table,
                                        decay_chain_to_tree, amplitude)
 
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     ch = [cc for cc in cfg.full_decay.chains if 'rhoA' in str(cc)][0]
     tbl = chain_angular_table(ch)
     tree = decay_chain_to_tree(ch)
@@ -291,7 +291,7 @@ def test_angular_model_combines_all_chains():
     from tabpwa.helicity_angle import (angular_model, evaluate_model,
                                        decay_chain_to_tree, amplitude)
 
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     chains = list(cfg.full_decay.chains)
     models = angular_model(chains)
     assert len(models) == 1
@@ -329,7 +329,7 @@ def test_angle_formula_mode_option():
     import yaml
     from tabpwa.config_loader import Config, load_config
 
-    base = yaml.safe_load(open('config_amp.yml'))
+    base = yaml.safe_load(open('tests/config_amp.yml'))
     assert Config(copy.deepcopy(base)).angle_formula_mode == 'helicity'
     d = copy.deepcopy(base)
     d['angle_formula'] = 'cache'
@@ -344,7 +344,7 @@ def test_compare_to_cache_all_matched():
     from tabpwa.config_loader import Config
     from tabpwa.helicity_angle import compare_to_cache
 
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     rows, summary = compare_to_cache(list(cfg.full_decay.chains),
                                      verbose=False)
     assert summary['rows_found'] == 62
@@ -360,8 +360,8 @@ def test_build_single_index_modes_equivalent_config_amp():
     base = {'angle_formula': 'cache'}
     d = {'angle_formula': 'cache'}
     # reload with explicit cache & helicity
-    c_h = Config(copy.deepcopy(Config('config_amp.yml').dic) | {'angle_formula': 'helicity'})
-    c_c = Config(copy.deepcopy(Config('config_amp.yml').dic) | {'angle_formula': 'cache'})
+    c_h = Config(copy.deepcopy(Config('tests/config_amp.yml').dic) | {'angle_formula': 'helicity'})
+    c_c = Config(copy.deepcopy(Config('tests/config_amp.yml').dic) | {'angle_formula': 'cache'})
     rh = c_h.build_single_index()
     rc = c_c.build_single_index()
     assert rh['matrix_angle'].shape == rc['matrix_angle'].shape
@@ -381,7 +381,7 @@ def test_amplitude_vectorized_matches_scalar():
                                        decay_chain_to_tree,
                                        decay_chain_ls_sets)
 
-    cfg = Config('config_pwa.yml')
+    cfg = Config('tests/config_pwa.yml')
     rng = np.random.default_rng(7)
     nv0 = None
     for ch in cfg.full_decay.chains:

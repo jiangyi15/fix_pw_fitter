@@ -18,7 +18,7 @@ from tabpwa.numpy_kernel import NumpyKernel
 from tabpwa.amp_cache import (build_amp_cache_layout, fill_amp_cache,
                               amp_factor_cached)
 
-CONFIGS = ["config_angle.yml", "config_amp.yml"]
+CONFIGS = ["tests/config_angle.yml", "tests/config_amp.yml"]
 
 
 def _config(name):

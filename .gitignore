@@ -24,3 +24,6 @@ kernel_meta/
 
 # Tutorial generated samples
 /tutorials/*.npz
+
+# runtime-generated self-contained test data (see tests/conftest.py)
+tests/lineshapes/

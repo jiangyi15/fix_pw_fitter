@@ -19,7 +19,7 @@ from tabpwa.momenta_to_angles import (_boost_4vector as boost,
 
 
 def _rho_chain():
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     return [cc for cc in cfg.full_decay.chains if 'rhoA' in str(cc)][0]
 
 
@@ -189,7 +189,7 @@ def test_chain_topology_original_rows_match_all_perm_blocks():
     from tabpwa.momenta_to_data import momenta_to_data, _IDENTICAL_PERMS
     from tabpwa.momenta_to_angles import chain_original_triplet
 
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     ch1 = [cc for cc in cfg.full_decay.chains
            if 'a1(1260)p->rhoA+pip2' in str(cc)][0]
     ev = generate_b4pi(400, seed=3)
@@ -211,7 +211,7 @@ def test_decay_angles_vectorized_matches_scalar():
     """Vectorized batch angle extraction equals the scalar per-event loop."""
     from tabpwa.momenta_to_angles import decay_angles_vectorized
 
-    cfg = Config('config_pwa.yml')
+    cfg = Config('tests/config_pwa.yml')
     ch = [cc for cc in cfg.full_decay.chains if 'MI1m' in str(cc)][0]
     names = [o.name for o in decay_chain_leaves(ch)]
     mom = np.load('data/phsp.npy')[:300]

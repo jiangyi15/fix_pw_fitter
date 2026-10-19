@@ -136,7 +136,7 @@ def test_declaration_driven_row_blocks(cfg):
 
     assert row_block_factors(cfg.dic) == (1, 1, 1)     # config_pwa: none
 
-    angle = Config("config_angle.yml")                 # legacy B->4pi
+    angle = Config("tests/config_angle.yml")                 # legacy B->4pi
     assert row_block_factors(angle.dic) == (4, 2, 8)
     kc = angle.build_all_index()
     assert kc["n_blocks"] == 8 and kc["n_perm"] == 4 and kc["n_cp"] == 2
@@ -257,7 +257,7 @@ def test_topo_index_from_decay_struct(cfg):
     assert c2.topo_index[ch.topo_id()] == 0
 
     # legacy models unchanged (identical key ordering to chain-derived)
-    a = _C("config_angle.yml")
+    a = _C("tests/config_angle.yml")
     assert a.n_topo == 3
 
 
@@ -273,7 +273,7 @@ def test_topo_index_from_name(cfg):
 def test_topo_index_from_name_list(cfg):
     """List of internal decay cores selects multi-decay topologies."""
     from tabpwa.config_loader import Config as _C
-    a = _C("config_angle.yml")
+    a = _C("tests/config_angle.yml")
     assert a.topo_index_from_name(["pipi1", "pipi2"]) == 0      # rho-rho-like
     assert a.topo_index_from_name(["pipi1", "pipipi"]) == 1     # chain
     assert a.topo_index_from_name(["pipi1", "pipipi2"]) == 2    # mirror

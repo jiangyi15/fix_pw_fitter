@@ -24,7 +24,7 @@ ort = pytest.importorskip("onnxruntime",
 
 
 # Build ONNX model from config (matches how onnx_backend.py does it).
-CONFIG_FILE = "config_angle.yml"
+CONFIG_FILE = "tests/config_angle.yml"
 BATCH_SIZE = 512
 
 import warnings

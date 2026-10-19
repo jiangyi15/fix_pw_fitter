@@ -13,7 +13,7 @@ import numpy as np
 from tabpwa.config_loader import Config
 from tabpwa.backends import create_backend
 
-CONFIG_FILE = "config_angle.yml"
+CONFIG_FILE = "tests/config_angle.yml"
 
 
 def _rng():
@@ -76,11 +76,13 @@ def test_backend_vs_numpy(backend_name="cuda_v3"):
     target_handle.free()
 
     tol = 1e-12 if "32" not in backend_name else 1e-6
-    assert abs(Q_np - Q_cu) < tol, f"Q mismatch: {Q_np} vs {Q_cu}"
-    assert np.max(np.abs(P_np - P_cu)) < tol, "P mismatch"
-    assert np.max(np.abs(grads_np['ck'] - grads_cu['ck'])) < tol, "ck grad mismatch"
-    assert np.max(np.abs(grads_np['m0'] - grads_cu['m0'])) < tol, "m0 grad mismatch"
-    assert np.max(np.abs(grads_np['g0'] - grads_cu['g0'])) < tol, "g0 grad mismatch"
+    # scale-aware (relative) tolerances: absolute bars break when the
+    # table inputs change gradient/P magnitudes
+    assert abs(Q_np - Q_cu) < tol * max(1.0, abs(Q_np)), f"Q mismatch: {Q_np} vs {Q_cu}"
+    assert np.max(np.abs(P_np - P_cu)) < tol * max(1.0, np.max(np.abs(P_np))), "P mismatch"
+    for key in ("ck", "m0", "g0"):
+        gscale = max(1.0, np.max(np.abs(grads_np[key])))
+        assert np.max(np.abs(grads_np[key] - grads_cu[key])) < tol * gscale, f"{key} grad mismatch"
     print(f"✓ {backend_name} vs NumPy: Q={Q_np:.6f}, max|grad_err|={max(
         np.max(np.abs(grads_np[k] - grads_cu[k])) for k in ('ck', 'm0', 'g0')
     ):.2e}")

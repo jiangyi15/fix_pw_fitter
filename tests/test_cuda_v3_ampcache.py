@@ -17,7 +17,7 @@ import pytest
 from tabpwa.config_loader import Config
 from tabpwa.backends import create_backend
 
-CONFIG = "config_angle.yml"
+CONFIG = "tests/config_angle.yml"
 
 
 def _require_cuda():
@@ -73,7 +73,7 @@ def test_cuda_v3_ampcache_matches_numpy():
         Q, grads, P = backend.compute(params, handle, norm=42.0)
 
         assert abs(Q - Q_np) < 1e-6 * max(1.0, abs(Q_np)), f"n={n} Q mismatch"
-        assert np.max(np.abs(P - P_np)) < 1e-6, f"n={n} P mismatch"
+        assert np.max(np.abs(P - P_np)) < 1e-6 * max(1.0, np.max(np.abs(P_np))), f"n={n} P mismatch"
         for key in ['ck', 'm0', 'g0']:
             rel = np.max(np.abs(grads[key] - grads_np[key])) / (
                 np.max(np.abs(grads_np[key])) + 1e-30)

@@ -35,7 +35,7 @@ def test_save_init_round_trips_through_values_from_dict(tmp_path):
     """A saved start vector replays bit-for-bit via values_from_dict()."""
     from tabpwa import Fitter
 
-    fitter = Fitter(os.path.join(ROOT, "config_angle.yml"), backend="numpy")
+    fitter = Fitter(os.path.join(ROOT, "tests/config_angle.yml"), backend="numpy")
     try:
         fitter.apply_constrains()
         x0 = fitter.initial_values(seed=7)

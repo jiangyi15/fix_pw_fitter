@@ -42,7 +42,7 @@ class TestHelpers:
 
     def test_build_params_nonzero(self):
         """Defaults produce a non-trivial amplitude (ck != 0)."""
-        f = Fitter("config_angle.yml", backend="numpy")
+        f = Fitter("tests/config_angle.yml", backend="numpy")
         params = _build_params(f)
         assert np.max(np.abs(params["ck"])) > 0
 
@@ -50,7 +50,7 @@ class TestHelpers:
 class TestToyGenerate:
     def test_toy_pipeline(self):
         """End-to-end: phase space -> data -> |A|² -> rejection."""
-        f = Fitter("config_angle.yml", backend="numpy")
+        f = Fitter("tests/config_angle.yml", backend="numpy")
         ev = toy_generate(f, 30, seed=5, compute_batch=3000)
         assert len(ev["momenta"]) == 30
         d = ev["data"]
@@ -63,9 +63,9 @@ class TestToyGenerate:
         assert d["angle"].shape == (30, 24, 3)
 
     def test_reproducible(self):
-        f = Fitter("config_angle.yml", backend="numpy")
+        f = Fitter("tests/config_angle.yml", backend="numpy")
         a = toy_generate(f, 30, seed=9, compute_batch=3000)
-        f2 = Fitter("config_angle.yml", backend="numpy")
+        f2 = Fitter("tests/config_angle.yml", backend="numpy")
         b = toy_generate(f2, 30, seed=9, compute_batch=3000)
         assert np.array_equal(a["momenta"], b["momenta"])
         assert np.array_equal(a["P"], b["P"])

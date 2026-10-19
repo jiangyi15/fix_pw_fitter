@@ -151,7 +151,7 @@ particle:
         width: 0.457
         model: width_linear_npy
         width_scale: True
-        file: /home/jiangy/ana/test_4pi/fit_ls4/Gamma_symm_disp.npy
+        file: tests/lineshapes/Gamma_symm_disp.npy
     a2(1320)p:
         J: 2
         P: +1
@@ -159,7 +159,7 @@ particle:
         width: 0.120
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        file: tests/lineshapes/a2(1320)p_gamma.npy
     a1(1260)m:
         J: 1
         P: +1
@@ -167,7 +167,7 @@ particle:
         width: 0.457
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/Gamma_symm_disp.npy
+        file: tests/lineshapes/Gamma_symm_disp.npy
     a2(1320)m:
         J: 2
         P: +1
@@ -175,7 +175,7 @@ particle:
         width: 0.120
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        file: tests/lineshapes/a2(1320)p_gamma.npy
     a2(1700)p:
         J: 2
         P: +1
@@ -183,7 +183,7 @@ particle:
         width: 0.377
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        file: tests/lineshapes/a2(1320)p_gamma.npy
     a2(1700)m:
         J: 2
         P: +1
@@ -191,7 +191,7 @@ particle:
         width: 0.377
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a2(1320)p_gamma.npy
+        file: tests/lineshapes/a2(1320)p_gamma.npy
     pi2(1670)p:
         J: 2
         P: -1
@@ -199,7 +199,7 @@ particle:
         width: 0.334
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi2(1670)p_gamma.npy
+        file: tests/lineshapes/pi2(1670)p_gamma.npy
     pi2(1670)m:
         J: 2
         P: -1
@@ -207,7 +207,7 @@ particle:
         width: 0.334
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi2(1670)p_gamma.npy
+        file: tests/lineshapes/pi2(1670)p_gamma.npy
     pi1(1600)p:
         J: 1
         P: -1
@@ -215,7 +215,7 @@ particle:
         width: 0.533
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1(1600)p_gamma.npy
+        file: tests/lineshapes/pi1(1600)p_gamma.npy
     pi1(1600)m:
         J: 1
         P: -1
@@ -223,7 +223,7 @@ particle:
         width: 0.533
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1(1600)p_gamma.npy
+        file: tests/lineshapes/pi1(1600)p_gamma.npy
     a1(1640)p:
         J: 1
         P: +1
@@ -231,7 +231,7 @@ particle:
         width: 0.599
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a1(1640)p_gamma.npy
+        file: tests/lineshapes/a1(1640)p_gamma.npy
     a1(1640)m:
         J: 1
         P: +1
@@ -239,7 +239,7 @@ particle:
         width: 0.599
         width_scale: True
         model: width_linear_npy
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/a1(1640)p_gamma.npy
+        file: tests/lineshapes/a1(1640)p_gamma.npy
     rhoA:
         J: 1
         P: -1
@@ -343,7 +343,7 @@ particle:
         width: 1.520
         model: width_linear_npy
         width_scale: True
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1300p_gamma.npy
+        file: tests/lineshapes/pi1300p_gamma.npy
     pi1300m:
         J: 0
         P: -1
@@ -351,7 +351,7 @@ particle:
         width: 1.520
         model: width_linear_npy
         width_scale: True
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1300p_gamma.npy
+        file: tests/lineshapes/pi1300p_gamma.npy
     pi1600p:
         J: 0
         P: -1
@@ -359,7 +359,7 @@ particle:
         width: 0.516
         model: width_linear_npy
         width_scale: True
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1600p_gamma.npy
+        file: tests/lineshapes/pi1600p_gamma.npy
     pi1600m:
         J: 0
         P: -1
@@ -367,7 +367,7 @@ particle:
         width: 0.516
         model: width_linear_npy
         width_scale: True
-        file: /home/jiangy/ana/test_4pi/fit_ls4/lineshapes4/pi1600p_gamma.npy
+        file: tests/lineshapes/pi1600p_gamma.npy
     f0(980):
         J: 0
         P: +1

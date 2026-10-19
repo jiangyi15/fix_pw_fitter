@@ -542,6 +542,15 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 ## Testing
 
+Test data is **self-contained under `tests/`**: the test configs
+(`config_angle.yml`, `config_amp.yml`, `config_pwa.yml`, …) live in
+`tests/`, and `tests/conftest.py` (`pytest_configure`) generates
+`tests/lineshapes/` — deterministic synthetic gamma/partial-width tables
+in the exact formats the models load (`width_linear_npy` (N,3)
+`[m, Im Π, Re Π]`; `ck_matrix_v2` gamma grid + `(N, n_ck, n_ck)` complex
+partial matrix + channel-order JSON) — whenever missing.  Tests never
+reference files outside `tests/`; generated data is never committed.
+
 ```bash
 pytest tests/ -v                        # 539 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline

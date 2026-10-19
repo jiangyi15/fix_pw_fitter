@@ -496,7 +496,7 @@ class TestFullPipeline:
         from tabpwa.config_loader import Config
         from tabpwa.param_constraint import ConstraintManager
 
-        cfg = Config("config_angle.yml")
+        cfg = Config("tests/config_angle.yml")
         kc = cfg.build_all_index()
 
         k_name = "test_k"

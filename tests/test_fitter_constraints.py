@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from tabpwa import Fitter
 
-CONFIG_FILE = "config_angle.yml"
+CONFIG_FILE = "tests/config_angle.yml"
 N_DATA = 50
 N_PHSP = 100
 

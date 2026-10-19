@@ -7,7 +7,7 @@ import pytest
 from tabpwa.config_loader import Config
 from tabpwa.backends import create_backend
 
-CONFIG_FILE = "config_angle.yml"
+CONFIG_FILE = "tests/config_angle.yml"
 
 
 @pytest.fixture(scope="module")

@@ -15,7 +15,7 @@ def _cuda_backends():
 
 
 def test_cuda_batch_accuracy():
-    config = Config('config_angle.yml')
+    config = Config('tests/config_angle.yml')
     kc = config.build_all_index()
 
     n_ck = len(config.get_ck_map())

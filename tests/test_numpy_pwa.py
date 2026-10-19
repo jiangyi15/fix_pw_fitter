@@ -33,7 +33,7 @@ from tabpwa.numpy_pwa import NumpyPWA
 
 @pytest.fixture(scope="module")
 def kc():
-    kc = Config("config_angle.yml").build_all_index()
+    kc = Config("tests/config_angle.yml").build_all_index()
     kc["n_proj"] = 1
     return kc
 

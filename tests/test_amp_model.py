@@ -77,7 +77,7 @@ def test_pwa_params_have_no_scalar_key():
 
 
 def test_legacy_params_have_scalar_key():
-    f = Fitter("config_amp.yml", backend="numpy")
+    f = Fitter("tests/config_amp.yml", backend="numpy")
     try:
         x = f.initial_values(seed=0)
         params, _ = f.build_params(x)
@@ -102,7 +102,7 @@ def test_ck_index_helpers_respect_row_blocks():
     assert idx and max(idx) < n, (n, max(idx))
     assert cfg.build_all_index()["n_blocks"] == 1
 
-    legacy = Config("config_angle.yml")
+    legacy = Config("tests/config_angle.yml")
     n_leg = len(legacy.get_ck_map())
     assert legacy.build_all_index()["n_blocks"] == 8
     assert max(legacy.get_decay_ck_indices([("a1(1260)p", "rhoA")])) < n_leg
@@ -129,12 +129,12 @@ def test_backend_registry_gates_backends_per_model():
     with pytest.raises(ValueError, match="not registered"):
         Fitter(PWA_CFG, backend="integrated")
     with pytest.raises(ValueError, match="not registered"):
-        Fitter("config_angle.yml", backend="integrated_pwa")
+        Fitter("tests/config_angle.yml", backend="integrated_pwa")
 
 
 def test_partial_scalar_defaults_keep_legacy_fallbacks():
     """A partial scalar_defaults override must not zero the other scalars."""
-    base = open("config_angle.yml").read()
+    base = open("tests/config_angle.yml").read()
     path = _with(base + "\nscalar_defaults: {gamma: 0.123}\n")
     cfg = Config(path)
     d = build_amplitude_model(cfg).build_params_transform().param_defaults()
@@ -161,7 +161,7 @@ def test_fitter_uses_registered_default_backend(monkeypatch):
         assert type(f.backend).__name__ == "CUDABackendV4PWA"
     finally:
         f.backend.free()
-    f = Fitter("config_angle.yml")
+    f = Fitter("tests/config_angle.yml")
     try:
         assert seen == {"spec": "default", "model": "flavour_tag_mix"}
         assert type(f.backend).__name__ == "CUDABackendV3"
@@ -196,20 +196,20 @@ def test_model_without_registered_backends_raises_clearly():
 
 def test_empty_top_level_amp_model_falls_back_to_data():
     """amp_model: {} / [] / '' must not shadow data.amp_model."""
-    base = open("config_angle.yml").read()
+    base = open("tests/config_angle.yml").read()
     for empty in ("{}", "[]", '""'):
         cfg = Config(_with(f"amp_model: {empty}\n" + base))
         assert build_amplitude_model(cfg).name == "flavour_tag_mix", empty
 
 
 def test_explicit_top_level_amp_model_wins_over_data():
-    base = open("config_angle.yml").read()      # data.amp_model = flavour_tag_mix
+    base = open("tests/config_angle.yml").read()      # data.amp_model = flavour_tag_mix
     cfg = Config(_with("amp_model: pwa\n" + base))
     assert build_amplitude_model(cfg).name == "pwa"
 
 
 def test_param_names_match_legacy_flat_order():
-    cfg = Config("config_amp.yml")
+    cfg = Config("tests/config_amp.yml")
     bases = sorted({p for comb in cfg.get_ck_map()
                     for p in comb if isinstance(p, str)})
     legacy = list(dict.fromkeys(
@@ -220,8 +220,8 @@ def test_param_names_match_legacy_flat_order():
 
 
 def test_param_names_are_unique_with_colliding_scalar():
-    base = open("config_amp.yml").read()
-    cfg = Config("config_amp.yml")
+    base = open("tests/config_amp.yml").read()
+    cfg = Config("tests/config_amp.yml")
     ck_name = sorted({p for comb in cfg.get_ck_map()
                       for p in comb if isinstance(p, str)})[0] + "r"
     path = _with(base + f"\nscalar_names: [gamma, {ck_name}]\n")
@@ -236,7 +236,7 @@ def test_integrated_backend_requires_legacy_block_structure():
     with pytest.raises(ValueError, match="integrated_pwa"):
         IntegratedBackend(kc_pwa, base="numpy_pwa")
 
-    kc = Config("config_angle.yml").build_all_index()
+    kc = Config("tests/config_angle.yml").build_all_index()
     be = IntegratedBackend(kc, base="numpy")
     assert be._n_blocks == 8 and be._n_perm == 4
     assert be._ng == be.kernel.n_wave // be._n_blocks
@@ -294,7 +294,7 @@ def test_integrated_threads_model_to_nested_base(monkeypatch):
 
     monkeypatch.setattr(B, "create_backend", spy)
     from tabpwa.backends.integrated_backend import IntegratedBackend
-    kc = Config("config_angle.yml").build_all_index()
+    kc = Config("tests/config_angle.yml").build_all_index()
     IntegratedBackend(kc, base="numpy", model="flavour_tag_mix")
     assert seen == {"spec": "numpy", "model": "flavour_tag_mix"}
 
@@ -308,7 +308,7 @@ def test_shard_records_model_for_workers():
 
 def test_initial_values_use_default():
     """Defaulted params start at their default; use_default=False is random."""
-    f = Fitter("config_angle.yml", backend="numpy")
+    f = Fitter("tests/config_angle.yml", backend="numpy")
     try:
         names = f.cm.var_registry.flat_names
         defaults = f.cm.defaults
@@ -353,7 +353,7 @@ def test_model_builds_event_data_per_case():
     assert {"mass", "q", "angle", "weight"} <= set(d)
     assert "frac" not in d and "time" not in d
 
-    ml = build_amplitude_model("config_amp.yml")          # path directly
+    ml = build_amplitude_model("tests/config_amp.yml")          # path directly
     dl = ml.build_event_data(_mom(5, [0.13957] * 4),
                              ml.build_kernel_config())
     assert "frac" in dl and "time" in dl

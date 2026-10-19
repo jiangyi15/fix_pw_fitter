@@ -201,7 +201,7 @@ def test_model_get_defaults_fixed_shape():
 
 def test_defaults_via_fitter():
     """cm.defaults includes mass and width from models."""
-    fitter = Fitter('config_amp.yml', backend='numpy')
+    fitter = Fitter('tests/config_amp.yml', backend='numpy')
     defaults = fitter.cm.defaults
     # Check a known mass is present
     assert 'a1(1260)p_mass' in defaults
@@ -223,7 +223,7 @@ def test_defaults_via_fitter():
 
 def test_get_decay_ck_indices():
     """Basic pair resolution returns non-empty indices."""
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     idx = cfg.get_decay_ck_indices([('a1(1260)p', 'rhoA')])
     assert len(idx) > 0
     assert all(isinstance(i, int) for i in idx)
@@ -231,7 +231,7 @@ def test_get_decay_ck_indices():
 
 def test_get_decay_ck_indices_wave_idx():
     """wave_idx separates S-wave (0) from D-wave (1) for a1→ρπ."""
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     s_wave = cfg.get_decay_ck_indices([('a1(1260)p', 'rhoA')], wave_idx=0)
     d_wave = cfg.get_decay_ck_indices([('a1(1260)p', 'rhoA')], wave_idx=1)
     all_wave = cfg.get_decay_ck_indices([('a1(1260)p', 'rhoA')])
@@ -243,14 +243,14 @@ def test_get_decay_ck_indices_wave_idx():
 
 def test_get_decay_ck_indices_nonexistent():
     """Non-existent decay pair returns empty list."""
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     idx = cfg.get_decay_ck_indices([('a1(1260)p', 'NONEXISTENT')])
     assert idx == []
 
 
 def test_get_decay_ck_indices_multi_pair():
     """Multiple pairs resolve independently and are unioned."""
-    cfg = Config('config_amp.yml')
+    cfg = Config('tests/config_amp.yml')
     single_a = cfg.get_decay_ck_indices([('pi2(1670)p', 'f0(500)')])
     single_b = cfg.get_decay_ck_indices([('pi2(1670)p', 'f0(980)')])
     # This must be called one pair at a time (AND semantics per call)
@@ -417,7 +417,7 @@ def test_cm_resolve_full_includes_defaults():
 def test_cm_flat_resolve_stop_after_transforms():
     """flat_resolve with stop_after='transforms' via Fitter."""
     from tabpwa.fitter import Fitter
-    f = Fitter('config_angle.yml', backend='numpy')
+    f = Fitter('tests/config_angle.yml', backend='numpy')
     x = f.initial_values(seed=42)
     d = f.cm.flat_resolve(x, stop_after='transforms')
     assert isinstance(d, dict)
@@ -426,7 +426,7 @@ def test_cm_flat_resolve_stop_after_transforms():
 def test_cm_flat_resolve_stop_after_bounds():
     """flat_resolve with stop_after='bounds'."""
     from tabpwa.fitter import Fitter
-    f = Fitter('config_angle.yml', backend='numpy')
+    f = Fitter('tests/config_angle.yml', backend='numpy')
     x = f.initial_values(seed=42)
     d = f.cm.flat_resolve(x, stop_after='bounds')
     # Keys should be raw ck names, not yet resolved
@@ -451,7 +451,7 @@ def test_cm_stop_after_roundtrip():
 
 def _make_fitter():
     """Create a fitter with minimal data for testing."""
-    fitter = Fitter('config_amp.yml', backend='numpy')
+    fitter = Fitter('tests/config_amp.yml', backend='numpy')
     n_d, n_p = 10, 20
     data = {
         'mass': np.random.uniform(2, 3, (n_d, 48)),
@@ -522,7 +522,7 @@ def test_values_from_dict_ignores_absent_k_param(tmp_path):
     """
     import yaml
     from tabpwa import Fitter
-    cfg = yaml.safe_load(open('config_amp.yml'))
+    cfg = yaml.safe_load(open('tests/config_amp.yml'))
     cfg['particle']['NR0'].update({'model': 'ExpSpline', 'k': 0.3,
                                    'k_range': [-1.0, 1.0], 'n_interp': 21,
                                    'pure_exp': True,
@@ -867,7 +867,7 @@ def test_particle_display_custom():
 def test_config_name_display_map():
     """name_display_map covers all particles in decay chains."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     m = c.decay_tree.name_display_map()
     assert isinstance(m, dict)
     assert len(m) > 5
@@ -880,7 +880,7 @@ def test_config_name_display_map():
 def test_config_display_decay():
     """display_decay wraps particle names in LaTeX."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     for chain in c.full_decay.chains:
         for decay in chain.decays[1:]:
             d = c.decay_tree.display_decay(decay)
@@ -893,7 +893,7 @@ def test_config_display_decay():
 def test_config_display_g_ls():
     """display_g_ls returns one LaTeX label per LS combination."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     for chain in c.full_decay.chains:
         for decay in chain.decays[1:]:
             labels = c.display_g_ls(decay)
@@ -909,7 +909,7 @@ def test_config_display_g_ls():
 def test_config_display_a_total():
     """display_a_total returns a LaTeX string."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     for chain in c.full_decay.chains:
         d = c.display_a_total(chain)
         assert "$a_{\\mathrm{total}}" in d, f"unexpected a_total: {d}"
@@ -919,7 +919,7 @@ def test_config_display_a_total():
 def test_config_param_display_mass():
     """param_display formats mass parameters."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     assert c.param_display("rhoA_mass") == r"$m_{\rho}$"
     assert r"_mass" not in c.param_display("f0(980)_mass")
 
@@ -927,7 +927,7 @@ def test_config_param_display_mass():
 def test_config_param_display_width():
     """param_display formats width parameters."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     d = c.param_display("rhoA_width")
     assert d.startswith(r"$\Gamma")
     assert r"\rho" in d
@@ -936,7 +936,7 @@ def test_config_param_display_width():
 def test_config_param_display_g_ls():
     """param_display formats g_ls magnitude and phase."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     # Find a g_ls name from the config
     name_r = None
     name_i = None
@@ -961,7 +961,7 @@ def test_config_param_display_g_ls():
 def test_config_param_display_scalar():
     """param_display formats scalar names."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     assert c.param_display("gamma") == r"$\Gamma$"
     assert c.param_display("delta_gamma") == r"$\Delta\Gamma$"
     assert c.param_display("A_prod") == r"$A_{\mathrm{prod}}$"
@@ -970,7 +970,7 @@ def test_config_param_display_scalar():
 def test_config_param_display_unknown():
     """param_display escapes underscores for unknown names."""
     from tabpwa.config_loader import Config
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     d = c.param_display("some_unknown_param")
     assert r"\_" in d, f"underscore not escaped: {d}"
     assert r"\mathrm" in d, f"missing \\mathrm: {d}"
@@ -985,7 +985,7 @@ def test_discover_groups_display_labels():
     from tabpwa.config_loader import Config
     from tabpwa.plot_pw_groups import discover_groups
 
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     g = discover_groups(c)
 
     # Charge-merged keys use the ± superscript, not a p/m variant
@@ -1013,7 +1013,7 @@ def test_discover_groups_merge_preserves_labels():
     from tabpwa.config_loader import Config
     from tabpwa.plot_pw_groups import discover_groups
 
-    c = Config("config_angle.yml")
+    c = Config("tests/config_angle.yml")
     # No MI0 particles here → merge is a no-op, labels unchanged
     g = discover_groups(c, merge=[("^MI0\\d", "MI0")])
     assert "$a_1(1260)^+$" in g
