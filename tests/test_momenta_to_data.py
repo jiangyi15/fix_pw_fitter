@@ -130,26 +130,16 @@ class TestHelpers:
 
 
 class TestReference:
-    """Compare against the reference data arrays (skipped if absent)."""
-
-    REF_MOM = "/media/jiangy/JZAO/ana/time_dep_amp/test_4pi/create_data17/data_sig.npy"
-    REF_NPZ = "/home/jiangy/github/project71/data/data_arrays.npz"
+    """momenta_to_data (fast/CP path) vs momenta_to_data_full (reference
+    computation) on seeded generated events — fully self-contained."""
 
     @pytest.fixture
-    def refs(self):
-        if not (os.path.exists(self.REF_MOM) and os.path.exists(self.REF_NPZ)):
-            pytest.skip("reference data files not available")
-        mom = np.load(self.REF_MOM)
-        ref = np.load(self.REF_NPZ)
-        assert mom.shape[0] == ref["mass"].shape[0]
-        return mom, ref
+    def mom(self, ev):
+        return ev["momenta"][:20000]
 
-    def test_default_matches_full(self):
+    def test_default_matches_full(self, mom):
         """The default (CP-transform) momenta_to_data reproduces the
         reference full-computation within the same tolerances."""
-        if not (os.path.exists(self.REF_MOM) and os.path.exists(self.REF_NPZ)):
-            pytest.skip("reference data files not available")
-        mom = np.load(self.REF_MOM)[:20000]
         a = momenta_to_data(mom)
         b = momenta_to_data_full(mom)
         assert np.max(np.abs(a["mass"] - b["mass"])) < 1e-8
@@ -160,16 +150,14 @@ class TestReference:
         assert np.max(np.abs(a["angles"][:, :, 1] - b["angles"][:, :, 1])) < 1e-6
         assert np.max(np.abs(a["angles"][:, :, 2] - b["angles"][:, :, 2])) < 1e-6
 
-    def test_mass_q_match(self, refs):
-        mom, ref = refs
-        out = momenta_to_data(mom[:20000])
-        assert np.max(np.abs(out["mass"] - ref["mass"][:20000])) < 1e-8
-        assert np.max(np.abs(out["q"] - ref["q"][:20000])) < 1e-8
+    def test_mass_q_match(self, mom):
+        out, ref = momenta_to_data(mom), momenta_to_data_full(mom)
+        assert np.max(np.abs(out["mass"] - ref["mass"])) < 1e-8
+        assert np.max(np.abs(out["q"] - ref["q"])) < 1e-8
 
-    def test_angles_match(self, refs):
-        mom, ref = refs
-        out = momenta_to_data(mom[:20000])
-        oa, ra = out["angles"], ref["angles"][:20000]
+    def test_angles_match(self, mom):
+        out, ref = momenta_to_data(mom), momenta_to_data_full(mom)
+        oa, ra = out["angles"], ref["angles"]
         # wrapped azimuth difference (clean form)
         d0 = np.abs(((oa[:, :, 0] - ra[:, :, 0] + np.pi) % (2 * np.pi)) - np.pi)
         assert d0.max() < 1e-6
