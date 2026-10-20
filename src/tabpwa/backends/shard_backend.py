@@ -226,6 +226,10 @@ class ShardBackend(ComputeBackend):
     def __init__(self, kernel_config, backends=None, n_workers=None,
                  weights=None, align=None, start_method=None,
                  worker_timeout=None, model=None):
+        # set first: free()/__del__ must be safe if spawn fails
+        self._procs = []
+        self._task_queues = []
+        self._result_queues = []
         self.kernel_config = kernel_config
         self._model = model
         self._align = int(align) if align else None

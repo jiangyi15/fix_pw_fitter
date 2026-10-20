@@ -13,6 +13,7 @@ class _CUDABackend(ComputeBackend):
     """
 
     def __init__(self, kernel_config, batch_size=50000):
+        self.kernel = None   # set below; free/__del__ must be safe
         self.kernel = self._make_kernel(kernel_config, batch_size)
 
     def _make_kernel(self, kernel_config, batch_size):
@@ -35,7 +36,9 @@ class _CUDABackend(ComputeBackend):
         return Q, grads, P
 
     def free(self):
-        self.kernel.free()
+        if self.kernel is not None:
+            self.kernel.free()
+            self.kernel = None
 
 
 @register_backend("cuda_v2", model="flavour_tag_mix")

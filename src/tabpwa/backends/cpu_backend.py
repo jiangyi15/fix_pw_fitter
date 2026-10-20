@@ -14,6 +14,7 @@ class CPUBackendV3(ComputeBackend):
     Register as ``"cpu_v3"`` or ``"cpu64_v3"``.
     """
     def __init__(self, kernel_config, batch_size=50000):
+        self.kernel = None   # free/__del__ must be safe if the build fails
         from tabpwa.cpu._v3 import CPUKernelV3 as K
         self.kernel = K(kernel_config, batch_size=batch_size)
 
@@ -29,4 +30,6 @@ class CPUBackendV3(ComputeBackend):
         return Q, grads, (P if return_p else None)
 
     def free(self):
-        self.kernel.free()
+        if self.kernel is not None:
+            self.kernel.free()
+            self.kernel = None
