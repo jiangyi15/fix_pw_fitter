@@ -99,6 +99,7 @@ class CUDAKernelV3Mixed:
     """
 
     def __init__(self, config, batch_size=50000, lib_path=None):
+        self._ctx = None
         self._lib = _load_lib()
 
         # ---- device info ----

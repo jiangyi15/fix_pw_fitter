@@ -99,6 +99,7 @@ class CUDAKernelV4PWA:
     """
 
     def __init__(self, config, batch_size=50000, lib_path=None):
+        self._ctx = None
         self._lib = _load_lib()
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:

@@ -99,6 +99,7 @@ class CUDAKernelV2:
 
     def __init__(self, config, batch_size=50000, lib_path=None):
         # ---- load library ----
+        self._ctx = None
         self._lib = _load_lib()
 
         # ---- device info ----
