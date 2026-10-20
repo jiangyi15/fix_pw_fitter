@@ -144,6 +144,8 @@ class CUDAKernelV4PWAS0B:
 
     def __init__(self, config, batch_size=50000, lib_path=None):
         self._ctx = None
+        self._lib = None
+        self._ka = []
         self._lib = _load_lib()
         # busy-wait sync BEFORE the primary context is created (no-op if
         # another backend already created it in this process)

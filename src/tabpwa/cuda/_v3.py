@@ -104,6 +104,8 @@ class CUDAKernelV3:
     def __init__(self, config, batch_size=50000, lib_path=None):
         # ---- load library ----
         self._ctx = None
+        self._lib = None
+        self._ka = []
         self._lib = _load_lib()
         self._last_dnorm = None
 
