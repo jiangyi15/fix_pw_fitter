@@ -72,6 +72,42 @@ def test_load_results_returns_fitresult(tmp_path):
     assert np.allclose(r2.x, x0)
 
 
+def test_load_params_roundtrip_with_fixed(tmp_path):
+    """load_params restores free x AND the fixed-parameter values.
+
+    Fixed *ck* slots are used because they flow straight through the
+    parameter layer; mass/width names are transform outputs whose values
+    the transform layer owns (a raw set_fixed on them is inert at the
+    kernel), so they are not meaningful fixed round-trip probes.
+    """
+    f = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
+    tail = f._kernel_builder.tail
+    base = next(iter(f.all_comb[0]))
+    r_name, i_name = base + tail[0], base + tail[1]
+    truth_r, truth_i = 0.3, -0.4
+    f.set_fixed({r_name: truth_r, i_name: truth_i})
+    x0 = f.initial_values(seed=1)
+    path = str(tmp_path / "res_fixed.json")
+    f.save_params(x0, path)
+    saved = json.load(open(path))["value"]
+    assert saved[r_name] == pytest.approx(truth_r)
+    assert saved[i_name] == pytest.approx(truth_i)
+
+    # a fresh fitter with the same slots fixed to DIFFERENT values:
+    # load_params must restore the saved x and the saved fixed values
+    g = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
+    g.set_fixed({r_name: 9.876, i_name: -9.876})
+    x = g.load_params(path)
+    assert np.allclose(x, x0)
+    assert g.cm.fixed_tr.values[r_name] == pytest.approx(truth_r)
+    assert g.cm.fixed_tr.values[i_name] == pytest.approx(truth_i)
+
+    # dict input is equivalent to path input
+    g2 = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
+    g2.set_fixed({r_name: 9.876, i_name: -9.876})
+    assert np.allclose(g2.load_params(json.load(open(path))), x0)
+
+
 
 def test_from_result_preserves_scipy_fields():
     """scipy OptimizeResult is dict-backed: extra fields survive."""

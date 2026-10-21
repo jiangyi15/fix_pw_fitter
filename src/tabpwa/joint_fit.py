@@ -302,6 +302,23 @@ class JointFitter:
         if changed:
             self.cm._rebuild()
 
+    def load_params(self, source):
+        """Load a saved parameter point over the union (see Fitter version).
+
+        Free values become the returned flat x over the shared registry;
+        fixed values from the same dict update the shared constraint
+        layer.  *source* is a path or the parsed dict.
+        """
+        import json, os
+        if isinstance(source, (str, os.PathLike)):
+            with open(source) as f:
+                data = json.load(f)
+        else:
+            data = source
+        x = self.values_from_dict(data)
+        self.load_fixed_from_dict(data)
+        return x
+
     def set_blind(self, names, seed, scale=1.0):
         """Blind shared parameters — ONE frame for the whole joint fit.
 

@@ -625,6 +625,31 @@ class Fitter:
         if changed:
             self.cm._rebuild()
 
+    def load_params(self, source):
+        """Load a saved parameter point: free values into x, fixed into cm.
+
+        *source* is a path to a ``save_params()`` JSON file or the
+        already-parsed dict.  Both halves of the state are restored: the
+        free parameters become the returned flat x vector (via
+        :meth:`values_from_dict`), and the fixed parameters are taken
+        from the same dict into the constraint layer (via
+        :meth:`load_fixed_from_dict` — names not currently fixed are
+        ignored), so the loaded point reproduces the source fit exactly
+        when both share the parameter layer.
+
+        Returns:
+            flat x vector for get_nll()/fit().
+        """
+        import json, os
+        if isinstance(source, (str, os.PathLike)):
+            with open(source) as f:
+                data = json.load(f)
+        else:
+            data = source
+        x = self.values_from_dict(data)
+        self.load_fixed_from_dict(data)
+        return x
+
     @property
     def var_registry(self):
         """Lazily-built VariableRegistry (built by _rebuild_pc)."""
@@ -1568,8 +1593,10 @@ class Fitter:
         """Load fit results from a JSON file and optionally the error matrix.
 
         The JSON file should have been saved by :meth:`save_params`.
-        ``x`` is reconstructed from the ``"value"`` dict via
-        :meth:`values_from_dict`.
+        The full parameter state is reconstructed via
+        :meth:`load_params`: ``x`` from the ``"value"`` dict **and** the
+        fixed-parameter values from the same dict (names not currently
+        fixed are ignored).
 
         If *hessian_path* is not given, the method looks for
         ``{json_stem}_error_matrix.npy`` alongside the JSON and loads
@@ -1588,7 +1615,7 @@ class Fitter:
         from tabpwa.fit_result import FitResult
         with open(json_path) as f:
             data = json.load(f)
-        res = FitResult.from_x(self.values_from_dict(data.get("value", data)))
+        res = FitResult.from_x(self.load_params(data))
         if hessian_path is None:
             auto_path = os.path.splitext(json_path)[0] + "_error_matrix.npy"
             if os.path.exists(auto_path):

@@ -136,7 +136,10 @@ def main():
     if args.params:
         import json
         with open(args.params) as fh:
-            x0 = f.values_from_dict(json.load(fh))
+            # free values → x AND fixed values → the constraint layer,
+            # so the toy truth matches the source fit including its
+            # fixed parameters
+            x0 = f.load_params(json.load(fh))
         print(f"params      : {args.params}")
     else:
         x0 = f.initial_values(seed=s + 2)
