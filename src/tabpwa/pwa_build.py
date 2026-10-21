@@ -360,7 +360,7 @@ def block_orders(finals, data):
 
 
 def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
-                          cm_boost=True, blocks=None):
+                          cm_boost=True, blocks=None, chunk=1_000_000):
     """Tree event data with identical-particle / CP block expansion.
 
     Wraps :func:`pwa_event_data_tree` per block: each declared block reorders
@@ -368,7 +368,30 @@ def build_tree_event_data(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     separately, then the blocks are concatenated along the topology axis,
     matching the kernel's ``n_blocks`` index shifts.  ``n_blocks == 1`` gives
     exactly the single-block result.
+
+    The fill is purely row-wise (per-event boosts/angles), so *momenta* are
+    processed in row chunks of ``chunk`` events (default 1e6) to bound peak
+    memory on large files; the concatenated result is identical to the
+    all-at-once fill.  ``chunk=None`` forces a single pass.
+
+    Args:
+        momenta: (n, n_finals, 4) final-state 4-momenta.
+        chunk: row-chunk size for the fill (None = all rows at once).
     """
+    n = momenta.shape[0]
+    if chunk is not None and n > chunk:
+        outs_all = []
+        for lo in range(0, n, chunk):
+            # materialize one chunk at a time (momenta may be a read-only
+            # np.load mmap of a large file)
+            outs_all.append(build_tree_event_data(
+                cfg, kc, chains_by_topo,
+                np.asarray(momenta[lo:lo + chunk], dtype=float),
+                spinful_names=spinful_names, cm_boost=cm_boost,
+                blocks=blocks, chunk=None))
+        return {k: np.concatenate([o[k] for o in outs_all], axis=0)
+                for k in outs_all[0]}
+    momenta = np.asarray(momenta, dtype=float)
     if blocks is None:
         tree = cfg if hasattr(cfg, "block_orders") else getattr(cfg, "decay_tree", None)
         if tree is not None:

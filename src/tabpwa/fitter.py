@@ -418,7 +418,7 @@ class Fitter:
         mom_path = _resolve(prefix)
         if not mom_path:
             return None
-        momenta = np.load(mom_path)
+        momenta = np.load(mom_path, mmap_mode="r")
         if momenta.ndim != 3 or momenta.shape[-1] != 4:
             raise ValueError(f"{prefix}: expected (n, n_finals, 4), got "
                              f"{momenta.shape}")
