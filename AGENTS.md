@@ -443,7 +443,15 @@ policy/kernel config through it.
   and a CP block additionally reverses the 3-momentum `p → −p` **in the CM
   frame**).  `n_blocks == 1` is the plain single-block fill.
 - **`flavour_tag_mix` (TD)**: `momenta_to_data` — the time-dependent 24-row
-  layout that also emits the `frac`/`time` mixing inputs.
+  layout that also emits the `frac`/`time` mixing inputs.  The override is
+  structure-routed: the legacy 24-row fill runs only for the 4π structure
+  (four pion finals in two identical pairs); any other declared structure
+  (e.g. K*K̄* — no identical particles, CP blocks only) takes the generic
+  tree walk with `frac`/`time` (defaults 0.5/0.0, overridable) appended —
+  the fill and the kernel config share the tree's row enumeration by
+  construction (`n_angle_total = max(angle_index)+1`), so the TD kernel's
+  config-driven contract (`reshape` + slice to `n_mass` /
+  `n_angle_total·n_angle_comp`) is met for any declared topology.
 
 Block enumeration lives on the tree: `DecayTree.block_orders()` →
 `[(column order, is_cp), ...]` (order is arbitrary — all blocks share one

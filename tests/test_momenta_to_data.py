@@ -165,6 +165,68 @@ class TestReference:
         assert np.max(np.abs(oa[:, :, 2] - ra[:, :, 2])) < 1e-6
 
 
+def test_flavour_tag_event_data_routes_by_structure():
+    """4π structure → the legacy 24-row fill (bit-equal to
+    momenta_to_data); a no-identical-particles structure (K*K̄*-like:
+    CP blocks only) → the generic tree fill with frac/time."""
+    import copy
+
+    import yaml
+    from tabpwa.amp_model import build_amplitude_model
+    from tabpwa.phasespace_b4pi import generate_b4pi
+
+    ev = generate_b4pi(300, seed=11)
+    mom = ev["momenta"]
+
+    m = build_amplitude_model("tests/config_amp.yml")
+    d = m.build_event_data(mom, m.build_kernel_config())
+    ref = momenta_to_data(mom)
+    assert m._legacy_td_structure() is True
+    assert np.array_equal(d["mass"].reshape(300, 24, 2), ref["mass"])
+    assert np.array_equal(d["q"].reshape(300, 24, 3), ref["q"])
+    assert np.array_equal(d["angle"], ref["angles"])
+    assert np.array_equal(d["frac"], ref["frac"])
+    assert np.array_equal(d["time"], ref["time"])
+
+    # K*K̄*-like: drop the identical-pair declaration (CP blocks only)
+    cfg = yaml.safe_load(open("tests/config_amp.yml"))
+    cfg["data"].pop("identical_particles", None)
+    m2 = build_amplitude_model(cfg)
+    assert m2._legacy_td_structure() is False
+    kc2 = m2.build_kernel_config()
+    d2 = m2.build_event_data(mom, kc2)
+    # the data-row count the kernel derives from the config: the fill
+    # and the config agree by construction (same tree enumeration)
+    n_rows = int(np.max(kc2["angle_index"])) + 1
+    assert d2["angle"].shape == (300, n_rows, 3)
+    assert d2["mass"].shape == (300, 2 * n_rows)   # flat: n_rows × n_res
+    assert np.allclose(d2["frac"], 0.5) and np.allclose(d2["time"], 0.0)
+
+    # frac/time overrides + chunk equivalence (NaN-aware)
+    d3 = m2.build_event_data(mom, kc2, frac=np.linspace(0, 1, 300),
+                             time=np.ones(300))
+    assert np.allclose(d3["frac"], np.linspace(0, 1, 300))
+    assert np.allclose(d3["time"], 1.0)
+    d4 = m2.build_event_data(mom, kc2, chunk=100)
+    for k in d2:
+        a, b = d4[k], d2[k]
+        ok = np.array_equal(a, b, equal_nan=True) if a.dtype.kind == "f" \
+            else np.array_equal(a, b)
+        assert ok, k
+
+    # fit-level smoke: the CP-only structure runs through the numpy TD
+    # backend (finite NLL)
+    from tabpwa import Fitter
+
+    f = Fitter(cfg, backend="numpy")
+    f.apply_constrains()
+    f.set_phsp(d2); f.set_data(d2)
+    x0 = f.initial_values(seed=5)
+    nll, grad = f.get_nll(x0)
+    assert np.isfinite(nll) and np.all(np.isfinite(grad))
+    del copy
+
+
 class TestSameSignTopology:
     """B → (π⁺₁π⁺₂)(π⁻₁π⁻₂): same-charge pairing, cosθ ∈ [0, 1]."""
 

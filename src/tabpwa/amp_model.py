@@ -273,20 +273,73 @@ class FlavourTagMix(AmplitudeModel):
     params_transform_cls = FlavourTagMixKernelParams
 
     def build_event_data(self, momenta, kernel_config, *, weight=None,
-                         bkg=None):
-        """Legacy 24-row layout with the ``frac`` / ``time`` mixing inputs."""
-        from tabpwa.momenta_to_data import momenta_to_data
+                         bkg=None, frac=None, time=None, chunk=None):
+        """TD event-data fill, tree-general.
+
+        Two paths:
+
+        * **legacy 4π structure** (four pion finals in two identical
+          pairs — the structure :func:`momenta_to_data` implements):
+          the production 24-row fill, unchanged.
+        * **any other declared structure** (e.g. K*K̄*: no identical
+          particles, CP blocks only): the generic tree walk — the same
+          per-chain fill the PWA path uses, with the block/topology
+          enumeration taken from the decay tree, so the fill and the
+          kernel config share one convention by construction.  Rows =
+          ``n_blocks × n_topos`` from the declared tree.
+
+        ``frac``/``time`` are per-event mixing inputs; ``None`` fills the
+        legacy defaults (0.5 / 0.0).  ``chunk`` bounds the tree-fill
+        memory (rows per pass; ``None`` = library default).
+        """
+        from tabpwa.pwa_build import build_tree_event_data
 
         n = momenta.shape[0]
-        w = np.ones(n) if weight is None else np.asarray(weight, dtype=float)
-        d = momenta_to_data(momenta, weight=w)
-        return {
-            "mass": d["mass"].reshape(n, -1),
-            "q": d["q"].reshape(n, -1),
-            "angle": d["angles"],
-            "frac": d["frac"],
-            "time": d["time"],
-            "bkg": (d["bkg_raw"] if bkg is None
-                    else np.asarray(bkg, dtype=np.float64).ravel()),
-            "weight": np.asarray(d["weight"], dtype=float),
-        }
+        if self._legacy_td_structure():
+            from tabpwa.momenta_to_data import momenta_to_data
+
+            w = np.ones(n) if weight is None else np.asarray(weight,
+                                                            dtype=float)
+            d = momenta_to_data(momenta, weight=w)
+            return {
+                "mass": d["mass"].reshape(n, -1),
+                "q": d["q"].reshape(n, -1),
+                "angle": d["angles"],
+                "frac": d["frac"],
+                "time": d["time"],
+                "bkg": (d["bkg_raw"] if bkg is None
+                        else np.asarray(bkg, dtype=np.float64).ravel()),
+                "weight": np.asarray(d["weight"], dtype=float),
+            }
+
+        # tree-general branch: same walk the PWA path uses
+        chains_by_topo = {}
+        for _, chain in self.full_decay.get_partial_waves():
+            chains_by_topo[self.topo_index[chain.topo_id()]] = chain
+        spinful = [nm for nm in self.finals
+                   if float(self.dic["particle"][nm].get("J", 0)) != 0]
+        out = build_tree_event_data(self, kernel_config, chains_by_topo,
+                                    momenta, spinful_names=spinful,
+                                    chunk=chunk)
+        out["weight"] = (np.ones(n) if weight is None
+                         else np.asarray(weight, dtype=float))
+        if bkg is not None:
+            out["bkg"] = np.asarray(bkg, dtype=np.float64).ravel()
+        out["frac"] = (np.full(n, 0.5) if frac is None
+                       else np.asarray(frac, dtype=float).ravel())
+        out["time"] = (np.zeros(n) if time is None
+                       else np.asarray(time, dtype=float).ravel())
+        return out
+
+    def _legacy_td_structure(self):
+        """True for the 4π structure momenta_to_data implements: four
+        pion finals in two identical-particle pairs."""
+        tree = self.decay_tree
+        if len(self.finals) != 4 or len(tree.identical_groups) != 2:
+            return False
+        if any(len(g) != 2 for g in tree.identical_groups):
+            return False
+        from tabpwa.phasespace_b4pi import M_PION
+        return all(
+            abs(float(self.dic["particle"][nm]["mass"]) - M_PION) <= 1e-3
+            for nm in self.finals)
