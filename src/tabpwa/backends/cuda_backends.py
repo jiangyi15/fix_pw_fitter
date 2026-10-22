@@ -263,6 +263,25 @@ class CUDABackendV4PWAS0C(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v4_pwa_s0d", model="pwa")
+class CUDABackendV4PWAS0D(_CUDABackend):
+    """CUDA v4 PWA s0d — s0c with the interp reading the mass column
+    straight from the read-only global input.
+
+    The s0c two-phase kernel stages the event's mass row into shared
+    memory and needs a __syncthreads() barrier between the staging fill
+    and the uslot interp (012c8fb — the interp consumes sibling threads'
+    columns), which serializes the two memory-latency phases per event
+    block.  s0d drops the staging: the interp reads ``mass[]`` directly
+    (read-only kernel input, no intra-kernel producer — the same pattern
+    as gamma_table/fl_table).  Less memory traffic AND no barrier;
+    results bit-identical to s0c.
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_s0d import CUDAKernelV4PWAS0D as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa_s0", model="pwa")
 class CUDABackendV5PWAS0(_CUDABackend):
     """CUDA v5 PWA s0 — one BW per chain + direct pole parameters +

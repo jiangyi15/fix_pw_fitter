@@ -62,6 +62,8 @@ BACKENDS = [
     ("cuda_v4_pwa_cache",   "cuda_v4_pwa_cache"),
     ("cuda_v4_pwa_cache32", "cuda32_v4_pwa_cache"),
     ("cuda_v5_pwa",         "cuda_v5_pwa"),
+    ("cuda_v4_s0c",         "cuda_v4_pwa_s0c"),
+    ("cuda_v4_s0d",         "cuda_v4_pwa_s0d"),
     ("integrated_pwa",      {"name": "integrated_pwa", "base": "cuda_v4_pwa"}),
 ]
 
