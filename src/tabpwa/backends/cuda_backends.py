@@ -358,6 +358,43 @@ class CUDABackendV5PWAS0C(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_s0d", model="pwa")
+class CUDABackendV5PWAS0D(_CUDABackend):
+    """CUDA v5 PWA s0d — the v5 s0c kernel with the iteration-invariant
+    u-cache (sibling of ``cuda_v4_pwa_s0d``).
+
+    The ``uslot`` gamma interp depends only on fixed inputs (mass columns
+    + interp tables), so it is filled once per data load and the
+    per-iteration kernel is a pure matvec (no interp, no staging, no
+    barrier).  Same grouped log-sum NLL and interface as
+    ``cuda_v5_pwa_s0c``; results identical.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_s0d import CUDAKernelV5PWAS0D as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_s0d kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda32_v4_pwa_cache", model="pwa")
 class CUDABackendV4PWACache32(_CUDABackend):
     """FP32-storage fixed-m0/g0 full-amplitude cache (see cuda_v4_pwa_cache).
