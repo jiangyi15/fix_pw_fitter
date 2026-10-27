@@ -357,6 +357,35 @@ class Fitter:
         self.set_data(data_np)
         return data_np, phsp_np
 
+    def _resolve_data_key(self, key):
+        """Resolve one ``data:`` section entry to a local path (or None).
+
+        The value may be a list/tuple (first entry wins).  Resolution goes
+        through :meth:`RawConfig.resolve` → :func:`tabpwa.paths.resolve_path`
+        (config directory + the global path map).  A resolved path that
+        does not exist raises :class:`FileNotFoundError` naming the ORIGINAL
+        config value, the mapped path and the effective map — the usual
+        remote→local mistake.
+        """
+        import os
+        from tabpwa.paths import current_path_map
+        val = (self.config.dic.get("data") or {}).get(key)
+        if isinstance(val, (list, tuple)):
+            val = val[0] if val else None
+        if not val:
+            return None
+        resolved = self.config.resolve(val)
+        # Accept an extension-less config value when the real file carries
+        # .npy/.npz; hand back the path that actually exists so the caller's
+        # np.load()/load_npz() branch sees the right suffix.
+        candidates = (resolved, resolved + ".npy", resolved + ".npz")
+        for cand in candidates:
+            if os.path.isfile(cand):
+                return cand
+        raise FileNotFoundError(
+            f"data.{key}: config path {val!r} not found (resolved to "
+            f"{resolved!r}; path_map={current_path_map() or {}})")
+
     def load_dataset(self, prefix):
         """One generic loader for any dataset prefix.
 
@@ -374,22 +403,11 @@ class Fitter:
         Returns the kernel-array dict, or ``None`` if the prefix is not
         configured.
         """
-        import os
-        data_conf = self.config.dic.get("data") or {}
-        cfg_dir = os.path.dirname(os.path.abspath(
-            self.config._config_path))
-
-        def _resolve(key):
-            val = data_conf.get(key)
-            if isinstance(val, (list, tuple)):
-                val = val[0] if val else None
-            return os.path.join(cfg_dir, val) if val else None
-
         n_comp = int(self.kernel_config["angle_k"].shape[1])
-        arr = _resolve(f"{prefix}_arr")
+        arr = self._resolve_data_key(f"{prefix}_arr")
         if arr:
             return self.load_npz(arr, n_angle_comp=n_comp)[0]
-        mom = _resolve(prefix)
+        mom = self._resolve_data_key(prefix)
         if mom is None:
             return None
         if str(mom).endswith(".npz"):
@@ -404,29 +422,18 @@ class Fitter:
         The exact same routine serves ``data`` / ``phsp`` and any other
         prefix (e.g. ``data_rec`` / ``phsp_rec``).
         """
-        import os
-        cfg_dir = os.path.dirname(os.path.abspath(
-            self.config._config_path))
-        data_conf = self.config.dic.get("data") or {}
-
-        def _resolve(key):
-            val = data_conf.get(key)
-            if isinstance(val, (list, tuple)):
-                val = val[0] if val else None
-            return os.path.join(cfg_dir, val) if val else None
-
-        mom_path = _resolve(prefix)
+        mom_path = self._resolve_data_key(prefix)
         if not mom_path:
             return None
         momenta = np.load(mom_path, mmap_mode="r")
         if momenta.ndim != 3 or momenta.shape[-1] != 4:
             raise ValueError(f"{prefix}: expected (n, n_finals, 4), got "
                              f"{momenta.shape}")
-        w_path = _resolve(f"{prefix}_weight")
+        w_path = self._resolve_data_key(f"{prefix}_weight")
         weight = np.load(w_path) if w_path else np.ones(momenta.shape[0])
 
         # Optional per-event background contribution {prefix}_bg_value
-        bg_path = _resolve(f"{prefix}_bg_value")
+        bg_path = self._resolve_data_key(f"{prefix}_bg_value")
         bg = None
         if bg_path:
             bg = np.load(bg_path).astype(np.float64).ravel()
@@ -436,7 +443,8 @@ class Fitter:
                     "events")
 
         # reorder columns from data.dat_order into cfg.finals order
-        order = data_conf.get("dat_order") or list(self.model.finals)
+        order = ((self.config.dic.get("data") or {}).get("dat_order")
+                 or list(self.model.finals))
         if len(order) != momenta.shape[1]:
             raise ValueError(
                 f"{prefix}: {momenta.shape[1]} columns but dat_order has "
@@ -2105,6 +2113,9 @@ def load_fit(source, backend=None, load_data=True, cm=None, strict=True):
     * anything else → a plain :class:`Fitter`, with
       ``apply_constrains()`` called and (``load_data=True``) the config's
       datasets loaded.
+
+    File paths come from the global path map (:mod:`tabpwa.paths`) —
+    ``bind_paths`` / ``path_scope`` / ``TABPWA_PATH_MAP``.
 
     ``Fitter`` itself ignores a stray ``broadcast:`` key; this is the
     entry point that honours it.

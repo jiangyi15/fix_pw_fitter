@@ -50,6 +50,8 @@ Programmatic scans inject the list into the template with :func:`scan`
 import copy
 import os
 
+from tabpwa.paths import resolve_path
+
 _DATA_SUFFIXES = (".npy", ".npz")
 
 
@@ -123,6 +125,11 @@ class ConfigBroadcast:
                 (default ``("decay",)`` — all variants share the decay
                 topology; a diff mentioning one raises ``ValueError``).
                 Pass ``()`` to disable the check.
+
+        File paths in the expanded variants go through
+        :func:`tabpwa.paths.resolve_path` (the global map), so callers bind
+        once with ``paths.bind_paths(...)`` / ``path_scope(...)`` — the
+        config dicts themselves are never modified.
         """
         if source is None:
             source = {}
@@ -221,7 +228,8 @@ class ConfigBroadcast:
         path, a dict, or an already-built ``ConfigBroadcast``.  A plain
         config yields a single ``("", source)`` (the source itself, so a
         path keeps its ``_config_path``); variants yield
-        ``(f"{i}:{label}", config)`` pairs.
+        ``(f"{i}:{label}", config)`` pairs.  Paths are resolved through the
+        global map while expanding.
         """
         bc = source if isinstance(source, cls) else cls(source)
         if not bc.is_broadcast:
@@ -241,11 +249,13 @@ class ConfigBroadcast:
             dic = copy.deepcopy(self.base)
             dic.pop("broadcast", None)
             self.merge_patch(dic, patch)
-            if self.base_dir:
-                data = dic.get("data")
-                if isinstance(data, dict):
-                    dic["data"] = {k: self.resolve_value(v, self.base_dir)
-                                   for k, v in data.items()}
+            # resolve every data path (config dir + global map) — the
+            # expanded variants are handed to Fitter as dicts, which have no
+            # directory anchor of their own
+            data = dic.get("data")
+            if isinstance(data, dict):
+                dic["data"] = {k: self.resolve_value(v, self.base_dir)
+                               for k, v in data.items()}
             out.append(dic)
         return out
 
@@ -292,14 +302,20 @@ class ConfigBroadcast:
 
     @classmethod
     def resolve_value(cls, val, base_dir):
-        """Resolve data-file path(s) relative to the config's directory."""
+        """Resolve data-file path(s) through :func:`tabpwa.paths.resolve_path`.
+
+        Relative ``.npy``/``.npz`` entries are anchored on *base_dir* (the
+        template config's directory) as before; the global path map is
+        applied by ``resolve_path`` to relative-resolved *and* absolute
+        strings, so a variant can be written with farm paths.
+        """
         if isinstance(val, (list, tuple)):
             return type(val)(cls.resolve_value(v, base_dir) for v in val)
-        if (isinstance(val, str) and base_dir
-                and val.endswith(_DATA_SUFFIXES)
-                and not os.path.isabs(val)):
-            return os.path.join(base_dir, val)
-        return val
+        if not isinstance(val, str):
+            return val
+        if base_dir and val.endswith(_DATA_SUFFIXES) and not os.path.isabs(val):
+            return resolve_path(val, base_dir=base_dir)
+        return resolve_path(val)
 
 
 def expand_configs(source):

@@ -5,6 +5,8 @@
 kernel config) lives on :class:`~tabpwa.base_model.BaseModel`; build it with
 ``build_amplitude_model(config)`` (a model) or ``BaseModel(config.dic)``.
 """
+import os
+
 import yaml
 import numpy as np  # used by the __main__ dev block
 
@@ -14,6 +16,7 @@ from .base_model import (  # noqa: F401 (re-exported)
 from .decay_tree import (  # noqa: F401 (Particle/Decay/... re-exported)
     DecayTree, Particle, Decay, DecayChain, DecayGroup,
 )
+from .paths import resolve_path
 
 
 def load_config(filename):
@@ -34,6 +37,21 @@ class RawConfig:
         # selecting the compute backend for this config; ``None`` = default
         self.backend_spec = (self.dic.get("config") or {}).get("backend",
                                                               self.dic.get("backend"))
+
+    def resolve(self, path):
+        """Resolve one config file path against this config's directory.
+
+        Thin wrapper over :func:`tabpwa.paths.resolve_path`: the global
+        path map (``bind_paths`` / ``path_scope`` / ``TABPWA_PATH_MAP``)
+        applies there, so no per-config state is involved.  The base
+        directory is only derived when the config came from a *file*; for
+        dict configs relative paths stay relative (resolved by the opener
+        against the CWD), because a dict has no anchor.
+        """
+        base_dir = None
+        if isinstance(self._config_path, str) and self._config_path:
+            base_dir = os.path.dirname(os.path.abspath(self._config_path))
+        return resolve_path(path, base_dir=base_dir)
 
     def to_dict(self):
         """Deep copy of the raw config dict — safe to edit and rebuild from

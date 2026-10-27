@@ -433,6 +433,8 @@ class SameTopoJointFitter(JointFitter):
             forbidden: top-level keys the template's ``broadcast:`` diffs
                 must not touch (passed to
                 :class:`~tabpwa.config_broadcast.ConfigBroadcast`).
+
+        File paths follow the global map (:mod:`tabpwa.paths`).
         """
         from tabpwa.config_broadcast import ConfigBroadcast
 

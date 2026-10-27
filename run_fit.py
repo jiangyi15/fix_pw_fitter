@@ -67,10 +67,29 @@ def main():
                              "value = path; default <config>_init.json next "
                              "to the config. In a --loop fit each run's start "
                              "is written to <config>_init{run}.json")
+    parser.add_argument("--path-map", action="append", default=None,
+                        metavar="FROM:TO",
+                        help="Remap file paths read from the config "
+                             "(longest-prefix bind). One FROM:TO pair per "
+                             "flag, repeatable; overrides TABPWA_PATH_MAP "
+                             "and --path-map-file. Use a JSON object if a "
+                             "path contains ':'")
+    parser.add_argument("--path-map-file", default=None, metavar="FILE",
+                        help="Path map from FILE: a JSON object {FROM: TO} "
+                             "or one FROM:TO pair per line")
     args = parser.parse_args()
 
     if args.loop > 1 and not args.fit:
         parser.error("--loop requires --fit (loop over random-start fits)")
+
+    # file first, CLI entries override — the map is process-wide, so every
+    # later load (config data, particle models) sees it.  TABPWA_PATH_MAP is
+    # the lowest-priority layer inside paths.current_path_map().
+    from tabpwa.paths import bind_paths, path_map_from_file
+    if args.path_map_file:
+        bind_paths(path_map_from_file(args.path_map_file))
+    if args.path_map:
+        bind_paths(args.path_map)
 
     # ==================================================================
     # 1. Create fitter with constraints

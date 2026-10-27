@@ -15,6 +15,51 @@ import numpy as np
 
 from .angular_formula import get_angle_formula
 from .decay_tree import DecayTree
+from .paths import resolve_path
+
+# Particle-model config keys / values that name a file on disk.
+_PATH_KEYS = ("file", "knots")
+_PATH_KEY_SUFFIXES = ("_file", "_arr", "_path")
+_PATH_VALUE_SUFFIXES = (".npy", ".npz")
+
+
+def _is_path_entry(key, value):
+    """True when a particle-table ``key: value`` names a file path."""
+    if not isinstance(value, str) or not value:
+        return False
+    k = str(key)
+    return (k in _PATH_KEYS or k.endswith(_PATH_KEY_SUFFIXES)
+            or value.endswith(_PATH_VALUE_SUFFIXES))
+
+
+def remap_particle_paths(particle_spec):
+    """Copy *particle_spec* with path-like entries remapped via the global map.
+
+    Only the particle-table dicts are touched (keys ``file`` / ``knots`` /
+    ``*_file`` / ``*_arr`` / ``*_path`` or values ending in ``.npy``/
+    ``.npz``); each such value goes through
+    :func:`tabpwa.paths.resolve_path`, so the process-wide bindings
+    (``bind_paths`` / ``path_scope`` / ``TABPWA_PATH_MAP``) apply.  The
+    input spec is never modified and the input object is returned unchanged
+    when nothing needs rewriting.
+    """
+    if not isinstance(particle_spec, dict):
+        return particle_spec
+    out = {}
+    changed = False
+    for name, entry in particle_spec.items():
+        if not isinstance(entry, dict):
+            out[name] = entry
+            continue
+        new = dict(entry)
+        for key, val in entry.items():
+            if _is_path_entry(key, val):
+                resolved = resolve_path(val)
+                if resolved != val:
+                    new[key] = resolved
+                    changed = True
+        out[name] = new
+    return out if changed else particle_spec
 
 
 def row_block_factors(dic):
@@ -65,7 +110,15 @@ def _projection_duplicate(ret, n_proj):
 
 class BaseModel:
     def __init__(self, config, config_path=""):
-        """Build from a raw :class:`Config` (has ``dic``) or a config dict."""
+        """Build from a raw :class:`Config` (has ``dic``) or a config dict.
+
+        Path-like particle-model entries (``file``, ``gamma_file``,
+        ``partial_file``, ``knots``, …) are resolved through
+        :func:`tabpwa.paths.resolve_path` before the models load them — the
+        global path map (``bind_paths`` / ``path_scope`` /
+        ``TABPWA_PATH_MAP``) applies.  The input declarations are never
+        modified; with no binding they are used as-is.
+        """
         if hasattr(config, "dic"):
             dic = config.dic
             if not config_path:
@@ -76,6 +129,11 @@ class BaseModel:
             raise TypeError(
                 "BaseModel expects a Config or a dict; got "
                 f"{type(config).__name__}")
+        particles = remap_particle_paths(dic.get("particle"))
+        if particles is not dic.get("particle"):
+            # remap only a COPY — never mutate the caller's declarations
+            dic = dict(dic)
+            dic["particle"] = particles
         self.dic = dic
         self._config_path = config_path
         # Config ``defaults`` are loaded as a *temporary* build context while
