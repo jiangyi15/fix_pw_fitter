@@ -888,18 +888,22 @@ class PWGroupPlotter:
                 phsp_weight_extra=None, cmap="jet", plot_scatter=True,
                 scatter_style={"s": 1, "c": "black"}, scatter_step=1, fmt="png", ax=None,
                 x_range=None, y_range=None,
-                boundary=None, boundary_style=None, plot_figs=None):
+                boundary=None, boundary_style=None, plot_figs=None,
+                mc_uncert=False):
         """2D adaptive-bin pull plot: data scatter + total-fit pull grid.
 
         Splits the (var1, var2) plane adaptively (equal-quantile bins,
         following ``tf_pwa``'s ``plot_function_2dpull``).  Each bin is a
         rectangle colored by the pull::
 
-            pull = (sum w_data - sum w_fit) / sqrt(sum w_data^2)
+            pull = (sum w_data - sum w_fit) / sqrt(var)
 
         where ``w_fit = P_total * scale`` (P_total already phsp_w-weighted
-        by compute()) (+ bkg if present).
-        A data scatter overlay and a colorbar are drawn.
+        by compute()) (+ bkg if present) and ``var = Σ w_data²``; with
+        ``mc_uncert=True`` the signal and background MC statistical
+        variances are added: ``var += Σ w_sig² + Σ w_bkg²`` (the same
+        convention as the 1D pull panels).  A data scatter overlay and a
+        colorbar are drawn.
 
         Args:
             varfun: callable(dict) -> ``[var1_data, var2_data]``.
@@ -922,6 +926,10 @@ class PWGroupPlotter:
                 tf-pwa convention).  ``None`` = no curve.
             boundary_style: dict merged over the default
                 ``{"color": "gray", "alpha": 0.5, "zorder": 3}``.
+            mc_uncert: if True, the bin error also includes the MC
+                (signal + background) statistical uncertainty —
+                ``σ² = Σ_data w² + Σ_sig w² + Σ_bkg w²``; default False
+                (model exact, data-only errors), matching the 1D panels.
             plot_figs: tf-pwa ``plot_figs`` selection — ``None`` (default)
                 draws only the pull panel as ``{prefix}.{fmt}``; a list
                 selects the figures to write: ``"pull"`` (adaptive pull,
@@ -933,6 +941,8 @@ class PWGroupPlotter:
                 boundary curve is drawn on every selected figure.  Extras
                 require *output*; with an external *ax* only ``"pull"``
                 is drawn.
+        Returns:
+            the per-bin pull list when the pull panel is drawn, else None.
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_2d()")
@@ -959,12 +969,14 @@ class PWGroupPlotter:
         w = dw[cut]
 
         # Total-fit weight (already phsp_w-weighted per row by compute())
-        w_fit = extra * self._P_total * self._scale
+        w_sig = extra * self._P_total * self._scale
+        w_bkg = np.zeros_like(w_sig)
         if self._bkg_norm > 0:
             purity = f._purity if f._purity is not None else 1.0
             data_total = float(np.sum(dw))
             bkg_scale = data_total * (1.0 - purity) / self._bkg_norm
-            w_fit = w_fit + extra * self._bkg_var * bkg_scale
+            w_bkg = extra * self._bkg_var * bkg_scale
+        w_fit = w_sig + w_bkg
 
         xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
         ylo0, yhi0 = y_range if y_range is not None else (np.min(p2), np.max(p2))
@@ -995,6 +1007,7 @@ class PWGroupPlotter:
                 ax2.set_title(title)
 
         figs = list(plot_figs) if plot_figs is not None else ["pull"]
+        pulls = None
 
         # rasterize the point layer by default: a multi-million-row data
         # scatter saved to pdf/svg otherwise emits one vector marker per
@@ -1019,9 +1032,13 @@ class PWGroupPlotter:
                 mask_p = (p1 >= xlo) & (p1 < xhi) & (p2 >= ylo) & (p2 < yhi)
                 ndata = float(np.sum(w[mask_d]))
                 nmc = float(np.sum(w_fit[mask_p]))
-                # data-side statistical error of the bin (weighted):
-                # sqrt(sum w_data^2); the model is treated as exact
-                err = float(np.sum(w[mask_d] ** 2)) ** 0.5
+                # bin variance: data (weighted) √Σw², plus the signal and
+                # background MC statistical variances when requested
+                var = float(np.sum(w[mask_d] ** 2))
+                if mc_uncert:
+                    var += float(np.sum(w_sig[mask_p] ** 2))
+                    var += float(np.sum(w_bkg[mask_p] ** 2))
+                err = var ** 0.5
                 pulls.append((ndata - nmc) / err if err > 0 else 0.0)
 
             max_weight = max(np.max(np.abs(pulls)), 5)
@@ -1046,8 +1063,11 @@ class PWGroupPlotter:
             normal = mpl.colors.Normalize(vmin=-max_weight, vmax=max_weight)
             im = mpl.cm.ScalarMappable(norm=normal, cmap=my_cmap)
             fig.colorbar(im, ax=ax)
-            _finish(ax, fig, r"$\chi^2/Nbins={:.2f}/{}$".format(
-                np.sum(np.abs(pulls) ** 2), len(bounds)))
+            chi_title = r"$\chi^2/Nbins={:.2f}/{}$".format(
+                np.sum(np.abs(pulls) ** 2), len(bounds))
+            if mc_uncert:
+                chi_title += " (data+MC)"
+            _finish(ax, fig, chi_title)
 
             if output is not None:
                 path = os.path.join(output, prefix + "." + fmt)
@@ -1094,6 +1114,8 @@ class PWGroupPlotter:
                 fig2.savefig(path, dpi=150, bbox_inches="tight")
                 plt.close(fig2)
                 print(f"  saved {path}")
+
+        return pulls
 
 
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,

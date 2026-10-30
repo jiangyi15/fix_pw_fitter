@@ -186,7 +186,7 @@ def main():
             output=args.output, fmt=args.format, boundary=p["boundary"],
             boundary_style=p["boundary_style"],
             scatter_style=p["scatter_style"] or {"s": 1, "c": "black"},
-            plot_figs=p["plot_figs"])
+            plot_figs=p["plot_figs"], mc_uncert=args.mc_uncert)
     print(f"  saved to {args.output}")
 
 

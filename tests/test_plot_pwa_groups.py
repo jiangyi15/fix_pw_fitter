@@ -294,6 +294,37 @@ def test_plot_2d_boundary_draw(tmp_path, real_plotter):
     plt.close("all")
 
 
+def test_plot_2d_mc_uncert_changes_pull(real_plotter):
+    """--mc-uncert adds the signal/background MC variance to the 2D pull."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    varfun = lambda d: [d["mass"][:, 0] ** 2, d["mass"][:, 1] ** 2]
+    kw = dict(binning=[[2, 2]], output=None)
+
+    fig, ax = plt.subplots()
+    p0 = real_plotter.plot_2d(varfun, ["x", "y"], "mc0",
+                              ax=ax, **kw)
+    t0 = ax.get_title()
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    p1 = real_plotter.plot_2d(varfun, ["x", "y"], "mc1",
+                              ax=ax, mc_uncert=True, **kw)
+    t1 = ax.get_title()
+    plt.close(fig)
+    plt.close("all")
+
+    assert "data+MC" not in t0
+    assert "data+MC" in t1
+    p0, p1 = np.asarray(p0), np.asarray(p1)
+    assert p0.shape == p1.shape
+    # same numerators, larger errors -> strictly smaller |pull| somewhere
+    assert np.any(~np.isclose(p0, p1))
+    assert np.all(np.abs(p1) <= np.abs(p0) + 1e-12)
+
+
 def test_plot_2d_plot_figs(tmp_path, real_plotter):
     """plot_figs selects the written figures (tf-pwa semantics)."""
     import matplotlib
