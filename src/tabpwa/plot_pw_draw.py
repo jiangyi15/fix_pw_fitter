@@ -93,9 +93,13 @@ def draw_var_panel(ax, samples, i, bins, *, ax_pull=None, first=False,
 
     pull_var = dw2.copy()
     if mc_uncert:
-        sig2, _ = np.histogram(p, bins=bins, weights=samples["w_model"] ** 2)
-        bkg2, _ = np.histogram(p, bins=bins, weights=samples["w_bkg"] ** 2)
-        pull_var = pull_var + sig2 + bkg2
+        # one event carries ONE model weight: the signal and background
+        # predictions are two components of the same phsp event, so their
+        # statistical fluctuation is the fluctuation of their SUM (the
+        # cross term is part of the variance).
+        mc_w = samples["w_model"] + samples["w_bkg"]
+        mc2, _ = np.histogram(p, bins=bins, weights=mc_w ** 2)
+        pull_var = pull_var + mc2
 
     group_items = list(samples["w_groups"].items())
     gys = [np.histogram(p, bins=bins, weights=w)[0] for _lbl, w in group_items]

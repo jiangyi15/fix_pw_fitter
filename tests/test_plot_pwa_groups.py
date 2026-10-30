@@ -430,3 +430,29 @@ def test_plots_2d_display_axis_labels(cfg_pwa):
     assert panels["p1"]["labels"] == ["$A$", "$B$"]
     assert panels["p2"]["labels"] == ["X", "Y"]       # explicit wins
     assert panels["p3"]["labels"] == ["m_pipi**2", "m_pipeta**2"]
+
+
+def test_pull_mc_uncert_sums_event_components():
+    """One phsp event carries ONE model weight: w_sig + w_bkg, cross term
+    included (the MC variance is not Σw_sig² + Σw_bkg²)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from tabpwa.plot_pw_draw import draw_var_panel
+
+    bins = np.array([0.0, 1.0, 2.0])
+    samples = {"x_data": [np.array([0.5, 1.5])],
+               "x_model": [np.array([0.5, 0.5, 1.5])],
+               "w_data": np.array([2.0, 1.0]),
+               "w_model": np.array([1.0, 2.0, 0.0]),
+               "w_bkg": np.array([0.5, 0.5, 0.0]),
+               "w_groups": {}}
+    fig, ax = plt.subplots()
+    pull = draw_var_panel(ax, samples, 0, bins, mc_uncert=True)
+    plt.close(fig)
+
+    # bin 0: data 2; model (1+0.5)+(2+0.5)=4
+    #        var = Σw_data² + Σ(w_sig+w_bkg)² = 4 + (1.5²+2.5²) = 12.5
+    # bin 1: data 1; model 0; var = 1
+    assert pull[0] == pytest.approx((2.0 - 4.0) / np.sqrt(12.5))
+    assert pull[1] == pytest.approx(1.0)

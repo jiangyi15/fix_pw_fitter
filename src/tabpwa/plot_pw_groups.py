@@ -628,10 +628,11 @@ class PWGroupPlotter:
             unit: physical unit for bin width in y-label (default "GeV").
             show_pull: if True, show pull (data−model)/σ below each panel.
             mc_uncert: if True, the pull/χ² error also includes the MC
-                (signal/background) statistical uncertainty per bin —
-                ``σ² = Σ_data w² + Σ_sig w² + Σ_bkg w²`` — treating each
-                weighted component as Poisson; default False (model exact,
-                data-only errors).
+                statistical uncertainty per bin —
+                ``σ² = Σ_data w² + Σ_mc w²`` with ``w_mc = w_sig + w_bkg``
+                (the signal and background are components of the SAME phsp
+                event, so their weights add before squaring); default
+                False (model exact, data-only errors).
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_var()")
@@ -928,8 +929,10 @@ class PWGroupPlotter:
                 ``{"color": "gray", "alpha": 0.5, "zorder": 3}``.
             mc_uncert: if True, the bin error also includes the MC
                 (signal + background) statistical uncertainty —
-                ``σ² = Σ_data w² + Σ_sig w² + Σ_bkg w²``; default False
-                (model exact, data-only errors), matching the 1D panels.
+                ``σ² = Σ_data w² + Σ_mc w²`` with ``w_mc = w_sig + w_bkg``
+                (one phsp event carries one total model weight, so the two
+                components add before squaring); default False (model exact,
+                data-only errors), matching the 1D panels.
             plot_figs: tf-pwa ``plot_figs`` selection — ``None`` (default)
                 draws only the pull panel as ``{prefix}.{fmt}``; a list
                 selects the figures to write: ``"pull"`` (adaptive pull,
@@ -1036,8 +1039,9 @@ class PWGroupPlotter:
                 # background MC statistical variances when requested
                 var = float(np.sum(w[mask_d] ** 2))
                 if mc_uncert:
-                    var += float(np.sum(w_sig[mask_p] ** 2))
-                    var += float(np.sum(w_bkg[mask_p] ** 2))
+                    # one event = one model weight (sig + bkg components)
+                    mc_w = w_sig[mask_p] + w_bkg[mask_p]
+                    var += float(np.sum(mc_w ** 2))
                 err = var ** 0.5
                 pulls.append((ndata - nmc) / err if err > 0 else 0.0)
 
