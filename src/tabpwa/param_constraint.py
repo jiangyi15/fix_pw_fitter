@@ -94,6 +94,28 @@ class CKProduct:
                     names.add(p)
         return sorted(names)
 
+    def _dck_dterm(self, slot_dict, counts, name, order):
+        """``d(ck_i)/d(term)`` with the *other* factors kept explicit.
+
+        Differentiating the product directly (instead of ``dk = order·ck/r``)
+        keeps the derivative finite at ``r = 0``: there ``ck`` and ``r`` are
+        both zero, so the ratio is 0/0, while the true derivative is
+        ``order · z^(order-1) · e^{iθ} · Π_{other} value^count``.
+        """
+        mag, phase = self.tail
+        if name + mag in slot_dict:
+            r = slot_dict[name + mag]
+            theta = slot_dict.get(name + phase, 0.0)
+            z = r * np.exp(1j * theta)
+            d = order * z ** (order - 1) * np.exp(1j * theta)
+        else:
+            v = slot_dict.get(name, 1.0)
+            d = order * v ** (order - 1)
+        for other, cnt in counts.items():
+            if other != name:
+                d = d * self._get_val(slot_dict, other) ** cnt
+        return d
+
     def backprop_grad(self, slot_dict, grad_ck):
         """Gradient w.r.t. each slot from kernel's ``grad_ck``.
 
@@ -103,8 +125,11 @@ class CKProduct:
         Uses Wirtinger calculus: for a real-valued Q, the chain rule
         through ``ck = r·exp(j·θ)`` gives::
 
-            dQ/dr = 2 · Re( Σ grad_ck · order · ck / r )
+            dQ/dr = 2 · Re( Σ grad_ck · dck/dr )
             dQ/dθ = 2 · Re( Σ grad_ck · j · order · ck )
+
+        ``dck/dr`` is evaluated as a product derivative, so it stays finite
+        at ``r = 0`` (where ``ck/r`` would be 0/0).
         """
         ck = self.build_ck(slot_dict)
         grads = {}
@@ -115,14 +140,12 @@ class CKProduct:
                 if isinstance(term, str):
                     counts[term] = counts.get(term, 0) + 1
             for name, order in counts.items():
-                dck = order * ck[i]
+                dck_dterm = self._dck_dterm(slot_dict, counts, name, order)
                 if name + mag in slot_dict:
-                    r = slot_dict[name + mag]
-                    grads[name + mag] = grads.get(name + mag, 0.0) + 2.0 * np.real(grad_ck[i] * dck / r)
-                    grads[name + phase] = grads.get(name + phase, 0.0) + 2.0 * np.real(grad_ck[i] * dck * 1j)
+                    grads[name + mag] = grads.get(name + mag, 0.0) + 2.0 * np.real(grad_ck[i] * dck_dterm)
+                    grads[name + phase] = grads.get(name + phase, 0.0) + 2.0 * np.real(grad_ck[i] * order * ck[i] * 1j)
                 else:
-                    v = slot_dict.get(name, 1.0)
-                    grads[name] = grads.get(name, 0.0) + 2.0 * np.real(grad_ck[i] * dck / v)
+                    grads[name] = grads.get(name, 0.0) + 2.0 * np.real(grad_ck[i] * dck_dterm)
         return grads
 
 
