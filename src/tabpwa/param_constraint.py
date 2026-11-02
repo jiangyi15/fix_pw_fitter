@@ -365,18 +365,26 @@ class Transform:
     optional; :meth:`apply_inverse` leaves the dict untouched when it raises
     ``NotImplementedError``.
 
-    Example (forward-only, names as class attributes)::
+    Example (forward-only; names depend on the particle)::
 
         class MyWidth(Transform):
-            input_names = ["m", "g"]
-            output_names = ["w"]
+            def __init__(self, model):
+                self.input_names = [f"{model.name}_m", f"{model.name}_g"]
+                self.output_names = [f"{model.name}_w"]
             def forward(self, d):
-                return {"w": d["g"] * d["m"] / 0.769}
+                ...
 
-    The names may also be set per instance: either directly in a custom
-    ``__init__`` (``self.input_names = [...]``) or through
-    ``super().__init__(input_names=..., output_names=...)`` — the latter is
-    only a convenience/backward-compatible shim, not required.
+    The names must be declared **before first use** (registration, graph
+    building, ``apply_forward``).  They are ordinary instance attributes:
+    set ``self.input_names`` / ``self.output_names`` in ``__init__`` or pass
+    them to ``super().__init__(...)`` (a compatibility shim).  Class-level
+    declarations are rejected — the built-in transforms all derive their
+    names from the particle/model at construction, so a class attribute
+    cannot express them and would silently hide a missing declaration.
+
+    Accessing ``input_names`` / ``output_names`` before they are set raises
+    a clear ``NotImplementedError`` instead of yielding an empty list (which
+    would make the FD backward silently return no gradients).
 
     Subclasses that need save/load support should also implement
     :meth:`to_dict` and :classmethod:`from_dict` and be registered
@@ -386,26 +394,54 @@ class Transform:
     ----------
     input_names : list of str, optional
         Names of input parameters (used for registry introspection).
-        Defaults to the class attribute ``input_names``.
     output_names : list of str, optional
-        Names of output parameters.  Defaults to the class attribute
-        ``output_names``.
+        Names of output parameters.
     """
 
     _has_inverse = True
 
-    #: Declared parameter names.  Class attributes may be used directly
-    #: (``input_names = ["m", "g"]``); passing ``input_names=`` to
-    #: ``__init__`` overrides them for that instance.  Consumers always read
-    #: the plain attributes, so there is no private mirror field.
-    input_names = ()
-    output_names = ()
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for attr in ("input_names", "output_names"):
+            if attr in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__}: declare {attr} in __init__ "
+                    f"(instance attribute), not as a class attribute — "
+                    f"transform names depend on the particle/model")
 
     def __init__(self, input_names=None, output_names=None):
+        self._input_names = None
+        self._output_names = None
         if input_names is not None:
-            self.input_names = list(input_names)
+            self.input_names = input_names
         if output_names is not None:
-            self.output_names = list(output_names)
+            self.output_names = output_names
+
+    @property
+    def input_names(self):
+        names = getattr(self, "_input_names", None)
+        if names is None:
+            raise NotImplementedError(
+                f"{type(self).__name__}: input_names must be declared in "
+                f"__init__ before the transform is registered or applied")
+        return names
+
+    @input_names.setter
+    def input_names(self, names):
+        self._input_names = list(names)
+
+    @property
+    def output_names(self):
+        names = getattr(self, "_output_names", None)
+        if names is None:
+            raise NotImplementedError(
+                f"{type(self).__name__}: output_names must be declared in "
+                f"__init__ before the transform is registered or applied")
+        return names
+
+    @output_names.setter
+    def output_names(self, names):
+        self._output_names = list(names)
 
     @property
     def has_inverse(self):

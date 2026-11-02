@@ -24,15 +24,16 @@ class SinSquare(Transform):
         return {"a": self.scale * np.sin(x), "b": x ** 2}
 
 
-class ClassNames(Transform):
-    """Class-attribute form: no ``__init__``, no ``super().__init__``."""
+class DynamicNames(Transform):
+    """Instance-assignment form: no ``super().__init__``, per-particle names."""
 
-    input_names = ["x"]
-    output_names = ["a", "b"]
-    scale = 2.0
+    def __init__(self, prefix="x", scale=2.0):
+        self.input_names = [prefix]
+        self.output_names = ["a", "b"]
+        self.scale = scale
 
     def forward(self, d):
-        x = float(d["x"])
+        x = float(d[self.input_names[0]])
         return {"a": self.scale * np.sin(x), "b": x ** 2}
 
 
@@ -48,27 +49,63 @@ def test_forward_only_backward_matches_analytic():
     assert g["x"] == pytest.approx(_analytic(dx), rel=1e-8)
 
 
-def test_class_level_names_without_super_init():
-    tr = ClassNames()
-    assert ClassNames.input_names == ["x"]
+def test_instance_names_without_super_init():
+    tr = DynamicNames()
     assert tr.input_names == ["x"] and tr.output_names == ["a", "b"]
     dx = {"a": 1.3, "b": -0.7}
     assert tr.backward(dx, {"x": 0.4})["x"] == pytest.approx(
         _analytic(dx), rel=1e-8)
-    # apply_forward/apply_backward path works with the class declarations
+    # the registration/apply paths read the instance names
     tr.apply_forward({"x": 0.4, "junk": 1.0})
     back = tr.apply_backward(dict(dx))
     assert back["x"] == pytest.approx(_analytic(dx), rel=1e-8)
+
+
+def test_names_must_be_declared_before_use():
+    class Undeclared(Transform):
+        def forward(self, d):
+            return {}
+
+    tr = Undeclared()
+    with pytest.raises(NotImplementedError, match="input_names"):
+        tr.input_names
+    with pytest.raises(NotImplementedError, match="output_names"):
+        tr.output_names
+    with pytest.raises(NotImplementedError, match="names must be declared"):
+        tr.apply_forward({"x": 1.0})
+
+
+def test_class_level_name_declarations_rejected():
+    """Particle-prefixed names cannot be class attributes."""
+    with pytest.raises(TypeError, match="instance attribute"):
+        class Bad(Transform):          # noqa: F841
+            input_names = ["x"]
+            output_names = ["y"]
+            def forward(self, d):
+                return {}
+
+
+def test_constructor_names_still_work():
+    """The base __init__ shim still accepts explicit names."""
+
+    class SuperDeclared(Transform):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+
+        def forward(self, d):
+            return {"y": 1.0}
+
+    tr = SuperDeclared(input_names=["z"], output_names=["q"])
+    assert tr.input_names == ["z"] and tr.output_names == ["q"]
 
 
 def test_direct_init_assignment_without_super():
     """A custom __init__ may assign the names directly; no super() needed."""
 
     class DirectInit(Transform):
-        output_names = ["y"]
-
         def __init__(self, name, scale):
             self.input_names = [name]
+            self.output_names = ["y"]
             self.scale = scale
 
         def forward(self, d):
@@ -78,11 +115,6 @@ def test_direct_init_assignment_without_super():
     assert tr.input_names == ["z"] and tr.output_names == ["y"]
     g = tr.backward({"y": 1.0}, {"z": 2.0})
     assert g["z"] == pytest.approx(12.0, rel=1e-8)   # 3·2z
-
-
-def test_explicit_names_override_class_declaration():
-    tr = ClassNames(input_names=["z"], output_names=["q"])
-    assert tr.input_names == ["z"] and tr.output_names == ["q"]
 
 
 def test_apply_backward_and_inverse_optional():
