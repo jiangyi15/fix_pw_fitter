@@ -13,7 +13,7 @@ from .numpy_kernel import NumpyKernel
 from .param_constraint import (
     CKProduct, BoundTransform,
     VariableRegistry, ConstraintManager,
-    Transform, BWParamsTransform,
+    Transform, BWParamsTransform, SympyTransform,
     transform_from_dict,
     Prior, GaussianPrior,
     prior_from_dict,
@@ -47,6 +47,7 @@ __all__ = [
     "ConstraintManager",
     "Transform",
     "BWParamsTransform",
+    "SympyTransform",
     "transform_from_dict",
     "Prior",
     "GaussianPrior",

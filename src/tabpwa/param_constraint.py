@@ -648,6 +648,123 @@ def transform_from_dict(d, **kwargs):
 
 
 # ================================================================
+# SympyTransform — write the formula once, derive forward/backward
+# ================================================================
+
+class SympyTransform(Transform):
+    """Transform defined by a symbolic ``calc`` expression.
+
+    Subclasses implement only::
+
+        class WidthRatio(SympyTransform):
+            def __init__(self, model):
+                self.input_names = [f"{model.name}_m", f"{model.name}_g"]
+                self.output_names = [f"{model.name}_w"]
+                self.m_ref = float(model.kwargs.get("mass", 0.775))
+
+            def calc(self, s):            # s: {input_name: sympy.Symbol}
+                m, g = s[self.input_names[0]], s[self.input_names[1]]
+                return {self.output_names[0]: g * m / self.m_ref}
+
+    ``forward`` and ``backward`` are generated once via ``sympy.lambdify``:
+
+    * ``forward`` evaluates the expressions at the numeric inputs;
+    * ``backward`` evaluates ``Σ_o grad_out[o] ∂out_o/∂in_i`` (exact, no
+      finite-difference step);
+    * ``inverse`` remains optional (``NotImplementedError`` by default).
+
+    The input/output names are instance attributes (particle-prefixed), as
+    required by :class:`Transform`.  ``calc`` is called once per instance on
+    the first use and the lambdified functions are cached.
+
+    Limitations: real scalar inputs and **scalar outputs**; ``calc`` must be
+    smooth (same caveat as the FD fallback); symbolic ``Piecewise`` works but
+    can produce large lambdified expressions.  Complex ck transforms keep
+    their analytic implementation.
+    """
+
+    _has_inverse = False
+    #: Apply ``sympy.simplify`` to each output expression before lambdify.
+    simplify = False
+    _compiled = None
+
+    def calc(self, s):
+        """Return ``{output_name: sympy.Expr}`` for the declared outputs."""
+        raise NotImplementedError(
+            f"{type(self).__name__}.calc() must return the output expressions")
+
+    # -- compilation --------------------------------------------------
+
+    def _ensure_compiled(self):
+        if self._compiled is not None:
+            return self._compiled
+        import sympy as sp
+
+        names_in = list(self.input_names)
+        names_out = list(self.output_names)
+        # sanitised symbols: parameter names contain '->', '(', ')' …
+        syms = {n: sp.Symbol(f"s{i}", real=True)
+                for i, n in enumerate(names_in)}
+        exprs = self.calc(syms)
+        if not isinstance(exprs, dict):
+            raise TypeError(
+                f"{type(self).__name__}.calc() must return a dict "
+                f"{{output_name: expression}}, got {type(exprs).__name__}")
+        missing = [o for o in names_out if o not in exprs]
+        extra = [o for o in exprs if o not in names_out]
+        if missing or extra:
+            raise ValueError(
+                f"{type(self).__name__}.calc(): missing outputs {missing}, "
+                f"undeclared outputs {extra} (declared: {names_out})")
+
+        args = [syms[n] for n in names_in]
+        fwd, jac = {}, {}
+        for out in names_out:
+            expr = exprs[out]
+            if self.simplify:
+                expr = sp.simplify(expr)
+            fwd[out] = sp.lambdify(args, expr, modules="numpy")
+            for name in names_in:
+                jac[(out, name)] = sp.lambdify(
+                    args, sp.diff(expr, syms[name]), modules="numpy")
+        self._compiled = (fwd, jac)
+        return self._compiled
+
+    def _input_values(self, d):
+        return [float(d[name]) for name in self.input_names]
+
+    # -- evaluation ---------------------------------------------------
+
+    def forward(self, d):
+        fwd, _ = self._ensure_compiled()
+        vals = self._input_values(d)
+        out = {}
+        for name in self.output_names:
+            val = np.asarray(fwd[name](*vals))
+            if val.ndim != 0:
+                raise ValueError(
+                    f"{type(self).__name__}.forward: output {name!r} is not "
+                    f"a scalar (shape {val.shape}); SympyTransform supports "
+                    f"scalar outputs only")
+            out[name] = float(val)
+        return out
+
+    def backward(self, grad_out, d_in=None):
+        _, jac = self._ensure_compiled()
+        vals = self._input_values(d_in or {})
+        grads = {}
+        for name in self.input_names:
+            g = 0.0
+            for out in self.output_names:
+                go = grad_out.get(out, 0.0)
+                if go is None or (np.ndim(go) == 0 and float(go) == 0.0):
+                    continue
+                g = g + go * float(jac[(out, name)](*vals))
+            grads[name] = g
+        return grads
+
+
+# ================================================================
 # LinearTransform — scale + bias a single parameter
 # ================================================================
 
