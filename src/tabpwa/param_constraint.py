@@ -356,6 +356,24 @@ class Transform:
     ── ``inverse(output_dict) → input_dict``  (optional — set
         ``has_inverse = False`` on subclasses that don't support it)
 
+    A subclass may implement **only** :meth:`forward` (plus the input/output
+    name declarations): :meth:`backward` then defaults to a centered
+    finite-difference VJP (:meth:`fd_backward`, relative step :attr:`fd_eps`).
+    Override :meth:`backward` with an analytic chain rule when the forward is
+    non-smooth (interpolation knots, ``searchsorted``, cut thresholds) or when
+    the extra 2·n_input forward calls matter.  :meth:`inverse` is likewise
+    optional; :meth:`apply_inverse` leaves the dict untouched when it raises
+    ``NotImplementedError``.
+
+    Example (forward-only)::
+
+        class MyWidth(Transform):
+            def __init__(self):
+                super().__init__(input_names=["m", "g"],
+                                 output_names=["w"])
+            def forward(self, d):
+                return {"w": d["g"] * d["m"] / 0.769}
+
     Subclasses that need save/load support should also implement
     :meth:`to_dict` and :classmethod:`from_dict` and be registered
     with :func:`_register_transform`.
@@ -414,25 +432,74 @@ class Transform:
             result[k] = v
         return result
 
+    #: Relative step of the default finite-difference backward.
+    fd_eps = 1e-6
+
     def backward(self, grad_out, d_in=None):
         """Backpropagate gradient from output space to input space.
 
-        Subclasses implement this.  Returns a dict mapping **only**
-        ``input_names`` to their gradients.
+        The default implementation is numerical (:meth:`fd_backward`), so a
+        forward-only transform needs no chain rule.  Override with an
+        analytic VJP when the forward is non-smooth or the 2·n_input forward
+        evaluations are significant.
 
-        Args
-        ----
-        grad_out : dict
-            Gradients w.r.t. output parameters ``{name: value}``.
-        d_in : dict or None
-            Input dict passed to forward (may be needed for chain rule).
+        Args:
+            grad_out: gradients w.r.t. output parameters ``{name: value}``.
+            d_in: input dict passed to forward (used by the chain rule).
 
-        Returns
-        -------
-        dict
-            Gradients w.r.t. input parameters (only ``input_names`` keys).
+        Returns:
+            dict mapping **only** ``input_names`` to their gradients.
         """
-        raise NotImplementedError
+        return self.fd_backward(grad_out, d_in)
+
+    def fd_backward(self, grad_out, d_in=None, eps=None):
+        """Numerical VJP of :meth:`forward` by centered differences.
+
+        For each declared input ``x`` this computes
+
+            d(Σ_o grad_out[o] · forward_o) / dx
+
+        by perturbing ``x`` by ``±h`` with ``h = eps · max(1, |x|)``.
+        ``forward`` is called with the same keys :meth:`apply_forward`
+        passes (``input_names`` only), so captured constants belong in
+        ``__init__``, not in the input dict.
+
+        This is the cheap "automatic differentiation" for the constraint
+        chain: the transforms are low-dimensional and their forwards are
+        plain Python/NumPy, so no tracing framework is required.  It stays
+        finite at degenerate points (e.g. zero width/magnitude) where a
+        hand-written ratio such as ``ck/r`` would be 0/0.
+
+        Raises:
+            ValueError: if an input is not a real scalar (the constraint
+                slots are real by construction).
+        """
+        base = dict(d_in or {})
+        step = self.fd_eps if eps is None else eps
+        grads = {}
+        for name in self.input_names:
+            if name not in base:
+                continue
+            x = base[name]
+            if np.iscomplexobj(x):
+                raise ValueError(
+                    f"{type(self).__name__}.fd_backward: input {name!r} is "
+                    f"complex; constraint slots must be real")
+            x = float(x)
+            h = step * max(1.0, abs(x))
+            dp, dm = dict(base), dict(base)
+            dp[name] = x + h
+            dm[name] = x - h
+            fp = self.forward(dp)
+            fm = self.forward(dm)
+            g = 0.0
+            for out in self.output_names:
+                go = grad_out.get(out, 0.0)
+                if go is None:
+                    continue
+                g = g + go * (fp[out] - fm[out]) / (2.0 * h)
+            grads[name] = g
+        return grads
 
     def apply_backward(self, grad_out, d_in=None):
         """Apply backward and merge into *grad_out*.
