@@ -92,8 +92,8 @@ class KToSVDWeights2DTransform(Transform):
                  n_a=12, n_b=12,
                  bc_type="not-a-knot"):
         out_names = list(out_names)
-        super().__init__(input_names=[a_name, b_name],
-                         output_names=[mass_name] + out_names)
+        self.input_names = [a_name, b_name]
+        self.output_names = [mass_name] + out_names
         self.a_name = a_name
         self.b_name = b_name
         self.mass_name = mass_name

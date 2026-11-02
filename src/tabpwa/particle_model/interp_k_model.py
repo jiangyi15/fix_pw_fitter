@@ -79,8 +79,8 @@ class KToCRWeightsTransform(Transform):
                  k_min=0.1, k_max=5.0,
                  k_default=None):
         out_names = [mass_name] + list(g0_names)
-        super().__init__(input_names=[k_name],
-                         output_names=out_names)
+        self.input_names = [k_name]
+        self.output_names = out_names
         self.k_name = k_name
         self.mass_name = mass_name
         self.g0_names = list(g0_names)

@@ -32,7 +32,8 @@ class _FixMassWidthTransform(Transform):
     _has_inverse = True
 
     def __init__(self, mass_name, width_name, mass_default=0.775, width_default=0.1):
-        super().__init__(input_names=[], output_names=[mass_name, width_name])
+        self.input_names = []
+        self.output_names = [mass_name, width_name]
         self._fixed = {mass_name: float(mass_default), width_name: float(width_default)}
 
     def forward(self, d):

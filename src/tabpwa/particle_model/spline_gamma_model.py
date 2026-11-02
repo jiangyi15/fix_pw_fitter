@@ -124,7 +124,8 @@ class _SplineMassFixTransform(Transform):
     _has_inverse = False
 
     def __init__(self, mass_name, mass_default):
-        super().__init__(input_names=[], output_names=[mass_name])
+        self.input_names = []
+        self.output_names = [mass_name]
         self._fixed = {mass_name: float(mass_default)}
 
     def forward(self, d):

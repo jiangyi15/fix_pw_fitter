@@ -84,9 +84,8 @@ class RhoOmegaBWRWeightsTransform(Transform):
     def __init__(self, mass_name, width_name, mass2_name, width2_name):
         p = mass_name[:-len("_mass")] if mass_name.endswith("_mass") else mass_name
         out_names = [f"{p}_w{k}" for k in range(8)]
-        super().__init__(
-            input_names=[mass_name, width_name, mass2_name, width2_name],
-            output_names=out_names)
+        self.input_names = [mass_name, width_name, mass2_name, width2_name]
+        self.output_names = out_names
         self.mass_name = mass_name
         self.width_name = width_name
         self.mass2_name = mass2_name

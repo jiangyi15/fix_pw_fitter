@@ -13,9 +13,23 @@ from tabpwa.param_constraint import Transform
 
 
 class SinSquare(Transform):
+    """Explicit-name form (``super().__init__``)."""
+
     def __init__(self, scale=2.0):
         super().__init__(input_names=["x"], output_names=["a", "b"])
         self.scale = scale            # captured constant, not an input
+
+    def forward(self, d):
+        x = float(d["x"])
+        return {"a": self.scale * np.sin(x), "b": x ** 2}
+
+
+class ClassNames(Transform):
+    """Class-attribute form: no ``__init__``, no ``super().__init__``."""
+
+    input_names = ["x"]
+    output_names = ["a", "b"]
+    scale = 2.0
 
     def forward(self, d):
         x = float(d["x"])
@@ -32,6 +46,43 @@ def test_forward_only_backward_matches_analytic():
     g = tr.backward(dx, {"x": 0.4})
     assert set(g) == {"x"}
     assert g["x"] == pytest.approx(_analytic(dx), rel=1e-8)
+
+
+def test_class_level_names_without_super_init():
+    tr = ClassNames()
+    assert ClassNames.input_names == ["x"]
+    assert tr.input_names == ["x"] and tr.output_names == ["a", "b"]
+    dx = {"a": 1.3, "b": -0.7}
+    assert tr.backward(dx, {"x": 0.4})["x"] == pytest.approx(
+        _analytic(dx), rel=1e-8)
+    # apply_forward/apply_backward path works with the class declarations
+    tr.apply_forward({"x": 0.4, "junk": 1.0})
+    back = tr.apply_backward(dict(dx))
+    assert back["x"] == pytest.approx(_analytic(dx), rel=1e-8)
+
+
+def test_direct_init_assignment_without_super():
+    """A custom __init__ may assign the names directly; no super() needed."""
+
+    class DirectInit(Transform):
+        output_names = ["y"]
+
+        def __init__(self, name, scale):
+            self.input_names = [name]
+            self.scale = scale
+
+        def forward(self, d):
+            return {"y": self.scale * float(d[self.input_names[0]]) ** 2}
+
+    tr = DirectInit("z", 3.0)
+    assert tr.input_names == ["z"] and tr.output_names == ["y"]
+    g = tr.backward({"y": 1.0}, {"z": 2.0})
+    assert g["z"] == pytest.approx(12.0, rel=1e-8)   # 3·2z
+
+
+def test_explicit_names_override_class_declaration():
+    tr = ClassNames(input_names=["z"], output_names=["q"])
+    assert tr.input_names == ["z"] and tr.output_names == ["q"]
 
 
 def test_apply_backward_and_inverse_optional():

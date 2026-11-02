@@ -161,8 +161,8 @@ class WidthTransform(Transform):
         import numpy as _np
         M = float(model.kwargs.get("M", model.kwargs.get("mass", 0.775)))
         self._gamma_M = float(_np.asarray(model.gamma(_np.array([M]))).reshape(-1)[0])
-        super().__init__(input_names=[self.mass_name, self.width_name],
-                         output_names=[self.out_name])
+        self.input_names = [self.mass_name, self.width_name]
+        self.output_names = [self.out_name]
 
     def _ratio(self, m0):
         """gamma(M) / gamma(m0) at the resolved resonance mass."""

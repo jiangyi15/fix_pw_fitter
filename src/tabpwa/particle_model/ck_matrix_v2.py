@@ -132,7 +132,8 @@ class _CKWidthTransform(Transform):
         else:
             in_names = [width_name] + list(order_names) + \
                        [phase_name(n, self.tail) for n in order_names]
-        super().__init__(input_names=in_names, output_names=gamma_names)
+        self.input_names = in_names
+        self.output_names = gamma_names
         self.name = name
         self.order_names = list(order_names)
         self.gamma_names = list(gamma_names)

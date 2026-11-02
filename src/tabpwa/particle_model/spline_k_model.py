@@ -215,8 +215,8 @@ class KToSplineWeightsTransform(Transform):
                  bc_type="not-a-knot",
                  k_default=None):
         out_names = [mass_name] + list(g0_names)
-        super().__init__(input_names=[k_name],
-                         output_names=out_names)
+        self.input_names = [k_name]
+        self.output_names = out_names
         self.k_name = k_name
         self.mass_name = mass_name
         self.g0_names = list(g0_names)

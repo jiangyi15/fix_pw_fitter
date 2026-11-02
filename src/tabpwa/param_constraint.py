@@ -365,14 +365,18 @@ class Transform:
     optional; :meth:`apply_inverse` leaves the dict untouched when it raises
     ``NotImplementedError``.
 
-    Example (forward-only)::
+    Example (forward-only, names as class attributes)::
 
         class MyWidth(Transform):
-            def __init__(self):
-                super().__init__(input_names=["m", "g"],
-                                 output_names=["w"])
+            input_names = ["m", "g"]
+            output_names = ["w"]
             def forward(self, d):
                 return {"w": d["g"] * d["m"] / 0.769}
+
+    The names may also be set per instance: either directly in a custom
+    ``__init__`` (``self.input_names = [...]``) or through
+    ``super().__init__(input_names=..., output_names=...)`` — the latter is
+    only a convenience/backward-compatible shim, not required.
 
     Subclasses that need save/load support should also implement
     :meth:`to_dict` and :classmethod:`from_dict` and be registered
@@ -382,23 +386,26 @@ class Transform:
     ----------
     input_names : list of str, optional
         Names of input parameters (used for registry introspection).
+        Defaults to the class attribute ``input_names``.
     output_names : list of str, optional
-        Names of output parameters.
+        Names of output parameters.  Defaults to the class attribute
+        ``output_names``.
     """
 
     _has_inverse = True
 
+    #: Declared parameter names.  Class attributes may be used directly
+    #: (``input_names = ["m", "g"]``); passing ``input_names=`` to
+    #: ``__init__`` overrides them for that instance.  Consumers always read
+    #: the plain attributes, so there is no private mirror field.
+    input_names = ()
+    output_names = ()
+
     def __init__(self, input_names=None, output_names=None):
-        self._input_names = list(input_names) if input_names is not None else None
-        self._output_names = list(output_names) if output_names is not None else None
-
-    @property
-    def input_names(self):
-        return list(self._input_names) if self._input_names is not None else []
-
-    @property
-    def output_names(self):
-        return list(self._output_names) if self._output_names is not None else []
+        if input_names is not None:
+            self.input_names = list(input_names)
+        if output_names is not None:
+            self.output_names = list(output_names)
 
     @property
     def has_inverse(self):
@@ -621,7 +628,8 @@ class LinearTransform(Transform):
     """
 
     def __init__(self, name, factor, bias=0.0):
-        super().__init__(input_names=[name], output_names=[name])
+        self.input_names = [name]
+        self.output_names = [name]
         self.name = name
         self.factor = float(factor)
         self.bias = float(bias)
@@ -697,7 +705,8 @@ class UnBlindTransform(Transform):
 
     def __init__(self, names, seed, scale=1.0):
         names = list(names)
-        super().__init__(input_names=names, output_names=names)
+        self.input_names = names
+        self.output_names = names
         self.seed = int(seed)
         if isinstance(scale, dict):
             self.scale = {n: float(scale.get(n, 1.0)) for n in names}
@@ -790,7 +799,8 @@ class BWParamsTransform(Transform):
         self.model = model
         in_names = [f"{model.name}_mass"] + list(model.get_gamma_name())
         out_names = [f"{model.name}_mass_bw", f"{model.name}_width_bw"]
-        super().__init__(input_names=in_names, output_names=out_names)
+        self.input_names = in_names
+        self.output_names = out_names
 
     def forward(self, d):
         bw = self.model.get_bw_params(d)

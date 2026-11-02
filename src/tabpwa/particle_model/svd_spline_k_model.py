@@ -187,8 +187,8 @@ class KToSVDWeightsTransform(Transform):
                  bc_type="not-a-knot",
                  k_default=None):
         out_names = list(out_names)
-        super().__init__(input_names=[k_name],
-                         output_names=[mass_name] + out_names)
+        self.input_names = [k_name]
+        self.output_names = [mass_name] + out_names
         self.k_name = k_name
         self.mass_name = mass_name
         self.out_names = out_names
