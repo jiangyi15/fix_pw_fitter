@@ -410,8 +410,8 @@ class Transform:
                     f"transform names depend on the particle/model")
 
     def __init__(self, input_names=None, output_names=None):
-        self._input_names = None
-        self._output_names = None
+        # Do not reset names that a subclass may have assigned before
+        # calling super().__init__(); the getters use getattr(..., None).
         if input_names is not None:
             self.input_names = input_names
         if output_names is not None:
@@ -528,6 +528,10 @@ class Transform:
                 raise ValueError(
                     f"{type(self).__name__}.fd_backward: input {name!r} is "
                     f"complex; constraint slots must be real")
+            if np.ndim(x) != 0:
+                raise ValueError(
+                    f"{type(self).__name__}.fd_backward: input {name!r} must "
+                    f"be a real scalar, got shape {np.shape(x)}")
             x = float(x)
             h = step * max(1.0, abs(x))
             dp, dm = dict(base), dict(base)
@@ -687,6 +691,7 @@ class SympyTransform(Transform):
     #: Apply ``sympy.simplify`` to each output expression before lambdify.
     simplify = False
     _compiled = None
+    _compiled_key = None
 
     def calc(self, s):
         """Return ``{output_name: sympy.Expr}`` for the declared outputs."""
@@ -696,12 +701,13 @@ class SympyTransform(Transform):
     # -- compilation --------------------------------------------------
 
     def _ensure_compiled(self):
-        if self._compiled is not None:
+        names_in = list(self.input_names)
+        names_out = list(self.output_names)
+        key = (tuple(names_in), tuple(names_out))
+        if self._compiled is not None and self._compiled_key == key:
             return self._compiled
         import sympy as sp
 
-        names_in = list(self.input_names)
-        names_out = list(self.output_names)
         # sanitised symbols: parameter names contain '->', '(', ')' …
         syms = {n: sp.Symbol(f"s{i}", real=True)
                 for i, n in enumerate(names_in)}
@@ -728,6 +734,7 @@ class SympyTransform(Transform):
                 jac[(out, name)] = sp.lambdify(
                     args, sp.diff(expr, syms[name]), modules="numpy")
         self._compiled = (fwd, jac)
+        self._compiled_key = key
         return self._compiled
 
     def _input_values(self, d):

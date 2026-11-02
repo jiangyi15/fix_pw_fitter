@@ -182,3 +182,26 @@ def test_fd_matches_analytic_model_transform():
             assert fd[n] == pytest.approx(ana[n], rel=1e-7, abs=1e-9), n
     finally:
         f.free()
+
+
+def test_names_survive_super_init_call():
+    """Assigning names before super().__init__() must not wipe them."""
+
+    class Ordered(Transform):
+        def __init__(self):
+            self.input_names = ["x"]
+            self.output_names = ["y"]
+            super().__init__()          # no names passed
+
+        def forward(self, d):
+            return {"y": float(d["x"]) ** 2}
+
+    tr = Ordered()
+    assert tr.input_names == ["x"] and tr.output_names == ["y"]
+    assert tr.backward({"y": 1.0}, {"x": 3.0})["x"] == pytest.approx(6.0)
+
+
+def test_fd_rejects_array_inputs():
+    with pytest.raises(ValueError, match="real scalar"):
+        SinSquare().fd_backward({"a": 1.0, "b": 1.0},
+                                {"x": np.array([1.0, 2.0])})
