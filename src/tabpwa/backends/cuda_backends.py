@@ -495,6 +495,44 @@ class CUDAPolarisedBackend(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_s0e", model="pwa")
+class CUDABackendV5PWAS0E(_CUDABackend):
+    """CUDA v5 PWA s0e — the FUSED single-kernel tile of ``cuda_v4_pwa_s0e``
+    with the v5 grouped log-sum data NLL.
+
+    One block owns whole resolution groups (``rs <= S0E_TE``) or one group
+    (``rs > S0E_TE``, walked internally in S0E_TE-event chunks with shared
+    per-group gradient accumulators), so every event still gets exactly ONE
+    BW pass — grouping only changes the per-event dQ/dP_e.  Same grouped
+    NLL and interface as ``cuda_v5_pwa_s0c``/``_s0d``; ``resolution_size=1``
+    with unit weights reproduces ``cuda_v4_pwa_s0e``.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_s0e import CUDAKernelV5PWAS0E as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_s0e kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda_v5_pwa_s0cw", model="pwa")
 class CUDAKernelV5PWAS0CWBackend(_CUDABackend):
     """CUDA v5 PWA s0cw — the s0c kernel with the GROUP-WEIGHTED log NLL.
