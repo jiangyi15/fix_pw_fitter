@@ -30,6 +30,7 @@ from . import shard_backend        # noqa: F401 — register ShardBackend
 from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
 from . import polarised_backend    # noqa: F401 — register PolarisedBackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
+from . import cpu_pwa_s0c_backend  # noqa: F401 — register CPUPWAS0CBackend
 
 __all__ = [
     "ALL_BACKENDS", "UNIVERSAL_BACKENDS", "MODEL_BACKENDS",
