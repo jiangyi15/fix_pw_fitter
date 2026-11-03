@@ -465,11 +465,11 @@ __global__ void pwa_amp_reduce_kernel(
             }
             if (lane == 0) P += ar * ar + ai * ai;
         }
+        double dQ_dP = 0.0;
         if (lane == 0) {
             P_out[event_idx] = P;
             double wval = weight[event_idx];
             double bkg_val = bkg[event_idx];
-            double dQ_dP;
             if (use_norm == 0) {
                 Q_out[event_idx] = wval * P;
                 dQ_dP = wval;
@@ -481,24 +481,30 @@ __global__ void pwa_amp_reduce_kernel(
                 // w_e·c_g (c_g = -1/(Pb+norm·Bb)).
                 dQ_dP = 1.0;
             }
-            size_t ab = (size_t)event_idx * n_proj;
-            for (int p = 0; p < n_proj; p++) {
-                double ar = 0.0, ai = 0.0;
-                for (int k = lane; k < n_base; k += 32) {
-                    int w = p * n_base + k;
-                    double ckr = ck_real[k], cki = ck_imag[k];
-                    double cmr = cr[w], cmi = ci[w];
-                    ar += ckr * cmr - cki * cmi;
-                    ai += ckr * cmi + cki * cmr;
-                }
-                for (int off = 16; off > 0; off >>= 1) {
-                    ar += __shfl_down_sync(0xffffffffu, ar, off);
-                    ai += __shfl_down_sync(0xffffffffu, ai, off);
-                }
-                if (lane == 0) {
-                    dQ_dA_r[ab + p] = dQ_dP * ar;
-                    dQ_dA_i[ab + p] = -dQ_dP * ai;
-                }
+        }
+        // dQ/dA_p is a WARP reduction: every lane must run the strided
+        // k-loop and the __shfl_down_sync tree (a shuffle with 31
+        // inactive lanes is undefined, and lane 0 alone would only
+        // visit k = 0 (mod 32)).  Only the stores are lane-0 work — so
+        // broadcast dQ/dP and lift the projection loop out of the guard.
+        dQ_dP = __shfl_sync(0xffffffffu, dQ_dP, 0);
+        size_t ab = (size_t)event_idx * n_proj;
+        for (int p = 0; p < n_proj; p++) {
+            double ar = 0.0, ai = 0.0;
+            for (int k = lane; k < n_base; k += 32) {
+                int w = p * n_base + k;
+                double ckr = ck_real[k], cki = ck_imag[k];
+                double cmr = cr[w], cmi = ci[w];
+                ar += ckr * cmr - cki * cmi;
+                ai += ckr * cmi + cki * cmr;
+            }
+            for (int off = 16; off > 0; off >>= 1) {
+                ar += __shfl_down_sync(0xffffffffu, ar, off);
+                ai += __shfl_down_sync(0xffffffffu, ai, off);
+            }
+            if (lane == 0) {
+                dQ_dA_r[ab + p] = dQ_dP * ar;
+                dQ_dA_i[ab + p] = -dQ_dP * ai;
             }
         }
     }

@@ -30,18 +30,28 @@ import pytest
 from benchmark_pwa_kernels import synthetic_case
 
 from tabpwa.cpu._pwa_s0c import CPUKernelPWAS0C
+from tabpwa.cuda._v4_pwa_s0b import CUDAKernelV4PWAS0B
 from tabpwa.cuda._v4_pwa_s0c import CUDAKernelV4PWAS0C
 from tabpwa.cuda._v4_pwa_s0d import CUDAKernelV4PWAS0D
 from tabpwa.cuda._v4_pwa_s0e import CUDAKernelV4PWAS0E
+from tabpwa.cuda._v5_pwa_s0c import CUDAKernelV5PWAS0C
+from tabpwa.cuda._v5_pwa_s0cw import CUDAKernelV5PWAS0CW
+from tabpwa.cuda._v5_pwa_s0d import CUDAKernelV5PWAS0D
 
 CFG = "tests/config_pwa.yml"
 # benchmark shape: N = n_wave/n_proj = 99 > 32 -> the warp branch
 N_COMP, N_PROJ, NEV = 100, 2, 400
 
+# every kernel that carries pwa_amp_reduce_kernel's warp branch (the v5
+# entries run the per-event NLL at resolution_size=1, i.e. the v4 math)
 BACKENDS = {
+    "cuda_v4_pwa_s0b": CUDAKernelV4PWAS0B,
     "cuda_v4_pwa_s0c": CUDAKernelV4PWAS0C,
     "cuda_v4_pwa_s0d": CUDAKernelV4PWAS0D,
     "cuda_v4_pwa_s0e": CUDAKernelV4PWAS0E,
+    "cuda_v5_pwa_s0c": CUDAKernelV5PWAS0C,
+    "cuda_v5_pwa_s0cw": CUDAKernelV5PWAS0CW,
+    "cuda_v5_pwa_s0d": CUDAKernelV5PWAS0D,
 }
 
 
@@ -106,7 +116,9 @@ def test_warp_path_matches_cpu(backend, norm):
         assert k._last_dnorm is not None
         assert _rel(k._last_dnorm, cpu._last_dnorm) < 1e-4
     else:
-        assert k._last_dnorm is None
+        # v4 kernels report None for an unnormalised call; the v5 log-sum
+        # family always stores the device accumulator (0.0 without a norm)
+        assert k._last_dnorm in (None, 0.0)
 
 
 def test_out_of_grid_masses_stay_finite():
