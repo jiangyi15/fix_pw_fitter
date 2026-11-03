@@ -282,6 +282,25 @@ class CUDABackendV4PWAS0D(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
+@register_backend("cuda_v4_pwa_s0e", model="pwa")
+class CUDABackendV4PWAS0E(_CUDABackend):
+    """CUDA v4 PWA s0e — the FUSED single-kernel tile variant of s0d.
+
+    s0d caches the iteration-invariant gamma interp at load time but
+    still round-trips every per-iteration intermediate (common, bw_dom,
+    g_interp, the per-event gradient partials) through global memory
+    across four kernels.  s0e keeps them in shared memory for a tile of
+    ``S0E_TE`` events (one warp per event) and computes the forward, the
+    ck gradient and the coefficient gradient in ONE launch over the whole
+    event range (no batching).  Same math/basis as s0c/s0d; the
+    summation order differs (measured 1e-15 relative on NLL/gradients vs
+    s0c wherever s0c's own thread path is in use).
+    """
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v4_pwa_s0e import CUDAKernelV4PWAS0E as K
+        return K(kc, batch_size=bs)
+
+
 @register_backend("cuda_v5_pwa_s0", model="pwa")
 class CUDABackendV5PWAS0(_CUDABackend):
     """CUDA v5 PWA s0 — one BW per chain + direct pole parameters +

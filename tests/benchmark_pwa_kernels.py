@@ -134,6 +134,12 @@ def synthetic_case(config, n_comp, n_proj, n_events, n_phsp=0, seed=123):
     length); the total per-event wave entries are ``n_wave = n_proj · N``.
     Projections are matched to *n_proj* (None -> the template's) and the
     wave axis is tiled so the actual ``N`` is ``N0 · round(n_comp / N0)``.
+
+    The event masses are drawn INSIDE the config's own invariant-mass grid
+    (``[gamma_min, gamma_min + gamma_delta*bins]``, 5 % margin at each
+    edge): the u-cache basis encodes ``m²`` as an extended gamma-table row
+    whose interp CLAMPS outside that grid, so out-of-grid benchmark events
+    are a harness artefact, not kernel behaviour.
     """
     base = build_amplitude_model(config).build_kernel_config()
     P0 = int(base.get("n_proj", 1) or 1)
@@ -143,6 +149,14 @@ def synthetic_case(config, n_comp, n_proj, n_events, n_phsp=0, seed=123):
     kc = tile_case(base, P, k)
 
     rng = np.random.default_rng(seed)
+    # the config's invariant-mass grid — the m² basis row and the
+    # running-width rows are tabulated on it and the interp clamps
+    # outside it, so the synthetic events must stay inside
+    gmin = float(kc["gamma_min"])
+    gspan = (float(kc["gamma_delta"])
+             * np.asarray(kc["gamma_table"]).shape[-1])
+    mass_lo = gmin + 0.05 * gspan
+    mass_hi = gmin + 0.95 * gspan
     n_mass = int(np.max(kc["mass_index"])) + 1
     n_mom = int(np.max(kc["fl_q_index"])) + 1
     n_ang = (int(np.max(kc["angle_index"])) + 1
@@ -150,7 +164,7 @@ def synthetic_case(config, n_comp, n_proj, n_events, n_phsp=0, seed=123):
     n_comp_ang = int(kc["angle_k"].shape[-1])
     def _events(ne):
         return {
-            "mass": rng.uniform(2.0, 3.0, (ne, n_mass)),
+            "mass": rng.uniform(mass_lo, mass_hi, (ne, n_mass)),
             "q": rng.uniform(0.0, 1.0, (ne, n_mom)),
             "angle": rng.uniform(-np.pi, np.pi, (ne, n_ang, n_comp_ang)),
             "weight": np.ones(ne),
