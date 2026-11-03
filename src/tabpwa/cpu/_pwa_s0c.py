@@ -172,14 +172,30 @@ class CPUKernelPWAS0C:
         #   slot 1    : F = −m_w²,        (coeff = +1)
         #   slot 2+j  : F = −i·γ(row, m_w)(coeff = m0·g0_j)
         # so that  BW_w = Σ_i coeff_i·F_i = m0² − m² − i·Σ mult_j γ_j.
-        # Only slot 0 and the γ slots carry fitted numbers; slot 1 is the
-        # constant 1 — the minus sign of −m² lives in the basis value, so
-        # no coefficient is a hard-coded −1.
-        # Unique (kind, row, mass-column) triples are shared between waves
-        # and events; slot_map routes each (wave, slot) to its entry.
+        # EVERY slot — including the constant and the m² term — is one row
+        # of the (2-row-extended) gamma table interpolated at the event
+        # mass, exactly like the CUDA siblings:
+        #   "1"  row: Z = i        -> F = −i·Z = 1
+        #   "m²" row: Z = −i·m²    -> F = −i·Z = −m²   (m² sampled on the
+        #                                               table grid, CR-exact)
+        # so both paths evaluate m² through the SAME interpolation (and
+        # clamp identically outside the grid), never from a raw mass.
+        # extended gamma table: the two extra rows the basis is built from
+        # (same construction as the CUDA siblings; the m² row carries the
+        # CPU's sign so the slot keeps coeff = +1)
+        gt = c["gamma_table"]
+        one_row = int(np.max(c["g0_index"])) + 1
+        ext = np.zeros((gt.shape[0] + 2, gt.shape[-1]), np.complex128)
+        ext[:gt.shape[0]] = gt
+        ext[one_row] = 1j                                  # "1"  -> Z = i
+        xgrid = (float(c["gamma_min"]) +
+                 float(c["gamma_delta"]) * np.arange(gt.shape[-1]))
+        ext[one_row + 1] = -1j * xgrid ** 2                # "m²" -> Z = −i·m²
+        self._gt_ext = ext
+
         uniq = {}
         self._uslot_kind = []      # 0 = const, 1 = m², 2 = γ interp
-        self._uslot_row = []       # basis-table row (γ rows only)
+        self._uslot_row = []       # row index into the EXTENDED table
         self._uslot_col = []       # mass column
         slot_map = np.empty((self.n_wave, self.n_basis), np.int32)
 
@@ -199,13 +215,13 @@ class CPUKernelPWAS0C:
             r1 = (int(self.row_start[w + 1]) if w + 1 < self.n_wave
                   else self.n_gamma_rows)
             col = int(mass_index_w[w])
-            slot_map[w, 0] = _uslot(0, -1, 0)
-            slot_map[w, 1] = _uslot(1, -1, col)
+            slot_map[w, 0] = _uslot(0, one_row, 0)
+            slot_map[w, 1] = _uslot(1, one_row + 1, col)
             for j in range(r0, r1):
                 slot_map[w, 2 + j - r0] = _uslot(
                     2, g0_index_w[j], g0_mass_index_w[j])
             for j in range(2 + (r1 - r0), self.n_basis):
-                slot_map[w, j] = _uslot(0, -1, 0)      # zero padded
+                slot_map[w, j] = _uslot(0, one_row, 0)   # zero padded
         self.n_uslot = len(self._uslot_kind)
         self.slot_map = slot_map.reshape(-1).astype(np.int32)
 
@@ -286,6 +302,7 @@ class CPUKernelPWAS0C:
         amp = fa * fl_p                                   # (ne, n_wave)
 
         # ── iteration-invariant basis functions at the unique slots ──
+        # (all of them derived from the SAME extended table + interp)
         # (only ne × n_uslot values — the s0c preset collapses 2·n_wave +
         #  n_gamma_rows naive entries to a handful of unique ones).
         # Stored READY-TO-USE: F = 1, −m², −i·γ (the −i rotation is done
