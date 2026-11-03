@@ -15,7 +15,7 @@ def setup():
     config = Config(CONFIG_FILE)
     kernel_config = config.build_all_index()
     ck_map = config.get_ck_map()
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(20261103)
     params = {
         'ck': rng.normal(size=len(ck_map)) + 1j * rng.normal(size=len(ck_map)),
         'm0': rng.random(int(np.max(kernel_config["m0_index"])) + 1) + 2,
