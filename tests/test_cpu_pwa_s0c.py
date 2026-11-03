@@ -301,8 +301,9 @@ def test_simple_basis_single_slot():
         keep.append((arr, buf))
         return ffi.cast("int*", buf)
 
+    # tables are event-contiguous: [wave][event] / [slot][event]
     h = lib.cpu_pwa_s0c_load(
-        _db(amp.real), _db(amp.imag), _db(F.real), _db(F.imag),
+        _db(amp.real.T), _db(amp.imag.T), _db(F.real.T), _db(F.imag.T),
         _ib(slot_map), nw, _db(wgt), _db(bkg), ne,
         nw, N, P, nf)
 

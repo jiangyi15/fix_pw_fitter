@@ -1,6 +1,6 @@
 /* ══════════════════════════════════════════════════════════════════════
  * kernels_cpu_pwa_s0c.c — pure-PWA (projection-sum, shared ck) CPU kernel
- * on an OPAQUE basis.
+ * on an OPAQUE basis, evaluated EVENT-BLOCK / SOA.
  *
  * Model:  P(e) = Σ_p |A_p(e)|² ,  A_p(e) = Σ_k ck_k·common[e, p·N+k]
  *
@@ -8,50 +8,55 @@
  *   BW_w(e)     = Σ_{i<n_basis} coeff[w·n_basis + i] · F[w,i](e)
  *
  * The kernel knows NOTHING about what the coefficients mean.  Every slot
- * of a wave is one basis function, supplied as a per-event table value
- * Z (real/imag) through the basis-selection matrix M — which is 0/1 (one
- * basis function per slot, sparse one-hot) and is stored here as column
- * indices rather than a dense matrix:
+ * of a wave is one basis function, supplied as a per-event table through
+ * the basis-selection matrix M — which is 0/1 (one basis function per
+ * slot, sparse one-hot) and is stored here as column indices:
  *
- *   M[w·n_basis + i] = u  ==  slot_map[w·n_basis + i]   (0/1 selection)
- *   F_r/F_i[e, u]                       (the basis FUNCTION at event e)
+ *   M[w·n_basis + i] = u  ==  slot_map[w·n_basis + i]
+ *   F_r/F_i[u·ne + e]                   (basis function, EVENTS CONTIGUOUS)
  *   coeff[w·n_basis + i]                (the caller's weight for it)
  *
- * The table holds the finished basis functions, so the kernel never
- * rotates anything (−i·γ, −m², 1 are produced once at load):
+ * The parameters enter ONLY as ``coeff`` and leave ONLY as ``grad_coeff``
+ * with the single uniform formula
  *
  *   ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w · F[w,i] )
  *                  = 2·(Re(∂Q/∂BW_w)·F_r − Im(∂Q/∂BW_w)·F_i)
  *
  * so a slot is a slot: no slot index, no basis kind, no sign and no
  * physical parameter identity is special-cased anywhere in this file.
- * Note that a 0/1 selection says only WHICH basis function a slot uses —
- * it says nothing about the coefficient, which is an arbitrary number the
- * caller supplies (and which is fitted, not assumed).  Choosing the basis
- * and the coefficient meanings (s0c, for instance: F = 1, −m², −i·γ over
- * coefficients m0², 1, m0·g0) is entirely the caller's job — see
- * ``cpu/_pwa_s0c.py``.
+ * A 0/1 selection says only WHICH basis function a slot uses — nothing
+ * about the coefficient, which is an arbitrary (fitted) number supplied
+ * by the caller.  Choosing the basis and the coefficient meanings (s0c,
+ * for instance: F = 1, −m², −i·γ over coefficients m0², 1, m0·g0) is the
+ * caller's job — see ``cpu/_pwa_s0c.py``.
  *
- * Iteration-invariant per-event inputs are precomputed once per data load
- * in Python and borrowed by the handle:
+ * ── Event-block (SoA) evaluation ───────────────────────────────────
+ * Every pass is vector over a tile of SOA_TILE consecutive events, so
  *
- *   amp[e,w]  = fa(e)·fl_p(e)          (angular basis · form factors)
- *   F[e,u]    = basis function at the unique slot u
- *   weight, bkg, slot_map
+ *   * the 0/1 slot indirection is resolved ONCE per wave (not per event),
+ *   * F[u][e0..e0+TE] and amp[w][e0..e0+TE] are contiguous loads,
+ *   * the 1/BW division vectorizes (no serial latency chain),
+ *   * the projection sum accumulates vectors: A_p[e] += ck_k·common[w][e].
+ *
+ * Tables are therefore stored EVENT-CONTIGUOUS:
+ *   amp_r/amp_i  [n_wave · ne]     amp_r[w·ne + e]
+ *   F_r/F_i      [n_uslot · ne]    F_r[u·ne + e]
+ * Per-thread tile buffers: common, common/BW, A_p, dQ/dA, BW scratch.
  *
  * API (cffi, see cpu/_pwa_s0c.py):
  *   cpu_pwa_s0c_load()     — build a data handle (borrows the arrays)
- *   cpu_pwa_s0c_compute()  — forward NLL + gradients (OpenMP over events)
+ *   cpu_pwa_s0c_compute()  — forward NLL + gradients (OpenMP over tiles)
  *   cpu_pwa_s0c_free()     — release the handle
- *
- * Parallelisation: OpenMP over events with per-thread accumulators,
- * reduced at the end (same pattern as kernels_cpu_v3.c).
  * ══════════════════════════════════════════════════════════════════════ */
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+
+#ifndef SOA_TILE
+#define SOA_TILE 64        /* events per tile */
+#endif
 
 /* ── data handle ─────────────────────────────────────────────────── */
 
@@ -63,13 +68,13 @@ typedef struct {
     int n_basis;        /* basis slots per wave */
     int n_uslot;        /* unique basis slots per event */
 
-    const double* amp_r;  /* (ne, n_wave) iteration-invariant amplitude */
+    const double* amp_r;  /* [n_wave · ne]  event-contiguous */
     const double* amp_i;
-    const double* Fr;     /* (ne, n_uslot) basis functions */
+    const double* Fr;     /* [n_uslot · ne] event-contiguous */
     const double* Fi;
-    const int* slot_map;  /* (n_wave · n_basis) -> unique slot */
-    const double* weight; /* (ne) */
-    const double* bkg;    /* (ne) */
+    const int* slot_map;  /* [n_wave · n_basis] -> unique slot */
+    const double* weight; /* [ne] */
+    const double* bkg;    /* [ne] */
 } PWAS0CData;
 
 void* cpu_pwa_s0c_load(
@@ -105,7 +110,7 @@ void cpu_pwa_s0c_free(void* h)
 
 
 
-/* ── forward + backward (opaque basis) ───────────────────────────── */
+/* ── forward + backward, event-block SoA ─────────────────────────── */
 
 double cpu_pwa_s0c_compute(
     void* h,
@@ -124,6 +129,8 @@ double cpu_pwa_s0c_compute(
     const int nu = d->n_uslot;
     const int nf = d->n_basis;
     const int nc = nw * nf;
+    const int TE = SOA_TILE;
+    const int ntiles = (ne + TE - 1) / TE;
 
     const int nt = omp_get_max_threads();
     const int padC = ((nc + 7) / 8) * 8;
@@ -137,125 +144,197 @@ double cpu_pwa_s0c_compute(
         free(tgc); free(tg_r); free(tg_i); free(tQ); free(tDn);
         return NAN;
     }
+    (void)nu;
 
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        double* gco = tgc + (size_t)tid * padC;
-        double* gck_r = tg_r + (size_t)tid * padN;
-        double* gck_i = tg_i + (size_t)tid * padN;
-
-        double* ir = (double*)malloc((size_t)nw * sizeof(double));
-        double* ii = (double*)malloc((size_t)nw * sizeof(double));
-        double* cr = (double*)malloc((size_t)nw * sizeof(double));
-        double* ci = (double*)malloc((size_t)nw * sizeof(double));
-        double* Ar = (double*)malloc((size_t)P  * sizeof(double));
-        double* Ai = (double*)malloc((size_t)P  * sizeof(double));
-        double* dQr = (double*)malloc((size_t)P * sizeof(double));
-        double* dQi = (double*)malloc((size_t)P * sizeof(double));
+        double* gco  = tgc  + (size_t)tid * padC;
+        double* gckr = tg_r + (size_t)tid * padN;
+        double* gcki = tg_i + (size_t)tid * padN;
         double Ql = 0.0, dnl = 0.0;
 
+        /* per-thread tile buffers (allocated once, reused by every tile) */
+        const size_t nwT = (size_t)nw * TE;
+        const size_t pT  = (size_t)P * TE;
+        double* cr   = (double*)malloc(nwT * sizeof(double)); /* common   */
+        double* ci   = (double*)malloc(nwT * sizeof(double));
+        double* qr   = (double*)malloc(nwT * sizeof(double)); /* common/BW*/
+        double* qi   = (double*)malloc(nwT * sizeof(double));
+        double* bwr  = (double*)malloc((size_t)TE * sizeof(double));
+        double* bwi  = (double*)malloc((size_t)TE * sizeof(double));
+        double* Ar   = (double*)malloc(pT * sizeof(double));
+        double* Ai   = (double*)malloc(pT * sizeof(double));
+        double* dQr  = (double*)malloc(pT * sizeof(double));
+        double* dQi  = (double*)malloc(pT * sizeof(double));
+        double* Pe_b = (double*)malloc((size_t)TE * sizeof(double));
+
         #pragma omp for schedule(static)
-        for (int e = 0; e < ne; e++) {
-            const double* fr = d->Fr + (size_t)e * nu;
-            const double* fi = d->Fi + (size_t)e * nu;
-            const double* ar = d->amp_r + (size_t)e * nw;
-            const double* ai = d->amp_i + (size_t)e * nw;
-            const double we = d->weight[e];
-            const double be = d->bkg[e];
+        for (int tile = 0; tile < ntiles; tile++) {
+            const int e0 = tile * TE;
+            const int nen = (ne - e0 > TE) ? TE : (ne - e0);
 
+            /* ── BW, 1/BW, common = amp/BW, common/BW ──────────────── */
             for (int w = 0; w < nw; w++) {
-                const double* cw = coeff + (size_t)w * nf;
+                const double* cwp = coeff + (size_t)w * nf;
                 const int* sm = d->slot_map + (size_t)w * nf;
-                /* BW = Σ_i coeff_i · F_i  (F is stored ready-made) */
-                double bwr = 0.0, bwi = 0.0;
-                #pragma omp simd reduction(+:bwr,bwi)
-                for (int i = 0; i < nf; i++) {
-                    const double M = cw[i];
-                    const int u = sm[i];
-                    bwr += M * fr[u];
-                    bwi += M * fi[u];
-                }
-                const double den = bwr * bwr + bwi * bwi;
-                const double irw =  bwr / den;    /* 1/BW real */
-                const double iiw = -bwi / den;    /* 1/BW imag */
-                ir[w] = irw; ii[w] = iiw;
-                const double amr = ar[w], ami = ai[w];
-                cr[w] = amr * irw - ami * iiw;
-                ci[w] = amr * iiw + ami * irw;
-            }
-
-            for (int p = 0; p < P; p++) {
-                double sr = 0.0, si = 0.0;
-                const int base = p * N;
-                #pragma omp simd reduction(+:sr,si)
-                for (int k = 0; k < N; k++) {
-                    double ckr = ck_r[k], cki = ck_i[k];
-                    double cmr = cr[base + k], cmi = ci[base + k];
-                    sr += ckr * cmr - cki * cmi;
-                    si += ckr * cmi + cki * cmr;
-                }
-                Ar[p] = sr; Ai[p] = si;
-            }
-
-            double Pe = 0.0;
-            for (int p = 0; p < P; p++)
-                Pe += Ar[p] * Ar[p] + Ai[p] * Ai[p];
-
-            double dQ_dP;
-            if (use_norm) {
-                double ratio = Pe / norm;
-                Ql -= we * log(ratio + be);
-                dQ_dP = -we / (norm * (ratio + be));
-                dnl += we * (Pe / (norm * norm)) / (ratio + be);
-            } else {
-                Ql += we * Pe;
-                dQ_dP = we;
-            }
-
-            for (int p = 0; p < P; p++) {
-                dQr[p] =  dQ_dP * Ar[p];
-                dQi[p] = -dQ_dP * Ai[p];
-            }
-
-            for (int p = 0; p < P; p++) {
-                const int base = p * N;
-                const double dr = dQr[p], di = dQi[p];
                 #pragma omp simd
-                for (int k = 0; k < N; k++) {
-                    double cmr = cr[base + k], cmi = ci[base + k];
-                    gck_r[k] += dr * cmr - di * cmi;
-                    gck_i[k] += dr * cmi + di * cmr;
+                for (int b = 0; b < nen; b++) { bwr[b] = 0.0; bwi[b] = 0.0; }
+                for (int i = 0; i < nf; i++) {
+                    const double M = cwp[i];
+                    const int u = sm[i];
+                    const double* fr = d->Fr + (size_t)u * ne + e0;
+                    const double* fi = d->Fi + (size_t)u * ne + e0;
+                    #pragma omp simd
+                    for (int b = 0; b < nen; b++) {
+                        bwr[b] += M * fr[b];
+                        bwi[b] += M * fi[b];
+                    }
+                }
+                const double* amr = d->amp_r + (size_t)w * ne + e0;
+                const double* ami = d->amp_i + (size_t)w * ne + e0;
+                double* pr = cr + (size_t)w * TE;
+                double* pi = ci + (size_t)w * TE;
+                double* xr = qr + (size_t)w * TE;
+                double* xi = qi + (size_t)w * TE;
+                #pragma omp simd
+                for (int b = 0; b < nen; b++) {
+                    const double br = bwr[b], bi = bwi[b];
+                    const double den = br * br + bi * bi;
+                    const double ir =  br / den;          /* 1/BW real */
+                    const double ii = -bi / den;          /* 1/BW imag */
+                    const double ar = amr[b], ai = ami[b];
+                    const double m_r = ar * ir - ai * ii; /* common    */
+                    const double m_i = ar * ii + ai * ir;
+                    pr[b] = m_r; pi[b] = m_i;
+                    xr[b] = m_r * ir - m_i * ii;          /* common/BW */
+                    xi[b] = m_r * ii + m_i * ir;
                 }
             }
 
+            /* ── projection sums: A_p[e] += ck_k·common[p·N+k][e] ──── */
+            for (int p = 0; p < P; p++) {
+                #pragma omp simd
+                for (int b = 0; b < nen; b++) {
+                    Ar[p * TE + b] = 0.0;
+                    Ai[p * TE + b] = 0.0;
+                }
+            }
+            for (int k = 0; k < N; k++) {
+                const double ckr = ck_r[k], cki = ck_i[k];
+                for (int p = 0; p < P; p++) {
+                    const int w = p * N + k;
+                    const double* pr = cr + (size_t)w * TE;
+                    const double* pi = ci + (size_t)w * TE;
+                    double* ar = Ar + p * TE;
+                    double* ai = Ai + p * TE;
+                    #pragma omp simd
+                    for (int b = 0; b < nen; b++) {
+                        ar[b] += ckr * pr[b] - cki * pi[b];
+                        ai[b] += ckr * pi[b] + cki * pr[b];
+                    }
+                }
+            }
+
+            /* ── P, Q, dQ/dP, dQ/dA ────────────────────────────────── */
+            const double* wgt = d->weight + e0;
+            const double* bkg = d->bkg + e0;
+            if (use_norm) {
+                #pragma omp simd reduction(+:Ql,dnl)
+                for (int b = 0; b < nen; b++) {
+                    double Pe = 0.0;
+                    for (int p = 0; p < P; p++)
+                        Pe += Ar[p * TE + b] * Ar[p * TE + b]
+                            + Ai[p * TE + b] * Ai[p * TE + b];
+                    const double ratio = Pe / norm;
+                    const double denom = ratio + bkg[b];
+                    Ql -= wgt[b] * log(denom);
+                    const double dQ_dP = -wgt[b] / (norm * denom);
+                    dnl += wgt[b] * (Pe / (norm * norm)) / denom;
+                    Pe_b[b] = Pe;
+                    for (int p = 0; p < P; p++) {
+                        dQr[p * TE + b] =  dQ_dP * Ar[p * TE + b];
+                        dQi[p * TE + b] = -dQ_dP * Ai[p * TE + b];
+                    }
+                }
+            } else {
+                #pragma omp simd reduction(+:Ql)
+                for (int b = 0; b < nen; b++) {
+                    double Pe = 0.0;
+                    for (int p = 0; p < P; p++)
+                        Pe += Ar[p * TE + b] * Ar[p * TE + b]
+                            + Ai[p * TE + b] * Ai[p * TE + b];
+                    const double dQ_dP = wgt[b];
+                    Ql += wgt[b] * Pe;
+                    Pe_b[b] = Pe;
+                    for (int p = 0; p < P; p++) {
+                        dQr[p * TE + b] =  dQ_dP * Ar[p * TE + b];
+                        dQi[p * TE + b] = -dQ_dP * Ai[p * TE + b];
+                    }
+                }
+            }
+            if (P_out) {
+                #pragma omp simd
+                for (int b = 0; b < nen; b++) P_out[e0 + b] = Pe_b[b];
+            }
+
+            /* ── ck gradient: Σ_p Σ_e dQ/dA_p·common[p·N+k] ────────── */
+            for (int k = 0; k < N; k++) {
+                double sr = 0.0, si = 0.0;
+                for (int p = 0; p < P; p++) {
+                    const int w = p * N + k;
+                    const double* dr = dQr + p * TE;
+                    const double* di = dQi + p * TE;
+                    const double* pr = cr + (size_t)w * TE;
+                    const double* pi = ci + (size_t)w * TE;
+                    #pragma omp simd reduction(+:sr,si)
+                    for (int b = 0; b < nen; b++) {
+                        sr += dr[b] * pr[b] - di[b] * pi[b];
+                        si += dr[b] * pi[b] + di[b] * pr[b];
+                    }
+                }
+                gckr[k] += sr;
+                gcki[k] += si;
+            }
+
+            /* ── coefficient gradient: 2·Re(dBW·F_i) ───────────────── */
             for (int w = 0; w < nw; w++) {
                 const int p = w / N;
                 const int k = w - p * N;
-                const double dr = dQr[p] * ck_r[k] - dQi[p] * ck_i[k];
-                const double di = dQr[p] * ck_i[k] + dQi[p] * ck_r[k];
-                /* common/BW = common·(1/BW); d(common)/dBW = −common/BW */
-                const double qr = cr[w] * ir[w] - ci[w] * ii[w];
-                const double qi = cr[w] * ii[w] + ci[w] * ir[w];
-                const double dBW_r = -(dr * qr - di * qi);
-                const double dBW_i = -(dr * qi + di * qr);
-                /* ∂Q/∂coeff_i = 2·Re(dBW·F_i) */
-                const int* sm2 = d->slot_map + (size_t)w * nf;
-                double* gc = gco + (size_t)w * nf;
+                const double ckr = ck_r[k], cki = ck_i[k];
+                const double* dr = dQr + p * TE;
+                const double* di = dQi + p * TE;
+                const double* xr = qr + (size_t)w * TE;
+                const double* xi = qi + (size_t)w * TE;
                 #pragma omp simd
+                for (int b = 0; b < nen; b++) {
+                    /* dQ/dcommon = dQ/dA_p·ck_k */
+                    const double ur = dr[b] * ckr - di[b] * cki;
+                    const double ui = dr[b] * cki + di[b] * ckr;
+                    /* dBW = −(dQ/dcommon)·(common/BW) */
+                    bwr[b] = -(ur * xr[b] - ui * xi[b]);
+                    bwi[b] = -(ur * xi[b] + ui * xr[b]);
+                }
+                const int* sm = d->slot_map + (size_t)w * nf;
+                double* gc = gco + (size_t)w * nf;
                 for (int i = 0; i < nf; i++) {
-                    const int u = sm2[i];
-                    gc[i] += 2.0 * (dBW_r * fr[u] - dBW_i * fi[u]);
+                    const int u = sm[i];
+                    const double* fr = d->Fr + (size_t)u * ne + e0;
+                    const double* fi = d->Fi + (size_t)u * ne + e0;
+                    double acc = 0.0;
+                    #pragma omp simd reduction(+:acc)
+                    for (int b = 0; b < nen; b++)
+                        acc += 2.0 * (bwr[b] * fr[b] - bwi[b] * fi[b]);
+                    gc[i] += acc;
                 }
             }
-
-            if (P_out) P_out[e] = Pe;
         }
 
         tQ[tid] += Ql;
         tDn[tid] += dnl;
-        free(ir); free(ii); free(cr); free(ci);
-        free(Ar); free(Ai); free(dQr); free(dQi);
+        free(cr); free(ci); free(qr); free(qi);
+        free(bwr); free(bwi); free(Ar); free(Ai); free(dQr); free(dQi);
+        free(Pe_b);
     }
 
     memset(ogcoeff, 0, (size_t)nc * sizeof(double));

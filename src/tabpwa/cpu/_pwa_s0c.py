@@ -29,14 +29,15 @@ Iteration-invariant per-event inputs are precomputed once at load time
 in NumPy (the CPU analogue of the CUDA τ-u-cache):
 
     amp[e,w] = (ka·matrix_angle)·Π fl        (angular basis × form factors)
-    F[e,u]   = basis function at unique slot u (1, −m², −i·γ interp)
+    F[u,e]   = basis function at unique slot u (1, −m², −i·γ interp)
 
 Unique slots are deduped across waves/events, so a production layout
 keeps only a handful of entries per event instead of 2·n_wave +
-n_gamma_rows.  ``compute()`` therefore only recomputes the BW
-denominators and the sum over projections — the same data layout / math
-as ``numpy_pwa`` (verified to FP64 round-off in
-``tests/test_cpu_pwa_s0c.py``).
+n_gamma_rows.  Both tables are stored **event-contiguous** (``[wave][event]``
+/ ``[slot][event]``) for the tile kernel's SoA evaluation.  ``compute()``
+therefore only recomputes the BW denominators and the sum over
+projections — the same data layout / math as ``numpy_pwa`` (verified to
+FP64 round-off in ``tests/test_cpu_pwa_s0c.py``).
 
 Three C calls::
 
@@ -307,8 +308,12 @@ class CPUKernelPWAS0C:
                 F_r[:, u] = np.imag(g)
                 F_i[:, u] = -np.real(g)
 
-        amp_r = np.ascontiguousarray(np.real(amp), np.float64)
-        amp_i = np.ascontiguousarray(np.imag(amp), np.float64)
+        # event-contiguous (SoA) layout for the tile kernel: [n_wave][ne]
+        amp_t = np.ascontiguousarray(amp.T)
+        del amp
+        amp_r = np.ascontiguousarray(amp_t.real, np.float64)
+        amp_i = np.ascontiguousarray(amp_t.imag, np.float64)
+        del amp_t
         weight = np.array(np.asarray(data.get("weight", np.ones(ne)),
                                      np.float64), copy=True).reshape(ne)
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
@@ -336,7 +341,9 @@ class CPUKernelPWAS0C:
         dh = DataHandle(
             self._lib.cpu_pwa_s0c_load(
                 _db(amp_r), _db(amp_i),
-                _db(F_r), _db(F_i), _ib(self.slot_map),
+                _db(np.ascontiguousarray(F_r.T, np.float64)),
+                _db(np.ascontiguousarray(F_i.T, np.float64)),
+                _ib(self.slot_map),
                 self.n_uslot,
                 _db(weight), _db(bkg), ne,
                 nw, self.n_wave_base, self.n_proj, self.n_basis),
