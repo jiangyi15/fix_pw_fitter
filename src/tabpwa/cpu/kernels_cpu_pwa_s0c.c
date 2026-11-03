@@ -100,7 +100,8 @@ void cpu_pwa_s0c_free(void* h)
     if (h) free(h);
 }
 
-/* ── forward + backward ──────────────────────────────────────────── */
+
+/* ── forward + backward (manual real/imag; no __divdc3) ─────────── */
 
 double cpu_pwa_s0c_compute(
     void* h,
@@ -118,38 +119,40 @@ double cpu_pwa_s0c_compute(
     const int P  = d->n_proj;
     const int ng = d->n_gamma_rows;
 
-    const int n_threads = omp_get_max_threads();
+    const int nt = omp_get_max_threads();
+    /* padded per-thread gradient slices (64-byte multiples) */
+    const int padN = ((N  + 7) / 8) * 8;
+    const int padW = ((nw + 7) / 8) * 8;
+    const int padG = ((ng + 7) / 8) * 8;
 
-    /* per-thread accumulators */
-    double complex* t_gck  = (double complex*)calloc((size_t)n_threads * N,
-                                                     sizeof(double complex));
-    double* t_gs0   = (double*)calloc((size_t)n_threads * nw, sizeof(double));
-    double* t_gmult = (double*)calloc((size_t)n_threads * ng, sizeof(double));
-    double* t_Q     = (double*)calloc((size_t)n_threads, sizeof(double));
-    double* t_dn    = (double*)calloc((size_t)n_threads, sizeof(double));
-    if (!t_gck || !t_gs0 || !t_gmult || !t_Q || !t_dn) {
-        free(t_gck); free(t_gs0); free(t_gmult); free(t_Q); free(t_dn);
+    double* tg_r  = (double*)calloc((size_t)nt * padN, sizeof(double));
+    double* tg_i  = (double*)calloc((size_t)nt * padN, sizeof(double));
+    double* tgs0  = (double*)calloc((size_t)nt * padW, sizeof(double));
+    double* tgm   = (double*)calloc((size_t)nt * padG, sizeof(double));
+    double* tQ    = (double*)calloc((size_t)nt, sizeof(double));
+    double* tDn   = (double*)calloc((size_t)nt, sizeof(double));
+    if (!tg_r || !tg_i || !tgs0 || !tgm || !tQ || !tDn) {
+        free(tg_r); free(tg_i); free(tgs0); free(tgm); free(tQ); free(tDn);
         return NAN;
     }
 
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
-        double complex* gck = t_gck + (size_t)tid * N;
-        double* gs0 = t_gs0 + (size_t)tid * nw;
-        double* gmult = t_gmult + (size_t)tid * ng;
-        double Ql = 0.0;
-        double dnl = 0.0;
+        double* gck_r = tg_r + (size_t)tid * padN;
+        double* gck_i = tg_i + (size_t)tid * padN;
+        double* gs0   = tgs0 + (size_t)tid * padW;
+        double* gm    = tgm  + (size_t)tid * padG;
 
-        /* per-thread scratch (heap, one allocation per call) */
-        double complex* invbw = (double complex*)malloc((size_t)nw *
-                                                        sizeof(double complex));
-        double complex* common = (double complex*)malloc((size_t)nw *
-                                                         sizeof(double complex));
-        double complex* A = (double complex*)malloc((size_t)P *
-                                                    sizeof(double complex));
-        double* dQdA_r = (double*)malloc((size_t)P * sizeof(double));
-        double* dQdA_i = (double*)malloc((size_t)P * sizeof(double));
+        double* ir = (double*)malloc((size_t)nw * sizeof(double));
+        double* ii = (double*)malloc((size_t)nw * sizeof(double));
+        double* cr = (double*)malloc((size_t)nw * sizeof(double));
+        double* ci = (double*)malloc((size_t)nw * sizeof(double));
+        double* Ar = (double*)malloc((size_t)P  * sizeof(double));
+        double* Ai = (double*)malloc((size_t)P  * sizeof(double));
+        double* dQr = (double*)malloc((size_t)P * sizeof(double));
+        double* dQi = (double*)malloc((size_t)P * sizeof(double));
+        double Ql = 0.0, dnl = 0.0;
 
         #pragma omp for schedule(static)
         for (int e = 0; e < ne; e++) {
@@ -161,34 +164,46 @@ double cpu_pwa_s0c_compute(
             const double we = d->weight[e];
             const double be = d->bkg[e];
 
-            /* ── BW denominators + common amplitudes ───────────────── */
             for (int w = 0; w < nw; w++) {
                 double m = ms[d->mass_index_w[w]];
                 int r0 = d->row_start[w];
                 int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
-                double complex g = 0.0;
-                for (int l = r0; l < r1; l++)
-                    g += mult[l] * (zr[l] + I * zi[l]);
-                double complex inv = 1.0 / (s0[w] - m * m - I * g);
-                invbw[w] = inv;
-                /* same op order as numpy_pwa: (1/BW)·amp */
-                common[w] = inv * (ar[w] + I * ai[w]);
+                double gr = 0.0, gi = 0.0;
+                #pragma omp simd reduction(+:gr,gi)
+                for (int l = r0; l < r1; l++) {
+                    gr += mult[l] * zr[l];
+                    gi += mult[l] * zi[l];
+                }
+                /* BW = s0 - m^2 - i*g,  g = gr + i*gi
+                   -> real = s0 - m^2 + gi,  imag = -gr */
+                double a = s0[w] - m * m + gi;
+                double b = -gr;
+                double den = a * a + b * b;
+                double irw =  a / den;                 /* 1/BW real */
+                double iiw = -b / den;                 /* 1/BW imag */
+                ir[w] = irw; ii[w] = iiw;
+                double amr = ar[w], ami = ai[w];
+                cr[w] = amr * irw - ami * iiw;
+                ci[w] = amr * iiw + ami * irw;
             }
 
-            /* ── projection sums A_p = Σ_k ck_k·common[p·N+k] ──────── */
             for (int p = 0; p < P; p++) {
-                double complex acc = 0.0;
-                const double complex* cp = common + (size_t)p * N;
-                for (int k = 0; k < N; k++)
-                    acc += (ck_r[k] + I * ck_i[k]) * cp[k];
-                A[p] = acc;
+                double sr = 0.0, si = 0.0;
+                const int base = p * N;
+                #pragma omp simd reduction(+:sr,si)
+                for (int k = 0; k < N; k++) {
+                    double ckr = ck_r[k], cki = ck_i[k];
+                    double cmr = cr[base + k], cmi = ci[base + k];
+                    sr += ckr * cmr - cki * cmi;
+                    si += ckr * cmi + cki * cmr;
+                }
+                Ar[p] = sr; Ai[p] = si;
             }
 
             double Pe = 0.0;
             for (int p = 0; p < P; p++)
-                Pe += creal(A[p]) * creal(A[p]) + cimag(A[p]) * cimag(A[p]);
+                Pe += Ar[p] * Ar[p] + Ai[p] * Ai[p];
 
-            /* ── objective ─────────────────────────────────────────── */
             double dQ_dP;
             if (use_norm) {
                 double ratio = Pe / norm;
@@ -200,79 +215,70 @@ double cpu_pwa_s0c_compute(
                 dQ_dP = we;
             }
 
-            /* ── back-prop through the projection sum ──────────────── */
             for (int p = 0; p < P; p++) {
-                dQdA_r[p] = dQ_dP * creal(A[p]);
-                dQdA_i[p] = -dQ_dP * cimag(A[p]);
+                dQr[p] =  dQ_dP * Ar[p];
+                dQi[p] = -dQ_dP * Ai[p];
             }
 
-            /* grad_ck[k] += Σ_p dQ_dA[p]·common[p·N+k] */
             for (int p = 0; p < P; p++) {
-                const double complex* cp = common + (size_t)p * N;
-                const double dr = dQdA_r[p];
-                const double di = dQdA_i[p];
+                const int base = p * N;
+                const double dr = dQr[p], di = dQi[p];
+                #pragma omp simd
                 for (int k = 0; k < N; k++) {
-                    double cr = creal(cp[k]);
-                    double ci = cimag(cp[k]);
-                    gck[k] += (dr * cr - di * ci) + I * (dr * ci + di * cr);
+                    double cmr = cr[base + k], cmi = ci[base + k];
+                    gck_r[k] += dr * cmr - di * cmi;
+                    gck_i[k] += dr * cmi + di * cmr;
                 }
             }
 
-            /* dQ/ds0 and dQ/dmult through common = amp/BW:
-               dQ/dBW = dQ/dc·(−common/BW),  dQ/dc = dQ_dA[p]·ck_k
-               ∂BW/∂s0 = 1,  ∂BW/∂mult_l = −i·Z_l                    */
             for (int w = 0; w < nw; w++) {
                 const int p = w / N;
                 const int k = w - p * N;
-                double complex dQdc =
-                    (dQdA_r[p] + I * dQdA_i[p]) * (ck_r[k] + I * ck_i[k]);
-                double complex dBW = dQdc * (-common[w] * invbw[w]);
-                gs0[w] += 2.0 * creal(dBW);
+                /* dQ/dc = dQdA[p]·ck[k] */
+                double dr = dQr[p] * ck_r[k] - dQi[p] * ck_i[k];
+                double di = dQr[p] * ck_i[k] + dQi[p] * ck_r[k];
+                /* common/BW = common·(1/BW) */
+                double qr = cr[w] * ir[w] - ci[w] * ii[w];
+                double qi = cr[w] * ii[w] + ci[w] * ir[w];
+                /* dBW = -(dQdc·(common/BW)) */
+                double bwr = -(dr * qr - di * qi);
+                double bwi = -(dr * qi + di * qr);
+                gs0[w] += 2.0 * bwr;
                 int r0 = d->row_start[w];
                 int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
+                #pragma omp simd
                 for (int l = r0; l < r1; l++) {
-                    /* dBW·(−i·Z_l) */
-                    double complex t = dBW * (-I * (zr[l] + I * zi[l]));
-                    gmult[l] += 2.0 * creal(t);
+                    /* 2·Re(dBW·(−i·Z)) = 2·(bwr·Zi + bwi·Zr) */
+                    gm[l] += 2.0 * (bwr * zi[l] + bwi * zr[l]);
                 }
             }
 
             if (P_out) P_out[e] = Pe;
         }
 
-        /* thread-local slots: disjoint per tid, no synchronisation needed */
-        t_Q[tid] += Ql;
-        t_dn[tid] += dnl;
-
-        free(invbw);
-        free(common);
-        free(A);
-        free(dQdA_r);
-        free(dQdA_i);
+        tQ[tid] += Ql;
+        tDn[tid] += dnl;
+        free(ir); free(ii); free(cr); free(ci);
+        free(Ar); free(Ai); free(dQr); free(dQi);
     }
 
-    /* Reduce thread-local gradient arrays (each thread wrote its own
-       slice, so the reduction is a plain host-side sum). */
     memset(ogck_r, 0, (size_t)N * sizeof(double));
     memset(ogck_i, 0, (size_t)N * sizeof(double));
     memset(ogs0, 0, (size_t)nw * sizeof(double));
     memset(ogmult, 0, (size_t)ng * sizeof(double));
     double Q_total = 0.0, dn_total = 0.0;
-    for (int t = 0; t < n_threads; t++) {
-        double complex* gck = t_gck + (size_t)t * N;
-        for (int k = 0; k < N; k++) {
-            ogck_r[k] += creal(gck[k]);
-            ogck_i[k] += cimag(gck[k]);
-        }
-        double* gs0 = t_gs0 + (size_t)t * nw;
-        for (int i = 0; i < nw; i++) ogs0[i] += gs0[i];
-        double* gmult = t_gmult + (size_t)t * ng;
-        for (int i = 0; i < ng; i++) ogmult[i] += gmult[i];
-        Q_total += t_Q[t];
-        dn_total += t_dn[t];
+    for (int t = 0; t < nt; t++) {
+        const double* g1 = tg_r + (size_t)t * padN;
+        const double* g2 = tg_i + (size_t)t * padN;
+        for (int k = 0; k < N; k++) { ogck_r[k] += g1[k]; ogck_i[k] += g2[k]; }
+        const double* s1 = tgs0 + (size_t)t * padW;
+        for (int i = 0; i < nw; i++) ogs0[i] += s1[i];
+        const double* m1 = tgm + (size_t)t * padG;
+        for (int i = 0; i < ng; i++) ogmult[i] += m1[i];
+        Q_total += tQ[t];
+        dn_total += tDn[t];
     }
-
-    free(t_gck); free(t_gs0); free(t_gmult); free(t_Q); free(t_dn);
+    free(tg_r); free(tg_i); free(tgs0); free(tgm); free(tQ); free(tDn);
     if (dnorm_out) *dnorm_out = dn_total;
     return Q_total;
 }

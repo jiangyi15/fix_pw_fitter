@@ -30,6 +30,10 @@ Three C calls::
     cpu_pwa_s0c_load     — build a data handle (borrows the arrays)
     cpu_pwa_s0c_compute  — forward NLL + gradients (OpenMP over events)
     cpu_pwa_s0c_free     — release the handle
+
+Performance note: on SMT CPUs set ``OMP_NUM_THREADS`` to the number of
+**physical** cores (16 on a 16C/32T Ryzen 9); using all logical threads was
+measured slower (memory/FP64 contention).
 """
 
 import numpy as np
