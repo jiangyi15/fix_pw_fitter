@@ -259,3 +259,93 @@ def test_flat_angle_input_matches_3d():
     assert q2 == pytest.approx(q3, rel=1e-12)
     assert np.allclose(g2["ck"], g3["ck"], rtol=1e-12, atol=1e-14)
     cpu.free()
+
+
+# ── opaque basis: a simple ONE-slot basis (nothing to do with s0) ────
+
+def test_simple_basis_single_slot():
+    """``n_basis = 1``: one basis function per wave, coefficient not s0.
+
+    The C kernel must not assume anything about a coefficient, so a model
+    whose denominator is ``coeff_w·(−i·Z_w(e))`` has to run through the
+    same code path.  Checked against a direct NumPy evaluation and FD
+    gradients of both ``coeff`` and ``ck``.
+    """
+    from tabpwa.cpu import _pwa_s0c as mod
+
+    lib, ffi = mod._load_lib(), mod._ffi
+    ne, nw, P, nf = 37, 8, 2, 1        # nf = 1 -> one basis slot per wave
+    N = nw // P
+    rs = np.random.RandomState(41)
+    Z = rs.randn(ne, nw) + 1j * rs.randn(ne, nw)
+    amp = rs.randn(ne, nw) + 1j * rs.randn(ne, nw)
+    ck = 0.3 * (rs.randn(N) + 1j * rs.randn(N))
+    coeff = 0.5 + rs.rand(ne if False else nw * nf)     # arbitrary numbers
+    wgt = 0.5 + rs.rand(ne)
+    bkg = 0.05 + 0.1 * rs.rand(ne)
+    slot_map = np.arange(nw * nf, dtype=np.int32)       # identity: u == slot
+    norm = 1.3
+
+    keep = []
+
+    def _db(a):
+        arr = np.ascontiguousarray(a, np.float64)
+        buf = ffi.from_buffer(arr)
+        keep.append((arr, buf))
+        return ffi.cast("double*", buf)
+
+    def _ib(a):
+        arr = np.ascontiguousarray(a, np.int32)
+        buf = ffi.from_buffer(arr)
+        keep.append((arr, buf))
+        return ffi.cast("int*", buf)
+
+    h = lib.cpu_pwa_s0c_load(
+        _db(amp.real), _db(amp.imag), _db(Z.real), _db(Z.imag),
+        _ib(slot_map), nw, _db(wgt), _db(bkg), ne,
+        nw, N, P, nf)
+
+    def run(co, cc=ck, use_norm=True):
+        gc = np.zeros(nw * nf, np.float64)
+        gcr = np.zeros(N, np.float64)
+        gci = np.zeros(N, np.float64)
+        dn = ffi.new("double*")
+        q = lib.cpu_pwa_s0c_compute(
+            h, _db(co), _db(cc.real), _db(cc.imag),
+            norm if use_norm else 0.0, 1 if use_norm else 0,
+            _db(gc), _db(gcr), _db(gci), ffi.NULL, dn)
+        return q, gc, gcr + 1j * gci, float(dn[0])
+
+    # ── reference: BW = coeff_w·(−i·Z_w) ────────────────────────────
+    def ref_q(co):
+        bw = co[None, :] * (-1j * Z)
+        common = amp / bw
+        A = common.reshape(ne, P, N) @ ck
+        Pv = np.sum(np.abs(A) ** 2, axis=1)
+        return float(np.sum(wgt * np.log(Pv / norm + bkg) * -1.0))
+
+    Q, gco, gck, _ = run(coeff)
+    assert Q == pytest.approx(ref_q(coeff), rel=1e-12)
+
+    # FD on the plain coefficients (no s0, no m0/g0 anywhere)
+    for i in range(nw * nf):
+        c = coeff.copy()
+        c[i] += NH
+        a = run(c)[0]
+        c[i] -= 2 * NH
+        b = run(c)[0]
+        fd = (a - b) / (2 * NH)
+        assert abs(fd - gco[i]) <= 1e-4 * max(abs(fd), 1.0), i
+
+    # FD on ck (Wirtinger convention)
+    for k in range(N):
+        c = np.array(ck, complex)
+        c[k] += NH
+        a = run(coeff, c)[0]
+        c[k] -= 2 * NH
+        b = run(coeff, c)[0]
+        fd = (a - b) / (2 * NH)
+        assert abs(fd - 2 * gck[k].real) <= 1e-4 * max(abs(fd), 1.0)
+
+    lib.cpu_pwa_s0c_free(h)
+    keep.clear()

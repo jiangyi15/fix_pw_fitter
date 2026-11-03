@@ -1,26 +1,43 @@
 /* ══════════════════════════════════════════════════════════════════════
  * kernels_cpu_pwa_s0c.c — pure-PWA (projection-sum, shared ck) CPU kernel
- * with the "s0c" parameterisation (direct pole parameters).
+ * on an OPAQUE basis.
  *
  * Model:  P(e) = Σ_p |A_p(e)|² ,  A_p(e) = Σ_k ck_k·common[e, p·N+k]
  *
  *   common[e,w] = amp[e,w] / BW_w(e)
- *   BW_w(e)     = s0_w − m_w(e)² − i·Σ_{l∈rows(w)} mult_l·Z[e,l]
+ *   BW_w(e)     = Σ_{i<n_basis} coeff[w·n_basis + i] · (−i·Z[w,i](e))
  *
- * with the s0c outside transform
+ * The kernel knows NOTHING about what the coefficients mean.  Every slot
+ * of a wave is one basis function, supplied as a per-event table value
+ * Z (real/imag) through the basis-selection matrix M — which is 0/1 (one
+ * basis function per slot, sparse one-hot) and is stored here as column
+ * indices rather than a dense matrix:
  *
- *   s0_w  = m0_w² ,     mult_l = m0_{w(l)}·g0_l
+ *   M[w·n_basis + i] = u  ==  slot_map[w·n_basis + i]   (0/1 selection)
+ *   Z_r/Z_i[e, u]                       (basis value at event e)
+ *   coeff[w·n_basis + i]                (the caller's weight for it)
  *
- * (`m0`, `g0` live on the host; the C code works purely in s0/mult and
- * returns dQ/ds0 and dQ/dmult — the wrapper chains to m0/g0, exactly like
- * `cuda_v4_pwa_s0c`).
+ * The parameters enter ONLY as ``coeff`` and leave ONLY as ``grad_coeff``
+ * with the single uniform formula
  *
- * Iteration-invariant inputs (the τ-u-cache analogue) are precomputed once
- * per data load in Python and stored on the handle:
+ *   ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w · (−i·Z[w,i]) )
+ *                  = 2·(Re(∂Q/∂BW_w)·Z_i + Im(∂Q/∂BW_w)·Z_r)
+ *
+ * so a slot is a slot: no slot index, no basis kind, no sign and no
+ * physical parameter identity is special-cased anywhere in this file.
+ * Note that a 0/1 selection says only WHICH basis function a slot uses —
+ * it says nothing about the coefficient, which is an arbitrary number the
+ * caller supplies (and which is fitted, not assumed).  Choosing the basis
+ * and the coefficient meanings (s0c, for instance: Z = i, −i·m², γ over
+ * coefficients m0², 1, m0·g0) is entirely the caller's job — see
+ * ``cpu/_pwa_s0c.py``.
+ *
+ * Iteration-invariant per-event inputs are precomputed once per data load
+ * in Python and borrowed by the handle:
  *
  *   amp[e,w]  = fa(e)·fl_p(e)          (angular basis · form factors)
- *   Z[e,l]    = Catmull-Rom γ-table interp at mass[e, g0_mass_index_w[l]]
- *   mass, weight, bkg, and the derived index arrays
+ *   Z[e,u]    = basis value at the unique slot u
+ *   weight, bkg, slot_map
  *
  * API (cffi, see cpu/_pwa_s0c.py):
  *   cpu_pwa_s0c_load()     — build a data handle (borrows the arrays)
@@ -35,7 +52,6 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
-#include <complex.h>
 
 /* ── data handle ─────────────────────────────────────────────────── */
 
@@ -44,34 +60,24 @@ typedef struct {
     int n_wave;         /* P·N entries per event */
     int N;              /* shared-ck length (n_wave / n_proj) */
     int n_proj;         /* projection count P */
-    int n_gamma_rows;   /* merged (wave, γ-row) entries */
-    int n_basis;        /* uniform coefficient slots per wave */
-    int n_mass;         /* mass columns */
+    int n_basis;        /* basis slots per wave */
+    int n_uslot;        /* unique basis slots per event */
 
-    const double* mass;   /* (ne, n_mass)               */
     const double* amp_r;  /* (ne, n_wave) iteration-invariant amplitude */
     const double* amp_i;
-    const double* Zr;     /* (ne, n_gamma_rows) γ-interp, real */
-    const double* Zi;     /*                     imag */
+    const double* Zr;     /* (ne, n_uslot) basis values */
+    const double* Zi;
+    const int* slot_map;  /* (n_wave · n_basis) -> unique slot */
     const double* weight; /* (ne) */
     const double* bkg;    /* (ne) */
-
-    /* p-major dedup expansion: one BW slot per wave, γ rows grouped
-       wave-major (row_start gives each wave's half-open row range). */
-    const int* m0_index_w;    /* (n_wave) wave -> m0 param slot (host only) */
-    const int* mass_index_w;  /* (n_wave) wave -> mass column */
-    const int* row_start;     /* (n_wave) first γ row of each wave */
 } PWAS0CData;
 
 void* cpu_pwa_s0c_load(
-    const double* mass, int n_mass,
     const double* amp_r, const double* amp_i,
-    const double* Z_r, const double* Z_i,
+    const double* Z_r, const double* Z_i, const int* slot_map,
+    int n_uslot,
     const double* w, const double* bkg, int ne,
-    const int* m0_index_w,
-    const int* mass_index_w,
-    const int* row_start,
-    int n_wave, int N, int n_proj, int n_gamma_rows, int n_basis)
+    int n_wave, int N, int n_proj, int n_basis)
 {
     PWAS0CData* d = (PWAS0CData*)calloc(1, sizeof(PWAS0CData));
     if (!d) return NULL;
@@ -79,21 +85,16 @@ void* cpu_pwa_s0c_load(
     d->n_wave = n_wave;
     d->N = N;
     d->n_proj = n_proj;
-    d->n_gamma_rows = n_gamma_rows;
     d->n_basis = n_basis;
-    d->n_mass = n_mass;
+    d->n_uslot = n_uslot;
 
-    d->mass = mass;
     d->amp_r = amp_r;
     d->amp_i = amp_i;
     d->Zr = Z_r;
     d->Zi = Z_i;
+    d->slot_map = slot_map;
     d->weight = w;
     d->bkg = bkg;
-
-    d->m0_index_w = m0_index_w;
-    d->mass_index_w = mass_index_w;
-    d->row_start = row_start;
     return (void*)d;
 }
 
@@ -104,7 +105,7 @@ void cpu_pwa_s0c_free(void* h)
 
 
 
-/* ── forward + backward (uniform coeff; slot 0 = s0) ─────────────── */
+/* ── forward + backward (opaque basis) ───────────────────────────── */
 
 double cpu_pwa_s0c_compute(
     void* h,
@@ -120,7 +121,7 @@ double cpu_pwa_s0c_compute(
     const int nw = d->n_wave;
     const int N  = d->N;
     const int P  = d->n_proj;
-    const int ng = d->n_gamma_rows;
+    const int nu = d->n_uslot;
     const int nf = d->n_basis;
     const int nc = nw * nf;
 
@@ -156,9 +157,8 @@ double cpu_pwa_s0c_compute(
 
         #pragma omp for schedule(static)
         for (int e = 0; e < ne; e++) {
-            const double* ms = d->mass + (size_t)e * d->n_mass;
-            const double* zr = d->Zr + (size_t)e * ng;
-            const double* zi = d->Zi + (size_t)e * ng;
+            const double* zr = d->Zr + (size_t)e * nu;
+            const double* zi = d->Zi + (size_t)e * nu;
             const double* ar = d->amp_r + (size_t)e * nw;
             const double* ai = d->amp_i + (size_t)e * nw;
             const double we = d->weight[e];
@@ -166,25 +166,24 @@ double cpu_pwa_s0c_compute(
 
             for (int w = 0; w < nw; w++) {
                 const double* cw = coeff + (size_t)w * nf;
-                double m2 = ms[d->mass_index_w[w]];
-                m2 *= m2;
-                int r0 = d->row_start[w];
-                int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
-                double gr = 0.0, gi = 0.0;
-                #pragma omp simd reduction(+:gr,gi)
-                for (int l = r0; l < r1; l++) {
-                    double mm = cw[2 + (l - r0)];
-                    gr += mm * zr[l];
-                    gi += mm * zi[l];
+                const int* sm = d->slot_map + (size_t)w * nf;
+                /* BW = Σ_i coeff_i · (−i·Z_i) = (Σ coeff_i·Z_i.imag)
+                                                − i·(Σ coeff_i·Z_i.real) */
+                double sr = 0.0, si = 0.0;
+                #pragma omp simd reduction(+:sr,si)
+                for (int i = 0; i < nf; i++) {
+                    const double M = cw[i];
+                    const int u = sm[i];
+                    sr += M * zr[u];
+                    si += M * zi[u];
                 }
-                /* BW = c0·1 + c1·m² + Σ_l c_{2+l}·(-i·Z_l) */
-                double bwr = cw[0] + cw[1] * m2 + gi;
-                double bwi = -gr;
-                double den = bwr * bwr + bwi * bwi;
-                double irw =  bwr / den;
-                double iiw = -bwi / den;
+                const double bwr = si;
+                const double bwi = -sr;
+                const double den = bwr * bwr + bwi * bwi;
+                const double irw =  bwr / den;    /* 1/BW real */
+                const double iiw = -bwi / den;    /* 1/BW imag */
                 ir[w] = irw; ii[w] = iiw;
-                double amr = ar[w], ami = ai[w];
+                const double amr = ar[w], ami = ai[w];
                 cr[w] = amr * irw - ami * iiw;
                 ci[w] = amr * iiw + ami * irw;
             }
@@ -236,21 +235,20 @@ double cpu_pwa_s0c_compute(
             for (int w = 0; w < nw; w++) {
                 const int p = w / N;
                 const int k = w - p * N;
-                double dr = dQr[p] * ck_r[k] - dQi[p] * ck_i[k];
-                double di = dQr[p] * ck_i[k] + dQi[p] * ck_r[k];
-                double qr = cr[w] * ir[w] - ci[w] * ii[w];
-                double qi = cr[w] * ii[w] + ci[w] * ir[w];
-                double dBW_r = -(dr * qr - di * qi);
-                double dBW_i = -(dr * qi + di * qr);
+                const double dr = dQr[p] * ck_r[k] - dQi[p] * ck_i[k];
+                const double di = dQr[p] * ck_i[k] + dQi[p] * ck_r[k];
+                /* common/BW = common·(1/BW); d(common)/dBW = −common/BW */
+                const double qr = cr[w] * ir[w] - ci[w] * ii[w];
+                const double qi = cr[w] * ii[w] + ci[w] * ir[w];
+                const double dBW_r = -(dr * qr - di * qi);
+                const double dBW_i = -(dr * qi + di * qr);
+                /* ∂Q/∂coeff_i = 2·Re(dBW·(−i·Z_i)) */
+                const int* sm2 = d->slot_map + (size_t)w * nf;
                 double* gc = gco + (size_t)w * nf;
-                double m2 = ms[d->mass_index_w[w]]; m2 *= m2;
-                gc[0] += 2.0 * dBW_r;
-                gc[1] += 2.0 * dBW_r * m2;
-                int r0 = d->row_start[w];
-                int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
                 #pragma omp simd
-                for (int l = r0; l < r1; l++) {
-                    gc[2 + (l - r0)] += 2.0 * (dBW_r * zi[l] + dBW_i * zr[l]);
+                for (int i = 0; i < nf; i++) {
+                    const int u = sm2[i];
+                    gc[i] += 2.0 * (dBW_r * zi[u] + dBW_i * zr[u]);
                 }
             }
 
