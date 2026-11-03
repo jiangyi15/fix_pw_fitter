@@ -32,6 +32,7 @@ from . import polarised_backend    # noqa: F401 — register PolarisedBackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 from . import cpu_pwa_s0c_backend  # noqa: F401 — register CPUPWAS0CBackend
 from . import cpu_pwa_gen_backend  # noqa: F401 — register CPUPWAGenBackend
+from . import cpu_pwa_v5_backend   # noqa: F401 — register CPUPWAV5Backend
 
 __all__ = [
     "ALL_BACKENDS", "UNIVERSAL_BACKENDS", "MODEL_BACKENDS",
