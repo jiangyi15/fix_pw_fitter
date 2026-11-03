@@ -45,6 +45,7 @@ typedef struct {
     int N;              /* shared-ck length (n_wave / n_proj) */
     int n_proj;         /* projection count P */
     int n_gamma_rows;   /* merged (wave, γ-row) entries */
+    int n_basis;        /* uniform coefficient slots per wave */
     int n_mass;         /* mass columns */
 
     const double* mass;   /* (ne, n_mass)               */
@@ -70,7 +71,7 @@ void* cpu_pwa_s0c_load(
     const int* m0_index_w,
     const int* mass_index_w,
     const int* row_start,
-    int n_wave, int N, int n_proj, int n_gamma_rows)
+    int n_wave, int N, int n_proj, int n_gamma_rows, int n_basis)
 {
     PWAS0CData* d = (PWAS0CData*)calloc(1, sizeof(PWAS0CData));
     if (!d) return NULL;
@@ -79,6 +80,7 @@ void* cpu_pwa_s0c_load(
     d->N = N;
     d->n_proj = n_proj;
     d->n_gamma_rows = n_gamma_rows;
+    d->n_basis = n_basis;
     d->n_mass = n_mass;
 
     d->mass = mass;
@@ -101,15 +103,16 @@ void cpu_pwa_s0c_free(void* h)
 }
 
 
-/* ── forward + backward (manual real/imag; no __divdc3) ─────────── */
+
+/* ── forward + backward (uniform coeff; slot 0 = s0) ─────────────── */
 
 double cpu_pwa_s0c_compute(
     void* h,
-    const double* s0, const double* mult,
+    const double* coeff,
     const double* ck_r, const double* ck_i,
     double norm, int use_norm,
+    double* ogcoeff,
     double* ogck_r, double* ogck_i,
-    double* ogs0, double* ogmult,
     double* P_out, double* dnorm_out)
 {
     PWAS0CData* d = (PWAS0CData*)h;
@@ -118,31 +121,28 @@ double cpu_pwa_s0c_compute(
     const int N  = d->N;
     const int P  = d->n_proj;
     const int ng = d->n_gamma_rows;
+    const int nf = d->n_basis;
+    const int nc = nw * nf;
 
     const int nt = omp_get_max_threads();
-    /* padded per-thread gradient slices (64-byte multiples) */
+    const int padC = ((nc + 7) / 8) * 8;
     const int padN = ((N  + 7) / 8) * 8;
-    const int padW = ((nw + 7) / 8) * 8;
-    const int padG = ((ng + 7) / 8) * 8;
-
-    double* tg_r  = (double*)calloc((size_t)nt * padN, sizeof(double));
-    double* tg_i  = (double*)calloc((size_t)nt * padN, sizeof(double));
-    double* tgs0  = (double*)calloc((size_t)nt * padW, sizeof(double));
-    double* tgm   = (double*)calloc((size_t)nt * padG, sizeof(double));
-    double* tQ    = (double*)calloc((size_t)nt, sizeof(double));
-    double* tDn   = (double*)calloc((size_t)nt, sizeof(double));
-    if (!tg_r || !tg_i || !tgs0 || !tgm || !tQ || !tDn) {
-        free(tg_r); free(tg_i); free(tgs0); free(tgm); free(tQ); free(tDn);
+    double* tgc = (double*)calloc((size_t)nt * padC, sizeof(double));
+    double* tg_r = (double*)calloc((size_t)nt * padN, sizeof(double));
+    double* tg_i = (double*)calloc((size_t)nt * padN, sizeof(double));
+    double* tQ  = (double*)calloc((size_t)nt, sizeof(double));
+    double* tDn = (double*)calloc((size_t)nt, sizeof(double));
+    if (!tgc || !tg_r || !tg_i || !tQ || !tDn) {
+        free(tgc); free(tg_r); free(tg_i); free(tQ); free(tDn);
         return NAN;
     }
 
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
+        double* gco = tgc + (size_t)tid * padC;
         double* gck_r = tg_r + (size_t)tid * padN;
         double* gck_i = tg_i + (size_t)tid * padN;
-        double* gs0   = tgs0 + (size_t)tid * padW;
-        double* gm    = tgm  + (size_t)tid * padG;
 
         double* ir = (double*)malloc((size_t)nw * sizeof(double));
         double* ii = (double*)malloc((size_t)nw * sizeof(double));
@@ -165,22 +165,24 @@ double cpu_pwa_s0c_compute(
             const double be = d->bkg[e];
 
             for (int w = 0; w < nw; w++) {
-                double m = ms[d->mass_index_w[w]];
+                const double* cw = coeff + (size_t)w * nf;
+                double m2 = ms[d->mass_index_w[w]];
+                m2 *= m2;
                 int r0 = d->row_start[w];
                 int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
                 double gr = 0.0, gi = 0.0;
                 #pragma omp simd reduction(+:gr,gi)
                 for (int l = r0; l < r1; l++) {
-                    gr += mult[l] * zr[l];
-                    gi += mult[l] * zi[l];
+                    double mm = cw[2 + (l - r0)];
+                    gr += mm * zr[l];
+                    gi += mm * zi[l];
                 }
-                /* BW = s0 - m^2 - i*g,  g = gr + i*gi
-                   -> real = s0 - m^2 + gi,  imag = -gr */
-                double a = s0[w] - m * m + gi;
-                double b = -gr;
-                double den = a * a + b * b;
-                double irw =  a / den;                 /* 1/BW real */
-                double iiw = -b / den;                 /* 1/BW imag */
+                /* BW = c0·1 + c1·m² + Σ_l c_{2+l}·(-i·Z_l) */
+                double bwr = cw[0] + cw[1] * m2 + gi;
+                double bwi = -gr;
+                double den = bwr * bwr + bwi * bwi;
+                double irw =  bwr / den;
+                double iiw = -bwi / den;
                 ir[w] = irw; ii[w] = iiw;
                 double amr = ar[w], ami = ai[w];
                 cr[w] = amr * irw - ami * iiw;
@@ -234,22 +236,21 @@ double cpu_pwa_s0c_compute(
             for (int w = 0; w < nw; w++) {
                 const int p = w / N;
                 const int k = w - p * N;
-                /* dQ/dc = dQdA[p]·ck[k] */
                 double dr = dQr[p] * ck_r[k] - dQi[p] * ck_i[k];
                 double di = dQr[p] * ck_i[k] + dQi[p] * ck_r[k];
-                /* common/BW = common·(1/BW) */
                 double qr = cr[w] * ir[w] - ci[w] * ii[w];
                 double qi = cr[w] * ii[w] + ci[w] * ir[w];
-                /* dBW = -(dQdc·(common/BW)) */
-                double bwr = -(dr * qr - di * qi);
-                double bwi = -(dr * qi + di * qr);
-                gs0[w] += 2.0 * bwr;
+                double dBW_r = -(dr * qr - di * qi);
+                double dBW_i = -(dr * qi + di * qr);
+                double* gc = gco + (size_t)w * nf;
+                double m2 = ms[d->mass_index_w[w]]; m2 *= m2;
+                gc[0] += 2.0 * dBW_r;
+                gc[1] += 2.0 * dBW_r * m2;
                 int r0 = d->row_start[w];
                 int r1 = (w + 1 < nw) ? d->row_start[w + 1] : ng;
                 #pragma omp simd
                 for (int l = r0; l < r1; l++) {
-                    /* 2·Re(dBW·(−i·Z)) = 2·(bwr·Zi + bwi·Zr) */
-                    gm[l] += 2.0 * (bwr * zi[l] + bwi * zr[l]);
+                    gc[2 + (l - r0)] += 2.0 * (dBW_r * zi[l] + dBW_i * zr[l]);
                 }
             }
 
@@ -262,23 +263,23 @@ double cpu_pwa_s0c_compute(
         free(Ar); free(Ai); free(dQr); free(dQi);
     }
 
+    memset(ogcoeff, 0, (size_t)nc * sizeof(double));
     memset(ogck_r, 0, (size_t)N * sizeof(double));
     memset(ogck_i, 0, (size_t)N * sizeof(double));
-    memset(ogs0, 0, (size_t)nw * sizeof(double));
-    memset(ogmult, 0, (size_t)ng * sizeof(double));
     double Q_total = 0.0, dn_total = 0.0;
     for (int t = 0; t < nt; t++) {
-        const double* g1 = tg_r + (size_t)t * padN;
-        const double* g2 = tg_i + (size_t)t * padN;
-        for (int k = 0; k < N; k++) { ogck_r[k] += g1[k]; ogck_i[k] += g2[k]; }
-        const double* s1 = tgs0 + (size_t)t * padW;
-        for (int i = 0; i < nw; i++) ogs0[i] += s1[i];
-        const double* m1 = tgm + (size_t)t * padG;
-        for (int i = 0; i < ng; i++) ogmult[i] += m1[i];
+        const double* g = tgc + (size_t)t * padC;
+        for (int i = 0; i < nc; i++) ogcoeff[i] += g[i];
+        const double* gr = tg_r + (size_t)t * padN;
+        const double* gi = tg_i + (size_t)t * padN;
+        for (int k = 0; k < N; k++) {
+            ogck_r[k] += gr[k];
+            ogck_i[k] += gi[k];
+        }
         Q_total += tQ[t];
         dn_total += tDn[t];
     }
-    free(tg_r); free(tg_i); free(tgs0); free(tgm); free(tQ); free(tDn);
+    free(tgc); free(tg_r); free(tg_i); free(tQ); free(tDn);
     if (dnorm_out) *dnorm_out = dn_total;
     return Q_total;
 }

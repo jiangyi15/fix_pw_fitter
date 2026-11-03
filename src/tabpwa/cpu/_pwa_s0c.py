@@ -49,14 +49,14 @@ void* cpu_pwa_s0c_load(
     const int* m0_index_w,
     const int* mass_index_w,
     const int* row_start,
-    int n_wave,int N,int n_proj,int n_gamma_rows);
+    int n_wave,int N,int n_proj,int n_gamma_rows,int n_basis);
 void cpu_pwa_s0c_free(void*);
 double cpu_pwa_s0c_compute(void* h,
-    const double* s0,const double* mult,
+    const double* coeff,
     const double* ck_r,const double* ck_i,
     double norm,int use_norm,
+    double* grad_coeff,
     double* grad_ck_r,double* grad_ck_i,
-    double* grad_s0,double* grad_mult,
     double* P_out,double* dnorm);
 """)
 
@@ -150,6 +150,9 @@ class CPUKernelPWAS0C:
         self.n_gamma_rows = int(rows_w.size)
         self.row_start = np.searchsorted(
             wave_of_row, np.arange(self.n_wave), side="left").astype(np.int32)
+        rows_per_wave = np.diff(np.append(self.row_start,
+                                          self.n_gamma_rows))
+        self.n_basis = int(2 + int(rows_per_wave.max()))
 
         self._m0_index_w = m0_index_w.astype(np.int32)
         self._mass_index_w = mass_index_w.astype(np.int32)
@@ -270,7 +273,7 @@ class CPUKernelPWAS0C:
                 _ib(self._m0_index_w),
                 _ib(self._mass_index_w),
                 _ib(self.row_start),
-                nw, self.n_wave_base, self.n_proj, n_gr),
+                nw, self.n_wave_base, self.n_proj, n_gr, self.n_basis),
             self._lib, ne)
         dh._keep = ka_list
         dh._weight = weight
@@ -308,15 +311,23 @@ class CPUKernelPWAS0C:
         g0 = np.zeros(self.n_g0_params, np.float64)
         g0[:len(params["g0"])] = np.asarray(params["g0"])
 
-        # ── outside transform (s0, mult) ─────────────────────────────
+        # ── uniform coefficient assembly (s0 is slot 0, -1 slot 1) ──
         m0_w = m0[self._m0_index_w]
-        s0 = m0_w * m0_w
-        mult = m0_w[self._wave_of_row] * g0[self._g0_index_w]
+        nf = self.n_basis
+        nw = self.n_wave
+        coeff = np.zeros(nw * nf, np.float64)
+        coeff[0::nf] = m0_w * m0_w
+        coeff[1::nf] = -1.0
+        rs = self.row_start
+        for w in range(nw):
+            r0 = int(rs[w])
+            r1 = (int(rs[w + 1]) if w + 1 < nw else self.n_gamma_rows)
+            coeff[w * nf + 2:w * nf + 2 + (r1 - r0)] = \
+                m0_w[self._wave_of_row[r0:r1]] * g0[self._g0_index_w[r0:r1]]
 
+        gcoeff = np.zeros(nw * nf, np.float64)
         ogck_r = np.zeros(nbase, np.float64)
         ogck_i = np.zeros(nbase, np.float64)
-        ogs0 = np.zeros(self.n_wave, np.float64)
-        ogmult = np.zeros(self.n_gamma_rows, np.float64)
         dnorm = _ffi.new("double*")
         P = (np.zeros(data_handle.ne, np.float64) if return_p else None)
 
@@ -330,12 +341,20 @@ class CPUKernelPWAS0C:
 
         Q = self._lib.cpu_pwa_s0c_compute(
             data_handle.ptr,
-            _db(s0), _db(mult), _db(ck_r), _db(ck_i),
+            _db(coeff), _db(ck_r), _db(ck_i),
             norm_val, use_norm,
-            _db(ogck_r), _db(ogck_i), _db(ogs0), _db(ogmult),
+            _db(gcoeff), _db(ogck_r), _db(ogck_i),
             (_db(P) if P is not None else _ffi.NULL),
             dnorm)
         self._last_dnorm = float(dnorm[0]) if use_norm else None
+
+        gc = gcoeff.reshape(nw, nf)
+        ogs0 = np.ascontiguousarray(gc[:, 0])
+        ogmult = np.zeros(self.n_gamma_rows, np.float64)
+        for w in range(nw):
+            r0 = int(rs[w])
+            r1 = (int(rs[w + 1]) if w + 1 < nw else self.n_gamma_rows)
+            ogmult[r0:r1] = gc[w, 2:2 + (r1 - r0)]
 
         # ── host chain: (s0, mult) -> (m0, g0) ──────────────────────
         # s0_w = m0_w²              -> dQ/dm0_w += 2·m0_w·dQ/ds0_w
