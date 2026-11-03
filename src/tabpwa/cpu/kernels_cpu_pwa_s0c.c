@@ -5,7 +5,7 @@
  * Model:  P(e) = Σ_p |A_p(e)|² ,  A_p(e) = Σ_k ck_k·common[e, p·N+k]
  *
  *   common[e,w] = amp[e,w] / BW_w(e)
- *   BW_w(e)     = Σ_{i<n_basis} coeff[w·n_basis + i] · (−i·Z[w,i](e))
+ *   BW_w(e)     = Σ_{i<n_basis} coeff[w·n_basis + i] · F[w,i](e)
  *
  * The kernel knows NOTHING about what the coefficients mean.  Every slot
  * of a wave is one basis function, supplied as a per-event table value
@@ -14,21 +14,21 @@
  * indices rather than a dense matrix:
  *
  *   M[w·n_basis + i] = u  ==  slot_map[w·n_basis + i]   (0/1 selection)
- *   Z_r/Z_i[e, u]                       (basis value at event e)
+ *   F_r/F_i[e, u]                       (the basis FUNCTION at event e)
  *   coeff[w·n_basis + i]                (the caller's weight for it)
  *
- * The parameters enter ONLY as ``coeff`` and leave ONLY as ``grad_coeff``
- * with the single uniform formula
+ * The table holds the finished basis functions, so the kernel never
+ * rotates anything (−i·γ, −m², 1 are produced once at load):
  *
- *   ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w · (−i·Z[w,i]) )
- *                  = 2·(Re(∂Q/∂BW_w)·Z_i + Im(∂Q/∂BW_w)·Z_r)
+ *   ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w · F[w,i] )
+ *                  = 2·(Re(∂Q/∂BW_w)·F_r − Im(∂Q/∂BW_w)·F_i)
  *
  * so a slot is a slot: no slot index, no basis kind, no sign and no
  * physical parameter identity is special-cased anywhere in this file.
  * Note that a 0/1 selection says only WHICH basis function a slot uses —
  * it says nothing about the coefficient, which is an arbitrary number the
  * caller supplies (and which is fitted, not assumed).  Choosing the basis
- * and the coefficient meanings (s0c, for instance: Z = i, −i·m², γ over
+ * and the coefficient meanings (s0c, for instance: F = 1, −m², −i·γ over
  * coefficients m0², 1, m0·g0) is entirely the caller's job — see
  * ``cpu/_pwa_s0c.py``.
  *
@@ -36,7 +36,7 @@
  * in Python and borrowed by the handle:
  *
  *   amp[e,w]  = fa(e)·fl_p(e)          (angular basis · form factors)
- *   Z[e,u]    = basis value at the unique slot u
+ *   F[e,u]    = basis function at the unique slot u
  *   weight, bkg, slot_map
  *
  * API (cffi, see cpu/_pwa_s0c.py):
@@ -65,8 +65,8 @@ typedef struct {
 
     const double* amp_r;  /* (ne, n_wave) iteration-invariant amplitude */
     const double* amp_i;
-    const double* Zr;     /* (ne, n_uslot) basis values */
-    const double* Zi;
+    const double* Fr;     /* (ne, n_uslot) basis functions */
+    const double* Fi;
     const int* slot_map;  /* (n_wave · n_basis) -> unique slot */
     const double* weight; /* (ne) */
     const double* bkg;    /* (ne) */
@@ -74,7 +74,7 @@ typedef struct {
 
 void* cpu_pwa_s0c_load(
     const double* amp_r, const double* amp_i,
-    const double* Z_r, const double* Z_i, const int* slot_map,
+    const double* F_r, const double* F_i, const int* slot_map,
     int n_uslot,
     const double* w, const double* bkg, int ne,
     int n_wave, int N, int n_proj, int n_basis)
@@ -90,8 +90,8 @@ void* cpu_pwa_s0c_load(
 
     d->amp_r = amp_r;
     d->amp_i = amp_i;
-    d->Zr = Z_r;
-    d->Zi = Z_i;
+    d->Fr = F_r;
+    d->Fi = F_i;
     d->slot_map = slot_map;
     d->weight = w;
     d->bkg = bkg;
@@ -157,8 +157,8 @@ double cpu_pwa_s0c_compute(
 
         #pragma omp for schedule(static)
         for (int e = 0; e < ne; e++) {
-            const double* zr = d->Zr + (size_t)e * nu;
-            const double* zi = d->Zi + (size_t)e * nu;
+            const double* fr = d->Fr + (size_t)e * nu;
+            const double* fi = d->Fi + (size_t)e * nu;
             const double* ar = d->amp_r + (size_t)e * nw;
             const double* ai = d->amp_i + (size_t)e * nw;
             const double we = d->weight[e];
@@ -167,18 +167,15 @@ double cpu_pwa_s0c_compute(
             for (int w = 0; w < nw; w++) {
                 const double* cw = coeff + (size_t)w * nf;
                 const int* sm = d->slot_map + (size_t)w * nf;
-                /* BW = Σ_i coeff_i · (−i·Z_i) = (Σ coeff_i·Z_i.imag)
-                                                − i·(Σ coeff_i·Z_i.real) */
-                double sr = 0.0, si = 0.0;
-                #pragma omp simd reduction(+:sr,si)
+                /* BW = Σ_i coeff_i · F_i  (F is stored ready-made) */
+                double bwr = 0.0, bwi = 0.0;
+                #pragma omp simd reduction(+:bwr,bwi)
                 for (int i = 0; i < nf; i++) {
                     const double M = cw[i];
                     const int u = sm[i];
-                    sr += M * zr[u];
-                    si += M * zi[u];
+                    bwr += M * fr[u];
+                    bwi += M * fi[u];
                 }
-                const double bwr = si;
-                const double bwi = -sr;
                 const double den = bwr * bwr + bwi * bwi;
                 const double irw =  bwr / den;    /* 1/BW real */
                 const double iiw = -bwi / den;    /* 1/BW imag */
@@ -242,13 +239,13 @@ double cpu_pwa_s0c_compute(
                 const double qi = cr[w] * ii[w] + ci[w] * ir[w];
                 const double dBW_r = -(dr * qr - di * qi);
                 const double dBW_i = -(dr * qi + di * qr);
-                /* ∂Q/∂coeff_i = 2·Re(dBW·(−i·Z_i)) */
+                /* ∂Q/∂coeff_i = 2·Re(dBW·F_i) */
                 const int* sm2 = d->slot_map + (size_t)w * nf;
                 double* gc = gco + (size_t)w * nf;
                 #pragma omp simd
                 for (int i = 0; i < nf; i++) {
                     const int u = sm2[i];
-                    gc[i] += 2.0 * (dBW_r * zi[u] + dBW_i * zr[u]);
+                    gc[i] += 2.0 * (dBW_r * fr[u] - dBW_i * fi[u]);
                 }
             }
 

@@ -267,9 +267,10 @@ def test_simple_basis_single_slot():
     """``n_basis = 1``: one basis function per wave, coefficient not s0.
 
     The C kernel must not assume anything about a coefficient, so a model
-    whose denominator is ``coeff_w·(−i·Z_w(e))`` has to run through the
-    same code path.  Checked against a direct NumPy evaluation and FD
-    gradients of both ``coeff`` and ``ck``.
+    whose denominator is ``coeff_w·F_w(e)`` (one basis function per wave,
+    no s0, no −i rotation inside the kernel) has to run through the same
+    code path.  Checked against a direct NumPy evaluation and FD gradients
+    of both ``coeff`` and ``ck``.
     """
     from tabpwa.cpu import _pwa_s0c as mod
 
@@ -277,7 +278,7 @@ def test_simple_basis_single_slot():
     ne, nw, P, nf = 37, 8, 2, 1        # nf = 1 -> one basis slot per wave
     N = nw // P
     rs = np.random.RandomState(41)
-    Z = rs.randn(ne, nw) + 1j * rs.randn(ne, nw)
+    F = rs.randn(ne, nw) + 1j * rs.randn(ne, nw)     # basis functions
     amp = rs.randn(ne, nw) + 1j * rs.randn(ne, nw)
     ck = 0.3 * (rs.randn(N) + 1j * rs.randn(N))
     coeff = 0.5 + rs.rand(ne if False else nw * nf)     # arbitrary numbers
@@ -301,7 +302,7 @@ def test_simple_basis_single_slot():
         return ffi.cast("int*", buf)
 
     h = lib.cpu_pwa_s0c_load(
-        _db(amp.real), _db(amp.imag), _db(Z.real), _db(Z.imag),
+        _db(amp.real), _db(amp.imag), _db(F.real), _db(F.imag),
         _ib(slot_map), nw, _db(wgt), _db(bkg), ne,
         nw, N, P, nf)
 
@@ -316,9 +317,9 @@ def test_simple_basis_single_slot():
             _db(gc), _db(gcr), _db(gci), ffi.NULL, dn)
         return q, gc, gcr + 1j * gci, float(dn[0])
 
-    # ── reference: BW = coeff_w·(−i·Z_w) ────────────────────────────
+    # ── reference: BW = coeff_w·F_w ─────────────────────────────────
     def ref_q(co):
-        bw = co[None, :] * (-1j * Z)
+        bw = co[None, :] * F
         common = amp / bw
         A = common.reshape(ne, P, N) @ ck
         Pv = np.sum(np.abs(A) ** 2, axis=1)

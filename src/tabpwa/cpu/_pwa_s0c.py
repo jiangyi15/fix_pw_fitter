@@ -9,17 +9,18 @@ Mirror of ``cuda_v4_pwa_s0c`` on the CPU: projection-sum PWA
 The C kernel works on an **opaque basis**: it knows nothing about s0 or
 about what a coefficient means.  Each wave contributes ``n_basis`` slots
 
-    BW_w(e) = Σ_i coeff[w·n_basis + i]·(−i·Z[slot_map[w·n_basis+i]](e))
-    ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w·(−i·Z_i) )
+    BW_w(e) = Σ_i coeff[w·n_basis + i]·F[slot_map[w·n_basis+i]](e)
+    ∂Q/∂coeff[w,i] = 2·Re( ∂Q/∂BW_w·F_i )
 
 so a wave can carry one basis function (a plain coefficient) or a whole
-denominator expansion — the kernel code is identical.  This module builds
-the **s0c preset** of that basis
+denominator expansion — the kernel code is identical.  The table stores
+the finished function F (the −i·γ rotation, the −m² sign and the constant
+1 are all baked in at load), so the kernel never rotates anything.  This
+module builds the **s0c preset** of that basis
 
-    slot 0  : Z =  i          coeff = m0_w²          (the pole term s0)
-    slot 1  : Z = −i·m_w²     coeff = +1             (a pure indicator;
-                                                      the sign is in Z)
-    slot 2+j: Z =  γ_j(m_w)   coeff = m0_w·g0_j      (running-width terms)
+    slot 0  : F =  1          coeff = m0_w²          (the pole term s0)
+    slot 1  : F = −m_w²       coeff = +1             (a pure indicator)
+    slot 2+j: F = −i·γ_j(m_w) coeff = m0_w·g0_j      (running-width terms)
 
 and chains dQ/dcoeff back to the fitted m0/g0 (exactly like the CUDA
 sibling), so no m0/g0 algebra enters the kernel.
@@ -28,7 +29,7 @@ Iteration-invariant per-event inputs are precomputed once at load time
 in NumPy (the CPU analogue of the CUDA τ-u-cache):
 
     amp[e,w] = (ka·matrix_angle)·Π fl        (angular basis × form factors)
-    Z[e,u]   = basis value at unique slot u  (γ interp, constant, m²)
+    F[e,u]   = basis function at unique slot u (1, −m², −i·γ interp)
 
 Unique slots are deduped across waves/events, so a production layout
 keeps only a handful of entries per event instead of 2·n_wave +
@@ -166,10 +167,10 @@ class CPUKernelPWAS0C:
         # ── basis layout (a HOST-side convention; the C kernel is
         #    basis-agnostic — it only sees coeff[] and the slot table) ──
         # For the s0c preset each wave carries
-        #   slot 0    : the constant row,  Z = i            (coeff = m0²)
-        #   slot 1    : the m² row,        Z = −i·m_w²      (coeff = +1)
-        #   slot 2+j  : the j-th γ row,    Z = γ(row, m_w)  (coeff = m0·g0)
-        # so that  BW_w = Σ_i coeff_i·(−i·Z_i) = m0² − m² − i·Σ mult_j γ_j.
+        #   slot 0    : F = 1,            (coeff = m0²)
+        #   slot 1    : F = −m_w²,        (coeff = +1)
+        #   slot 2+j  : F = −i·γ(row, m_w)(coeff = m0·g0_j)
+        # so that  BW_w = Σ_i coeff_i·F_i = m0² − m² − i·Σ mult_j γ_j.
         # Only slot 0 and the γ slots carry fitted numbers; slot 1 is the
         # constant 1 — the minus sign of −m² lives in the basis value, so
         # no coefficient is a hard-coded −1.
@@ -283,26 +284,28 @@ class CPUKernelPWAS0C:
         fa = ka @ k.matrix_angle
         amp = fa * fl_p                                   # (ne, n_wave)
 
-        # ── iteration-invariant basis table at the unique slots ──────
+        # ── iteration-invariant basis functions at the unique slots ──
         # (only ne × n_uslot values — the s0c preset collapses 2·n_wave +
-        #  n_gamma_rows naive entries to a handful of unique ones)
+        #  n_gamma_rows naive entries to a handful of unique ones).
+        # Stored READY-TO-USE: F = 1, −m², −i·γ (the −i rotation is done
+        # here once, so the kernel is a plain complex linear combination).
         nu = self.n_uslot
-        U_r = np.zeros((ne, nu), np.float64)
-        U_i = np.zeros((ne, nu), np.float64)
+        F_r = np.zeros((ne, nu), np.float64)
+        F_i = np.zeros((ne, nu), np.float64)
         for u in range(nu):
             kind = self._uslot_kind[u]
             col = self._uslot_col[u]
-            if kind == 0:                       # constant row: Z = i
-                U_i[:, u] = 1.0
-            elif kind == 1:                     # m² row: Z = −i·m_col²
-                U_i[:, u] = -mass[:, col] ** 2
-            else:                               # γ row: Z = interp
+            if kind == 0:                       # F = 1
+                F_r[:, u] = 1.0
+            elif kind == 1:                     # F = −m²
+                F_r[:, u] = -mass[:, col] ** 2
+            else:                               # F = −i·γ  =  (γ_i, −γ_r)
                 gm = np.take(mass, col, axis=-1)
-                z = k.interp_catmull_rom(
+                g = k.interp_catmull_rom(
                     k.gamma_table, self._uslot_row[u], gm,
                     k.gamma_min, k.gamma_delta)
-                U_r[:, u] = np.real(z)
-                U_i[:, u] = np.imag(z)
+                F_r[:, u] = np.imag(g)
+                F_i[:, u] = -np.real(g)
 
         amp_r = np.ascontiguousarray(np.real(amp), np.float64)
         amp_i = np.ascontiguousarray(np.imag(amp), np.float64)
@@ -333,7 +336,7 @@ class CPUKernelPWAS0C:
         dh = DataHandle(
             self._lib.cpu_pwa_s0c_load(
                 _db(amp_r), _db(amp_i),
-                _db(U_r), _db(U_i), _ib(self.slot_map),
+                _db(F_r), _db(F_i), _ib(self.slot_map),
                 self.n_uslot,
                 _db(weight), _db(bkg), ne,
                 nw, self.n_wave_base, self.n_proj, self.n_basis),
