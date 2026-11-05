@@ -1185,6 +1185,15 @@ class Fitter:
             hess_inv: optional inverse Hessian. If None, tries
                       ``fit_result.hess_inv``.
 
+        Note:
+            with ``return_bounded=True`` the *values* go through the bound
+            transform only (not through scale / blind / mass-width / custom
+            transforms), and the *errors* are propagated through the bounds
+            stage alone, evaluated at the unbounded value.  See
+            :meth:`save_params`: the returned values are written to the
+            ``value_bounded`` section, the frame its ``error`` entries
+            belong to.
+
         Returns:
             (values_dict, errors_dict) where each maps slot_name -> float.
             values_dict: best-fit parameter values.
@@ -1221,8 +1230,11 @@ class Fitter:
         Hessian via finite-difference gradients when *use_cached* is
         ``False``.
 
-        Bound transforms are automatically propagated for parameters
-        set via ``set_range()``.
+        Bound transforms are automatically propagated for parameters set via
+        ``set_range()`` -- and **only** those: scale / blind / mass-width /
+        custom transforms are not propagated, so a parameter behind one of
+        them reports the sigma of its pre-transform value (see the note in
+        :meth:`save_params`).
 
         For constrained fits (SLSQP), *use_cached* is ignored — the
         Hessian is not available, and no uncertainties are returned.
@@ -1466,13 +1478,28 @@ class Fitter:
           - a flat numpy array ``x`` — saves values only (no errors/status)
 
         The JSON structure:
-            value: {name_r: float, name_i: float, time_param: float, ...}
-            error: {name_r: float, ...}
-            status: {NLL, Ndf, jac, success, message, rhorho}
+            value:         {name_r: float, ...}   resolved + blinded frame
+            error:         {name_r: float, ...}   after-bounds frame
+            value_bounded: {name_r: float, ...}   the values ``error`` belongs to
+            status:        {NLL, Ndf, jac, success, message, rhorho}
 
         Handles bound transforms, fixed params, same-param aliases,
         scale params, and time parameter defaults automatically.
-        
+
+        Known limitation (errors):
+            the ``error`` values are propagated through the **bound**
+            transform only, and are keyed by the flat (raw) parameter
+            names.  The ``value`` section holds the fully resolved, blinded
+            values.  So for a parameter behind a scale / blind / mass-width
+            / custom transform ``value`` and ``error`` are in different
+            frames -- e.g. with ``set_scale({"a": 2.0})`` the reported sigma
+            is a factor 2 too small (verified: value 1.5498, sigma 0.001235
+            vs the correct 0.002470).  ``value_bounded`` therefore stores the
+            after-bounds value that each ``error`` belongs to, so the file is
+            self-consistent; propagating to the resolved frame would need the
+            Jacobian of the whole ``ConstraintManager.resolve`` pipeline, not
+            just ``BoundTransform.trans_err``.
+
         Args:
             fit_result: OptimizeResult from fit() method.
             filepath: output JSON file path.
@@ -1502,16 +1529,25 @@ class Fitter:
         _, resolved = self.build_params(x)
         resolved = self.cm.blind_result(resolved)
 
-        # Errors from Hessian (transformed to physical space)
+        # Errors from Hessian.  These are propagated through the BOUND
+        # transform only (see the note above), so they live in the
+        # after-bounds frame -- record the matching values beside them so the
+        # file is self-consistent (an error is never paired with a value
+        # from a different transform stage).
         if hess_inv is not None:
-            _, errors = self._params_from_fit(fit_result, return_bounded=True)
+            bounded_values, errors = self._params_from_fit(fit_result,
+                                                           return_bounded=True)
         else:
-            errors = {}
+            bounded_values, errors = {}, {}
 
-        out = {"value": {}, "error": {}}
+        out = {"value": {}, "error": {}, "value_bounded": {}}
         # Store physical values for all resolved keys (canon + alias)
         for name, val in resolved.items():
             out["value"][name] = float(val)
+        # The frame the "error" entries belong to: after the bound transform,
+        # before scale / blind / mass-width / custom.
+        for name, val in bounded_values.items():
+            out["value_bounded"][name] = float(val)
         # Errors only for free params (matches reference JSON convention)
         free_names = set(self.free_param_names())
         for name in free_names:

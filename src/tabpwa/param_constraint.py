@@ -1678,7 +1678,13 @@ class ConstraintManager:
         optimizer variable, e.g. ``sqrt(diag(hess_inv))``), and
         ``BoundTransform.trans_err`` evaluates ``|dy/dx|`` at that
         unbounded value -- so the propagation must run **before** *d* is
-        transformed.  Doing it afterwards fed the bounded value into a
+        transformed.
+
+        Scope: this is the **bounds** stage only.  The value it leaves in
+        *d* is "after bounds", not the resolved frame -- later constraints
+        (blind / fixed / same / scale / mass-width / custom) are not applied
+        here; use :meth:`resolve` for those, and note that their errors are
+        not propagated (see ``Fitter.save_params``).  Doing it afterwards fed the bounded value into a
         Jacobian that expects the unbounded one (13x too small at the
         centre of the range, 24x too large near a bound).
         """
