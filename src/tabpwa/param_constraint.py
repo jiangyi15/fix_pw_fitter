@@ -1673,12 +1673,24 @@ class ConstraintManager:
         """Apply forward bounds to dict *d* (in-place).
 
         If *errors* dict given, propagates uncertainties through bounds.
+
+        The errors are uncertainties on the **unbounded** value (the
+        optimizer variable, e.g. ``sqrt(diag(hess_inv))``), and
+        ``BoundTransform.trans_err`` evaluates ``|dy/dx|`` at that
+        unbounded value -- so the propagation must run **before** *d* is
+        transformed.  Doing it afterwards fed the bounded value into a
+        Jacobian that expects the unbounded one (13x too small at the
+        centre of the range, 24x too large near a bound).
         """
+        if errors is None:
+            self.bounds.apply_dict(d)
+            return d
+        prop = {}
+        for name, bt in self.bounds.items():
+            if name in errors and name in d:
+                prop[name] = bt.trans_err(d[name], errors[name])
         self.bounds.apply_dict(d)
-        if errors is not None:
-            for name, bt in self.bounds.items():
-                if name in errors:
-                    errors[name] = bt.trans_err(d[name], errors[name])
+        errors.update(prop)
         return d
 
     def to_dict(self):

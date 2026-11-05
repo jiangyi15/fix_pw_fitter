@@ -196,8 +196,10 @@ class Boundary:
         flat_names : list of str
             Names of parameters in the flat vector (same order as x_flat).
         raw_dict : dict
-            Bounded named-parameter dict (returned by ``apply()``).
-            Used to get the bounded value for Jacobian evaluation.
+            **Unbounded** named-parameter dict (``from_flat(x)``): the
+            Jacobian ``dy/dx`` is evaluated at the unbounded value.  (This
+            docstring previously said "bounded", the same domain confusion
+            that produced the ``apply_bound_dict`` uncertainty bug.)
         """
         for name, bt in self._tfm.items():
             try:
