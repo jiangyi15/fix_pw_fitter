@@ -22,7 +22,8 @@ in this ``__init__.py``::
     from . import my_model   # noqa: F401
 """
 
-from .base import BaseModel, ALL_MODELS, register_model, build_particle
+from .base import (BaseModel, BasisModel, ALL_MODELS, register_model,
+                   build_particle)
 from . import models_builtin   # noqa: F401 — register built-in models
 from . import bugg_model       # noqa: F401 — register Bugg model
 from . import gs_rho_model     # noqa: F401 — register GS_rho model
@@ -41,6 +42,7 @@ from . import svd_2d_spline_k_model  # noqa: F401 — 2-parameter SVD spline-k
 from . import ck_matrix_disp_v2 # noqa: F401 — register ck_matrix_disp_v2
 from . import spline_gamma_model  # noqa: F401 — register BSpline model
 from . import kmatrix_model       # noqa: F401 — register pipi_swave model
+from . import kmatrix2_model      # noqa: F401 — register kmatrix2 model
 __all__ = [
-    "BaseModel", "ALL_MODELS", "register_model", "build_particle",
+    "BaseModel", "BasisModel", "ALL_MODELS", "register_model", "build_particle",
 ]
