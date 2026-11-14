@@ -38,7 +38,7 @@ from test_pwa_gen import _cfg, _loaded, _synth
 
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
-from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PwaGenS0E
+from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PWAGenS0E
 from tabpwa.cuda._v5_pwa_s0e import CUDAKernelV5PWAS0E
 from tabpwa.pwa_gen_support import check_backend_support
 
@@ -79,7 +79,7 @@ def test_rejects_multi_bw_chains():
     kc = dict(Fitter(CFG_PWA, backend="cuda_v4_pwa").kernel_config)
     kc["bw_order"] = np.repeat(np.asarray(kc["bw_order"]).reshape(-1), 2)
     with pytest.raises(ValueError, match="exactly ONE BW"):
-        CUDAKernelV5PwaGenS0E(kc, resolution_size=1)
+        CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
 
 
 # ── gate 1: N ≡ 1 + default basis is cuda_v5_pwa_s0e, bit for bit ────
@@ -92,7 +92,7 @@ def test_gate_a_default_basis_is_s0e_bitwise(rs):
     data = _synth(kc, NEV, 5)
 
     ref = CUDAKernelV5PWAS0E(kc, resolution_size=rs)
-    gen = CUDAKernelV5PwaGenS0E(kc, resolution_size=rs)
+    gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=rs)
     params = _rand_params(gen)
     Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
     Qg, gg, Pg = gen.compute(params, gen.load_data(data), norm=1.3)
@@ -245,7 +245,7 @@ def test_gate_d_loads_next_to_s0e():
 
 def test_partial_last_group_warns():
     kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
-    k = CUDAKernelV5PwaGenS0E(kc, resolution_size=8)
+    k = CUDAKernelV5PWAGenS0E(kc, resolution_size=8)
     data = _synth(kc, 5, 3)          # 5 not a multiple of 8
     with pytest.warns(RuntimeWarning):
         k.load_data(data)

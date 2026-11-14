@@ -558,7 +558,7 @@ class CUDABackendV5PWAGenS0E(_CUDABackend):
         super().__init__(kernel_config, batch_size=batch_size)
 
     def _make_kernel(self, kc, bs):
-        from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PwaGenS0E as K
+        from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PWAGenS0E as K
         return K(kc, batch_size=bs, resolution_size=self._resolution_size)
 
     @property

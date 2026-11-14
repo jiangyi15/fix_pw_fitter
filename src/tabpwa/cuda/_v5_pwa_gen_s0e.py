@@ -161,7 +161,7 @@ class DataHandle:
         self.free()
 
 
-class CUDAKernelV5PwaGenS0E:
+class CUDAKernelV5PWAGenS0E:
     """s0e fused tile + grouped log-sum NLL on the ``pwa_gen`` basis.
 
     ``params`` needs ``ck`` (length N = n_wave/n_proj) plus either

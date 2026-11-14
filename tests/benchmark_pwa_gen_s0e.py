@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 
 from tabpwa.amp_model import build_amplitude_model
-from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PwaGenS0E
+from tabpwa.cuda._v5_pwa_gen_s0e import CUDAKernelV5PWAGenS0E
 from tabpwa.cuda._v5_pwa_s0e import CUDAKernelV5PWAS0E
 from benchmark_pwa_kernels import _rate, _time, synthetic_case
 
@@ -159,14 +159,14 @@ def main():
         _row("A) N ≡ 1, 198 waves", kc, data_max, params, norm, sizes,
              [("s0e", lambda rs=rs, kc=kc: CUDAKernelV5PWAS0E(
                  kc, resolution_size=rs)),
-              ("gen_s0e", lambda rs=rs, kc=kc: CUDAKernelV5PwaGenS0E(
+              ("gen_s0e", lambda rs=rs, kc=kc: CUDAKernelV5PWAGenS0E(
                   kc, resolution_size=rs))])
         _row("B) kmatrix2 basis, 198 waves", kc_km, data_km, params_km,
              norm_km, sizes,
              [("s0e (s0 preset)", lambda rs=rs, kc=kc_km: CUDAKernelV5PWAS0E(
                  kc, resolution_size=rs)),
               ("gen_s0e (pwa_gen)", lambda rs=rs, kc=kc_km:
-                  CUDAKernelV5PwaGenS0E(kc, resolution_size=rs))])
+                  CUDAKernelV5PWAGenS0E(kc, resolution_size=rs))])
         print()
 
 
