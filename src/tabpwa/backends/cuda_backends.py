@@ -625,6 +625,55 @@ class CUDABackendV5PWAGenFlat(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_gen_bw", model="pwa_gen")
+class CUDABackendV5PWAGenBW(_CUDABackend):
+    """CUDA v5 PWA gen bw — ``cuda_v5_pwa_gen_flat`` with the denominator
+    basis block indexed **per unique base Breit–Wigner**.
+
+    ``BW_w = Π_r Σ_{idx∈off_bw[b(w,r)]} coeff[idx]·T[g_idx[idx]]``: the weights
+    of a base BW are stored ONCE and shared by every wave that refers to it
+    through ``bw_order`` (the flat sibling repeats them once per wave), so
+    the ``coeff`` / ``dcoeff`` block is ``n_bw·n_basis`` instead of
+    ``n_wave·n_res·n_basis`` — and the per-iteration H2D upload / D2H
+    download shrinks with it.  The sharing is also what makes the compute
+    cheaper: the basis matvec runs once per (event, BW) instead of once per
+    (event, wave, factor), and the coefficient gradient reads each basis
+    value once per (event, BW, slot) instead of once per (event, copy, slot).
+    Everything else — the fused tile, the grouped log-sum data NLL with the
+    group total weight, the combined basis table and the numerator folded
+    into the amp-cache fill — is the s0e gen machinery.  The host contract is
+    unchanged (padded ``params["coeff"]`` in, padded ``grads["coeff"]`` out;
+    the per-BW gradient is spread evenly over the BW's factor copies, so
+    ``PWAGenKernelParams``'s unchanged copy-sum recovers the total
+    derivative).  0.76–0.86× the flat kernel's compute time on the 198-wave
+    kmatrix2 benchmark shape.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_gen_bw import CUDAKernelV5PWAGenBW as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_gen_bw kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda_v5_pwa_s0cw", model="pwa")
 class CUDAKernelV5PWAS0CWBackend(_CUDABackend):
     """CUDA v5 PWA s0cw — the s0c kernel with the GROUP-WEIGHTED log NLL.

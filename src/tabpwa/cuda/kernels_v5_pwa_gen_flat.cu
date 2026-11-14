@@ -1,20 +1,37 @@
 /**
  * cuda_v5_pwa_gen_flat — case-1 copy of cuda_v5_pwa_gen_s0e whose
- * denominator basis is a **flat, unpadded, per-wave contiguous range**
- * (CSR-style) instead of the uniform ``n_basis`` slots per wave:
+ * denominator basis is a **flat, unpadded, per-(wave, factor) contiguous
+ * range** (CSR-style) instead of the uniform ``n_basis`` slots per wave,
+ * for **any number of Breit–Wigner factors per wave** (``n_res >= 1``):
  *
- *     BW_w(m) = Σ_{idx = off[w]}^{off[w+1]-1} coeff[idx] · T[g_idx[idx]](m)
- *     dQ/dcoeff[idx] = Σ_e (dQ/dBW_w) · T[g_idx[idx]](m_e)
+ *     bw_{w,r}(m) = Σ_{idx = off[f]}^{off[f+1]-1} coeff[idx] · T[g_idx[idx]](m)
+ *     BW_w(m)     = Π_r bw_{w,r}(m),                f = w·n_res + r
+ *     common_w    = amp_w / BW_w
+ *     dQ/dcoeff[idx] = Σ_e (dQ/dBW_w) · Π_{r'≠r} bw_{w,r'} · T[g_idx[idx]](m_e)
  *
- * ``off`` is int32 ``[n_wave + 1]``, ``g_idx`` int32 ``[n_basis_tot]`` and
- * ``coeff``/``dcoeff`` are float64 ``[n_basis_tot]`` with
- * ``n_basis_tot = off[n_wave] = Σ_w n_basis_w`` — no padding, so a mixed
- * decay (a 3-row resonance next to a 5-row one) carries
- * ``n_basis_tot < n_wave · n_basis_max``.  ``T`` is the combined basis table
+ * ``off`` is int32 ``[n_fact + 1]`` with ``n_fact = n_wave · n_res``,
+ * ``g_idx`` int32 ``[n_basis_tot]`` and ``coeff``/``dcoeff`` are float64
+ * ``[n_basis_tot]`` with ``n_basis_tot = off[n_fact] = Σ_f n_basis_f`` — no
+ * padding, so a mixed decay (a 3-row resonance next to a 5-row one) carries
+ * ``n_basis_tot < n_fact · n_basis_max``.  ``T`` is the combined basis table
  * this context owns (raw gamma rows + the two pre-rotated rows "1" / "m²" +
  * the ``den_table`` rows, exactly as in cuda_v5_pwa_gen_s0e); ``g_idx[idx]``
  * is the deduped ``(table row, mass column)`` interp slot (``uslot``), the
  * flat analogue of the padded ``slot_map``.
+ *
+ * The multi-factor gradient is the REFERENCE implementation
+ * (``tabpwa/cpu/_pwa_gen.py``) verbatim: with ``d = dQ/dcommon_w`` and
+ * ``dBW = −d·common_w``,
+ *
+ *     dQ/dcoeff[(w,r,i)] = 2·Re( dBW·(1/bw_{w,r})·F_i )
+ *
+ * and the ``1/bw_{w,r}`` is written as ``other_{w,r} / BW_w`` with
+ * ``other_{w,r} = Π_{r'≠r} bw_{w,r'}`` — a prefix·suffix product over the
+ * (1–3) factors, never a division by a factor that can vanish.  At
+ * ``n_res == 1`` the empty product is exactly ``1`` and the code reduces to
+ * the single-factor form (bit-identical: the factor value is the BW, the
+ * product is a multiply by 1+0i, and the coefficient gradient is the same
+ * negated expression in the same accumulation order).
  *
  * Everything else is inherited verbatim from cuda_v5_pwa_gen_s0e:
  * cuda_v5_pwa_s0e (fused single-kernel tile + the cuda_v5 GROUPED LOG-SUM
@@ -36,12 +53,18 @@
  * denominator needs NO new compute algebra.  Only the addressing is new:
  *
  *   1. **flat CSR basis addressing** — the padded
- *      ``coeff[w·n_basis + i]`` / ``slot_map[w·n_basis + i]`` indexing is
- *      replaced by ``coeff[off[w] + i]`` / ``g_idx[off[w] + i]`` and the
- *      per-wave loops run over ``off[w] … off[w+1]-1``.  ``wave_of_slot``
+ *      ``coeff[f·n_basis + i]`` / ``slot_map[f·n_basis + i]`` indexing is
+ *      replaced by ``coeff[off[f] + i]`` / ``g_idx[off[f] + i]`` and the
+ *      per-factor loops run over ``off[f] … off[f+1]-1``.  ``wave_of_slot``
  *      (``[n_basis_tot]``) lets the coefficient-gradient phase recover the
  *      wave (hence the projection ``p`` and the ``ck`` column ``k``) from a
  *      flat slot index.  No pinned/padded entry exists anywhere.
+ *      ``off`` is indexed by the **factor** ``f = w·n_res + r``, so a wave
+ *      with several BW factors owns one contiguous range per factor and
+ *      the factors are multiplied (cuda_v4_pwa_s0e / the CPU
+ *      ``cpu_pwa_gen`` model).  The gradient phase groups its work per
+ *      factor, so the other-factor product is formed once per event
+ *      instead of once per slot.
  *   2. **combined denominator table, built HERE** (as in the s0e gen
  *      sibling) — this context receives the raw ``gamma_table`` rows and
  *      the ``pwa_gen`` ``den_table`` rows as data and concatenates them
@@ -53,7 +76,7 @@
  *      then addresses that table, so this kernel sees no difference between
  *      a gamma row and a tabulated basis row.  Nothing is shared with, or
  *      appended to, any other kernel's table.
- *   2. **numerator factor** ``N_{n_index[w]}(m_e)`` — pure fixed data, so
+ *   3. **numerator factor** ``N_{n_index[w]}(m_e)`` — pure fixed data, so
  *      it is applied ONCE in the amp-cache FILL (load time), never in the
  *      per-iteration loop: each cached ``Amp = fa·fl`` is multiplied by
  *      the interpolated numerator row.  ``n_index[w] == 0`` is the
@@ -266,15 +289,16 @@ __global__ void amp_cache_fill_gen_kernel(
 //=============================================================================
 // KERNEL 2b: cached forward — BW propagator × cached angular amp.
 // Per event; threads stride over the P·N wave entries.  Same as
-// cuda_v3_ampcache's amp_cache_amp_gen_kernel but entry-count generic.
+// cuda_v3_ampcache's amp_cache_amp_gen_kernel but entry-count generic, with
+// the flat per-(wave, factor) basis and the BW **product** over the factors.
 //=============================================================================
 __global__ void amp_cache_amp_gen_flat_kernel(
     const double* __restrict__ us_r,          // s0d: u-cache [nb·n_uslot]
     const double* __restrict__ us_i,
     const double* __restrict__ coeff,         // flat: [n_basis_tot]
-    const int* __restrict__ off,              // flat: [n_wave + 1]
+    const int* __restrict__ off,              // flat: [n_fact + 1]
     const int* __restrict__ g_idx,            // flat: [n_basis_tot] -> uslot
-    int n_wave, int n_uslot,
+    int n_wave, int n_res, int n_uslot,
     const float2* __restrict__ amp_cache,
     const int* __restrict__ slot_of_wave,
     int n_uniq,
@@ -297,14 +321,23 @@ __global__ void amp_cache_amp_gen_flat_kernel(
 
     for (int wave_idx = tid; wave_idx < n_wave; wave_idx += block_sz) {
         int bw_idx = wave_idx;
-        double bw_r = 0.0, bw_i = 0.0;
-        const int b0 = off[wave_idx], b1 = off[wave_idx + 1];
+        const int f0 = wave_idx * n_res;
+        // product of the factors; the empty-product start (1, 0) makes the
+        // single-factor path exact (1·bw − 0·bw == bw bit for bit).
+        double bw_r = 1.0, bw_i = 0.0;
         if (n_uslot > 0) {
-            for (int b = b0; b < b1; b++) {
-                int u = g_idx[b];
-                double M = coeff[b];
-                bw_r += M * ui[u];               // -i·Z: Re = +Z_i
-                bw_i -= M * ur[u];               //       Im = -Z_r
+            for (int r = 0; r < n_res; r++) {
+                const int f = f0 + r;
+                double fr = 0.0, fi = 0.0;
+                for (int b = off[f]; b < off[f + 1]; b++) {
+                    int u = g_idx[b];
+                    double M = coeff[b];
+                    fr += M * ui[u];             // -i·Z: Re = +Z_i
+                    fi -= M * ur[u];             //       Im = -Z_r
+                }
+                const double t_r = bw_r * fr - bw_i * fi;
+                bw_i = bw_r * fi + bw_i * fr;
+                bw_r = t_r;
             }
         }
 
@@ -329,14 +362,14 @@ __global__ void us_cache_fill_gen_flat_kernel(
     const double* __restrict__ mass, int n_mass,
     const int* __restrict__ uslot_row,        // [n_uslot] ext-table row
     const int* __restrict__ uslot_col,        // [n_uslot] mass column
-    const int* __restrict__ off,              // flat: [n_wave + 1]
+    const int* __restrict__ off,              // flat: [n_fact + 1]
     const int* __restrict__ g_idx,            // flat: [n_basis_tot] -> uslot
     const int* __restrict__ slot_l,           // flat: [n_basis_tot]
                                               //   merged row (-1: non-gamma)
     const double* __restrict__ gamma_table_real,
     const double* __restrict__ gamma_table_imag,
     double gamma_min, double gamma_inv_delta, int gamma_table_bins,
-    int n_gamma_rows, int n_uslot, int n_wave,
+    int n_gamma_rows, int n_uslot, int n_fact,
     double* __restrict__ us_real, double* __restrict__ us_imag,
     double* __restrict__ gi_real, double* __restrict__ gi_imag,
     int n_events
@@ -362,9 +395,10 @@ __global__ void us_cache_fill_gen_flat_kernel(
     // s_us must be COMPLETE before the row scatter reads other threads'
     // (row, col) slots — the load-time analogue of the shipped s0c barrier.
     __syncthreads();
-    for (int wave_idx = tid; wave_idx < n_wave; wave_idx += block_sz) {
-        const int b1 = off[wave_idx + 1];
-        for (int b = off[wave_idx]; b < b1; b++) {
+    // per (wave, factor) contiguous range (off is factor-indexed)
+    for (int f = tid; f < n_fact; f += block_sz) {
+        const int b1 = off[f + 1];
+        for (int b = off[f]; b < b1; b++) {
             int l = slot_l[b];
             if (l >= 0) {
                 int u = g_idx[b];
@@ -386,35 +420,40 @@ __global__ void us_cache_fill_gen_flat_kernel(
 // the rs > TE path.
 //
 // shared: 4 arrays of [S0E_TE*n_wave] + 4 of [S0E_TE*n_proj] doubles
-//         + a tail of per-event P/q/scale (+ the rs>TE group accumulators)
+//         + a tail of per-event P/q/scale (+ the n_res > 1 factor cache)
+//         (+ the rs>TE group accumulators)
 //=============================================================================
 #define S0E_TE    8        /* events per tile (chunk in the rs>TE path) */
 #define S0E_BLOCK 256      /* threads */
+#define S0E_KACC  8        /* coefficient-gradient accumulators per thread */
 
-/* shared tail: 3 arrays of S0E_TE (P_e, q_e, group scale) for the
-   whole-group path, or the same plus [3] totals (S, WP, W) + the shared
-   per-group gradient accumulators grad_ck[2N] + grad_coeff[n_basis_tot] */
-#define S0E_TAIL(nw, P, nb) \
-    ((3 * S0E_TE) > (3 * S0E_TE + 3 + 2 * ((nw) / (P)) + (nb)) \
-        ? (3 * S0E_TE) \
-        : (3 * S0E_TE + 3 + 2 * ((nw) / (P)) + (nb)))
+/* shared tail: 3 arrays of S0E_TE (P_e, q_e, group scale) + the
+   per-(event, factor) BW factor cache (nfr = n_fact when n_res > 1, else 0)
+   for the whole-group path, or the same plus [3] totals (S, WP, W) + the
+   shared per-group gradient accumulators grad_ck[2N] +
+   grad_coeff[n_basis_tot] */
+#define S0E_TAIL(nw, P, nb, nfr) \
+    (3 * S0E_TE + 2 * S0E_TE * (nfr) + 3 + 2 * ((nw) / (P)) + (nb))
 
-#define S0E_SHM_V5(nw, P, nb) \
+#define S0E_SHM_V5(nw, P, nb, nfr) \
     ((size_t)(4 * S0E_TE * (nw) + 4 * S0E_TE * (P) \
-              + S0E_TAIL((nw), (P), (nb))) * sizeof(double))
+              + S0E_TAIL((nw), (P), (nb), (nfr))) * sizeof(double))
 
 __global__ void s0e_tile_gen_flat_kernel_v5(
     const double* __restrict__ coeff,        /* flat: [n_basis_tot] */
-    const int* __restrict__ off,             /* flat: [n_wave + 1] */
+    const int* __restrict__ off,             /* flat: [n_fact + 1] */
     const int* __restrict__ g_idx,           /* flat: [n_basis_tot] -> uslot */
-    const int* __restrict__ wave_of_slot,    /* flat: [n_basis_tot] -> wave */
+    const int* __restrict__ wave_of_slot,    /* flat: [n_basis_tot] -> wave
+                                                (kept for the API/validation;
+                                                the gradient phase derives the
+                                                wave as f / n_res) */
     const int* __restrict__ slot_of_wave,    /* [n_wave] -> amp cache slot */
     const double* __restrict__ us_r,         /* [ne*n_uslot] */
     const double* __restrict__ us_i,
     const float2* __restrict__ amp_cache,    /* [ne*n_uniq] */
     const double* __restrict__ ck_r, const double* __restrict__ ck_i,
     const double* __restrict__ weight, const double* __restrict__ bkg,
-    int n_wave, int N, int n_proj, int n_bt, int n_uslot, int n_uniq,
+    int n_wave, int n_res, int N, int n_proj, int n_bt, int n_uslot, int n_uniq,
     int ne, int use_norm, double norm, int rsize,
     double* __restrict__ Q_acc, double* __restrict__ dnorm_acc,
     double* __restrict__ g_ck_r, double* __restrict__ g_ck_i,
@@ -425,6 +464,8 @@ __global__ void s0e_tile_gen_flat_kernel_v5(
     const int nt  = blockDim.x;
     const int P   = n_proj;
     const int nc  = n_bt;              /* flat basis slots (no padding) */
+    const int n_fact = n_wave * n_res; /* (wave, factor) entries */
+    const int nfr = (n_res > 1) ? n_fact : 0;  /* factor cache (0: absent) */
     const int rs  = (rsize < 1) ? 1 : rsize;
     const int pathB = (rs > S0E_TE);
 
@@ -445,7 +486,9 @@ __global__ void s0e_tile_gen_flat_kernel_v5(
     double* s_pe = s_di + (size_t)S0E_TE * P;            /* P_e         */
     double* s_q  = s_pe + S0E_TE;                        /* q_e         */
     double* s_sc = s_q + S0E_TE;                         /* group scale */
-    double* s_tot = s_sc + S0E_TE;                       /* [3]  path B */
+    double* s_fr = s_sc + S0E_TE;                        /* bw_{w,r}     */
+    double* s_fi = s_fr + (size_t)S0E_TE * nfr;          /*   n_res > 1  */
+    double* s_tot = s_fi + (size_t)S0E_TE * nfr;         /* [3]  path B */
     double* s_gr = s_tot + 3;                            /* [N]  path B */
     double* s_gi = s_gr + N;
     double* s_gc = s_gi + N;                             /* [nc] path B */
@@ -474,19 +517,33 @@ __global__ void s0e_tile_gen_flat_kernel_v5(
         int nen = pathB ? (evn - c * S0E_TE) : evn;
         if (nen > S0E_TE) nen = S0E_TE;
 
-        /* phase A: BW, 1/BW, common, common/BW (one thread per (event, wave)) */
+        /* phase A: per-factor bw_{w,r}, the BW product, 1/BW, common,
+           common/BW (one thread per (event, wave)) */
         for (int idx = tid; idx < nen * n_wave; idx += nt) {
             const int e = idx / n_wave;
             const int w = idx - e * n_wave;
-            const int b0 = off[w], b1 = off[w + 1];
             const double* ur = us_r + (size_t)(ce0 + e) * n_uslot;
             const double* ui = us_i + (size_t)(ce0 + e) * n_uslot;
-            double bw_r = 0.0, bw_i = 0.0;
-            for (int b = b0; b < b1; b++) {
-                const double M = coeff[b];
-                const int u = g_idx[b];
-                bw_r += M * ui[u];       /* -i*Z : Re = +Z_i */
-                bw_i -= M * ur[u];       /*        Im = -Z_r */
+            const int f0 = w * n_res;
+            /* the factors are MULTIPLIED; the (1, 0) start is exact, so
+               n_res == 1 gives back the single factor bit for bit */
+            double bw_r = 1.0, bw_i = 0.0;
+            for (int r = 0; r < n_res; r++) {
+                const int f = f0 + r;
+                double fr = 0.0, fi = 0.0;
+                for (int b = off[f]; b < off[f + 1]; b++) {
+                    const double M = coeff[b];
+                    const int u = g_idx[b];
+                    fr += M * ui[u];         /* -i*Z : Re = +Z_i */
+                    fi -= M * ur[u];         /*        Im = -Z_r */
+                }
+                if (nfr) {                   /* n_res > 1: keep the factor */
+                    s_fr[e * nfr + f] = fr;
+                    s_fi[e * nfr + f] = fi;
+                }
+                const double t_r = bw_r * fr - bw_i * fi;
+                bw_i = bw_r * fi + bw_i * fr;
+                bw_r = t_r;
             }
             const double den = bw_r * bw_r + bw_i * bw_i;
             const double ir =  bw_r / den;
@@ -607,26 +664,55 @@ __global__ void s0e_tile_gen_flat_kernel_v5(
             atomicAdd(d_ck_i + k, si);
         }
 
-        /* phase D: coefficient gradient (flat slots; the wave — hence p/k —
-           comes from wave_of_slot) */
-        for (int idx = tid; idx < nc; idx += nt) {
-            const int w = wave_of_slot[idx];
+        /* phase D: coefficient gradient, grouped per (wave, factor) so the
+           product of the OTHER factors (prefix·suffix over r' != r — no
+           division by a factor that can vanish) is formed once per EVENT
+           instead of once per slot.  Flat slots; the wave — hence p/k —
+           comes from the factor index (f / n_res). */
+        for (int f = tid; f < n_fact; f += nt) {
+            const int w = f / n_res;
+            const int r = f - w * n_res;
+            const int b0 = off[f], b1 = off[f + 1];
             const int p = w / N;
             const int k = w - p * N;
-            const int u = g_idx[idx];
             const double ckr = ck_r[k], cki = ck_i[k];
-            double acc = 0.0;
-            for (int e = 0; e < nen; e++) {
-                const double dr = s_dr[e * P + p], di = s_di[e * P + p];
-                const int o = e * n_wave + w;
-                const double ur = dr * ckr - di * cki;
-                const double ui = dr * cki + di * ckr;
-                const double dbr = -(ur * s_xr[o] - ui * s_xi[o]);
-                const double dbi = -(ur * s_xi[o] + ui * s_xr[o]);
-                const size_t uo = (size_t)(ce0 + e) * n_uslot + u;
-                acc += 2.0 * (dbr * us_i[uo] + dbi * us_r[uo]);
+            const int nsl = b1 - b0;
+            for (int i0 = 0; i0 < nsl; i0 += S0E_KACC) {
+                const int ilim = (nsl - i0 < S0E_KACC)
+                    ? (nsl - i0) : S0E_KACC;
+                double acc[S0E_KACC];
+                for (int j = 0; j < S0E_KACC; j++) acc[j] = 0.0;
+                for (int e = 0; e < nen; e++) {
+                    const double dr = s_dr[e * P + p], di = s_di[e * P + p];
+                    const int o = e * n_wave + w;
+                    /* d = dQ/dcommon_w — only projection p touches this
+                       wave, so p and k are fixed here */
+                    const double ur = dr * ckr - di * cki;
+                    const double ui = dr * cki + di * ckr;
+                    /* dBW·(1/bw_{w,r}) = -(d·common/BW)·Π_{r'≠r} bw_{w,r'} */
+                    double dbr = -(ur * s_xr[o] - ui * s_xi[o]);
+                    double dbi = -(ur * s_xi[o] + ui * s_xr[o]);
+                    if (n_res > 1) {
+                        const int ef = e * nfr + w * n_res;
+                        for (int r2 = 0; r2 < n_res; r2++) {
+                            if (r2 == r) continue;
+                            const double ar2 = dbr, ai2 = dbi;
+                            const double br2 = s_fr[ef + r2];
+                            const double bi2 = s_fi[ef + r2];
+                            dbr = ar2 * br2 - ai2 * bi2;
+                            dbi = ar2 * bi2 + ai2 * br2;
+                        }
+                    }
+                    const size_t ubase = (size_t)(ce0 + e) * n_uslot;
+                    for (int j = 0; j < ilim; j++) {
+                        const int u = g_idx[b0 + i0 + j];
+                        const size_t uo = ubase + u;
+                        acc[j] += 2.0 * (dbr * us_i[uo] + dbi * us_r[uo]);
+                    }
+                }
+                for (int j = 0; j < ilim; j++)
+                    atomicAdd(d_coeff + b0 + i0 + j, acc[j]);
             }
-            atomicAdd(d_coeff + idx, acc);
         }
         __syncthreads();   /* shared tile / accumulators reused next chunk */
     }
@@ -947,7 +1033,7 @@ void* cuda_create_context_v5_gen_flat(
     c->matrix_gamma = (n16 > 0) ? (double*)_up_dbl_gen(mg, n16) : NULL;  // unused (per-wave rows)
     c->gamma_col_idx = (int*)_up_int_gen(gci, ngci);
     c->fl_table = (double*)_up_dbl_gen(ft, n17); c->fl_min = flmin; c->fl_delta = fldel; c->fl_table_bins = fbins;
-    c->n_wave = nw; c->n_res = nr; c->n_decay = nd;
+    c->n_wave = nw; c->n_res = nr > 0 ? nr : 1; c->n_decay = nd;
     c->n_unique_bw = nub; c->n_gamma_rows = ngr;
     c->n_mass = nm; c->n_momentum = nmom; c->n_angle_k = nak_; c->n_angle_total = nat; c->n_angle_comp = nac;
     c->n_m0_params = n_m0p; c->n_g0_params = n_g0p;
@@ -964,16 +1050,19 @@ void* cuda_create_context_v5_gen_flat(
     c->wave_of_slot = (int*)_up_int_gen(wave_of_slot, n_wos);
     c->slot_l = (int*)_up_int_gen(slot_l, n_sl);
     // fail fast on an inconsistent CSR range table (checked on the HOST
-    // copy — the uploaded buffers are device memory)
-    if (!off || n_off != nw + 1 || !g_idx || !wave_of_slot
-            || off[0] != 0 || off[nw] != c->n_basis_tot
+    // copy — the uploaded buffers are device memory).  ``off`` is indexed
+    // by the FACTOR f = w·n_res + r, so it has n_wave·n_res + 1 entries.
+    const int n_fact = nw * (nr > 0 ? nr : 1);
+    if (!off || n_off != n_fact + 1 || !g_idx || !wave_of_slot
+            || off[0] != 0 || off[n_fact] != c->n_basis_tot
             || (int)n_gidx != c->n_basis_tot
             || (int)n_wos != c->n_basis_tot) {
         fprintf(stderr,
                 "cuda_v5_pwa_gen_flat: inconsistent flat basis table "
-                "(off %d entries, n_wave %d, n_basis_tot %d, g_idx %d, "
-                "wave_of_slot %d)\n",
-                n_off, nw, c->n_basis_tot, (int)n_gidx, (int)n_wos);
+                "(off %d entries, n_fact %d (n_wave %d, n_res %d), "
+                "n_basis_tot %d, g_idx %d, wave_of_slot %d)\n",
+                n_off, n_fact, nw, nr, c->n_basis_tot, (int)n_gidx,
+                (int)n_wos);
         cuda_free_context_v5(c);
         return NULL;
     }
@@ -987,15 +1076,17 @@ void* cuda_create_context_v5_gen_flat(
     }
     // the fused tile lives in shared memory: fail fast if it cannot fit
     {
-        size_t shm = S0E_SHM_V5(c->n_wave, c->n_proj, c->n_basis_tot);
+        size_t shm = S0E_SHM_V5(c->n_wave, c->n_proj, c->n_basis_tot,
+                                c->n_res > 1 ? n_fact : 0);
         int shm_opt = 0;
         cudaDeviceGetAttribute(&shm_opt,
                                cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
         if ((int)shm > shm_opt) {
             fprintf(stderr,
                     "cuda_v5_pwa_gen_flat: shared tile %zu B exceeds the device "
-                    "opt-in limit %d B (n_wave %d, n_basis_tot %d, S0E_TE %d)\n",
-                    shm, shm_opt, c->n_wave, c->n_basis_tot, S0E_TE);
+                    "opt-in limit %d B (n_wave %d, n_res %d, n_basis_tot %d, "
+                    "S0E_TE %d)\n",
+                    shm, shm_opt, c->n_wave, c->n_res, c->n_basis_tot, S0E_TE);
             cuda_free_context_v5(c);
             return NULL;
         }
@@ -1128,7 +1219,7 @@ void* cuda_load_data_v5(void* vctx,
                 c_ctx->gamma_min, 1.0 / c_ctx->gamma_delta,
                 c_ctx->gamma_table_bins_ext,
                 c_ctx->n_gamma_rows, c_ctx->n_uslot,
-                c_ctx->n_wave,
+                c_ctx->n_wave * c_ctx->n_res,
                 h->us_real, h->us_imag, h->gi_real, h->gi_imag, ne);
             if (cudaGetLastError() != cudaSuccess) goto fail;
             cudaStreamSynchronize(c_ctx->stream);
@@ -1269,14 +1360,15 @@ void cuda_compute_v5_gen_flat(void* vctx, void* vdh,
         // blocks hold whole groups: rs·(S0E_TE/rs) events, or one group
         const int per_blk = (rs > S0E_TE) ? rs : rs * (S0E_TE / rs);
         const int tiles = (ne + per_blk - 1) / per_blk;
-        const size_t shm = S0E_SHM_V5(nw, P, nbt);
+        const size_t shm = S0E_SHM_V5(nw, P, nbt,
+                                      c->n_res > 1 ? nw * c->n_res : 0);
         genflat_set_shmem(shm);
         s0e_tile_gen_flat_kernel_v5<<<tiles, S0E_BLOCK, shm, c->stream>>>(
             c->p_coeff, c->off, c->g_idx, c->wave_of_slot, c->slot_of_wave,
             h->us_real, h->us_imag, h->amp_cache,
             c->p_ck_r, c->p_ck_i,
             h->w, h->b,
-            nw, N, P, nbt, c->n_uslot, c->n_uniq,
+            nw, c->n_res, N, P, nbt, c->n_uslot, c->n_uniq,
             ne, use_norm, norm, rs,
             c->acc_buf + 0, c->acc_buf + 1,
             c->acc_buf + off_gck_r, c->acc_buf + off_gck_i,
@@ -1346,7 +1438,7 @@ void cuda_gram_matrix_v5(void* vctx, void* vdh,
             h->us_real + (size_t)st * c->n_uslot,
             h->us_imag + (size_t)st * c->n_uslot,
             c->p_coeff, c->off, c->g_idx,
-            nw, c->n_uslot,
+            nw, c->n_res, c->n_uslot,
             h->amp_cache + (size_t)st * c->n_uniq,
             c->slot_of_wave, c->n_uniq,
             cr, ci, br, bi, nb);

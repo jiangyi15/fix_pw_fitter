@@ -212,11 +212,12 @@ def check_backend_support(config, backend_name):
         # ``_CUDABackend`` passes its CLASS name here (the backend is built
         # through the class); accept both spellings of the gen kernels.
         allow = {"CUDABackendV5PWAGenS0E", "cuda_v5_pwa_gen_s0e",
-                 "CUDABackendV5PWAGenFlat", "cuda_v5_pwa_gen_flat"}
+                 "CUDABackendV5PWAGenFlat", "cuda_v5_pwa_gen_flat",
+                 "CUDABackendV5PWAGenBW", "cuda_v5_pwa_gen_bw"}
         if backend_name in allow:
             return
         raise ValueError(
             f"pwa_gen numerator not supported by {backend_name} yet; "
             f"use a CPU backend, cuda_v5_pwa_gen_s0e, "
-            f"cuda_v5_pwa_gen_flat, or n≡1 (and the default denominator "
-            f"basis, i.e. no extended basis rows)")
+            f"cuda_v5_pwa_gen_flat, cuda_v5_pwa_gen_bw, or n≡1 (and the "
+            f"default denominator basis, i.e. no extended basis rows)")

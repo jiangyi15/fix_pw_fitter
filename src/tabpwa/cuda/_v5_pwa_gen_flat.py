@@ -1,19 +1,30 @@
 """
 CUDA kernel v5 PWA gen flat — the ``pwa_gen`` fused tile kernel of
-``cuda_v5_pwa_gen_s0e`` with a **flat, unpadded, per-wave contiguous**
-denominator basis (CSR-style):
+``cuda_v5_pwa_gen_s0e`` with a **flat, unpadded, per-(wave, factor)
+contiguous** denominator basis (CSR-style), for **any** ``n_res >= 1``
+Breit–Wigner factors per wave:
 
-    BW_w(m) = Σ_{idx = off[w]}^{off[w+1]-1} coeff[idx] · T[g_idx[idx]](m)
-    dQ/dcoeff[idx] = Σ_e (dQ/dBW_w) · T[g_idx[idx]](m_e)
+    bw_{w,r}(m) = Σ_{idx = off[f]}^{off[f+1]-1} coeff[idx] · T[g_idx[idx]](m)
+    BW_w(m)     = Π_r bw_{w,r}(m),                       f = w·n_res + r
+    common_w    = amp_w / BW_w
+    ∂Q/∂coeff[idx] = Σ_e (∂Q/∂BW_w) · Π_{r'≠r} bw_{w,r'} · T[g_idx[idx]](m_e)
 
-* ``off`` int32 ``[n_wave + 1]`` — the flat slot range of each wave;
+* ``off`` int32 ``[n_fact + 1]``, ``n_fact = n_wave · n_res`` — the flat
+  slot range of each **(wave, factor)**;
 * ``g_idx`` int32 ``[n_basis_tot]`` — the deduped ``(combined-table row,
   mass column)`` interp slot of each flat coefficient (the flat analogue of
   the padded ``slot_map``);
 * ``coeff`` / ``dcoeff`` float64 ``[n_basis_tot]`` with
-  ``n_basis_tot = off[n_wave] = Σ_w n_basis_w`` — **no padded slots**, so a
+  ``n_basis_tot = off[n_fact] = Σ_f n_basis_f`` — **no padded slots**, so a
   mixed decay (a 3-row resonance next to a 5-row one) carries
-  ``n_basis_tot < n_wave · n_basis_max``.
+  ``n_basis_tot < n_fact · n_basis_max``.
+
+The multi-factor gradient is the ``cpu_pwa_gen`` model (see
+``tabpwa/cpu/_pwa_gen.py``): the factors are multiplied, and the
+``1/bw_{w,r}`` of the reference formula is written as the prefix·suffix
+product of the *other* factors — never a division by a factor that can
+vanish.  At ``n_res == 1`` the empty product is exactly 1 and the numbers
+collapse to the single-factor ones (bit-identical, see the kernel header).
 
 Everything else is the s0e gen machinery verbatim: the fused per-iteration
 tile (BW / 1/BW / common / common⁄BW / A_p / dQ⁄dA_p all in shared memory,
@@ -24,7 +35,7 @@ the context owns (raw ``gamma_table`` rows + the pre-rotated "1" / "m²" rows
 ``N_{n_index[w]}(m_e)`` folded into the amp-cache fill (load time).
 
 The host contract is **unchanged**: ``compute`` still takes
-``params["coeff"]`` in the padded ``(n_wave, n_basis)`` form produced by
+``params["coeff"]`` in the padded ``(n_fact, n_basis)`` form produced by
 :class:`~tabpwa.kernel_params.PWAGenKernelParams`, compresses it to the flat
 block with this wrapper's own ``off`` / ``g_idx``, and returns
 ``grads["coeff"]`` in the same padded shape the other ``pwa_gen`` kernels
@@ -158,7 +169,7 @@ class CUDAKernelV5PWAGenFlat:
     """Flat-CSR ``pwa_gen`` fused tile + group-total-weight log-sum NLL.
 
     ``params`` needs ``ck`` (length N = n_wave/n_proj) plus either
-    ``m0``/``g0`` (default basis) or ``coeff`` ``(n_wave, n_basis)`` padded
+    ``m0``/``g0`` (default basis) or ``coeff`` ``(n_fact, n_basis)`` padded
     (explicit ``den_row`` basis).  Gradients mirror the same keys — the
     ``coeff`` gradient is returned **padded**, exactly like
     ``cuda_v5_pwa_gen_s0e``.
@@ -187,17 +198,18 @@ class CUDAKernelV5PWAGenFlat:
                 f"v5 PWA gen flat: n_wave={self.n_wave} not divisible by "
                 f"n_proj={self.n_proj}")
         self.n_wave_base = self.n_wave // self.n_proj  # N = ck length
-        self.n_res = c["bw_order"].size // self.n_wave
-        if self.n_res != 1:
+        # ── factors per wave: n_res >= 1, any number ────────────────
+        self.bw_order = np.ascontiguousarray(
+            np.asarray(c["bw_order"]).reshape(-1), np.int64)
+        if self.bw_order.size % self.n_wave != 0:
             raise ValueError(
-                "cuda_v5_pwa_gen_flat needs exactly ONE BW per chain "
-                f"(top -> R + X), got n_res = {self.n_res} — use "
-                "cuda_v5_pwa(_s0c/_s0d) for multi-BW chains")
-
-        bw = np.asarray(c["bw_order"]).reshape(-1)
-        if bw.size != self.n_wave:
-            raise ValueError("bw_order must be flat (n_wave,) at n_res=1")
-        mass_index_w = np.asarray(c["mass_index"])[bw]
+                f"cuda_v5_pwa_gen_flat: bw_order size {self.bw_order.size} "
+                f"is not a multiple of n_wave={self.n_wave}")
+        self.n_res = self.bw_order.size // self.n_wave        # BW factors
+        self.n_fact = self.n_wave * self.n_res                # (wave, factor)
+        # the BW slot of each (wave, factor) entry
+        bw = self.bw_order
+        mass_index_w = np.asarray(c["mass_index"])[bw]        # [n_fact]
 
         self.n_decay = c["fl_order"].size // self.n_wave
         self.n_mass = int(np.max(c["mass_index"])) + 1
@@ -271,53 +283,60 @@ class CUDAKernelV5PWAGenFlat:
 
     # ── flat CSR layout helpers ─────────────────────────────────────
     def _finish_flat(self, widths):
-        """``off`` from the per-wave widths; flat↔padded column mapping."""
+        """``off`` from the per-(wave, factor) widths; flat↔padded mapping."""
         widths = np.asarray(widths, np.int64)
-        if widths.size != self.n_wave:
+        if widths.size != self.n_fact:
             raise ValueError(
-                f"cuda_v5_pwa_gen_flat: {widths.size} wave widths for "
-                f"n_wave={self.n_wave}")
+                f"cuda_v5_pwa_gen_flat: {widths.size} (wave, factor) widths "
+                f"for n_fact={self.n_fact} (n_wave {self.n_wave}, "
+                f"n_res {self.n_res})")
         if np.any(widths < 1):
             raise ValueError(
-                "cuda_v5_pwa_gen_flat: every wave needs at least one "
-                f"basis slot (got {widths.tolist()})")
+                "cuda_v5_pwa_gen_flat: every (wave, factor) needs at least "
+                f"one basis slot (got {widths.tolist()})")
         self.n_basis_w = widths
         self.off = np.concatenate(
             [[0], np.cumsum(widths)]).astype(np.int32)
         self.n_basis_tot = int(self.off[-1])
         self.wave_of_slot = np.repeat(
-            np.arange(self.n_wave, dtype=np.int32), widths)
-        # flat slot -> padded (wave, col) flat index (grad re-expansion)
+            np.arange(self.n_fact, dtype=np.int32) // self.n_res, widths)
+        # flat slot -> padded (factor, col) flat index (grad re-expansion)
         cols = np.concatenate([np.arange(int(w)) for w in widths])
         rows = np.concatenate([
             np.full(int(w), i, np.int64) for i, w in enumerate(widths)])
         self._flat_src = (rows * self.n_basis + cols).astype(np.int64)
 
     def _init_plain(self, c, bw, mass_index_w, one_row):
-        """s0 preset: slot 0 = s0, slot 1 = −1, then the wave's γ rows."""
+        """s0 preset, per (wave, factor): s0, −1, then the factor's γ rows.
+
+        ``bw`` is the flat ``[n_fact]`` BW slot of each (wave, factor) entry,
+        so the gamma rows are merged per factor exactly as in the CPU
+        sibling ``cpu_pwa_gen`` (whose non-generic preset this mirrors).
+        """
         self.n_basis = 0
-        m0_index_w = np.asarray(c["m0_index"])[bw]
-        mg_w = np.asarray(c["matrix_gamma"])[:, bw]     # (n_gamma, n_wave)
-        gamma_col_idx_w, rows_w = np.nonzero(mg_w.T)    # wave-major
+        m0_index_w = np.asarray(c["m0_index"])[bw]           # [n_fact]
+        mg_w = np.asarray(c["matrix_gamma"])[:, bw]     # (n_gamma, n_fact)
+        rows_idx, rows_w = np.nonzero(mg_w.T)           # factor-major
         self._gamma_col_idx = np.ascontiguousarray(
-            gamma_col_idx_w.astype(np.int32))
+            rows_idx.astype(np.int32))                  # gamma row of each
+        self._fact_of_row = rows_idx.astype(np.int64)
         rows_w = rows_w.astype(np.int64)
         g0_index_w = np.asarray(c["g0_index"])[rows_w]
         g0_mass_index_w = np.asarray(c["g0_mass_index"])[rows_w]
         self._g0_index_w = g0_index_w
         self._g0_mass_index_w = g0_mass_index_w
         self._m0_index_w = m0_index_w
-        self._wave_of_row = self._gamma_col_idx.astype(np.int64)
-        self._mass_index_w = mass_index_w
+        self._mass_index_w = mass_index_w               # [n_fact]
         self.n_gamma_rows = int(rows_w.size)
-        self.n_unique_bw = self.n_wave          # wave index == BW slot
+        self.n_unique_bw = self.n_fact          # factor index == BW slot
         self.row_start = np.searchsorted(
-            self._gamma_col_idx, np.arange(self.n_wave),
+            self._fact_of_row, np.arange(self.n_fact),
             side="left").astype(np.int32)
-        rows_per_wave = np.diff(
+        rows_per_fact = np.diff(
             np.append(self.row_start, self.n_gamma_rows)).astype(np.int64)
         # padded n_basis of the s0e gen sibling (comparison / anchors only)
-        self.n_basis = int(2 + rows_per_wave.max())
+        self.n_basis = int(2 + (int(rows_per_fact.max())
+                                if self.n_fact else 0))
 
         uniq = {}
         uslot_row, uslot_col = [], []
@@ -330,17 +349,17 @@ class CUDAKernelV5PWAGenFlat:
                 uslot_col.append(key[1])
             return uniq[key]
 
-        self._finish_flat(2 + rows_per_wave)
+        self._finish_flat(2 + rows_per_fact)
         g_idx = np.empty(self.n_basis_tot, np.int32)
         slot_l = np.full(self.n_basis_tot, -1, np.int32)
-        for w in range(self.n_wave):
-            b0 = int(self.off[w])
-            r0 = int(self.row_start[w])
-            r1 = (int(self.row_start[w + 1]) if w + 1 < self.n_wave
+        for f in range(self.n_fact):
+            b0 = int(self.off[f])
+            r0 = int(self.row_start[f])
+            r1 = (int(self.row_start[f + 1]) if f + 1 < self.n_fact
                   else self.n_gamma_rows)
             g_idx[b0] = _uslot(one_row, 0)                 # "1"  (constant)
             g_idx[b0 + 1] = _uslot(one_row + 1,
-                                   int(mass_index_w[w]))    # "m²"
+                                   int(mass_index_w[f]))    # "m²"
             for j in range(r0, r1):
                 g_idx[b0 + 2 + j - r0] = _uslot(
                     int(g0_index_w[j]), int(g0_mass_index_w[j]))
@@ -354,34 +373,37 @@ class CUDAKernelV5PWAGenFlat:
         self._den_table = None
 
     def _init_generic(self, c, bw, mass_index_w, one_row):
-        """Explicit ``den_row`` basis, packed per wave with no padding.
+        """Explicit ``den_row`` basis, packed per (wave, factor), no padding.
 
         ``den_row`` pads a narrower resonance with the ``ZERO_KIND`` (-1)
         sentinel; those columns are trailing and carry coefficient 0, so the
         flat layout simply drops them.  Anything but a trailing padding
         block would break the "contiguous range" contract and is rejected.
+        Each factor of a wave has its own ``den_row`` row (``bw`` maps the
+        factor to its BW slot), so the factors of one wave may have
+        different widths.
         """
         enc = np.asarray(c["den_row"])
         if enc.ndim != 2:
             raise ValueError("cuda_v5_pwa_gen_flat: den_row must be 2-D")
-        enc_w = enc[bw]
+        enc_w = enc[bw]                          # [n_fact, n_basis]
         self.n_basis = int(enc.shape[1])
-        widths = np.zeros(self.n_wave, np.int64)
-        for w in range(self.n_wave):
-            live = np.nonzero(enc_w[w] >= 0)[0]
+        widths = np.zeros(self.n_fact, np.int64)
+        for f in range(self.n_fact):
+            live = np.nonzero(enc_w[f] >= 0)[0]
             wd = int(live.max()) + 1 if live.size else 0
-            if wd and not np.all(enc_w[w][:wd] >= 0):
+            if wd and not np.all(enc_w[f][:wd] >= 0):
                 raise ValueError(
                     "cuda_v5_pwa_gen_flat: den_row padding must be a "
-                    f"trailing block (wave {w}: {enc_w[w].tolist()})")
-            widths[w] = wd
+                    f"trailing block (factor {f}: {enc_w[f].tolist()})")
+            widths[f] = wd
         self._mass_index_w = mass_index_w
-        self.n_unique_bw = self.n_wave
+        self.n_unique_bw = self.n_fact
         # the generic path never reads m0/g0/gamma-row indices on the device
         self._gamma_col_idx = np.zeros(0, np.int32)
         self._g0_index_w = np.zeros(0, np.int32)
         self._g0_mass_index_w = np.zeros(0, np.int32)
-        self._wave_of_row = np.zeros(0, np.int64)
+        self._fact_of_row = np.zeros(0, np.int64)
         self.row_start = np.zeros(0, np.int32)
 
         uniq = {}
@@ -397,11 +419,11 @@ class CUDAKernelV5PWAGenFlat:
 
         self._finish_flat(widths)
         g_idx = np.empty(self.n_basis_tot, np.int32)
-        for w in range(self.n_wave):
-            b0 = int(self.off[w])
-            col = int(mass_index_w[w])
-            for j in range(int(widths[w])):
-                e = int(enc_w[w, j])
+        for f in range(self.n_fact):
+            b0 = int(self.off[f])
+            col = int(mass_index_w[f])
+            for j in range(int(widths[f])):
+                e = int(enc_w[f, j])
                 if e == 0:                                  # F = 1
                     g_idx[b0 + j] = _uslot(one_row, 0)
                 elif e == 1:                                # F = −m²
@@ -419,19 +441,19 @@ class CUDAKernelV5PWAGenFlat:
 
     # ── packed ↔ flat coefficient mapping ───────────────────────────
     def _pack(self, coeff_padded):
-        """Padded ``(n_wave, n_basis)`` → flat ``[n_basis_tot]``."""
+        """Padded ``(n_fact, n_basis)`` → flat ``[n_basis_tot]``."""
         flat = np.ascontiguousarray(coeff_padded, np.float64).reshape(-1)
-        if flat.size != self.n_wave * self.n_basis:
+        if flat.size != self.n_fact * self.n_basis:
             raise ValueError(
                 f"cuda_v5_pwa_gen_flat: coeff length {flat.size} != "
-                f"n_wave·n_basis = {self.n_wave}·{self.n_basis}")
+                f"n_fact·n_basis = {self.n_fact}·{self.n_basis}")
         return np.ascontiguousarray(flat[self._flat_src])
 
     def _unpack(self, gflat):
-        """Flat ``[n_basis_tot]`` gradient → padded ``(n_wave, n_basis)``."""
-        gp = np.zeros(self.n_wave * self.n_basis, np.float64)
+        """Flat ``[n_basis_tot]`` gradient → padded ``(n_fact, n_basis)``."""
+        gp = np.zeros(self.n_fact * self.n_basis, np.float64)
         gp[self._flat_src] = gflat
-        return gp.reshape(self.n_wave, self.n_basis)
+        return gp.reshape(self.n_fact, self.n_basis)
 
     # ── context ─────────────────────────────────────────────────────
     def _create_context(self, c, gt, bw, batch_size):
@@ -568,30 +590,34 @@ class CUDAKernelV5PWAGenFlat:
         return dh
 
     def _coeff_from_m0g0(self, params):
-        """s0 preset (flat): slot 0 = m0², slot 1 = −1, then m0·g0_j."""
+        """s0 preset (flat), per (wave, factor): m0², −1, then m0·g0_j.
+
+        The factors of a wave are the s0c preset of each BW in the product;
+        at ``n_res == 1`` the single factor is the wave's BW, so this is the
+        previous per-wave assembly unchanged.
+        """
         nm_, gg_ = self.n_m0_params, self.n_g0_params
         m0 = np.zeros(nm_, np.float64)
         m0[:len(params["m0"])] = np.asarray(params["m0"])
         g0 = np.zeros(gg_, np.float64)
         g0[:len(params["g0"])] = np.asarray(params["g0"])
-        m0_w = m0[self._m0_index_w]
-        s0_w = m0_w * m0_w
-        mult_w = m0_w[self._wave_of_row] * g0[self._g0_index_w]
+        m0_f = m0[self._m0_index_w]                       # [n_fact]
+        s0_f = m0_f * m0_f
+        mult_f = m0_f[self._fact_of_row] * g0[self._g0_index_w]
         coeff = np.zeros(self.n_basis_tot, np.float64)
-        for w in range(self.n_wave):
-            b0 = int(self.off[w])
-            r0 = int(self.row_start[w])
-            r1 = (int(self.row_start[w + 1]) if w + 1 < self.n_wave
+        for f in range(self.n_fact):
+            b0 = int(self.off[f])
+            r0 = int(self.row_start[f])
+            r1 = (int(self.row_start[f + 1]) if f + 1 < self.n_fact
                   else self.n_gamma_rows)
-            coeff[b0] = s0_w[w]
+            coeff[b0] = s0_f[f]
             coeff[b0 + 1] = -1.0
-            coeff[b0 + 2:b0 + 2 + (r1 - r0)] = mult_w[r0:r1]
-        return coeff, m0_w, g0
+            coeff[b0 + 2:b0 + 2 + (r1 - r0)] = mult_f[r0:r1]
+        return coeff, m0_f, g0
 
     def compute(self, params, data_handle, norm=None, return_p=True):
         """Forward + gradients (s0 preset or explicit ``coeff`` basis)."""
         ck = params["ck"]
-        nw = self.n_wave
         nbase = self.n_wave_base           # N — ck / gradient buffer size
         use_norm = 0 if norm is None else 1
         norm_val = norm if norm is not None else 0.0
@@ -605,10 +631,10 @@ class CUDAKernelV5PWAGenFlat:
         ck_i = np.imag(ck).astype(np.float64)
 
         if self._generic:
-            # padded (n_wave, n_basis) coefficients -> flat CSR block
+            # padded (n_fact, n_basis) coefficients -> flat CSR block
             coeff = self._pack(params["coeff"])
         else:
-            coeff, m0_w, g0 = self._coeff_from_m0g0(params)
+            coeff, m0_f, g0 = self._coeff_from_m0g0(params)
 
         oQ = _ffi.new("double*")
         oDn = _ffi.new("double*")
@@ -636,33 +662,33 @@ class CUDAKernelV5PWAGenFlat:
         self._last_dnorm = float(oDn[0])
 
         if self._generic:
-            # raw per-slot gradients, re-expanded to the padded (n_wave,
+            # raw per-slot gradients, re-expanded to the padded (n_fact,
             # n_basis) shape the other pwa_gen kernels return; the parameter
             # chain lives in the model's basis transform.
             grads = {"ck": ogck_r + 1j * ogck_i,
                      "coeff": self._unpack(ogcoeff)}
             return oQ[0], grads, (oP if return_p else None)
 
-        # ── unpack the flat coefficient gradient to (s0, mult) ──────
-        ogs0 = np.zeros(nw, np.float64)
+        # ── unpack the flat coefficient gradient to (s0, mult) per factor ──
+        ogs0 = np.zeros(self.n_fact, np.float64)
         ogmult = np.zeros(self.n_gamma_rows, np.float64)
-        for w in range(nw):
-            b0 = int(self.off[w])
-            r0 = int(self.row_start[w])
-            r1 = (int(self.row_start[w + 1]) if w + 1 < nw
+        for f in range(self.n_fact):
+            b0 = int(self.off[f])
+            r0 = int(self.row_start[f])
+            r1 = (int(self.row_start[f + 1]) if f + 1 < self.n_fact
                   else self.n_gamma_rows)
-            ogs0[w] = ogcoeff[b0]
+            ogs0[f] = ogcoeff[b0]
             ogmult[r0:r1] = ogcoeff[b0 + 2:b0 + 2 + (r1 - r0)]
 
-        # ── host chain: (s0, mult) -> (m0, g0) ───────────────────────
+        # ── host chain: (s0, mult) -> (m0, g0), per factor ────────────
         g0_row = g0[self._g0_index_w]
-        dm0_w = 2.0 * m0_w * ogs0 + np.bincount(
-            self._wave_of_row, weights=g0_row * ogmult,
-            minlength=self.n_wave)
-        grad_m0 = np.bincount(self._m0_index_w, weights=dm0_w,
+        dm0_f = 2.0 * m0_f * ogs0 + np.bincount(
+            self._fact_of_row, weights=g0_row * ogmult,
+            minlength=self.n_fact)
+        grad_m0 = np.bincount(self._m0_index_w, weights=dm0_f,
                               minlength=self.n_m0_params)
         grad_g0 = np.bincount(self._g0_index_w,
-                              weights=m0_w[self._wave_of_row] * ogmult,
+                              weights=m0_f[self._fact_of_row] * ogmult,
                               minlength=self.n_g0_params)
 
         grads = {"ck": ogck_r + 1j * ogck_i,
@@ -687,7 +713,7 @@ class CUDAKernelV5PWAGenFlat:
         m0_arr[:len(m0)] = np.asarray(m0)
         g0_arr = np.zeros(self.n_g0_params, np.float64)
         g0_arr[:len(g0)] = np.asarray(g0)
-        coeff, _m0_w, _g0 = self._coeff_from_m0g0({"m0": m0_arr,
+        coeff, _m0_f, _g0 = self._coeff_from_m0g0({"m0": m0_arr,
                                                    "g0": g0_arr})
         oDr = np.zeros(n * n, np.float64)
         oDi = np.zeros(n * n, np.float64)
