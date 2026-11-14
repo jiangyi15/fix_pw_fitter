@@ -89,7 +89,7 @@ from cffi import FFI
 
 _ffi = FFI()
 _ffi.cdef("""
-void* cuda_create_context_s0e(
+void* cuda_create_context(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -116,24 +116,18 @@ void* cuda_create_context_s0e(
     const int* slot_map,int n_sm2,
     const int* slot_l,int n_sl,
     int n_gamma_rows_ext,int gamma_table_bins_ext);
-void cuda_free_context_s0e(void*);
-void* cuda_load_data_s0e(void*,const double*,int,const double*,int,
+void cuda_free_context(void*);
+void* cuda_load_data(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
-void cuda_free_data_s0e(void*);
+void cuda_free_data(void*);
 void cuda_compute_s0e(void*,void*,
     const double*,const double*,const double*,
     double,int,
     double*,double*,double*,double*,double*,double*);
-void cuda_gram_matrix_s0e(void*,void*,
+void cuda_gram_matrix(void*,void*,
     const double*,double*,double*);
-int cuda_get_device_count_s0e();
-void cuda_s0e_set_flags();
-int cuda_get_device_name_s0e(char*,int);
-void* cuda_alloc_s0e(void**, size_t);
-void cuda_free_s0e(void*);
-void cuda_memcpy_to_device_s0e(void*, const void*, size_t);
-void cuda_memcpy_to_host_s0e(void*, void*, size_t);
-void cuda_memset_s0e(void*, int, size_t);
+int cuda_get_device_count();
+int cuda_get_device_name(char*,int);
 """)
 
 
@@ -155,7 +149,7 @@ class DataHandle:
 
     def free(self):
         if self.ptr is not None:
-            self._lib.cuda_free_data_s0e(self.ptr)
+            self._lib.cuda_free_data(self.ptr)
             self.ptr = None
             self._keep.clear()
 
@@ -175,13 +169,10 @@ class CUDAKernelV4PWAS0E:
         self._lib = None
         self._ka = []
         self._lib = _load_lib()
-        # busy-wait sync BEFORE the primary context is created (no-op if
-        # another backend already created it in this process)
-        self._lib.cuda_s0e_set_flags()
-        n_dev = self._lib.cuda_get_device_count_s0e()
+        n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")
-            self._lib.cuda_get_device_name_s0e(name_buf, 256)
+            self._lib.cuda_get_device_name(name_buf, 256)
             print(f"v4 PWA s0e GPU: {_ffi.string(name_buf).decode()}")
         else:
             raise RuntimeError("No CUDA devices found")
@@ -325,7 +316,7 @@ class CUDAKernelV4PWAS0E:
         mg = c["matrix_gamma"]
         gamma_col_idx = np.argmax(mg, axis=1).astype(np.int32)
 
-        self._ctx = self._lib.cuda_create_context_s0e(
+        self._ctx = self._lib.cuda_create_context(
             _ffi.NULL, 0,                      # m0_index: host-side only
             _ib(g0_index_w), len(g0_index_w),
             _ib(g0_mass_index_w), len(g0_mass_index_w),
@@ -379,7 +370,7 @@ class CUDAKernelV4PWAS0E:
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
-        dh = DataHandle(self._lib.cuda_load_data_s0e(
+        dh = DataHandle(self._lib.cuda_load_data(
             self._ctx, _db(mass), mass.shape[1],
             _db(mom), mom.shape[1], _db(ang), nang,
             _db(data["weight"]), _db(data[bkg_key]), ne), self._lib, ne)
@@ -531,7 +522,7 @@ class CUDAKernelV4PWAS0E:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_gram_matrix_s0e(
+        self._lib.cuda_gram_matrix(
             self._ctx, phsp_handle.ptr,
             _db(coeff), _db(oDr), _db(oDi))
         D = (oDr + 1j * oDi).reshape(n, n)
@@ -539,7 +530,7 @@ class CUDAKernelV4PWAS0E:
 
     def free(self):
         if self._ctx is not None:
-            self._lib.cuda_free_context_s0e(self._ctx)
+            self._lib.cuda_free_context(self._ctx)
             self._ctx = None
         self._ka.clear()
 

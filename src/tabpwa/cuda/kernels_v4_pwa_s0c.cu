@@ -913,25 +913,7 @@ typedef struct {
     const double* coeff;                // s0c: [n_wave · n_basis]
 } ComputeParams;
 
-cudaError_t cuda_alloc(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
-cudaError_t cuda_free(void* ptr) { return cudaFree(ptr); }
-cudaError_t cuda_memcpy_to_device(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
-}
-cudaError_t cuda_memcpy_to_host(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
-}
-cudaError_t cuda_memset(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
 int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
-void cuda_s0b_set_flags() {
-    // s0b: busy-wait synchronization — the default (interrupt/blocking)
-    // sync costs ~1-2 ms per cudaStreamSynchronize on this driver
-    // (interrupt coalescing), dominating the per-call overhead.  Must be
-    // called BEFORE the primary context is created (first CUDA call in
-    // the process); silently ignored otherwise.
-    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
-}
-
 cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);

@@ -1055,25 +1055,7 @@ typedef struct {
     const double* coeff;                // s0c: [n_wave · n_basis]
 } ComputeParams;
 
-cudaError_t cuda_alloc(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
-cudaError_t cuda_free(void* ptr) { return cudaFree(ptr); }
-cudaError_t cuda_memcpy_to_device(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
-}
-cudaError_t cuda_memcpy_to_host(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
-}
-cudaError_t cuda_memset(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
 int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
-void cuda_s0b_set_flags() {
-    // s0b: busy-wait synchronization — the default (interrupt/blocking)
-    // sync costs ~1-2 ms per cudaStreamSynchronize on this driver
-    // (interrupt coalescing), dominating the per-call overhead.  Must be
-    // called BEFORE the primary context is created (first CUDA call in
-    // the process); silently ignored otherwise.
-    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
-}
-
 cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
@@ -1302,9 +1284,9 @@ typedef struct {
     double* h_P;          // s0b: pinned per-event P staging [ne]
 } DataHandle2;
 
-void cuda_free_context_v5s0cw(void* vctx);  // forward decl (used by create on error)
+void cuda_free_context_v5(void* vctx);  // forward decl (used by create on error)
 
-void* cuda_create_context_v5s0cw(
+void* cuda_create_context_v5(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -1375,7 +1357,7 @@ void* cuda_create_context_v5s0cw(
     if (c->n_wave % c->n_proj != 0) {
         fprintf(stderr, "cuda_v5_pwa: n_wave %d must be divisible by n_proj %d\n",
                 c->n_wave, c->n_proj);
-        cuda_free_context_v5s0cw(c);
+        cuda_free_context_v5(c);
         return NULL;
     }
 
@@ -1427,7 +1409,7 @@ void* cuda_create_context_v5s0cw(
     return c;
 }
 
-void cuda_free_context_v5s0cw(void* vctx) {
+void cuda_free_context_v5(void* vctx) {
     ComputeContext* c = (ComputeContext*)vctx;
     if (!c) return;
     #define F(p) cudaFree((void*)c->p)
@@ -1477,7 +1459,7 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
                                 const float* mom, const float* ang,
                                 int n_events, int base_event);
 
-void* cuda_load_data_v5s0cw(void* vctx,
+void* cuda_load_data_v5(void* vctx,
     const double* mass,int nmass, const double* mom,int nmom,
     const double* ang,int nang,
     const double* wgt,const double* bkg,int ne
@@ -1529,7 +1511,7 @@ fail:
     return NULL;
 }
 
-void cuda_free_data_v5s0cw(void* vh) {
+void cuda_free_data_v5(void* vh) {
     if (!vh) return;
     DataHandle2* h = (DataHandle2*)vh;
     cudaFree((void*)h->m);
@@ -1570,7 +1552,7 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
     return cudaGetLastError() == cudaSuccess;
 }
 
-void cuda_compute_v5s0cw(void* vctx, void* vdh,
+void cuda_compute_v5(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* coeff,
     double nv,int use_norm,
@@ -1729,7 +1711,7 @@ void cuda_compute_v5s0cw(void* vctx, void* vdh,
 // (batch_size slices; per-batch scratch, device N×N accumulator).
 //   D[k,j] = Σ_e w_e Σ_p conj(common[e,pN+k])·common[e,pN+j]
 //=============================================================================
-void cuda_gram_matrix_v5s0cw(void* vctx, void* vdh,
+void cuda_gram_matrix_v5(void* vctx, void* vdh,
     const double* coeff,
     double* oDr, double* oDi
 ) {

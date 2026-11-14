@@ -789,15 +789,6 @@ typedef struct {
     const double* m0; const double* g0;
 } ComputeParams;
 
-cudaError_t cuda_alloc(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
-cudaError_t cuda_free(void* ptr) { return cudaFree(ptr); }
-cudaError_t cuda_memcpy_to_device(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
-}
-cudaError_t cuda_memcpy_to_host(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
-}
-cudaError_t cuda_memset(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
 int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
 cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;

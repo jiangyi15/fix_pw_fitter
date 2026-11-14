@@ -728,6 +728,7 @@ typedef struct {
     double* acc_host;                   // pinned [acc_total] output staging
     // uniform basis layout — n_basis slots per wave
     int n_basis;
+    int rsize;                          // v5 log-sum group size (>= 1)
     // deduped interp tables — one unique (table row, mass column) per entry
     int n_uslot;
     const int* uslot_row;               // [n_uslot]
@@ -762,24 +763,8 @@ typedef struct {
     double* P_dev;        // s0e: per-event P (device, written by the kernel)
 } DataHandleGen;
 
-cudaError_t cuda_alloc_genv5s0e(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
-cudaError_t cuda_free_genv5s0e(void* ptr) { return cudaFree(ptr); }
-cudaError_t cuda_memcpy_to_device_genv5s0e(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
-}
-cudaError_t cuda_memcpy_to_host_genv5s0e(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
-}
-cudaError_t cuda_memset_genv5s0e(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
-int cuda_get_device_count_genv5s0e() { int count; cudaGetDeviceCount(&count); return count; }
-void cuda_set_flags_genv5s0e() {
-    // busy-wait synchronization — the default (interrupt/blocking) sync
-    // costs ~1-2 ms per cudaStreamSynchronize on some drivers.  Must be
-    // called BEFORE the primary context is created.
-    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
-}
-
-cudaError_t cuda_get_device_name_genv5s0e(char* name, int len) {
+int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
+cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err == cudaSuccess) strncpy(name, prop.name, len);
@@ -799,7 +784,7 @@ static void genv5s0e_set_shmem(size_t shm) {
     }
 }
 
-void cuda_free_context_genv5s0e(void* vctx);  // forward decl (used by create on error)
+void cuda_free_context_v5(void* vctx);  // forward decl (used by create on error)
 void* cuda_create_context_genv5s0e(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
@@ -822,6 +807,7 @@ void* cuda_create_context_genv5s0e(
     int n_uniq, int n_proj,
     const int* row_start,int n_rs,
     int n_basis,
+    int rsize,
     const int* uslot_row,int n_ur,
     const int* uslot_col,int n_uc,
     const int* slot_map,int n_sm2,
@@ -869,14 +855,14 @@ void* cuda_create_context_genv5s0e(
                     "cuda_v5_pwa_gen_s0e: inconsistent basis table sizes "
                     "(bins %d, gamma %d/%d, den %d rows / %d/%d)\n",
                     bins, n14, n15, n_den_rows, n_dtr, n_dti);
-            cuda_free_context_genv5s0e(c);
+            cuda_free_context_v5(c);
             return NULL;
         }
         double* h_r = (double*)malloc((size_t)n_rows_tot * bins * sizeof(double));
         double* h_i = (double*)malloc((size_t)n_rows_tot * bins * sizeof(double));
         if (!h_r || !h_i) {
             free(h_r); free(h_i);
-            cuda_free_context_genv5s0e(c);
+            cuda_free_context_v5(c);
             return NULL;
         }
         if (n14 > 0) {
@@ -936,6 +922,7 @@ void* cuda_create_context_genv5s0e(
     c->rep_of_slot = (n_rep > 0) ? (int*)_up_int_gen(rep_of_slot, n_rep) : NULL;
     c->row_start = (n_rs > 0) ? (int*)_up_int_gen(row_start, n_rs) : NULL;
     c->n_basis = n_basis > 0 ? n_basis : 1;
+    c->rsize = rsize > 0 ? rsize : 1;   // v5: group size of the log-sum NLL
     c->n_uslot = n_ur;
     c->uslot_row = (int*)_up_int_gen(uslot_row, n_ur);
     c->uslot_col = (int*)_up_int_gen(uslot_col, n_uc);
@@ -946,7 +933,7 @@ void* cuda_create_context_genv5s0e(
     if (c->n_wave % c->n_proj != 0) {
         fprintf(stderr, "cuda_v5_pwa_gen_s0e: n_wave %d must be divisible by n_proj %d\n",
                 c->n_wave, c->n_proj);
-        cuda_free_context_genv5s0e(c);
+        cuda_free_context_v5(c);
         return NULL;
     }
     // the fused tile lives in shared memory: fail fast if it cannot fit
@@ -960,7 +947,7 @@ void* cuda_create_context_genv5s0e(
                     "cuda_v5_pwa_gen_s0e: shared tile %zu B exceeds the device "
                     "opt-in limit %d B (n_wave %d, n_basis %d, S0E_TE %d)\n",
                     shm, shm_opt, c->n_wave, c->n_basis, S0E_TE);
-            cuda_free_context_genv5s0e(c);
+            cuda_free_context_v5(c);
             return NULL;
         }
     }
@@ -988,7 +975,7 @@ void* cuda_create_context_genv5s0e(
     return c;
 }
 
-void cuda_free_context_genv5s0e(void* vctx) {
+void cuda_free_context_v5(void* vctx) {
     ComputeContextGen* c = (ComputeContextGen*)vctx;
     if (!c) return;
     #define F(p) cudaFree((void*)c->p)
@@ -1026,7 +1013,7 @@ static int fill_amp_cache_chunk_gen(ComputeContextGen* c, DataHandleGen* h,
                                 const float* mom, const float* ang,
                                 int n_events, int base_event);
 
-void* cuda_load_data_genv5s0e(void* vctx,
+void* cuda_load_data_v5(void* vctx,
     const double* mass,int nmass, const double* mom,int nmom,
     const double* ang,int nang,
     const double* wgt,const double* bkg,int ne
@@ -1110,7 +1097,7 @@ fail:
     return NULL;
 }
 
-void cuda_free_data_genv5s0e(void* vh) {
+void cuda_free_data_v5(void* vh) {
     if (!vh) return;
     DataHandleGen* h = (DataHandleGen*)vh;
     cudaFree((void*)h->m);
@@ -1184,10 +1171,18 @@ static int fill_amp_cache_chunk_gen(ComputeContextGen* c, DataHandleGen* h,
 // v5 s0e compute: ONE fused launch over the whole event range (no batching).
 // Blocks own whole resolution groups (rs <= S0E_TE) or one group each
 // (rs > S0E_TE) — see s0e_tile_gen_kernel_v5.
+//
+// Named cuda_compute_v5s0e, NOT cuda_compute_v5: the objective, the
+// create-time rsize placement and every other entry point are the v5 s0e
+// API (argument-identical to cuda_v5_pwa_s0e), but this kernel returns the
+// uniform-basis gradient as ONE block [n_wave·n_basis] (ogcoeff) — 13
+// arguments — where cuda_v5_pwa_s0c/s0d/s0cw return ogs0 (n_wave) + ogmult
+// (n_gamma_rows) — 14 arguments.  Same API unless the argument changes =>
+// different name.
 //=============================================================================
-void cuda_compute_genv5s0e(void* vctx, void* vdh,
+void cuda_compute_v5s0e(void* vctx, void* vdh,
     const double* ck_r, const double* ck_i, const double* coeff,
-    double norm, int use_norm, int resolution_size,
+    double norm, int use_norm,
     double* oQ, double* oDn, double* oP,
     double* ogck_r, double* ogck_i, double* ogcoeff
 ) {
@@ -1201,7 +1196,7 @@ void cuda_compute_genv5s0e(void* vctx, void* vdh,
     const int ncb = nw * nf;
     const int acc_total = 2 + 2 * N + ncb;
     const int off_gck_r = 2, off_gck_i = 2 + N, off_gcoeff = 2 + 2 * N;
-    const int rs = (resolution_size < 1) ? 1 : resolution_size;
+    const int rs = c->rsize;   // v5: group size fixed at context creation
 
     // s0b: refresh the persistent parameter buffers (plain memcpy into the
     // pinned staging, then async H2D — no per-call malloc/free)
@@ -1266,7 +1261,7 @@ void cuda_compute_genv5s0e(void* vctx, void* vdh,
 // — the gram path is NOT part of the fused per-iteration kernel.
 //   D[k,j] = Σ_e w_e Σ_p conj(common[e,pN+k])·common[e,pN+j]
 //=============================================================================
-void cuda_gram_matrix_genv5s0e(void* vctx, void* vdh,
+void cuda_gram_matrix_v5(void* vctx, void* vdh,
     const double* coeff,
     double* oDr, double* oDi
 ) {

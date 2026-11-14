@@ -78,6 +78,7 @@ void* cuda_create_context_genv5s0e(
     int n_uniq,int n_proj,
     const int* row_start,int n_rs,
     int n_basis,
+    int rsize,
     const int* uslot_row,int n_ur,
     const int* uslot_col,int n_uc,
     const int* slot_map,int n_sm2,
@@ -88,24 +89,18 @@ void* cuda_create_context_genv5s0e(
     const double* ntr,int n_ntr, const double* nti,int n_nti,
     int n_num_rows,int n_num_bins,double n_min,double n_delta,
     const int* n_index,int n_ni, const int* n_mass_index,int n_nmi);
-void cuda_free_context_genv5s0e(void*);
-void* cuda_load_data_genv5s0e(void*,const double*,int,const double*,int,
+void cuda_free_context_v5(void*);
+void* cuda_load_data_v5(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
-void cuda_free_data_genv5s0e(void*);
-void cuda_compute_genv5s0e(void*,void*,
+void cuda_free_data_v5(void*);
+void cuda_compute_v5s0e(void*,void*,
     const double*,const double*,const double*,
-    double,int,int,
+    double,int,
     double*,double*,double*,double*,double*,double*);
-void cuda_gram_matrix_genv5s0e(void*,void*,
+void cuda_gram_matrix_v5(void*,void*,
     const double*,double*,double*);
-int cuda_get_device_count_genv5s0e();
-void cuda_set_flags_genv5s0e();
-int cuda_get_device_name_genv5s0e(char*,int);
-void* cuda_alloc_genv5s0e(void**, size_t);
-void cuda_free_genv5s0e(void*);
-void cuda_memcpy_to_device_genv5s0e(void*, const void*, size_t);
-void cuda_memcpy_to_host_genv5s0e(void*, void*, size_t);
-void cuda_memset_genv5s0e(void*, int, size_t);
+int cuda_get_device_count();
+int cuda_get_device_name(char*,int);
 """)
 
 
@@ -163,7 +158,7 @@ class DataHandle:
 
     def free(self):
         if self.ptr is not None:
-            self._lib.cuda_free_data_genv5s0e(self.ptr)
+            self._lib.cuda_free_data_v5(self.ptr)
             self.ptr = None
             self._keep.clear()
 
@@ -186,13 +181,10 @@ class CUDAKernelV5PWAGenS0E:
         self._lib = None
         self._ka = []
         self._lib = _load_lib()
-        # busy-wait sync BEFORE the primary context is created (no-op if
-        # another backend already created it in this process)
-        self._lib.cuda_set_flags_genv5s0e()
-        n_dev = self._lib.cuda_get_device_count_genv5s0e()
+        n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")
-            self._lib.cuda_get_device_name_genv5s0e(name_buf, 256)
+            self._lib.cuda_get_device_name(name_buf, 256)
             print(f"v5 PWA gen s0e GPU: {_ffi.string(name_buf).decode()}")
         else:
             raise RuntimeError("No CUDA devices found")
@@ -466,6 +458,7 @@ class CUDAKernelV5PWAGenS0E:
             self.n_uniq, self.n_proj,
             _ib_or_null(self.row_start), len(self.row_start),
             self.n_basis,
+            self.resolution_size,
             _ib(self.uslot_row), len(self.uslot_row),
             _ib(self.uslot_col), len(self.uslot_col),
             _ib(self.slot_map), len(self.slot_map),
@@ -515,7 +508,7 @@ class CUDAKernelV5PWAGenS0E:
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
-        dh = DataHandle(self._lib.cuda_load_data_genv5s0e(
+        dh = DataHandle(self._lib.cuda_load_data_v5(
             self._ctx, _db(mass), mass.shape[1],
             _db(mom), mom.shape[1], _db(ang), nang,
             _db(data["weight"]), _db(data[bkg_key]), ne), self._lib, ne)
@@ -589,10 +582,10 @@ class CUDAKernelV5PWAGenS0E:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_compute_genv5s0e(
+        self._lib.cuda_compute_v5s0e(
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(coeff),
-            norm_val, use_norm, self.resolution_size,
+            norm_val, use_norm,
             oQ, oDn, (_db(oP) if oP is not None else _ffi.NULL),
             _db(ogck_r), _db(ogck_i), _db(ogcoeff))
         # v5 semantics: the device accumulates dNLL/dnorm (0 without a norm)
@@ -659,7 +652,7 @@ class CUDAKernelV5PWAGenS0E:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_gram_matrix_genv5s0e(
+        self._lib.cuda_gram_matrix_v5(
             self._ctx, phsp_handle.ptr,
             _db(coeff), _db(oDr), _db(oDi))
         D = (oDr + 1j * oDi).reshape(n, n)
@@ -667,7 +660,7 @@ class CUDAKernelV5PWAGenS0E:
 
     def free(self):
         if self._ctx is not None:
-            self._lib.cuda_free_context_genv5s0e(self._ctx)
+            self._lib.cuda_free_context_v5(self._ctx)
             self._ctx = None
         self._ka.clear()
 

@@ -581,24 +581,8 @@ typedef struct {
     double* P_dev;        // s0e: per-event P (device, written by the kernel)
 } DataHandle2;
 
-cudaError_t cuda_alloc_s0e(void** ptr, size_t size) { return cudaMalloc(ptr, size); }
-cudaError_t cuda_free_s0e(void* ptr) { return cudaFree(ptr); }
-cudaError_t cuda_memcpy_to_device_s0e(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyHostToDevice);
-}
-cudaError_t cuda_memcpy_to_host_s0e(void* dst, const void* src, size_t size) {
-    return cudaMemcpy(dst, src, size, cudaMemcpyDeviceToHost);
-}
-cudaError_t cuda_memset_s0e(void* ptr, int value, size_t size) { return cudaMemset(ptr, value, size); }
-int cuda_get_device_count_s0e() { int count; cudaGetDeviceCount(&count); return count; }
-void cuda_s0e_set_flags() {
-    // busy-wait synchronization — the default (interrupt/blocking) sync
-    // costs ~1-2 ms per cudaStreamSynchronize on some drivers.  Must be
-    // called BEFORE the primary context is created.
-    cudaSetDeviceFlags(cudaDeviceScheduleSpin);
-}
-
-cudaError_t cuda_get_device_name_s0e(char* name, int len) {
+int cuda_get_device_count() { int count; cudaGetDeviceCount(&count); return count; }
+cudaError_t cuda_get_device_name(char* name, int len) {
     cudaDeviceProp prop;
     cudaError_t err = cudaGetDeviceProperties(&prop, 0);
     if (err == cudaSuccess) strncpy(name, prop.name, len);
@@ -617,8 +601,8 @@ static void s0e_set_shmem(size_t shm) {
     }
 }
 
-void cuda_free_context_s0e(void* vctx);  // forward decl (used by create on error)
-void* cuda_create_context_s0e(
+void cuda_free_context(void* vctx);  // forward decl (used by create on error)
+void* cuda_create_context(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -682,7 +666,7 @@ void* cuda_create_context_s0e(
     if (c->n_wave % c->n_proj != 0) {
         fprintf(stderr, "cuda_v4_pwa_s0e: n_wave %d must be divisible by n_proj %d\n",
                 c->n_wave, c->n_proj);
-        cuda_free_context_s0e(c);
+        cuda_free_context(c);
         return NULL;
     }
     // the fused tile lives in shared memory: fail fast if it cannot fit
@@ -696,7 +680,7 @@ void* cuda_create_context_s0e(
                     "cuda_v4_pwa_s0e: shared tile %zu B exceeds the device "
                     "opt-in limit %d B (n_wave %d, S0E_TE %d)\n",
                     shm, shm_opt, c->n_wave, S0E_TE);
-            cuda_free_context_s0e(c);
+            cuda_free_context(c);
             return NULL;
         }
     }
@@ -724,7 +708,7 @@ void* cuda_create_context_s0e(
     return c;
 }
 
-void cuda_free_context_s0e(void* vctx) {
+void cuda_free_context(void* vctx) {
     ComputeContext* c = (ComputeContext*)vctx;
     if (!c) return;
     #define F(p) cudaFree((void*)c->p)
@@ -758,7 +742,7 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
                                 const float* mom, const float* ang,
                                 int n_events, int base_event);
 
-void* cuda_load_data_s0e(void* vctx,
+void* cuda_load_data(void* vctx,
     const double* mass,int nmass, const double* mom,int nmom,
     const double* ang,int nang,
     const double* wgt,const double* bkg,int ne
@@ -842,7 +826,7 @@ fail:
     return NULL;
 }
 
-void cuda_free_data_s0e(void* vh) {
+void cuda_free_data(void* vh) {
     if (!vh) return;
     DataHandle2* h = (DataHandle2*)vh;
     cudaFree((void*)h->m);
@@ -988,7 +972,7 @@ void cuda_compute_s0e(void* vctx, void* vdh,
 // — the gram path is NOT part of the fused per-iteration kernel.
 //   D[k,j] = Σ_e w_e Σ_p conj(common[e,pN+k])·common[e,pN+j]
 //=============================================================================
-void cuda_gram_matrix_s0e(void* vctx, void* vdh,
+void cuda_gram_matrix(void* vctx, void* vdh,
     const double* coeff,
     double* oDr, double* oDi
 ) {

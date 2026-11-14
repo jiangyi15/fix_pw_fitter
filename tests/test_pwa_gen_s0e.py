@@ -26,8 +26,11 @@ Gates:
 5. ``kmatrix2`` (``tests/config_pwa_gen_km.yml``) P / ``coeff`` gradients
    against the CPU ``pwa_gen`` kernel; FD through ``Fitter.get_nll`` for
    ``m1, g1, b1r, b2r`` at ``resolution_size ∈ {1, 8}``;
-6. kernel independence: the library exports only ``*_genv5s0e`` C symbols
-   and loads next to ``libcuda_kernels_v5_pwa_s0e.so`` in one process.
+6. kernel independence: the library exports only the ``_v5`` lifecycle entry
+   points, its own ``cuda_create_context_genv5s0e`` (pwa_gen basis tables) and
+   ``cuda_compute_v5s0e`` (the 13-argument s0e/gens compute — the 14-argument
+   ``cuda_compute_v5`` of s0c/s0d/s0cw is a different signature), and loads
+   next to ``libcuda_kernels_v5_pwa_s0e.so`` in one process.
 """
 
 import ctypes
@@ -348,11 +351,23 @@ def test_gate_g_symbols_are_private():
             continue
         exported.append(name)
     assert exported, "no defined symbols found"
-    # the C entry points: exactly the *_genv5s0e suffix (the copy keeps the
-    # source kernel's symbol names — every kernel is a standalone library)
-    bad = [n for n in exported
-           if n.startswith("cuda_") and not n.endswith("_genv5s0e")]
+    # the C entry points: the shared v5 family names, plus the two 13-argument
+    # specialities — the gen kernel's own create (pwa_gen basis/numerator
+    # tables) and the s0e compute (one flat [n_wave·n_basis] gradient block
+    # instead of ogs0 + ogmult)
+    allowed = {
+        "cuda_create_context_genv5s0e",
+        "cuda_free_context_v5",
+        "cuda_load_data_v5",
+        "cuda_free_data_v5",
+        "cuda_compute_v5s0e",
+        "cuda_gram_matrix_v5",
+        "cuda_get_device_count",
+        "cuda_get_device_name",
+    }
+    bad = [n for n in exported if n.startswith("cuda_") and n not in allowed]
     assert bad == [], f"leaked cuda symbols: {bad}"
+    assert {n for n in exported if n.startswith("cuda_")} == allowed
     # everything else must be a *_gen helper (or a cuda::std instantiation)
     cxx = [n for n in exported if not n.startswith("cuda_")]
     demangled = subprocess.run(["c++filt"] + cxx, capture_output=True,
@@ -370,17 +385,22 @@ def test_gate_g_loads_next_to_s0e():
     gen_lib, s0e_lib = _lib_paths()
     a = ctypes.CDLL(s0e_lib)
     b = ctypes.CDLL(gen_lib)
-    # the gen copy keeps the source kernel's symbol names (case-1 copy); the
-    # old library is gone, so there is nothing to collide with ...
-    assert hasattr(b, "cuda_get_device_count_genv5s0e")
-    # ... and the original is untouched / still loadable
-    assert hasattr(a, "cuda_get_device_count_v5s0e")
+    # the gen copy keeps its own basis-table create; every other entry point
+    # uses the shared v5 family names (same signature, separate libraries)
+    assert hasattr(b, "cuda_create_context_genv5s0e")
+    assert hasattr(a, "cuda_create_context_v5")
+    assert not hasattr(a, "cuda_create_context_genv5s0e")
+    for nm in ("cuda_compute_v5s0e", "cuda_get_device_count"):
+        assert hasattr(a, nm) and hasattr(b, nm)
+    # the 14-argument family compute is NOT exported here (13-arg s0e compute)
+    assert not hasattr(a, "cuda_compute_v5")
+    assert not hasattr(b, "cuda_compute_v5")
     # no undefined reference to another kernel's code: every cuda_* undefined
-    # symbol must come from the CUDA runtime, not from *_v5s0e
+    # symbol must come from the CUDA runtime, not from the sibling library
     out = subprocess.run(["nm", "-D", "--undefined-only", gen_lib],
                          capture_output=True, text=True, check=True).stdout
     undef = [ln.split()[-1] for ln in out.splitlines() if ln.split()]
-    assert [n for n in undef if "_v5s0e" in n] == []
+    assert [n for n in undef if n.startswith("cuda_compute_")] == []
 
 
 # ── grouped log-sum bookkeeping carried over from s0e ───────────────

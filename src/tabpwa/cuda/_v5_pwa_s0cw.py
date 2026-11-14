@@ -95,7 +95,7 @@ from cffi import FFI
 
 _ffi = FFI()
 _ffi.cdef("""
-void* cuda_create_context_v5s0cw(
+void* cuda_create_context_v5(
     const int* m0_i,int n1, const int* g0_i,int n2,
     const int* g0_m,int n3, const int* mass_i,int n4,
     const int* fl_t,int n5, const int* fl_q,int n6,
@@ -123,24 +123,18 @@ void* cuda_create_context_v5s0cw(
     const int* slot_map,int n_sm2,
     const int* slot_l,int n_sl,
     int n_gamma_rows_ext,int gamma_table_bins_ext);
-void cuda_free_context_v5s0cw(void*);
-void* cuda_load_data_v5s0cw(void*,const double*,int,const double*,int,
+void cuda_free_context_v5(void*);
+void* cuda_load_data_v5(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
-void cuda_free_data_v5s0cw(void*);
-void cuda_compute_v5s0cw(void*,void*,
+void cuda_free_data_v5(void*);
+void cuda_compute_v5(void*,void*,
     const double*,const double*,const double*,
     double,int,
     double*,double*,double*,double*,double*,double*,double*);
-void cuda_gram_matrix_v5s0cw(void*,void*,
+void cuda_gram_matrix_v5(void*,void*,
     const double*,double*,double*);
 int cuda_get_device_count();
-void cuda_s0b_set_flags();
 int cuda_get_device_name(char*,int);
-void* cuda_alloc(void**, size_t);
-void cuda_free(void*);
-void cuda_memcpy_to_device(void*, const void*, size_t);
-void cuda_memcpy_to_host(void*, void*, size_t);
-void cuda_memset(void*, int, size_t);
 """)
 
 
@@ -162,7 +156,7 @@ class DataHandle:
 
     def free(self):
         if self.ptr is not None:
-            self._lib.cuda_free_data_v5s0cw(self.ptr)
+            self._lib.cuda_free_data_v5(self.ptr)
             self.ptr = None
             self._keep.clear()
 
@@ -183,9 +177,6 @@ class CUDAKernelV5PWAS0CW:
         self._lib = None
         self._ka = []
         self._lib = _load_lib()
-        # busy-wait sync BEFORE the primary context is created (no-op if
-        # another backend already created it in this process)
-        self._lib.cuda_s0b_set_flags()
         n_dev = self._lib.cuda_get_device_count()
         if n_dev > 0:
             name_buf = _ffi.new("char[256]")
@@ -340,7 +331,7 @@ class CUDAKernelV5PWAS0CW:
         mg = c["matrix_gamma"]
         gamma_col_idx = np.argmax(mg, axis=1).astype(np.int32)
 
-        self._ctx = self._lib.cuda_create_context_v5s0cw(
+        self._ctx = self._lib.cuda_create_context_v5(
             _ffi.NULL, 0,                      # m0_index: host-side only
             _ib(g0_index_w), len(g0_index_w),
             _ib(g0_mass_index_w), len(g0_mass_index_w),
@@ -402,7 +393,7 @@ class CUDAKernelV5PWAS0CW:
         nang = self.n_angle_total
         bkg_key = "bkg_raw" if "bkg_raw" in data else "bkg"
 
-        dh = DataHandle(self._lib.cuda_load_data_v5s0cw(
+        dh = DataHandle(self._lib.cuda_load_data_v5(
             self._ctx, _db(mass), mass.shape[1],
             _db(mom), mom.shape[1], _db(ang), nang,
             _db(data["weight"]), _db(data[bkg_key]), ne), self._lib, ne)
@@ -478,7 +469,7 @@ class CUDAKernelV5PWAS0CW:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_compute_v5s0cw(
+        self._lib.cuda_compute_v5(
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(coeff),
             norm_val, use_norm,
@@ -543,7 +534,7 @@ class CUDAKernelV5PWAS0CW:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_gram_matrix_v5s0cw(
+        self._lib.cuda_gram_matrix_v5(
             self._ctx, phsp_handle.ptr,
             _db(coeff), _db(oDr), _db(oDi))
         D = (oDr + 1j * oDi).reshape(n, n)
@@ -551,7 +542,7 @@ class CUDAKernelV5PWAS0CW:
 
     def free(self):
         if self._ctx is not None:
-            self._lib.cuda_free_context_v5s0cw(self._ctx)
+            self._lib.cuda_free_context_v5(self._ctx)
             self._ctx = None
         self._ka.clear()
 
