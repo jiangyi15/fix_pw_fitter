@@ -1,7 +1,8 @@
 """
 CUDA kernel v5 PWA gen s0e — the FUSED tile kernel of ``cuda_v5_pwa_s0e``
 (one BW per chain + direct pole parameters + grouped log-sum data NLL)
-with the ``pwa_gen`` basis extensions (``cuda_v5_pwa_gen_s0e``).
+with the ``pwa_gen`` basis extensions (``cuda_v5_pwa_gen_s0e``) and the
+GROUP-TOTAL-WEIGHT objective of ``cuda_v5_pwa_s0cw``.
 
 The s0e tile kernel is already **basis-agnostic**: it consumes an explicit
 ``coeff[n_wave·n_basis]`` and returns ``g_coeff``, so the ``pwa_gen``
@@ -26,15 +27,22 @@ wrapper only passes data: ``gamma_table``, ``den_table`` and the numerator
 table.  ``uslot_row`` indexes that combined table.
 
 ``n_index ≡ 0`` (or no ``n_table`` at all) and the default denominator
-basis make this backend **bit-identical** to ``cuda_v5_pwa_s0e`` (identical
-fill, identical coefficients, identical math).
+basis make this backend **bit-identical** to ``cuda_v5_pwa_s0e`` with unit
+weights (identical fill, identical coefficients, identical math); with
+non-unit weights the ``rsize=1`` objective is the per-event NLL instead
+(see below).
 
-The grouped log-sum NLL is inherited unchanged::
+The grouped log-sum NLL applies the group TOTAL WEIGHT ``W_g = Σ_{e∈g} w_e``::
 
     q_e      = w_e·(P_e/norm + bkg_e),     S_g = Σ_{e∈g} q_e
-    Q        = -Σ_g log(S_g)
-    dQ/dP_e  = -(w_e/norm)/S_g
-    dQ/dnorm = Σ_g (1/S_g)·(Σ_{e∈g} w_e·P_e)/norm²
+    Q        = -Σ_g W_g·log(S_g/W_g)
+    dQ/dP_e  = -(W_g/S_g)·(w_e/norm)
+    dQ/dnorm = Σ_g W_g·Pb_g/(S_g·norm²),   Pb_g = Σ_{e∈g} w_e·P_e
+
+A fully zero-weight group (``W_g == 0``) contributes nothing (no log, group
+scale 0).  At ``resolution_size == 1`` this is ``-w_e·log(pdf_e)`` for ANY
+weights — the per-event NLL — so the ``rsize=1`` objective no longer differs
+from the per-event CPU default (``cpu_pwa_gen``).
 
 ``_last_dnorm`` / ``dnorm_on_gpu`` follow the v5 family.  Data whose event
 count is not a multiple of ``resolution_size`` gets the usual
@@ -164,7 +172,8 @@ class DataHandle:
 
 
 class CUDAKernelV5PWAGenS0E:
-    """s0e fused tile + grouped log-sum NLL on the ``pwa_gen`` basis.
+    """s0e fused tile + group-total-weight log-sum NLL on the ``pwa_gen``
+    basis.
 
     ``params`` needs ``ck`` (length N = n_wave/n_proj) plus either
     ``m0``/``g0`` (default basis) or ``coeff`` ``(n_wave, n_basis)``

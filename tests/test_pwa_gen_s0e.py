@@ -1,26 +1,32 @@
-"""``cuda_v5_pwa_gen_s0e`` — fused tile + grouped log-sum on the ``pwa_gen`` basis.
+"""``cuda_v5_pwa_gen_s0e`` — fused tile + group-total-weight log-sum on
+the ``pwa_gen`` basis.
 
 The s0e fused single-kernel tile (one BW per chain, explicit ``coeff`` /
-``g_coeff``, grouped log-sum data NLL) with the two ``pwa_gen`` additions:
+``g_coeff``) with the two ``pwa_gen`` additions — the kernel's own combined
+basis table (raw gamma rows + pre-rotated "1" / "m²" + the ``den_table``
+rows rotated to ``Z = i·F``) and the numerator ``N_{n_index[w]}(m_e)``
+folded into the amp-cache fill — plus the **group-total-weight** data NLL
+of ``cuda_v5_pwa_s0cw``:
 
-* the kernel's own create builds the combined basis table (raw gamma rows +
-  the two pre-rotated rows "1" / "m²" + the ``den_table`` rows rotated to
-  ``Z = i·F``), indexed through ``uslot_row`` / ``slot_map``;
-* the numerator ``N_{n_index[w]}(m_e)`` is folded into the amp-cache fill
-  (load time, fixed data) — ``n_index[w] == 0`` is the constant row and is
-  short-circuited.
+    S_g = Σ_{e∈g} w_e·(P_e/norm + bkg_e),     W_g = Σ_{e∈g} w_e
+    Q   = -Σ_g W_g·log(S_g/W_g)
 
 Gates:
 0. registration (``pwa_gen`` scope) + the kernel-scope guard accepts it;
-1. ``n_index ≡ 0`` / default basis (``tests/config_pwa_gen.yml``) is
-   **bit-identical** to ``cuda_v5_pwa_s0e`` at ``resolution_size ∈ {1, 8}``
-   (Q, P, ck/m0/g0 and dNLL/dnorm);
-2. ``kmatrix2`` (``tests/config_pwa_gen_km.yml``) end to end vs the CPU
-   ``pwa_gen`` path (``cpu_pwa_s0c`` / ``numpy_pwa``): NLL, P and gradients
-   agree within the fp32-amp floor; ``n_index`` includes row 1;
-3. FD through ``Fitter.get_nll`` on the GPU backend for ``m1, g1, b1r, b2r``
-   at ``resolution_size ∈ {1, 8}`` (explicit-``coeff`` chain on device);
-4. kernel independence: the library exports only ``*_genv5s0e`` C symbols
+1. plain-path regression: ``resolution_size=1`` with **unit** weights is
+   bit-identical to ``cuda_v5_pwa_s0e`` (Q/P at fp64 atomic round-off,
+   gradients at 1e-12); the ``norm=None`` path is unchanged for ANY weights;
+2. ``resolution_size=1`` with **non-unit** weights is the per-event NLL:
+   GPU vs ``cpu_pwa_gen`` within the fp32 amp-cache floor.  The old s0c
+   form (``cuda_v5_pwa_s0e``) gives ``-Σ log(w·pdf)`` instead and fails here;
+3. ``resolution_size ∈ {2, 8}`` with non-unit weights reproduces the host
+   ``Σ_g W_g·log(S_g/W_g)`` built from the kernel's own ``P``;
+4. a zero-weight group is inert (same host formula with the group skipped,
+   finite gradients — no ``log(0)`` / NaN);
+5. ``kmatrix2`` (``tests/config_pwa_gen_km.yml``) P / ``coeff`` gradients
+   against the CPU ``pwa_gen`` kernel; FD through ``Fitter.get_nll`` for
+   ``m1, g1, b1r, b2r`` at ``resolution_size ∈ {1, 8}``;
+6. kernel independence: the library exports only ``*_genv5s0e`` C symbols
    and loads next to ``libcuda_kernels_v5_pwa_s0e.so`` in one process.
 """
 
@@ -34,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import pytest
 
-from test_pwa_gen import _cfg, _loaded, _synth
+from test_pwa_gen import _loaded, _synth
 
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
@@ -63,6 +69,25 @@ def _rand_params(k, seed=7):
             "g0": np.linspace(0.1, 0.5, k.n_g0_params)}
 
 
+def _host_Q(P, weight, bkg, norm, rs):
+    """``Q = Σ_g W_g·log(S_g/W_g)`` from the kernel's own per-event P.
+
+    Zero-weight groups (``W_g == 0``) are skipped — that is the kernel's
+    rule, so the host side must skip them too.
+    """
+    P = np.asarray(P, np.float64)
+    w = np.asarray(weight, np.float64)
+    b = np.asarray(bkg, np.float64)
+    Q = 0.0
+    for a in range(0, P.size, rs):
+        sl = slice(a, a + rs)
+        S = float(np.sum(w[sl] * (P[sl] / norm + b[sl])))
+        W = float(np.sum(w[sl]))
+        if W > 0.0:
+            Q -= W * np.log(S / W)
+    return Q
+
+
 # ── gate 0: registration ─────────────────────────────────────────────
 
 def test_registration():
@@ -73,6 +98,9 @@ def test_registration():
     check_backend_support(Fitter(CFG_KM, backend="numpy_pwa").kernel_config,
                           "CUDABackendV5PWAGenS0E")
     check_backend_support(kc, "CUDABackendV5PWAGenS0E")
+    # exactly one pwa_gen GPU log-sum kernel: no sibling / alias remains
+    gen = [b for b in backends_for_model("pwa_gen") if "gen_s0e" in b]
+    assert gen == ["cuda_v5_pwa_gen_s0e"], gen
 
 
 def test_rejects_multi_bw_chains():
@@ -82,17 +110,17 @@ def test_rejects_multi_bw_chains():
         CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
 
 
-# ── gate 1: N ≡ 1 + default basis is cuda_v5_pwa_s0e, bit for bit ────
+# ── gate 1: unit weights at rsize=1 is cuda_v5_pwa_s0e, bit for bit ──
 
-@pytest.mark.parametrize("rs", [1, 8])
-def test_gate_a_default_basis_is_s0e_bitwise(rs):
+def test_gate_a_default_basis_unit_weights_is_s0e_bitwise():
     f = Fitter(CFG_BASIS, backend="numpy_pwa")
     kc = f.kernel_config
     assert "n_table" not in kc and "den_row" not in kc
     data = _synth(kc, NEV, 5)
+    data["weight"] = np.ones_like(data["weight"])       # W_g == 1
 
-    ref = CUDAKernelV5PWAS0E(kc, resolution_size=rs)
-    gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=rs)
+    ref = CUDAKernelV5PWAS0E(kc, resolution_size=1)
+    gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
     params = _rand_params(gen)
     Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
     Qg, gg, Pg = gen.compute(params, gen.load_data(data), norm=1.3)
@@ -102,51 +130,78 @@ def test_gate_a_default_basis_is_s0e_bitwise(rs):
     # round-off; P and every gradient block must be bit-identical.
     assert Qg == pytest.approx(Qr, rel=1e-14)
     assert np.array_equal(Pg, Pr)
-    # ck/m0/g0 are accumulated with atomics in both kernels (the reference's
-    # own gradient varies at ~1e-14 run to run), so compare to fp64 round-off;
-    # P is written per event and must be bit-identical.
+    # ck/m0/g0 are accumulated with atomics in both kernels, so compare to
+    # fp64 round-off; P is written per event and must be bit-identical.
     for key in ("ck", "m0", "g0"):
         assert _rel(gg[key], gr[key]) < 1e-12, key
     assert gen._last_dnorm == pytest.approx(ref._last_dnorm, rel=1e-14)
     assert gen.n_uniq == ref.n_uniq and gen.n_basis == ref.n_basis
-    # norm=None too
-    Qr0, _gr0, Pr0 = ref.compute(params, ref.load_data(data), norm=None)
-    Qg0, _gg0, Pg0 = gen.compute(params, gen.load_data(data), norm=None)
-    assert Qg0 == pytest.approx(Qr0, rel=1e-14)
-    assert np.array_equal(Pg0, Pr0)
     ref.free()
     gen.free()
 
 
-# ── gate 2: kmatrix2 end to end vs the CPU pwa_gen path ─────────────
+def test_gate_a_norm_none_path_is_unchanged():
+    """The ``use_norm == 0`` path is per-event linear — any weights."""
+    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    data = _synth(kc, NEV, 9)          # non-unit weights on purpose
+    ref = CUDAKernelV5PWAS0E(kc, resolution_size=8)
+    gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=8)
+    params = _rand_params(gen, seed=11)
+    Qr, _gr, Pr = ref.compute(params, ref.load_data(data), norm=None)
+    Qg, _gg, Pg = gen.compute(params, gen.load_data(data), norm=None)
+    # Q = Σ w·P — summed on the host from the SAME P in both cases
+    assert Qg == pytest.approx(Qr, rel=1e-14)
+    assert np.array_equal(Pg, Pr)
+    ref.free()
+    gen.free()
 
-def _cpu_params(f, x):
-    return f.build_params(x)[0]
 
+# ── gate 2: rsize=1 with NON-unit weights is the per-event NLL ───────
 
-def _loaded_unit(cfg, backend, n_phsp=300, n_data=150):
-    """Like ``_loaded`` but with unit weights.
+def test_gate_b_rsize1_non_unit_weights_matches_per_event_cpu():
+    """The point of the change: ``-w·log(w·pdf/w) == -w·log pdf``.
 
-    The v5 grouped log-sum with ``resolution_size=1`` differs from the
-    per-event v4 form by the constant ``-sum log w`` (and its gradient by a
-    factor ``w``), so a like-for-like comparison against the v4 CPU
-    references requires unit weights — the documented equivalence.
+    ``cpu_pwa_gen`` is the per-event reference.  The old s0c-form kernel
+    (``cuda_v5_pwa_s0e``, same config, same params) computes
+    ``-Σ log(w·pdf)`` and is off by ``Σ log w`` — reported below so the
+    discrimination is visible.
     """
-    f = Fitter(cfg, backend=backend)
-    kc = f.kernel_config
-    p = _synth(kc, n_phsp, 1)
-    d = _synth(kc, n_data, 2)
-    p["weight"] = np.ones_like(p["weight"])
-    d["weight"] = np.ones_like(d["weight"])
-    f.set_phsp(p)
-    f.set_data(d)
-    return f
+    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    data = _synth(kc, NEV, 5)
+    w = np.asarray(data["weight"])
+    assert not np.allclose(w, 1.0)                    # non-unit on purpose
+    norm = 1.3
+    params = _rand_params_pwa_gen(kc, seed=7)
+
+    gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
+    Qg, gg, Pg = gen.compute(params, gen.load_data(data), norm=norm)
+
+    ref = create_backend("cpu_pwa_gen", kc, model="pwa_gen")
+    hr = ref.load_data(data)
+    Qr, gr, Pr = ref.compute(params, hr, norm=norm)
+    assert _rel(Pg, Pr) < 1e-6
+    assert _rel(Qg, Qr) < 1e-6, (Qg, Qr)
+    for key in ("ck", "m0", "g0"):
+        assert _rel(gg[key], gr[key]) < 1e-5, key
+    ref.free()
+
+    # the old objective on the identical inputs
+    old = CUDAKernelV5PWAS0E(kc, resolution_size=1)
+    Qo, _go, Po = old.compute(params, old.load_data(data), norm=norm)
+    assert _rel(Po, Pg) < 1e-6                        # same P, only the NLL
+    old.free()
+    # before: |Qo − Qcpu| / |Qcpu| is O(1) (the Σ log w offset);
+    # after:  |Qg − Qcpu| / |Qcpu| < 1e-6.
+    before = abs(Qo - Qr) / abs(Qr)
+    after = abs(Qg - Qr) / abs(Qr)
+    assert before > 1e-3, (before, after)
+    assert after < 1e-6, (before, after)
 
 
-@pytest.mark.parametrize("rs", [1, 8])
-def test_gate_b_matches_cpu_pwa_gen(rs):
-    fg = _loaded_unit(CFG_KM, {"name": "cuda_v5_pwa_gen_s0e",
-                               "resolution_size": rs}, n_phsp=300, n_data=150)
+def test_gate_b_full_nll_vs_per_event_cpu():
+    """Full norm-chained NLL (purity constant included) at rsize=1."""
+    fg = _loaded(CFG_KM, {"name": "cuda_v5_pwa_gen_s0e",
+                          "resolution_size": 1}, n_phsp=300, n_data=150)
     kc = fg.kernel_config
     assert "den_row" in kc and "n_table" in kc
     assert np.any(np.asarray(kc["n_index"]) == 1)
@@ -155,7 +210,76 @@ def test_gate_b_matches_cpu_pwa_gen(rs):
     Qg, gg = fg.get_nll(x)
     assert np.isfinite(Qg) and np.all(np.isfinite(gg))
 
-    # per-event P vs the CPU opaque-basis kernel (same data)
+    fr = _loaded(CFG_KM, "cpu_pwa_gen", n_phsp=300, n_data=150)
+    xr = fr.initial_values(seed=1)
+    Qc, gc = fr.get_nll(xr)
+    assert np.allclose(x, xr)
+    assert abs(Qg - Qc) / abs(Qc) < 1e-6, (Qg, Qc)
+    assert _rel(gg, gc) < 1e-5
+
+
+# ── gate 3: the W_g formula at rsize > 1 ────────────────────────────
+
+@pytest.mark.parametrize("rs", [2, 8])
+def test_gate_c_host_w_formula(rs):
+    """``Q = Σ_g W_g·log(S_g/W_g)`` rebuilt from the kernel's own P.
+
+    1e-9 relative is the fp64 atomic accumulation order across blocks (the
+    host sums sequentially, the kernel atomically) — the math is identical.
+    """
+    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    data = _synth(kc, NEV, 3)
+    assert not np.allclose(data["weight"], 1.0)
+    norm = 0.87
+    k = CUDAKernelV5PWAGenS0E(kc, resolution_size=rs)
+    Q, _g, P = k.compute(_rand_params_pwa_gen(kc, seed=4), k.load_data(data),
+                         norm=norm, return_p=True)
+    Qh = _host_Q(P, data["weight"], data["bkg"], norm, rs)
+    assert abs(Q - Qh) / abs(Qh) < 1e-9, (Q, Qh)
+    k.free()
+
+    # the s0c form is NOT the same number here (non-unit weights): the
+    # objective really is rsize-dependent.
+    S_list = [np.sum(data["weight"][a:a + rs]
+                     * (P[a:a + rs] / norm + data["bkg"][a:a + rs]))
+              for a in range(0, P.size, rs)]
+    Qs0c = float(-np.sum(np.log(S_list)))
+    assert abs(Q - Qs0c) / abs(Qh) > 1e-3
+
+
+# ── gate 4: a zero-weight group is inert ────────────────────────────
+
+@pytest.mark.parametrize("rs", [1, 8])
+def test_gate_d_zero_weight_group(rs):
+    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    data = _synth(kc, NEV, 3)
+    w = np.array(data["weight"])
+    w[:rs] = 0.0                       # one COMPLETE group with W_g == 0
+    data["weight"] = w
+    norm = 0.87
+    k = CUDAKernelV5PWAGenS0E(kc, resolution_size=rs)
+    Q, g, P = k.compute(_rand_params_pwa_gen(kc, seed=4), k.load_data(data),
+                        norm=norm, return_p=True)
+
+    # the same host formula skips W_g == 0 (what the kernel must do)
+    assert np.isfinite(Q)
+    Qh = _host_Q(P, data["weight"], data["bkg"], norm, rs)
+    assert abs(Q - Qh) / abs(Qh) < 1e-9, (Q, Qh)
+    # and it is NOT the "with group" value (which is -W·log(0) = +inf)
+    for key, val in g.items():
+        assert np.all(np.isfinite(val)), key
+    assert np.isfinite(k._last_dnorm)
+    k.free()
+
+
+# ── gate 5: kmatrix2 end to end + FD ────────────────────────────────
+
+def test_gate_e_kmatrix2_direct_vs_cpu():
+    fg = _loaded(CFG_KM, {"name": "cuda_v5_pwa_gen_s0e",
+                          "resolution_size": 1}, n_phsp=300, n_data=150)
+    kc = fg.kernel_config
+    x = fg.initial_values(seed=1)
+
     p = fg.build_params(x)[0]
     Qn, gn, Pn = fg.backend.compute(p, fg._data_holder, norm=None)
     ref = create_backend("cpu_pwa_s0c", kc, model="pwa_gen")
@@ -167,23 +291,9 @@ def test_gate_b_matches_cpu_pwa_gen(rs):
         assert _rel(gn[key], gr[key]) < 1e-5, key
     ref.free()
 
-    # full NLL (norm chain): like-for-like against the v5 CPU sibling at the
-    # SAME rsize (the grouped objective is rsize-dependent), plus the v4
-    # references at rsize == 1 where they coincide (unit weights).
-    refs = [("cpu_v5_pwa", {"name": "cpu_v5_pwa", "resolution_size": rs})]
-    if rs == 1:
-        refs += [("cpu_pwa_s0c", "cpu_pwa_s0c"), ("numpy_pwa", "numpy_pwa")]
-    for label, be in refs:
-        fr = _loaded_unit(CFG_KM, be, n_phsp=300, n_data=150)
-        Qc, gc = fr.get_nll(fr.initial_values(seed=1))
-        assert abs(Qg - Qc) / abs(Qc) < 1e-6, label
-        assert _rel(gg, gc) < 1e-5, label
-
-
-# ── gate 3: FD through Fitter.get_nll (explicit-coeff chain) ─────────
 
 @pytest.mark.parametrize("rs", [1, 8])
-def test_gate_c_fd_gradients(rs):
+def test_gate_f_fd_gradients(rs):
     f = _loaded(CFG_KM, {"name": "cuda_v5_pwa_gen_s0e",
                          "resolution_size": rs}, n_phsp=200, n_data=120)
     x = f.initial_values(seed=5)
@@ -202,7 +312,18 @@ def test_gate_c_fd_gradients(rs):
             nm, grad[i], fd)
 
 
-# ── gate 4: standalone kernel unit ──────────────────────────────────
+def _rand_params_pwa_gen(kc, seed=7):
+    """Kernel params for a default-basis config (m0/g0 path)."""
+    r = np.random.RandomState(seed)
+    n_wave = int(np.asarray(kc["matrix_angle"]).shape[1])
+    n_proj = int(kc.get("n_proj", 1) or 1)
+    return {"ck": 0.5 * (r.randn(n_wave // n_proj)
+                         + 1j * r.randn(n_wave // n_proj)),
+            "m0": np.linspace(0.7, 1.5, int(np.max(kc["m0_index"])) + 1),
+            "g0": np.linspace(0.1, 0.5, int(np.max(kc["g0_index"])) + 1)}
+
+
+# ── gate 6: standalone kernel unit ──────────────────────────────────
 
 def _lib_paths():
     from tabpwa.cuda.build import ensure
@@ -211,7 +332,7 @@ def _lib_paths():
             ensure("kernels_v5_pwa_s0e.cu", "libcuda_kernels_v5_pwa_s0e.so"))
 
 
-def test_gate_d_symbols_are_private():
+def test_gate_g_symbols_are_private():
     gen_lib, s0e_lib = _lib_paths()
     assert gen_lib and s0e_lib
     out = subprocess.run(["nm", "-D", "--defined-only", gen_lib],
@@ -227,7 +348,8 @@ def test_gate_d_symbols_are_private():
             continue
         exported.append(name)
     assert exported, "no defined symbols found"
-    # the C entry points: exactly the *_genv5s0e suffix
+    # the C entry points: exactly the *_genv5s0e suffix (the copy keeps the
+    # source kernel's symbol names — every kernel is a standalone library)
     bad = [n for n in exported
            if n.startswith("cuda_") and not n.endswith("_genv5s0e")]
     assert bad == [], f"leaked cuda symbols: {bad}"
@@ -244,19 +366,21 @@ def test_gate_d_symbols_are_private():
     assert cxx, "no helper symbols found"
 
 
-def test_gate_d_loads_next_to_s0e():
+def test_gate_g_loads_next_to_s0e():
     gen_lib, s0e_lib = _lib_paths()
     a = ctypes.CDLL(s0e_lib)
     b = ctypes.CDLL(gen_lib)
-    # the gen copy exposes ONLY its own suffixed entry points ...
+    # the gen copy keeps the source kernel's symbol names (case-1 copy); the
+    # old library is gone, so there is nothing to collide with ...
     assert hasattr(b, "cuda_get_device_count_genv5s0e")
-    assert not hasattr(b, "cuda_get_device_count_v5s0e")
-    assert not hasattr(b, "cuda_compute_v5s0e")
     # ... and the original is untouched / still loadable
     assert hasattr(a, "cuda_get_device_count_v5s0e")
-    assert not hasattr(a, "cuda_get_device_count_genv5s0e")
-    # resolving both at once is the coexistence check (no device call here —
-    # the actual context creation is covered by the numerics gates)
+    # no undefined reference to another kernel's code: every cuda_* undefined
+    # symbol must come from the CUDA runtime, not from *_v5s0e
+    out = subprocess.run(["nm", "-D", "--undefined-only", gen_lib],
+                         capture_output=True, text=True, check=True).stdout
+    undef = [ln.split()[-1] for ln in out.splitlines() if ln.split()]
+    assert [n for n in undef if "_v5s0e" in n] == []
 
 
 # ── grouped log-sum bookkeeping carried over from s0e ───────────────

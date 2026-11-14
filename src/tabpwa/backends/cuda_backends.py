@@ -540,7 +540,14 @@ class CUDABackendV5PWAS0E(_CUDABackend):
 class CUDABackendV5PWAGenS0E(_CUDABackend):
     """CUDA v5 PWA gen s0e — the FUSED single-kernel tile of
     ``cuda_v5_pwa_s0e`` (grouped log-sum data NLL) extended to the
-    ``pwa_gen`` basis.
+    ``pwa_gen`` basis, with the **group-total-weight** objective of
+    ``cuda_v5_pwa_s0cw``:
+
+        Q          = -Σ_g W_g · log( (Pb_g/norm + Bb_g) / W_g )
+        dNLL/dnorm =  Σ_g W_g · Pb_g / (S_g · norm²)
+
+    so ``resolution_size=1`` is the per-event NLL ``-Σ_e w_e·log(pdf_e)``
+    for ANY weights (a zero-weight group is inert).
 
     The tile kernel is basis-agnostic (explicit ``coeff`` / ``g_coeff``), so
     the ``pwa_gen`` generic denominator needs no new compute algebra: the
@@ -549,8 +556,8 @@ class CUDABackendV5PWAGenS0E(_CUDABackend):
     is folded into the amp-cache fill (load time, fixed data).  Without a
     ``den_row`` basis the wrapper passes ``m0``/``g0`` exactly like
     ``cuda_v5_pwa_s0e``; with one it takes ``params["coeff"]`` and returns
-    ``grads["coeff"]``.  ``N ≡ 1`` (or no ``n_table``) is bit-identical to
-    ``cuda_v5_pwa_s0e`` at the same ``resolution_size``.
+    ``grads["coeff"]``.  ``N ≡ 1`` (or no ``n_table``) with unit weights is
+    bit-identical to ``cuda_v5_pwa_s0e`` at the same ``resolution_size``.
     """
     def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
         self._resolution_size = int(resolution_size)

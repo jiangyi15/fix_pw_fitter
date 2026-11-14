@@ -1,7 +1,17 @@
 /**
  * cuda_v5_pwa_gen_s0e — cuda_v5_pwa_s0e (fused single-kernel tile + the
  * cuda_v5 GROUPED LOG-SUM data NLL) extended to the ``pwa_gen`` basis
- * (case-1 copy).
+ * (case-1 copy), with the GROUP-TOTAL-WEIGHT objective of cuda_v5_pwa_s0cw:
+ *
+ *     q_e      = w_e·(P_e/norm + bkg_e),     S_g = Σ_{e∈g} q_e
+ *     W_g      = Σ_{e∈g} w_e
+ *     Q        = -Σ_g W_g·log(S_g/W_g)
+ *     dQ/dP_e  = -(W_g/S_g)·(w_e/norm)
+ *     dQ/dnorm = Σ_g W_g·Pb_g/(S_g·norm²),   Pb_g = Σ_{e∈g} w_e·P_e
+ *
+ * A fully zero-weight group (W_g == 0) contributes nothing: no log, group
+ * scale 0.  At resolution_size == 1 this is ``-w_e·log(w_e·pdf_e/w_e) =
+ * -w_e·log(pdf_e)``, i.e. the per-event NLL for ANY weights.
  *
  * The s0e tile kernel is already BASIS-AGNOSTIC: it consumes an explicit
  * ``coeff[n_wave·n_basis]`` and returns ``g_coeff``, so the ``pwa_gen``
@@ -32,24 +42,19 @@
  * launch (per-block accumulation, no batching).  This kernel additionally
  * replaces the per-event NLL with the cuda_v5 grouped log-sum, WITHOUT a
  * second BW/common pass — grouping only changes the per-event scalar
- * dQ/dP_e that feeds the already-fused gradient phases:
- *
- *     q_e    = w_e·(P_e/norm + bkg_e),     S_g = Σ_{e∈g} q_e
- *     Q      = -Σ_g log(S_g)
- *     dQ/dP_e  = -(w_e/norm)/S_g
- *     dQ/dnorm = Σ_g (1/S_g)·(Σ_{e∈g} w_e·P_e)/norm²
+ * dQ/dP_e that feeds the already-fused gradient phases (formulas above).
  *
  *   * rs <= S0E_TE: a block covers rs·(S0E_TE/rs) events, i.e. WHOLE
  *     groups (only the last block's last group can be partial).  The tile
  *     is computed once, the group sums live in shared memory and phase B2
  *     folds them into dQ/dP_e before the gradient phases.
  *   * rs > S0E_TE: one block = one GROUP, walked internally in S0E_TE-event
- *     chunks.  Because 1/S_g is only known when the group closes, the
+ *     chunks.  Because W_g/S_g is only known when the group closes, the
  *     gradient phases accumulate with the per-event factor f_e = w_e/norm
  *     into SHARED per-group accumulators (grad_ck[2N] + grad_coeff
  *     [n_wave·n_basis], ~8 KB at n_wave=198); at group close the block
- *     multiplies them by const_g = -1/S_g and issues ONE set of global
- *     atomics.  Still exactly one BW pass per event.
+ *     multiplies them by const_g = -W_g/S_g (0 for W_g == 0) and issues ONE
+ *     set of global atomics.  Still exactly one BW pass per event.
  *
  * norm=None stays per-event linear in both paths (Q = Σ w_e·P_e,
  * dQ/dP_e = w_e) — identical to cuda_v4_pwa_s0e.  `P_out` is per-event P.
@@ -360,12 +365,12 @@ __global__ void us_cache_fill_gen_kernel(
 #define S0E_BLOCK 256      /* threads */
 
 /* shared tail: 3 arrays of S0E_TE (P_e, q_e, group scale) for the
-   whole-group path, or the same plus [2] totals + the shared per-group
-   gradient accumulators grad_ck[2N] + grad_coeff[n_wave*n_basis] */
+   whole-group path, or the same plus [3] totals (S, WP, W) + the shared
+   per-group gradient accumulators grad_ck[2N] + grad_coeff[n_wave*n_basis] */
 #define S0E_TAIL(nw, P, nb) \
-    ((3 * S0E_TE) > (3 * S0E_TE + 2 + 2 * ((nw) / (P)) + (nw) * (nb)) \
+    ((3 * S0E_TE) > (3 * S0E_TE + 3 + 2 * ((nw) / (P)) + (nw) * (nb)) \
         ? (3 * S0E_TE) \
-        : (3 * S0E_TE + 2 + 2 * ((nw) / (P)) + (nw) * (nb)))
+        : (3 * S0E_TE + 3 + 2 * ((nw) / (P)) + (nw) * (nb)))
 
 #define S0E_SHM_V5(nw, P, nb) \
     ((size_t)(4 * S0E_TE * (nw) + 4 * S0E_TE * (P) \
@@ -412,8 +417,8 @@ __global__ void s0e_tile_gen_kernel_v5(
     double* s_pe = s_di + (size_t)S0E_TE * P;            /* P_e         */
     double* s_q  = s_pe + S0E_TE;                        /* q_e         */
     double* s_sc = s_q + S0E_TE;                         /* group scale */
-    double* s_tot = s_sc + S0E_TE;                       /* [2]  path B */
-    double* s_gr = s_tot + 2;                            /* [N]  path B */
+    double* s_tot = s_sc + S0E_TE;                       /* [3]  path B */
+    double* s_gr = s_tot + 3;                            /* [N]  path B */
     double* s_gi = s_gr + N;
     double* s_gc = s_gi + N;                             /* [nc] path B */
 
@@ -427,7 +432,7 @@ __global__ void s0e_tile_gen_kernel_v5(
         d_ck_r = s_gr; d_ck_i = s_gi; d_coeff = s_gc;
         for (int k = tid; k < N; k += nt) { s_gr[k] = 0.0; s_gi[k] = 0.0; }
         for (int i = tid; i < nc; i += nt) s_gc[i] = 0.0;
-        if (tid == 0) { s_tot[0] = 0.0; s_tot[1] = 0.0; }
+        if (tid == 0) { s_tot[0] = 0.0; s_tot[1] = 0.0; s_tot[2] = 0.0; }
         __syncthreads();
     }
 
@@ -513,28 +518,36 @@ __global__ void s0e_tile_gen_kernel_v5(
             for (int g = tid; g < ng; g += nt) {
                 const int a = g * rs;
                 const int b = (a + rs < nen) ? (a + rs) : nen;
-                double S = 0.0, WP = 0.0;
+                double S = 0.0, WP = 0.0, W = 0.0;
                 for (int e = a; e < b; e++) {
                     S += s_q[e];
                     WP += weight[ce0 + e] * s_pe[e];
+                    W += weight[ce0 + e];
                 }
                 if (use_norm) {
-                    s_sc[g] = -1.0 / S;
-                    atomicAdd(Q_acc, -log(S));
-                    atomicAdd(dnorm_acc, WP / (S * norm * norm));
+                    /* group-total-weight objective: -W·log(S/W) */
+                    if (W > 0.0) {
+                        s_sc[g] = -W / S;
+                        atomicAdd(Q_acc, -W * log(S / W));
+                        atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
+                    } else {
+                        s_sc[g] = 0.0;      /* zero-weight group: inert */
+                    }
                 } else {
                     s_sc[g] = 1.0;
                     atomicAdd(Q_acc, S);
                 }
             }
         } else if (tid == 0) {
-            double S = 0.0, WP = 0.0;
+            double S = 0.0, WP = 0.0, W = 0.0;
             for (int e = 0; e < nen; e++) {
                 S += s_q[e];
                 WP += weight[ce0 + e] * s_pe[e];
+                W += weight[ce0 + e];
             }
             s_tot[0] += S;
             s_tot[1] += WP;
+            s_tot[2] += W;
         }
         __syncthreads();
 
@@ -594,11 +607,15 @@ __global__ void s0e_tile_gen_kernel_v5(
        set of the group's gradient accumulators */
     if (pathB) {
         if (tid == 0) {
-            const double S = s_tot[0], WP = s_tot[1];
+            const double S = s_tot[0], WP = s_tot[1], W = s_tot[2];
             if (use_norm) {
-                atomicAdd(Q_acc, -log(S));
-                atomicAdd(dnorm_acc, WP / (S * norm * norm));
-                s_sc[0] = -1.0 / S;
+                if (W > 0.0) {
+                    atomicAdd(Q_acc, -W * log(S / W));
+                    atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
+                    s_sc[0] = -W / S;
+                } else {
+                    s_sc[0] = 0.0;              /* zero-weight group: inert */
+                }
             } else {
                 atomicAdd(Q_acc, S);
                 s_sc[0] = 1.0;
