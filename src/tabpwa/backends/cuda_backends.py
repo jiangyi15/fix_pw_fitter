@@ -585,6 +585,46 @@ class CUDABackendV5PWAGenS0E(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_gen_flat", model="pwa_gen")
+class CUDABackendV5PWAGenFlat(_CUDABackend):
+    """CUDA v5 PWA gen flat — ``cuda_v5_pwa_gen_s0e`` with a **flat,
+    unpadded, per-wave contiguous** (CSR-style) denominator basis.
+
+    ``BW_w = Σ_{idx=off[w]}^{off[w+1]-1} coeff[idx]·T[g_idx[idx]]``: no
+    padded slots, so a mixed decay (a 3-row resonance next to a 5-row one)
+    carries ``n_basis_tot < n_wave·n_basis_max``.  Everything else — the
+    fused tile, the grouped log-sum data NLL with the group total weight,
+    the combined basis table and the numerator folded into the amp-cache
+    fill — is the s0e gen machinery.  The host contract is unchanged
+    (padded ``params["coeff"]`` in, padded ``grads["coeff"]`` out); with an
+    equal-width basis the numbers are those of ``cuda_v5_pwa_gen_s0e``.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_gen_flat import CUDAKernelV5PWAGenFlat as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_gen_flat kernel did not provide _last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda_v5_pwa_s0cw", model="pwa")
 class CUDAKernelV5PWAS0CWBackend(_CUDABackend):
     """CUDA v5 PWA s0cw — the s0c kernel with the GROUP-WEIGHTED log NLL.
