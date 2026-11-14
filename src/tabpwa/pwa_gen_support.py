@@ -43,11 +43,14 @@ carries a free numerator basis / an extended denominator basis).
 
 import numpy as np
 
-#: den_row slot kinds (see the module docstring).
+#: den_row slot kinds (see the module docstring).  ``ZERO_KIND`` is the
+#: *negative* padding sentinel: every non-negative encoding is a real
+#: basis selector (``2+r`` = ``TABLE_KIND`` row ``r``), so a distinct,
+#: non-colliding value is required (``3`` used to mean ``den_table[1]``).
 CONST_KIND = 0
 MSQ_KIND = 1
 TABLE_KIND = 2
-ZERO_KIND = 3
+ZERO_KIND = -1
 
 
 # ── numerator ────────────────────────────────────────────────────────
@@ -72,11 +75,6 @@ def numerator_values(config, kernel, mass):
 def has_generic_den(config):
     """True when the config carries an explicit coefficient basis."""
     return "den_row" in config
-
-
-def den_encodings(config, bw_of_fact):
-    """Per-(wave, factor) slot encodings from the per-BW ``den_row``."""
-    return np.asarray(config["den_row"])[np.asarray(bw_of_fact)]
 
 
 def build_den_slots(enc, mass_col):
@@ -153,14 +151,16 @@ def fill_den_F(config, kernel, mass, kinds, rows, cols):
     return F_r, F_i
 
 
-def den_domain(config, mass, coeff, enc, F):
-    """``BW_b(e) = Σ_j coeff[b, j] · F_{enc[b, j]}(e)`` per unique BW.
+def den_domain(mass, coeff, slots, F):
+    """``BW_b(e) = Σ_j coeff[b, j] · F_{slots[b, j]}(e)`` per unique BW.
 
     Args:
-        config: kernel config (unused beyond signature symmetry).
         mass: ``(n_events, n_mass)`` mass columns.
         coeff: ``(n_bw, n_basis)`` real coefficients.
-        enc: ``(n_bw, n_basis)`` slot encodings.
+        slots: ``(n_bw, n_basis)`` **unique-slot indices** (the reshaped
+            ``slot_map`` from :func:`build_den_slots`), not the raw
+            ``den_row`` encoding.  Padding (``ZERO_KIND``) is a real slot
+            whose basis value is 0, so it never needs a special case here.
         F: ``(n_events, n_uslot)`` complex basis values (from
             :func:`fill_den_F`, combined here).
 
@@ -168,26 +168,29 @@ def den_domain(config, mass, coeff, enc, F):
         complex ``(n_events, n_bw)``.
     """
     coeff = np.asarray(coeff, dtype=np.float64)
-    enc = np.asarray(enc, dtype=np.int64)
-    n_bw = enc.shape[0]
+    slots = np.asarray(slots, dtype=np.int64)
+    n_bw = slots.shape[0]
     out = np.zeros((mass.shape[0], n_bw), dtype=complex)
     # one reused gather buffer: the per-slot (n_events, n_bw) block is the
     # denominator's own size, so avoid re-allocating it for every slot
     buf = np.empty((mass.shape[0], n_bw), dtype=complex)
-    for j in range(enc.shape[1]):
-        np.take(F, enc[:, j], axis=1, out=buf)
+    for j in range(slots.shape[1]):
+        np.take(F, slots[:, j], axis=1, out=buf)
         out += coeff[:, j] * buf
     return out
 
 
-def den_domain_grad(dQ_dbw, coeff, enc, F):
-    """``dQ/dcoeff[b, j] = 2·Re Σ_e dQ/dBW_b(e) · F_{enc[b,j]}(e)``."""
+def den_domain_grad(dQ_dbw, slots, F):
+    """``dQ/dcoeff[b, j] = 2·Re Σ_e dQ/dBW_b(e) · F_{slots[b,j]}(e)``.
+
+    ``slots`` is the reshaped unique-slot map (see :func:`den_domain`).
+    """
     dQ_dbw = np.asarray(dQ_dbw)
-    enc = np.asarray(enc, dtype=np.int64)
-    out = np.zeros((enc.shape[0], enc.shape[1]), dtype=np.float64)
-    buf = np.empty((dQ_dbw.shape[0], enc.shape[0]), dtype=complex)
-    for j in range(enc.shape[1]):
-        np.take(F, enc[:, j], axis=1, out=buf)
+    slots = np.asarray(slots, dtype=np.int64)
+    out = np.zeros((slots.shape[0], slots.shape[1]), dtype=np.float64)
+    buf = np.empty((dQ_dbw.shape[0], slots.shape[0]), dtype=complex)
+    for j in range(slots.shape[1]):
+        np.take(F, slots[:, j], axis=1, out=buf)
         out[:, j] = 2.0 * np.real(np.sum(dQ_dbw * buf, axis=0))
     return out
 

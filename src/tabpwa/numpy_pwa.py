@@ -94,7 +94,12 @@ class NumpyPWA:
         ne = mass.shape[0]
 
         # ── forward amplitude chain (identical to the original kernel) ────
-        use_coeff = self._den_generic and "coeff" in params
+        if self._den_generic and "coeff" not in params:
+            raise ValueError(
+                "numpy_pwa: generic denominator (den_row) requires "
+                "params['coeff'] — the m0/g0 path does not implement an "
+                "explicit coefficient basis")
+        use_coeff = self._den_generic
         kc = self.config
         if use_coeff:
             coeff = np.asarray(params["coeff"], dtype=float)
@@ -105,11 +110,14 @@ class NumpyPWA:
             coeff_bw[uniq_bw] = coeff[first]
             from tabpwa.pwa_gen_support import (
                 build_den_slots, fill_den_F, den_domain, den_domain_grad)
-            kinds, d_rows, d_cols, _slot, _nu = build_den_slots(
+            kinds, d_rows, d_cols, slot_flat, _nu = build_den_slots(
                 enc_bw, np.asarray(k.mass_index))
+            # ``F`` is indexed by unique-slot id, not by the raw den_row
+            # encoding — pass the reshaped slot map to the domain calls.
+            slots = slot_flat.reshape(enc_bw.shape)
             F_r, F_i = fill_den_F(kc, k, mass, kinds, d_rows, d_cols)
             F = F_r + 1j * F_i
-            bw_dom = den_domain(kc, mass, coeff_bw, enc_bw, F)
+            bw_dom = den_domain(mass, coeff_bw, slots, F)
         else:
             g0_all = np.take(g0, k.g0_index)
             g0_m = np.take(mass, k.g0_mass_index, axis=-1)
@@ -184,7 +192,7 @@ class NumpyPWA:
             # leave the duplicates at zero.  The model's basis transform sums
             # over the copies, which then recovers the total dQ/dweight (the
             # per-factor CPU kernels distribute it instead).
-            gc = den_domain_grad(dQ_dbw_dom, coeff_bw, enc_bw, F)
+            gc = den_domain_grad(dQ_dbw_dom, slots, F)
             grad_coeff = np.zeros_like(coeff)
             grad_coeff[first] = gc[uniq_bw]
             grad_m0 = np.zeros(len(m0))

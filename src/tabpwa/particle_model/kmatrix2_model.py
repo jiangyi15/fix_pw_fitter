@@ -8,6 +8,10 @@ interface.  The amplitude is a rational function of ``s = m²``::
     P(s)  = b1  / (m1² − s) + b2  / (m2² − s)
     A(s)  = P(s) / (1 − i·ρ(s)·K(s))
 
+**Not the conventional phase space**: this ``ρ`` is
+``sqrt(1 − (2m_π)²/s)``, *not* the ``2k/m`` two-body phase space, so the
+``g1/g2`` couplings are not directly comparable to literature values.
+
 Written over the common denominator ``(m1² − s)(m2² − s)`` this is the
 basis ratio ``(Σ n_i N_i) / (Σ g_j G_j)`` with::
 

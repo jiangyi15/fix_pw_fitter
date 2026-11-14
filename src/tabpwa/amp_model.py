@@ -337,11 +337,7 @@ class PWAGen(PWA):
 
     def _pg_grid(self):
         """Mass grid shared with ``build_gamma_table`` (for ``den_table``)."""
-        from .build_defaults import get as _bg
-        n_interp = int(_bg("n_interp", self.n_interp_gamma))
-        m_min, m_max = self.get_max_mass_range()
-        grid = np.linspace(m_min - 0.01, m_max + 0.01, n_interp)
-        return grid, float(grid[0]), float(grid[1] - grid[0])
+        return self.gamma_grid()
 
     def _pg_chain_rows(self, chain):
         """Free numerator rows of a chain: ``[(head names, N(m) callable)]``.
@@ -473,7 +469,6 @@ class PWAGen(PWA):
         bws = []
         extra_rows = []           # tabulated finished basis functions
         extra_pos = {}
-        extras_exist = False
         any_transform = False
         for b, key in enumerate(self.unique_bw):
             name = key[0][:-len("_mass")]
@@ -483,24 +478,31 @@ class PWAGen(PWA):
             if tr is not None:
                 any_transform = True
             names, rows = self._pg_den_basis(name, mdl, grid, tr)
-            if tr is not None:
-                # every row past the two built-ins (1, m²) is tabulated as a
-                # finished basis function with an explicit weight
-                for j in range(2, len(names)):
-                    extras_exist = True
+            den_names.append(names)
+            bws.append({"name": name, "model": mdl, "transform": tr,
+                        "den_names": names, "rows": rows})
+
+        # Every row past the two built-ins (1, m²) is tabulated as a
+        # finished basis function with an explicit weight.  This must run
+        # for ALL Breit–Wigner slots — including plain models — whenever
+        # the generic coefficient basis is needed: a config that mixes a
+        # BasisModel with an ordinary resonance then has a ``den_row`` for
+        # every slot instead of a KeyError.  Plain weights are
+        # ``[m0², −1, m0·g_l]`` (see PWAgenWeightsTransform.forward).
+        if any_transform:
+            for rec in bws:
+                name = rec["name"]
+                for j in range(2, len(rec["rows"])):
                     pos = extra_pos.get((name, j))
                     if pos is None:
                         pos = len(extra_rows)
                         extra_pos[(name, j)] = pos
-                        extra_rows.append(rows[j])
-            den_names.append(names)
-            bws.append({"name": name, "model": mdl, "transform": tr,
-                        "den_names": names})
+                        extra_rows.append(rec["rows"][j])
 
         n_bw = len(self.unique_bw)
         self._pg_den_names = den_names
         self._pg_bws = bws
-        self._pg_generic = bool(extras_exist or any_transform)
+        self._pg_generic = bool(any_transform)
 
         # ── numerator rows per base wave + expanded wave list ────────
         chain_rows = {}
@@ -592,7 +594,13 @@ class PWAGen(PWA):
                     elif j == 1:
                         base_den[b, j] = 1
                     else:
-                        base_den[b, j] = 2 + extra_pos[(name, j)]
+                        pos = extra_pos.get((name, j))
+                        if pos is None:            # tail of a mixed config
+                            raise ValueError(
+                                f"pwa_gen: no tabulated denominator basis "
+                                f"row for '{name}' slot {j} — the resonance "
+                                f"cannot join a generic coefficient config")
+                        base_den[b, j] = 2 + pos
             kc["den_row"] = np.tile(base_den, (C, 1))
             kc["den_table"] = (np.stack(extra_rows) if extra_rows
                                else np.zeros((0, grid.size), dtype=complex))

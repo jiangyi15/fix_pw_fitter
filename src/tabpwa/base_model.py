@@ -213,13 +213,23 @@ class BaseModel:
         m_min = m_finals[0]+ m_finals[1]
         return m_min, m_max
 
-    def build_gamma_table(self, n_interp=None):
+    def gamma_grid(self, n_interp=None):
+        """The gamma/``fl`` interpolation mass grid.
+
+        Returns ``(grid, min, delta)`` — one definition shared by
+        :meth:`build_gamma_table` (which fills the rows) and the
+        ``pwa_gen`` denominator tables (which must sit on the same grid).
+        """
         if n_interp is None:
             from .build_defaults import get as _build_get
             n_interp = int(_build_get("n_interp", self.n_interp_gamma))
-        gamma_table = {}
         m_min, m_max = self.get_max_mass_range()
-        m = np.linspace(m_min-0.01, m_max + 0.01, n_interp)
+        m = np.linspace(m_min - 0.01, m_max + 0.01, n_interp)
+        return m, float(m[0]), float(m[1] - m[0])
+
+    def build_gamma_table(self, n_interp=None):
+        gamma_table = {}
+        m, m0, dm = self.gamma_grid(n_interp)
         for chain in self.full_decay.chains:
             for decay in chain.decays[1:]:
                 g0 = decay.core._model.get_gamma_name()
@@ -227,7 +237,7 @@ class BaseModel:
                     gamma = decay.core._model.gamma(m)
                     for i,j in zip(g0, gamma):
                         gamma_table[i] = j
-        return gamma_table, m[0], m[1]-m[0]
+        return gamma_table, m0, dm
 
 
     def get_max_q_range(self):

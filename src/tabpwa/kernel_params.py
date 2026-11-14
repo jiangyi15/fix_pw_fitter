@@ -104,23 +104,38 @@ class PWAGenKernelParams(PWAKernelParams):
             return
         den_row = np.asarray(kc["den_row"])
         bow = np.asarray(kc["bw_order"]).reshape(-1)
-        n_bw = den_row.shape[0]
         self._den_row = den_row
         self._n_slots = den_row.shape[1]
         self._n_fact = int(bow.size)
         self._bw_of_fact = bow
-        self._base_bw = bow % n_bw
-        self._n_bw = n_bw
         self._den_names = list(model._pg_den_names)
+        # ``den_row`` is tiled over the n_blocks copies, while
+        # ``_den_names`` has one entry per *base* BW: reduce the block
+        # offset (``b·n_bw_base``) back to the base slot first.
+        n_bw_base = len(self._den_names)
+        self._n_bw = n_bw_base
+        self._base_bw = bow % n_bw_base
         self._facts_of_bw = [np.nonzero(self._base_bw == b)[0]
-                             for b in range(n_bw)]
+                             for b in range(n_bw_base)]
         self._inputs = list(model._coef_transform().input_names)
+        # The generic kernels consume only ``coeff`` (built host-side from
+        # the basis weights); a physical m0/g0 that is NOT a transform
+        # input would be an identically-zero flat direction, so keep it out
+        # of the parameter surface (and out of the kernel params).
+        self._m0_names = []
+        self._g0_names = []
 
     # -- parameter surface ----------------------------------------------
     def param_names(self):
         base = super().param_names()
         if not self._generic:
             return base
+        # drop the model's physical mass/width names that are not also
+        # basis-transform inputs (e.g. a k-matrix's ``k2_mass``); those
+        # never reach the generic kernel's coefficient vector.
+        keep = set(self._inputs)
+        dropped = set(self.model.m0_phys_name) | set(self.model.g0_phys_name)
+        base = [n for n in base if n not in dropped or n in keep]
         return list(dict.fromkeys(base + self._inputs))
 
     # -- forward --------------------------------------------------------

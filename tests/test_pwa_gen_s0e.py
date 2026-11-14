@@ -219,11 +219,29 @@ def test_gate_d_symbols_are_private():
     exported = []
     for line in out.splitlines():
         parts = line.split()
-        if parts and parts[-1].startswith("cuda_"):
-            exported.append(parts[-1])
-    assert exported, "no cuda_* symbols found"
-    bad = [n for n in exported if not n.endswith("_genv5s0e")]
-    assert bad == [], f"leaked symbols: {bad}"
+        if len(parts) < 3:
+            continue
+        typ, name = parts[-2], parts[-1]
+        # "u" = unique globals of the CUDA/thrust runtime headers; not ours
+        if typ == "u":
+            continue
+        exported.append(name)
+    assert exported, "no defined symbols found"
+    # the C entry points: exactly the *_genv5s0e suffix
+    bad = [n for n in exported
+           if n.startswith("cuda_") and not n.endswith("_genv5s0e")]
+    assert bad == [], f"leaked cuda symbols: {bad}"
+    # everything else must be a *_gen helper (or a cuda::std instantiation)
+    cxx = [n for n in exported if not n.startswith("cuda_")]
+    demangled = subprocess.run(["c++filt"] + cxx, capture_output=True,
+                               text=True, check=True).stdout.splitlines()
+    for dem in demangled:
+        if "cuda::std" in dem:
+            continue
+        base = dem.split("(")[0]
+        assert base.endswith("_gen") or "_gen_" in base, (
+            f"unexpected exported helper: {dem}")
+    assert cxx, "no helper symbols found"
 
 
 def test_gate_d_loads_next_to_s0e():
@@ -250,3 +268,22 @@ def test_partial_last_group_warns():
     with pytest.warns(RuntimeWarning):
         k.load_data(data)
     k.free()
+
+
+def test_generic_does_not_upload_bogus_gamma_columns():
+    """The generic path must not invent ``gamma_col_idx`` from matrix_gamma.
+
+    The device never reads m0/g0/gamma-row indices when the basis is
+    explicit; uploading ``argmax(matrix_gamma, axis=1)`` (and the unused
+    g0 arrays) is both meaningless and misleading.
+    """
+    kc = Fitter(CFG_KM, backend="numpy_pwa").kernel_config
+    k = CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
+    try:
+        assert k._generic
+        assert k._gamma_col_idx.size == 0
+        assert k._g0_index_w.size == 0
+        assert k._g0_mass_index_w.size == 0
+        assert k.row_start.size == 0
+    finally:
+        k.free()

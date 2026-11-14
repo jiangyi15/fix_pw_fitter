@@ -114,12 +114,14 @@ def _load_lib():
 def _amp_cache_layout(config, n_on):
     """Wave → minimal angular-cache-slot mapping (numerator aware).
 
-    Same dedup key as :func:`tabpwa.amp_cache.build_amp_cache_layout`
-    (matrix_angle column + fl_order row), extended by the per-wave numerator
-    row ``n_index`` / mass column when the numerator is actually used: the
-    numerator is folded into the cached ``Amp``, so waves sharing an angular
-    entry but carrying different numerator rows must NOT share a slot.
-    Without a numerator this is exactly the shared layout.
+    House-rule case-1 copy (a kernel owns its own load-time caches).  The
+    dedup key must stay **equal** to
+    :func:`tabpwa.amp_cache.build_amp_cache_layout` — matrix_angle column +
+    fl_order row — extended by the per-wave numerator row ``n_index`` /
+    mass column when the numerator is actually used: the numerator is
+    folded into the cached ``Amp``, so waves sharing an angular entry but
+    carrying different numerator rows must NOT share a slot.  Without a
+    numerator this is exactly the shared layout.
     """
     n_wave = config["matrix_angle"].shape[1]
     n_decay = config["fl_order"].size // n_wave
@@ -367,13 +369,13 @@ class CUDAKernelV5PWAGenS0E:
         self.slot_l = np.full(self.n_wave * self.n_basis, -1, np.int32)
         self._mass_index_w = mass_index_w
         self.n_unique_bw = self.n_wave
-        self._gamma_col_idx = np.ascontiguousarray(
-            np.argmax(c["matrix_gamma"], axis=1).astype(np.int32))
-        # m0/g0 bookkeeping is unused on the device in the generic path, but
-        # the create call still uploads the (s0c-shaped) index arrays.
-        self._g0_index_w = np.asarray(c["g0_index"])
-        self._g0_mass_index_w = np.asarray(c["g0_mass_index"])
-        self._m0_index_w = np.asarray(c["m0_index"])
+        # The generic path never reads m0/g0/gamma-row indices on the
+        # device (only the combined basis slots).  Keep the arrays empty so
+        # the create call passes NULL/0 — in particular, do NOT invent a
+        # ``gamma_col_idx`` from ``argmax(matrix_gamma)`` (meaningless here).
+        self._gamma_col_idx = np.zeros(0, np.int32)
+        self._g0_index_w = np.zeros(0, np.int32)
+        self._g0_mass_index_w = np.zeros(0, np.int32)
         self._wave_of_row = np.zeros(0, np.int64)
         self.row_start = np.zeros(0, np.int32)
         den_table = np.asarray(c.get("den_table"))
@@ -442,7 +444,7 @@ class CUDAKernelV5PWAGenS0E:
             float(c["gamma_min"]), float(c["gamma_delta"]),
             gt.shape[-1],
             _ffi.NULL, 0,                    # matrix_gamma: wrapper-side only
-            _ib(self._gamma_col_idx), len(self._gamma_col_idx),
+            _ib_or_null(self._gamma_col_idx), len(self._gamma_col_idx),
             _db(c["fl_table"].flatten()), c["fl_table"].size,
             float(c["fl_min"]), float(c["fl_delta"]), c["fl_table"].shape[-1],
             self.n_wave, self.n_res, self.n_decay,
