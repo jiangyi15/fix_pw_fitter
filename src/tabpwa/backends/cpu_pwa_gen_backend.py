@@ -16,6 +16,9 @@ from .core import ComputeBackend, register_backend
 
 @register_backend("cpu_pwa_gen", model="pwa")
 @register_backend("cpu_v4_pwa", model="pwa")
+@register_backend("default", model="pwa_gen")
+@register_backend("cpu_pwa_gen", model="pwa_gen")
+@register_backend("cpu_v4_pwa", model="pwa_gen")
 class CPUPWAGenBackend(ComputeBackend):
     """CPU PWA general-n_res backend (C + OpenMP, float64, per-event NLL).
 

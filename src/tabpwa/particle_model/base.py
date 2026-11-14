@@ -580,3 +580,16 @@ class BasisModel(BaseModel):
                     d[name] = (complex(val) if np.iscomplexobj(val)
                                else float(val))
         return d
+
+
+@register_model("basis")
+class DefaultBasisModel(BasisModel):
+    """The default :class:`BasisModel` basis — a registered, plain basis.
+
+    ``num_basis = [1]`` and ``den_basis = [1, m², −i·γ]`` with the kernel
+    coefficient weights ``[m0², −1, m0·g0]``, i.e. exactly the plain
+    Breit–Wigner denominator of :class:`BaseModel` (bit-identical, see
+    ``tests/test_particle_basis.py::test_basis_default_matches_bw_bitwise``).
+    It exists so a config can select the *default* basis explicitly
+    (``model: basis``) — the reference case of the ``pwa_gen`` model.
+    """

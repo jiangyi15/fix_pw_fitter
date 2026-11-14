@@ -194,6 +194,10 @@ class Fitter:
         on each model, and adds non-``None`` results to the constraint pipeline.
         Duplicate model instances (same particle appearing in multiple chains)
         are registered only once.
+
+        The amplitude model may add its own transforms (``extra_transforms``)
+        — e.g. ``pwa_gen``'s physical-parameters → basis-weights transform,
+        which has the same contract as a mass/width transform.
         """
         transforms = []
         seen = set()
@@ -207,6 +211,9 @@ class Fitter:
                 tfm = model.make_mass_width_transform()
                 if tfm is not None:
                     transforms.append(tfm)
+        extra = getattr(self.model, "extra_transforms", None)
+        if extra is not None:
+            transforms.extend(extra())
         # Never reset: on a SHARED cm a reset would wipe the other configs'
         # mass/width transforms; on the private cm there is nothing to wipe
         # on this single call.  Same-name collisions are handled per name
@@ -782,9 +789,11 @@ class Fitter:
         nll = nll + self._log_purity_const
 
         # 5. Combine gradients: total = direct + norm_chain
+        # ``coeff`` is the pwa_gen explicit denominator coefficient vector —
+        # like ck it enters the normalisation, so it takes the same chain.
         total_grads = {}
         for key in grads:
-            if key in ("ck", "scalar", "m0", "g0"):
+            if key in ("ck", "scalar", "m0", "g0", "coeff"):
                 g = np.asarray(grads[key])
                 ng = np.asarray(norm_grads[key])
                 total_grads[key] = g + dNLL_dnorm * ng

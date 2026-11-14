@@ -14,6 +14,8 @@ class _CUDABackend(ComputeBackend):
 
     def __init__(self, kernel_config, batch_size=50000):
         self.kernel = None   # set below; free/__del__ must be safe
+        from tabpwa.pwa_gen_support import check_backend_support
+        check_backend_support(kernel_config, type(self).__name__)
         self.kernel = self._make_kernel(kernel_config, batch_size)
 
     def _make_kernel(self, kernel_config, batch_size):
@@ -126,6 +128,7 @@ class CUDABackendV3AmpCache(_CUDABackend):
 
 
 @register_backend("cuda_v4_pwa", model="pwa")
+@register_backend("cuda_v4_pwa", model="pwa_gen")
 @register_backend("default", model="pwa")
 class CUDABackendV4PWA(_CUDABackend):
     """CUDA v4 PWA — projection-sum PWA on the ampcache infrastructure.

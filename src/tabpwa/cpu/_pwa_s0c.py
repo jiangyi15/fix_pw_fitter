@@ -139,6 +139,13 @@ class CPUKernelPWAS0C:
                 "cpu_pwa_s0c needs exactly ONE BW per chain "
                 f"(top -> R + X), got n_res = {self.n_res}")
 
+        # ── explicit coefficient basis (pwa_gen): the host slot layout is
+        #    given by the kernel config's ``den_row`` and the coefficients
+        #    are supplied per call — no m0/g0 chain lives here.
+        if "den_row" in c:
+            self._init_generic(c)
+            return
+
         # ── per-wave BW expansion (no bw_order indirection) ──────────
         bw = np.asarray(c["bw_order"]).reshape(-1)
         if bw.size != self.n_wave:
@@ -248,6 +255,51 @@ class CPUKernelPWAS0C:
         self._nk = NumpyKernel(c)
 
         self._last_dnorm = None
+        self._generic = False
+        from tabpwa.pwa_gen_support import has_numerator
+        self._n_on = has_numerator(c)
+
+    def _init_generic(self, c):
+        """Explicit coefficient basis (``pwa_gen``): host slot table.
+
+        The kernel is basis-agnostic, so only the *host* layout changes: the
+        per-wave slot encodings come from the kernel config's ``den_row``
+        (``0`` = F=1, ``1`` = F=−m², ``2+r`` = ``den_table[r]``, ``-1`` = 0)
+        and the coefficients are passed in per call (``params["coeff"]``,
+        gradients out as ``grads["coeff"]``).
+        """
+        from tabpwa.numpy_kernel import NumpyKernel
+        from tabpwa.pwa_gen_support import build_den_slots, has_numerator
+
+        self._generic = True
+        self._n_on = has_numerator(c)
+        enc = np.asarray(c["den_row"])
+        bow = np.asarray(c["bw_order"]).reshape(-1)
+        mass_index_w = np.asarray(c["mass_index"])[bow]
+        enc_w = enc[bow]
+        self.n_basis = int(enc.shape[1])
+        kinds, rows, cols, slot_map, n_uslot = build_den_slots(
+            enc_w, mass_index_w)
+        self._den_kinds = kinds
+        self._den_rows = rows
+        self._den_cols = cols
+        self.n_uslot = n_uslot
+        self.slot_map = np.ascontiguousarray(slot_map, np.int32)
+        self.n_gamma_rows = 0
+        self._mass_index_w = mass_index_w.astype(np.int32)
+
+        self.n_decay = c["fl_order"].size // self.n_wave
+        self.n_mass = int(np.max(c["mass_index"])) + 1
+        self.n_momentum = int(np.max(c["fl_q_index"])) + 1
+        self.n_angle_k = c["angle_k"].shape[0]
+        self.n_angle_total = (int(np.max(c["angle_index"])) + 1
+                              if len(c["angle_index"]) > 0 else 0)
+        self.n_angle_comp = c["angle_k"].shape[-1]
+        self.n_m0_params = int(np.max(c["m0_index"])) + 1
+        self.n_g0_params = int(np.max(c["g0_index"])) + 1
+
+        self._nk = NumpyKernel(c)
+        self._last_dnorm = None
 
     # -- data lifecycle ------------------------------------------------
 
@@ -300,6 +352,9 @@ class CPUKernelPWAS0C:
         ka = np.prod(np.cos(ang_t * k.angle_k + k.angle_b), axis=-1)
         fa = ka @ k.matrix_angle
         amp = fa * fl_p                                   # (ne, n_wave)
+        if self._n_on:
+            from tabpwa.pwa_gen_support import numerator_values
+            amp = amp * numerator_values(self.config, k, mass)
 
         # ── iteration-invariant basis functions at the unique slots ──
         # (all of them derived from the SAME extended table + interp)
@@ -308,22 +363,27 @@ class CPUKernelPWAS0C:
         # Stored READY-TO-USE: F = 1, −m², −i·γ (the −i rotation is done
         # here once, so the kernel is a plain complex linear combination).
         nu = self.n_uslot
-        F_r = np.zeros((ne, nu), np.float64)
-        F_i = np.zeros((ne, nu), np.float64)
-        for u in range(nu):
-            kind = self._uslot_kind[u]
-            col = self._uslot_col[u]
-            if kind == 0:                       # F = 1
-                F_r[:, u] = 1.0
-            elif kind == 1:                     # F = −m²
-                F_r[:, u] = -mass[:, col] ** 2
-            else:                               # F = −i·γ  =  (γ_i, −γ_r)
-                gm = np.take(mass, col, axis=-1)
-                g = k.interp_catmull_rom(
-                    k.gamma_table, self._uslot_row[u], gm,
-                    k.gamma_min, k.gamma_delta)
-                F_r[:, u] = np.imag(g)
-                F_i[:, u] = -np.real(g)
+        if self._generic:
+            from tabpwa.pwa_gen_support import fill_den_F
+            F_r, F_i = fill_den_F(self.config, k, mass, self._den_kinds,
+                                  self._den_rows, self._den_cols)
+        else:
+            F_r = np.zeros((ne, nu), np.float64)
+            F_i = np.zeros((ne, nu), np.float64)
+            for u in range(nu):
+                kind = self._uslot_kind[u]
+                col = self._uslot_col[u]
+                if kind == 0:                       # F = 1
+                    F_r[:, u] = 1.0
+                elif kind == 1:                     # F = −m²
+                    F_r[:, u] = -mass[:, col] ** 2
+                else:                               # F = −i·γ  =  (γ_i, −γ_r)
+                    gm = np.take(mass, col, axis=-1)
+                    g = k.interp_catmull_rom(
+                        k.gamma_table, self._uslot_row[u], gm,
+                        k.gamma_min, k.gamma_delta)
+                    F_r[:, u] = np.imag(g)
+                    F_i[:, u] = -np.real(g)
 
         # event-contiguous (SoA) layout for the tile kernel: [n_wave][ne]
         amp_t = np.ascontiguousarray(amp.T)
@@ -396,26 +456,39 @@ class CPUKernelPWAS0C:
 
         ck_r = np.ascontiguousarray(np.real(ck), np.float64)
         ck_i = np.ascontiguousarray(np.imag(ck), np.float64)
-        m0 = np.zeros(self.n_m0_params, np.float64)
-        m0[:len(params["m0"])] = np.asarray(params["m0"])
-        g0 = np.zeros(self.n_g0_params, np.float64)
-        g0[:len(params["g0"])] = np.asarray(params["g0"])
 
-        # ── coefficient assembly for the s0c basis ───────────────────
-        # slot 0 = m0², slot 1 = the constant 1, slot 2+j = m0·g0_j.
-        # (The kernel only sees this vector; the meanings live here.)
-        m0_w = m0[self._m0_index_w]
-        nf = self.n_basis
+        if self._generic:
+            # explicit coefficients (pwa_gen): the kernel only sees the
+            # per-wave basis sum, so no m0/g0 algebra happens here.
+            coeff = np.ascontiguousarray(
+                np.asarray(params["coeff"], np.float64).reshape(-1))
+            nf = self.n_basis
+            if coeff.size != self.n_wave * nf:
+                raise ValueError(
+                    f"cpu_pwa_s0c: coeff length {coeff.size} != "
+                    f"n_wave·n_basis = {self.n_wave}·{nf}")
+        else:
+            m0 = np.zeros(self.n_m0_params, np.float64)
+            m0[:len(params["m0"])] = np.asarray(params["m0"])
+            g0 = np.zeros(self.n_g0_params, np.float64)
+            g0[:len(params["g0"])] = np.asarray(params["g0"])
+
         nw = self.n_wave
-        coeff = np.zeros(nw * nf, np.float64)
-        coeff[0::nf] = m0_w * m0_w
-        coeff[1::nf] = 1.0
-        rs = self.row_start
-        for w in range(nw):
-            r0 = int(rs[w])
-            r1 = (int(rs[w + 1]) if w + 1 < nw else self.n_gamma_rows)
-            coeff[w * nf + 2:w * nf + 2 + (r1 - r0)] = \
-                m0_w[self._wave_of_row[r0:r1]] * g0[self._g0_index_w[r0:r1]]
+        nf = self.n_basis
+        if not self._generic:
+            # ── coefficient assembly for the s0c basis ───────────────
+            # slot 0 = m0², slot 1 = the constant 1, slot 2+j = m0·g0_j.
+            # (The kernel only sees this vector; the meanings live here.)
+            m0_w = m0[self._m0_index_w]
+            coeff = np.zeros(nw * nf, np.float64)
+            coeff[0::nf] = m0_w * m0_w
+            coeff[1::nf] = 1.0
+            rs = self.row_start
+            for w in range(nw):
+                r0 = int(rs[w])
+                r1 = (int(rs[w + 1]) if w + 1 < nw else self.n_gamma_rows)
+                coeff[w * nf + 2:w * nf + 2 + (r1 - r0)] = \
+                    m0_w[self._wave_of_row[r0:r1]] * g0[self._g0_index_w[r0:r1]]
 
         gcoeff = np.zeros(nw * nf, np.float64)
         ogck_r = np.zeros(nbase, np.float64)
@@ -440,7 +513,15 @@ class CPUKernelPWAS0C:
             dnorm)
         self._last_dnorm = float(dnorm[0]) if use_norm else None
 
+        if self._generic:
+            # raw per-slot gradients: the parameter chain lives in the
+            # model's basis transform (registered as a cm transform).
+            grads = {"ck": ogck_r + 1j * ogck_i,
+                     "coeff": gcoeff.reshape(nw, nf)}
+            return Q, grads, P
+
         gc = gcoeff.reshape(nw, nf)
+        rs = self.row_start
         ogs0 = np.ascontiguousarray(gc[:, 0])
         ogmult = np.zeros(self.n_gamma_rows, np.float64)
         for w in range(nw):

@@ -1,0 +1,39 @@
+# pwa_gen with the DEFAULT BasisModel basis (N ≡ 1, denominator [1, m², −iγ]).
+# Gate A: this must reproduce the plain `pwa` path bit for bit (same kernel
+# config on every key, same NLL and gradients) — see tests/test_pwa_gen.py.
+n_proj: 1
+amp_model: pwa_gen
+data:
+  dat_order: [pip, pim, eta]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  jpsi:
+    - [pipi, eta]
+  pipi: [pip, pim]
+particle:
+  $top: jpsi
+  $finals: [pip, pim, eta]
+  pipi: [k2]
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    width: 0.30
+    model: basis
