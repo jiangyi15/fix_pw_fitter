@@ -788,17 +788,23 @@ class Fitter:
         # NLL_true = NLL_kernel - log(purity)*sum(w)
         nll = nll + self._log_purity_const
 
-        # 5. Combine gradients: total = direct + norm_chain
-        # ``coeff`` is the pwa_gen explicit denominator coefficient vector —
-        # like ck it enters the normalisation, so it takes the same chain.
+        # 5. Combine gradients: total = direct + norm_chain, **keyed by what
+        # the backend and the norm actually provide** — no hard-coded list of
+        # parameter blocks.  Any block present in both dicts gets the
+        # dNLL/dnorm chain (ck, m0, g0, scalar, coeff, and anything added
+        # later), and a block that only enters the normalisation still
+        # contributes its chain term.
         total_grads = {}
-        for key in grads:
-            if key in ("ck", "scalar", "m0", "g0", "coeff"):
-                g = np.asarray(grads[key])
-                ng = np.asarray(norm_grads[key])
-                total_grads[key] = g + dNLL_dnorm * ng
+        for key, g in grads.items():
+            ng = norm_grads.get(key)
+            if ng is None:
+                total_grads[key] = g
             else:
-                total_grads[key] = grads[key]
+                total_grads[key] = np.asarray(g) + dNLL_dnorm * np.asarray(ng)
+        for key, ng in norm_grads.items():
+            if key in total_grads or ng is None:
+                continue
+            total_grads[key] = dNLL_dnorm * np.asarray(ng)
 
         return nll, total_grads
 
