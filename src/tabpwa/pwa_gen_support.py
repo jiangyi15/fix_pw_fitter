@@ -197,14 +197,21 @@ def den_domain_grad(dQ_dbw, coeff, enc, F):
 def check_backend_support(config, backend_name):
     """Refuse a pwa_gen config a backend cannot evaluate yet.
 
-    Only the CPU/NumPy backends implement the numerator factor and the
-    generic coefficient basis; the CUDA kernels read ``m0``/``g0``
-    directly (kernels untouched), so both extensions are unsupported
-    there.  An ``n ≡ 1``, default-basis ``pwa_gen`` config is exactly the
-    plain PWA config and therefore works everywhere.
+    The CPU/NumPy backends implement the numerator factor and the generic
+    coefficient basis; the CUDA kernels read ``m0``/``g0`` directly
+    (kernels untouched), so both extensions are unsupported there — with the
+    single exception of ``cuda_v5_pwa_gen_s0e``, a case-1 kernel copy that
+    builds its own combined basis table and folds the numerator into its
+    amp-cache fill.  An ``n ≡ 1``, default-basis ``pwa_gen`` config is
+    exactly the plain PWA config and therefore works everywhere.
     """
     if has_numerator(config) or has_generic_den(config):
+        # ``_CUDABackend`` passes its CLASS name here (the backend is built
+        # through the class); accept both spellings of the gen kernel.
+        allow = {"CUDABackendV5PWAGenS0E", "cuda_v5_pwa_gen_s0e"}
+        if backend_name in allow:
+            return
         raise ValueError(
             f"pwa_gen numerator not supported by {backend_name} yet; "
-            f"use a CPU backend or n≡1 (and the default denominator "
-            f"basis, i.e. no extended basis rows)")
+            f"use a CPU backend, cuda_v5_pwa_gen_s0e, or n≡1 (and the "
+            f"default denominator basis, i.e. no extended basis rows)")
