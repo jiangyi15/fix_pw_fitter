@@ -1151,7 +1151,8 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
     return cudaGetLastError() == cudaSuccess;
 }
 
-void cuda_compute_v4(void* vctx, void* vdh,
+// in: m0, g0  out: dQ/dm0, dQ/dg0
+void cuda_compute_v4_m0g0(void* vctx, void* vdh,
     const double* ck_r,const double* ck_i,
     const double* m0,const double* g0,
     double nv,int use_norm,

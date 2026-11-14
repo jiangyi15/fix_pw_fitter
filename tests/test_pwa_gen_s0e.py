@@ -28,9 +28,9 @@ Gates:
    ``m1, g1, b1r, b2r`` at ``resolution_size ∈ {1, 8}``;
 6. kernel independence: the library exports only the ``_v5`` lifecycle entry
    points, its own ``cuda_create_context_genv5s0e`` (pwa_gen basis tables) and
-   ``cuda_compute_v5s0e`` (the 13-argument s0e/gens compute — the 14-argument
-   ``cuda_compute_v5`` of s0c/s0d/s0cw is a different signature), and loads
-   next to ``libcuda_kernels_v5_pwa_s0e.so`` in one process.
+   ``cuda_compute_v5_coeff`` (the 13-argument s0e/gens compute — the 14-argument
+   ``cuda_compute_v5_s0mult`` of s0c/s0d/s0cw is a different signature), and
+   loads next to ``libcuda_kernels_v5_pwa_s0e.so`` in one process.
 """
 
 import ctypes
@@ -360,7 +360,7 @@ def test_gate_g_symbols_are_private():
         "cuda_free_context_v5",
         "cuda_load_data_v5",
         "cuda_free_data_v5",
-        "cuda_compute_v5s0e",
+        "cuda_compute_v5_coeff",
         "cuda_gram_matrix_v5",
         "cuda_get_device_count",
         "cuda_get_device_name",
@@ -390,11 +390,13 @@ def test_gate_g_loads_next_to_s0e():
     assert hasattr(b, "cuda_create_context_genv5s0e")
     assert hasattr(a, "cuda_create_context_v5")
     assert not hasattr(a, "cuda_create_context_genv5s0e")
-    for nm in ("cuda_compute_v5s0e", "cuda_get_device_count"):
+    for nm in ("cuda_compute_v5_coeff", "cuda_get_device_count"):
         assert hasattr(a, nm) and hasattr(b, nm)
-    # the 14-argument family compute is NOT exported here (13-arg s0e compute)
-    assert not hasattr(a, "cuda_compute_v5")
-    assert not hasattr(b, "cuda_compute_v5")
+    # the 14-argument family computes (m0g0 / s0mult) are NOT exported here
+    assert not hasattr(a, "cuda_compute_v5_s0mult")
+    assert not hasattr(b, "cuda_compute_v5_s0mult")
+    assert not hasattr(a, "cuda_compute_v5_m0g0")
+    assert not hasattr(b, "cuda_compute_v5_m0g0")
     # no undefined reference to another kernel's code: every cuda_* undefined
     # symbol must come from the CUDA runtime, not from the sibling library
     out = subprocess.run(["nm", "-D", "--undefined-only", gen_lib],

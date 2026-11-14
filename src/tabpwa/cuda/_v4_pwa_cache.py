@@ -54,10 +54,6 @@ void cuda_free_context_v4(void*);
 void* cuda_load_data_v4(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
 void cuda_free_data_v4(void*);
-void cuda_compute_v4(void*,void*,
-    const double*,const double*,const double*,const double*,
-    double,int,
-    double*,double*,double*,double*,double*,double*);
 void cuda_compute_v4_cache(void*,void*,
     const double*,const double*,const double*,const double*,
     double,int,

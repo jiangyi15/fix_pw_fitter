@@ -1172,15 +1172,12 @@ static int fill_amp_cache_chunk_gen(ComputeContextGen* c, DataHandleGen* h,
 // Blocks own whole resolution groups (rs <= S0E_TE) or one group each
 // (rs > S0E_TE) — see s0e_tile_gen_kernel_v5.
 //
-// Named cuda_compute_v5s0e, NOT cuda_compute_v5: the objective, the
-// create-time rsize placement and every other entry point are the v5 s0e
-// API (argument-identical to cuda_v5_pwa_s0e), but this kernel returns the
-// uniform-basis gradient as ONE block [n_wave·n_basis] (ogcoeff) — 13
-// arguments — where cuda_v5_pwa_s0c/s0d/s0cw return ogs0 (n_wave) + ogmult
-// (n_gamma_rows) — 14 arguments.  Same API unless the argument changes =>
-// different name.
+// Named cuda_compute_v5_coeff: the name encodes the parameterisation — in a
+// coeff block (n_wave·n_basis) -> out dQ/dcoeff as ONE block (ogcoeff), where
+// the v5 *_s0mult compute returns ogs0 (n_wave) + ogmult (n_gamma_rows).
 //=============================================================================
-void cuda_compute_v5s0e(void* vctx, void* vdh,
+// in: coeff (n_wave*n_basis)  out: dQ/dcoeff (one block)
+void cuda_compute_v5_coeff(void* vctx, void* vdh,
     const double* ck_r, const double* ck_i, const double* coeff,
     double norm, int use_norm,
     double* oQ, double* oDn, double* oP,

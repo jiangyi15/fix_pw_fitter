@@ -894,7 +894,8 @@ static int fill_amp_cache_chunk(ComputeContext* c, DataHandle2* h,
 //=============================================================================
 // s0e compute: ONE fused launch over the whole event range (no batching).
 //=============================================================================
-void cuda_compute_s0e(void* vctx, void* vdh,
+// in: coeff (n_wave*n_basis)  out: dQ/dcoeff (one block)
+void cuda_compute_v4_coeff(void* vctx, void* vdh,
     const double* ck_r, const double* ck_i, const double* coeff,
     double norm, int use_norm,
     double* oQ, double* oDn, double* oP,

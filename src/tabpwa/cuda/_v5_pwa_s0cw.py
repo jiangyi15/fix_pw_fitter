@@ -127,7 +127,7 @@ void cuda_free_context_v5(void*);
 void* cuda_load_data_v5(void*,const double*,int,const double*,int,
     const double*,int,const double*,const double*,int);
 void cuda_free_data_v5(void*);
-void cuda_compute_v5(void*,void*,
+void cuda_compute_v5_s0mult(void*,void*,
     const double*,const double*,const double*,
     double,int,
     double*,double*,double*,double*,double*,double*,double*);
@@ -469,7 +469,7 @@ class CUDAKernelV5PWAS0CW:
             ka.append(buf)
             return _ffi.cast("double*", buf)
 
-        self._lib.cuda_compute_v5(
+        self._lib.cuda_compute_v5_s0mult(
             self._ctx, data_handle.ptr,
             _db(ck_r), _db(ck_i), _db(coeff),
             norm_val, use_norm,
