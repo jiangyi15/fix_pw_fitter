@@ -12,6 +12,13 @@ Shape template: ``tests/config_pwa_gen.yml`` (one partial wave) tiled to the
                        generic coefficient basis (``den_row``/``den_table``).
 
 Measured: ``compute(norm=<scalar>, return_p=True)`` (data NLL + gradients),
+i.e. **kernel-only**.  Caveat for reading the table: ``pwa_gen``'s
+``params["coeff"]`` is assembled by the fitter-side ``PWAGenKernelParams``
+*before* ``compute`` and is therefore NOT in the timed region, while the
+plain backends derive ``s0``/``mult`` from ``m0``/``g0`` *inside* ``compute``.
+The rows are kernel-vs-kernel, not end-to-end; for the user-facing cost see
+``tests/benchmark_pwa_gen_s0e.py`` (``Fitter.get_nll``) and the ``N≡1``
+bit-identity gate (same kernel config -> same code path).
 the realistic per-iteration call.  Physics is irrelevant (random params).
 
 Usage (repo root)::
@@ -117,6 +124,8 @@ def run(sizes, n_comp, n_proj, warmup, trials, backends):
         ("pwa_gen N=1", kc_gen1, True),
         ("pwa_gen N=[1,m^2]", kc_gen2, True),
     ]
+    print("  kernel-only (generated coeff for pwa_gen is assembled outside "
+          "the timed call; see the module docstring)")
     print(f"wave shape: n_wave = {kc_plain['matrix_angle'].shape[1]} (pwa, "
           f"N={N}, n_proj={n_proj});  "
           f"{kc_gen2['matrix_angle'].shape[1]} (N=[1,m^2])")
