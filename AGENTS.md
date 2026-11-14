@@ -297,6 +297,47 @@ models), so single-config behaviour is unchanged.
 `setup_mass_width_transforms` therefore always calls with `reset=False`;
 a shared cm must never be reset by a joining config.
 
+#### Basis PWA (`amp_model: pwa_gen`, alias `pwa_basis`)
+
+Projection-sum PWA on the particle `BasisModel` basis: for a chain whose
+resonance is a `BasisModel` the amplitude is
+`A_w = ck_w·fa·fl·N_{i(w)}(m) / Σ_j g_j·G_j(m)`, expressed in the existing
+kernel vocabulary as an **opaque basis sum** (`BW = Σ_j coeff_j·F_j`) plus a
+tabulated **numerator** factor.  Everything is additive — a config where the
+resonances use the *default* `BasisModel` basis (`model: basis`) produces
+byte-identical `pwa` kernel config / NLL / gradients.
+
+Kernel-config keys (only emitted when a model actually needs them):
+
+* `n_table` (complex `(n_rows, n_bins)`, row 0 ≡ 1), `n_min` / `n_delta`,
+  `n_index` (int32 `[n_wave]`, `0` = constant row) and `n_mass_index`
+  (`[n_wave]`, the wave's mass column) — the per-event numerator factor
+  `N_{n_index[w]}(m_e)`, applied only when some `n_index != 0`.
+* `den_row` (int32 `(n_unique_bw, n_basis)`: `0` = F 1, `1` = F −m²,
+  `2+r` = `den_table[r]`, `-1` = 0), `den_table` (complex `(n_extra, n_bins)`,
+  the finished extra rows `m⁴`, `−iρ`, `+i·s·ρ`, …), `den_min`/`den_delta`.
+  Present when a resonance has a basis transform or extra basis rows; the
+  backends then take an explicit `params["coeff"]` `(n_fact, n_basis)` and
+  return `grads["coeff"]` instead of deriving `coeff` from `m0`/`g0`.
+
+ck rule: one chain expands into one wave per free numerator row, with
+`ck_w = g_ls[chain]·n_i` (the heads go into the `ck_map` tuple, so
+`CKProduct` builds the outer product).  `ck_map`/`get_ck_map()` carry the
+expanded combinations; `PWAGenKernelParams` assembles `coeff` and chains
+`grads["coeff"]` back to the basis *weight* names, and
+`PWAgenWeightsTransform` (`PWAGen.extra_transforms()`, registered by
+`Fitter.setup_mass_width_transforms` as a mass/width-style transform) maps the
+weights to/from the physical parameters (FD VJP, the `make_basis_transform`
+contract).
+
+Backends: `numpy_pwa`, `cpu_pwa_s0c`, `cpu_pwa_gen`/`cpu_v4_pwa`,
+`cpu_v5_pwa` (`default` for `pwa_gen` = `cpu_pwa_gen`).  CUDA kernels read
+`m0`/`g0` only and raise
+`pwa_gen numerator not supported by <backend> yet; use a CPU backend or n≡1`
+(`pwa_gen_support.check_backend_support`).  Fixtures:
+`tests/config_pwa_gen.yml` (default basis, gate A), `tests/config_pwa_gen_km.yml`
+(`kmatrix2`, gate B/C), `tests/test_pwa_gen.py`, `tests/benchmark_pwa_gen.py`.
+
 ### Barrier factors & build-time defaults
 
 The Blatt-Weisskopf form factor `F_L(q)` of every decay vertex is baked into
@@ -488,6 +529,49 @@ Fitter.get_nll_raw(params):
 - `_compute_norm_batched` always calls `backend.compute(norm=None, return_p=False)`:
   - IntegratedBackend → Gram path (O(n²) matmul from cached matrices)
   - Other backends → full forward pass (batched internally, `return_p=False` just skips P).
+
+### Likelihood layer (design — not implemented)
+
+The `norm → Q` pipeline above is currently hard-coded in
+`Fitter.get_nll_raw`.  `docs/likelihood_layer.md` specifies a standalone
+`tabpwa/likelihood.py` as a **pipeline of `Step` objects** threaded by a plain
+loop (`run(steps, params, datasets)`).  Every step type shares **one general
+constructor** `Step(spec, context)` and is built through a common
+registry: `@register_step("norm")` / `STEP_TYPES` / `build_step(spec,
+context)`.  A spec is plain data (`{"type": "data", "needs": "data",
+"name": "nll_data"}`), `spec` carries the type configuration and `context` the
+build-time dependencies (backend, `purity`, `sumw`, `purity_const`).  Each
+step declares `needs` (the dataset **name** it reads) and `outputs` (value
+names it publishes) and **stores no data**: the caller keeps a `datasets`
+mapping (`name -> handle`, handles from `backend.load_data()`) and the driver
+passes `datasets[step.needs]` at call time.  The mapping holds **both forms**
+of each dataset as separate entries — `"data"`/`"phsp"` (backend handles, for
+`compute`) and `"data_np"`/`"phsp_np"` (the numpy arrays) — so a step declares
+which one it reads.  The observed count comes from the numpy entry:
+`SumWStep(needs="data_np")` publishes `"@<key>:sumw"` / `"@<key>:n"`
+(constants, empty gradient), so extended terms such as the Poisson term read
+`S` without any hand-passed constant, backend change, or driver pre-seeding,
+and the pipeline stays static.
+Two **shared updateable dicts** carry the state: `values` (`name -> scalar`) and `grads` (`name -> ∂value/∂params`), so
+one value (e.g. the normalisation) is reused by every later step.
+`cur_grads[name] = {source: derivative}` with the reserved source `"params"`
+holding the direct `∂v/∂params`; every other source is a scalar cotangent.
+**The driver applies the chain**
+`grads[name] = ∂name/∂params + Σ_src (∂name/∂src)·grads[src]`, so a step
+cannot drop the factor.  Value names are unique per producer and **`"nll"` is
+reserved for the objective**, produced only by the final `"sum"` step (terms
+publish `nll_data`, `nll_poisson`, `nll_penalty_<tag>`, …), so no term reads
+or aliases the objective.  The default spec list (`norm`, `data`, `sum`) is a
+bit-exact port of `Fitter.get_nll_raw`.  Named objectives are a registry of
+**builders** (`register_nll(name)` / `build_pipeline(fitter)`) returning spec
+lists; resolution `Fitter(nll=…)` → `config["nll"]` → `"standard"`, unknown
+names fail with the registered list, the chosen name is saved in the fit
+metadata.  Different objectives (shared-normalisation multi-dataset,
+extended/Poisson yields, external measurement constraints) are **different
+spec lists**; there is no objective/NLL class hierarchy and no backend
+capability metadata.  `ConstraintManager` transforms (fixed/same/scale/
+bounds/blind) are *not* NLL terms and are untouched; priors remain
+resolved-frame additions merged before `_kernel_builder.backward`.
 
 ### `compute(params, data_handle, norm=None, return_p=True)`
 

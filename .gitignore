@@ -27,3 +27,6 @@ kernel_meta/
 
 # runtime-generated self-contained test data (see tests/conftest.py)
 tests/lineshapes/
+
+# local job scratch (pwa fit dispatch)
+.pwa-job/
