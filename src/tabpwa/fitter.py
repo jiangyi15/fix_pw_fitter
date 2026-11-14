@@ -1855,6 +1855,135 @@ class Fitter:
         err = np.sqrt(np.maximum(np.diag(cov), 0.0))
         return cov, err
 
+    # -- forward-mode duals -----------------------------------------
+    def fwd_names(self):
+        """The fixed parameter space for :class:`tabpwa.fwd.Fwd`.
+
+        The free parameters in ``x``-slot order (``free_param_names()``), so
+        every ``Fwd`` built by this fitter shares one gradient layout.
+        """
+        return list(self.free_param_names())
+
+    def fwd_parameter(self, name, value=0.0):
+        """``Fwd`` for one parameter: unit tangent at *name*'s slot.
+
+        The seed is a delta at the parameter's index in :meth:`fwd_names`,
+        so ``fwd_parameter("rho_mass") * 2.0`` is the dual of the quantity
+        ``2*rho_mass``.
+        """
+        from .fwd import Fwd
+
+        names = self.fwd_names()
+        try:
+            i = names.index(name)
+        except ValueError:
+            raise KeyError(
+                f"{name!r} is not a free parameter; available: {names}") from None
+        grad = np.zeros(len(names), dtype=float)
+        grad[i] = 1.0
+        return Fwd(value, grad)
+
+    @staticmethod
+    def _as_real_observable(out, where):
+        arr = np.asarray(out)
+        if np.iscomplexobj(arr):
+            raise ValueError(
+                f"{where}: the observable is complex — return a real one "
+                "(Re, Im, |y|^2, ...); Fwd is real-valued")
+        return np.atleast_1d(arr.astype(float))
+
+    def fd_jacobian(self, fn, args=(), kwargs=None, *, fit_result=None,
+                    x=None, rel=1e-5):
+        """Central-difference Jacobian of ``fn`` w.r.t. the free parameters.
+
+        *fn* is called as ``fn(phys, *args, **kwargs)`` with a **physical**
+        parameter dict (the resolved dict, at most one entry perturbed) and
+        returns a scalar or a 1-D array — the observables whose
+        uncertainties you want.  The extra arguments are passed **explicitly**
+        (``args`` tuple, ``kwargs`` dict) rather than collected variadically,
+        so the fitter's own keywords (``fit_result``, ``x``, ``rel``) can
+        never be swallowed by the callable's ``**kwargs``.
+
+        The perturbation is applied to the free names in ``fwd_names()``
+        order (the same space :class:`tabpwa.fwd.Fwd` uses), so the rows can
+        be handed straight to :func:`tabpwa.fwd.rows`.
+
+        The observable must be **real**: :class:`tabpwa.fwd.Fwd` is real, so
+        a complex model quantity has to be handed over as the quantity you
+        actually plot (``Re``/``Im``, ``|y|²``, a ratio …) — a complex
+        return raises instead of being silently truncated.
+
+        Args:
+            fn: ``fn(phys_dict, *args, **kwargs) -> float | array`` (real).
+            args: positional arguments forwarded to *fn* after the dict.
+            kwargs: keyword arguments forwarded to *fn*.
+            fit_result: an ``OptimizeResult`` (for ``x``).
+            x: the parameter vector, when *fit_result* is not given.
+            rel: relative step (``h = rel * max(1, |value|)``).
+
+        Returns:
+            ``(values, J)`` with ``values`` the unperturbed output (1-D) and
+            ``J[i, j] = d values[i] / d param_j``.
+        """
+        if fit_result is not None:
+            x = fit_result.x
+        if x is None:
+            raise ValueError("fd_jacobian needs fit_result or x")
+        resolved = self.report_params(x)
+        names = [n for n in self.fwd_names() if n in resolved]
+
+        extra_kw = dict(kwargs or {})
+
+        def call(phys):
+            return fn(phys, *args, **extra_kw)
+
+        base = dict(resolved)
+        values = self._as_real_observable(call(base), "fd_jacobian")
+        J = np.zeros((values.size, len(names)), dtype=float)
+        for j, name in enumerate(names):
+            v = float(resolved[name])
+            h = rel * max(1.0, abs(v))
+            up = dict(base)
+            up[name] = v + h
+            dn = dict(base)
+            dn[name] = v - h
+            J[:, j] = (self._as_real_observable(call(up), "fd_jacobian")
+                       - self._as_real_observable(call(dn), "fd_jacobian")) \
+                / (2.0 * h)
+        return values, J
+
+    def fwd_of(self, value, grad_dict):
+        """``Fwd`` for one summed quantity: ``value`` + gradient by name.
+
+        ``value`` is a scalar the kernel returned for a sample
+        (``compute(..., norm=None)`` gives ``Q = Σ_e w_e·P(e)``) and
+        *grad_dict* must be the **chained** gradient of that same scalar,
+        ``{physical_name: dvalue/dname}`` — e.g. the result of
+        ``_kernel_builder.backward(grads, resolved)``.  Raw kernel blocks
+        (``{"ck": …, "m0": …, "g0": …}``) are rejected: they carry kernel
+        slots, not parameter names.
+
+        Names outside :meth:`fwd_names` are ignored (fixed parameters, or a
+        block attributed to a shared BW — they have no slot in the fixed
+        space).
+        """
+        from .fwd import Fwd
+
+        if any(k in grad_dict for k in ("ck", "m0", "g0", "scalar")):
+            raise ValueError(
+                "fwd_of expects physical-name gradients (e.g. "
+                "_kernel_builder.backward(grads, resolved)), not raw kernel "
+                f"blocks: got keys {sorted(grad_dict)[:6]}")
+
+        names = self.fwd_names()
+        index = {n: i for i, n in enumerate(names)}
+        grad = np.zeros(len(names), dtype=float)
+        for name, g in grad_dict.items():
+            i = index.get(name)
+            if i is not None:
+                grad[i] = float(np.real(g))
+        return Fwd(value, grad)
+
     def cal_uncertainties_multi(self, fun, param_names, fit_result, jac=False,
                                 return_cov=True):
         """Covariance between multiple observables (direct method).

@@ -59,6 +59,87 @@ and a commit must never ride on the tail of a test pipeline.
 
 `cuda` / `cuda64` alias to `cuda_v3`.  GPU `__del__` auto-frees memory — no manual `.free()` needed.
 
+### Forward-mode duals (`tabpwa.fwd`)
+
+`Fwd(value, grad)` is a scalar with a value and a dense gradient over a
+**fixed** parameter list; `+ - * / pow sqrt log` propagate the gradient.  No
+layout object: the parameter space is the gradient vector's own index space,
+fixed once by the fitter —
+
+```python
+f.fwd_names()                       # the free parameters, x-slot order
+f.fwd_parameter("rho_mass")         # unit tangent: grad[i] = 1 at that slot
+f.fwd_of(total, grads)              # from a compute()'s (value, {name: d}) pair
+```
+
+so every `Fwd` in one fit shares the ordering and the operators raise (not
+broadcast) when two different spaces meet.  `sigma(cov)` gives
+`sqrt(g C gᵀ)`; `a.cov(b, cov)` / `a.correlation(b, cov)` (alias `corr`) the
+pairwise covariance and correlation (`0` when either side is a constant), and
+`corr_matrix(duals, cov)` the full matrix for a list of observables.
+
+Elementary functions, usable on duals and plain numbers alike: `sin`, `cos`,
+`exp`, `log`, `sqrt`, `erf`, `gamma`, `loggamma` (via
+`scipy.special`, derivatives `2/√π·e^{−x²}`, `Γ·ψ`, `ψ`), `atan2(y, x)`,
+`mod(a, b)` (floor semantics, gradient `g_a − floor(a/b)·g_b`), `abs` (`abs(x)` = real modulus with the sign in the
+gradient; `abs(re, im)` = the complex modulus of a pair), and the
+polar/rectangular pair — `reim(magnitude,
+phase)` gives the two real parts of `m·e^{iφ}` (`re² + im²` recovers `|z|²`,
+gradient included), `polar(re, im)` and `magnitude(re, im)` the inverse.  So
+a complex model quantity is carried as two real duals and a real observable
+(e.g. `abs(lineshape)**2`) is formed from them.
+
+Each of those is written **once** and decorated with `@dual` (exported),
+which simply converts every argument to a `Fwd`: a number is just
+`Fwd(value, 0)`, i.e. a **scalar** tangent, and numpy broadcasts it against a
+real parameter vector — so a mixed expression like `2*sin(x) + 1` keeps the
+vector gradient.  The call always returns a dual (tuples elementwise); take
+`.value` for the plain number, and `.sigma` of a constant is 0.  There is no
+second implementation to keep in sync:
+
+```python
+from tabpwa.fwd import dual, Fwd
+
+@dual
+def lorentz(m, m0, w):
+    return w * w / ((m * m - m0 * m0) ** 2 + w * w)   # number or dual
+```
+
+For a **curve or grid** (many outputs, few parameters) don't build one dual
+per point by hand — take the FD Jacobian and map it:
+
+```python
+def intensity(phys, grid):          # a REAL observable
+    return abs(lineshape(phys, grid))**2
+
+y, J = f.fd_jacobian(intensity, (m_grid,), fit_result=result)   # no lambda
+duals = rows(y, J)                  # one Fwd per grid point
+band  = [d.sigma(cov) for d in duals]
+```
+
+`fd_jacobian(fn, args=(), kwargs=None, *, fit_result=…, x=…, rel=…)` calls
+`fn(phys, *args, **kwargs)` with the extra arguments given **explicitly**
+(not collected variadically), so the fitter's own keywords can never be
+swallowed by the callable's `**kwargs`.  It uses central differences over the free names
+(`fwd_names()`, physical inputs, so transform-derived slots update
+correctly), costs
+`2·n_var` evaluations of the function and returns `(values, J)` with
+`J[i, j] = d value_i / d param_j` — the same row layout `rows()` turns into
+duals.  That is the cheap form for a mass scan: one vectorised evaluation of
+the grid plus `2·n_var` tangent sweeps, not `n_points` scalar dual chains.
+The observable must be **real** (`Re`, `Im`, `|y|²`, a ratio …): `Fwd` is
+real-valued, so a complex return raises rather than being silently truncated
+(`abs(lineshape(...))**2` above, not the complex `lineshape` itself).
+
+Scope: linear accumulation per sample (what the kernel already returns as
+value + `grads`) plus closed-form post-processing on the accumulated
+scalars.  It is **not** a general autodiff — no per-event arrays, no graph,
+no model re-evaluation; a quantity that needs the model at changed
+parameters stays a kernel call (analytic) or finite differences.  Cost is
+O(n_params) per operation and in practice numpy-overhead bound: ~1–2.6 µs
+per op at `n_var` 50 *and* 1000 (`tests/benchmark_fwd.py`), i.e. ~20 µs for
+a mask set — against a kernel `compute` of 0.5–30 ms.
+
 ### IntegratedBackend (Gram matrix norm)
 
 Pre-computes 56×56 Gram matrices from phsp.  Norm is O(n²) per iteration instead of O(N_phsp × 448).
