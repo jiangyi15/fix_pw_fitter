@@ -3,7 +3,7 @@
 import warnings
 
 import numpy as np
-from tabpwa.param_constraint import Transform
+from tabpwa.param_constraint import Transform, complex_tail
 
 ALL_MODELS = {}
 
@@ -279,6 +279,32 @@ class BaseModel:
 # Rational lineshapes: ratio of two fixed bases
 # ═══════════════════════════════════════════════════════════════════
 
+def complex_slot_names(heads, tail=None):
+    """Expand complex parameter *head* names to their real slot names.
+
+    Mirrors the ``ck`` convention (:func:`tabpwa.param_constraint.complex_tail`
+    / :meth:`CKProduct._get_val`): a complex weight/parameter named by its
+    head ``h`` is stored as the two real slots ``h{mag}`` / ``h{phase}``
+    (default ``hr`` / ``hi``; renamable to e.g. ``hrho`` / ``hphi`` via
+    ``build_defaults.scope(complex_tail=(...))``).  The head itself remains
+    the public name — consumers such as :class:`CKProduct` append the tail
+    at lookup time.
+
+    Args:
+        heads: iterable of head (base) parameter names.
+        tail: optional ``(magnitude_suffix, phase_suffix)``; defaults to
+            the active :func:`~tabpwa.param_constraint.complex_tail`.
+
+    Returns:
+        list of expanded slot names, in ``head`` order, two per head.
+    """
+    mag, phase = tuple(tail) if tail is not None else complex_tail()
+    out = []
+    for head in heads:
+        out.extend([f"{head}{mag}", f"{head}{phase}"])
+    return out
+
+
 class BasisModel(BaseModel):
     """Particle amplitude as a ratio of two *fixed* bases.
 
@@ -395,12 +421,25 @@ class BasisModel(BaseModel):
     # -- weight names ----------------------------------------------
 
     def get_num_name(self):
-        """Weight names for the numerator rows ``n_i``.
+        """Head (base) names for the numerator rows ``n_i``.
 
         Default ``[]``: no free numerator weights, ``n = [1]``.  If
-        non-empty, the names must match :meth:`num_basis` length.
+        non-empty, the names must match :meth:`num_basis` length.  These
+        are *heads*: a complex weight is expanded by the consumer to the
+        two real ``(magnitude, phase)`` slots named
+        :meth:`num_slot_names` (the ``ck`` convention); a real weight may
+        be given as one parameter named exactly the head.
         """
         return []
+
+    def num_slot_names(self):
+        """Expanded real ``(magnitude, phase)`` slot names for the heads.
+
+        Uses :func:`complex_slot_names` with the active
+        :func:`~tabpwa.param_constraint.complex_tail`; empty when
+        :meth:`get_num_name` is empty.
+        """
+        return complex_slot_names(self.get_num_name())
 
     def get_den_name(self):
         """Weight names for the denominator rows ``g_j``.

@@ -61,21 +61,25 @@ real slots:
 
 * inputs (all real): ``m1, m2, g1, g2`` and the four coupling
   magnitude/phase slots above;
-* outputs (all real): the 5 real denominator weights and the numerator
-  weights in the **same (magnitude, phase) tail convention as the
-  inputs** — they become ``ck`` slots, so ``CKProduct.build_ck`` reads
-  ``{name}{mag}`` / ``{name}{phase}`` and forms ``r·exp(iθ)``::
+* outputs (all real): the expanded numerator slots followed by the 5
+  real denominator weights.  The numerator weights use the **same
+  (magnitude, phase) tail convention as the inputs** — they become ``ck``
+  slots, so ``CKProduct.build_ck`` reads ``{name}{mag}`` /
+  ``{name}{phase}`` and forms ``r·exp(iθ)``::
 
-      n0 → (abs(n0), angle(n0))  as  n0{mag}, n0{phase}
-      n1 → (abs(n1), angle(n1))  as  n1{mag}, n1{phase}
+      head h = {name}_n0 / {name}_n1     (get_num_name(); one per basis row)
+      slots  = h{mag}, h{phase}          (num_slot_names(); the transform outputs)
+      values = abs(n_i), angle(n_i)
 
   with ``abs(0) = 0``, ``angle(0) = 0`` and the usual ``±π`` branch cut.
-  Under ``complex_tail=("rho", "phi")`` these rename together with the
-  ``b`` slots (``n0rho`` / ``n0phi`` ...).
+  Under ``complex_tail=("rho", "phi")`` the slots rename together with
+  the ``b`` slots (``n0rho`` / ``n0phi`` ...), while the heads stay
+  fixed.  A *real* numerator weight may be supplied as one parameter
+  named exactly the head (no exponential applied).
 
 :meth:`KMatrix2Model._num_weights` reassembles
-``n_i = mag·exp(i·phase)`` from the real slots internally; only the
-amplitude is complex.
+``n_i = mag·exp(i·phase)`` from the real slots (or uses a bare head
+directly); only the amplitude is complex.
 
 YAML usage::
 
@@ -100,7 +104,7 @@ import numpy as np
 
 from tabpwa.param_constraint import Transform, complex_tail
 
-from .base import BasisModel, register_model
+from .base import BasisModel, complex_slot_names, register_model
 
 #: Default pion mass entering the two-body phase space ρ(s).
 M_PI = 0.13957039
@@ -114,9 +118,10 @@ class KMatrix2WeightsTransform(Transform):
     (suffixes from :func:`complex_tail`).  Internally
     ``b = mag·exp(i·phase)``.
 
-    Outputs (all real): the 5 basis denominator weights, then the
-    numerator weights in the **same (magnitude, phase) convention as a
-    complex ``ck`` slot**::
+    Outputs (all real): the four numerator slots first, then the 5 basis
+    denominator weights.  The numerator heads (``{name}_n0``,
+    ``{name}_n1``) are expanded to the **same (magnitude, phase) slots as a
+    complex ``ck`` parameter**::
 
         n0{mag}, n0{phase}, n1{mag}, n1{phase}   (mag, phase = complex_tail())
 
@@ -140,14 +145,16 @@ class KMatrix2WeightsTransform(Transform):
     def __init__(self, name, den_names, num_names, defaults, tail=None):
         self.tail = tuple(tail) if tail is not None else complex_tail()
         mag, phase = self.tail
+        self.name = name
         self._keys = (
             "m1", "m2", "g1", "g2",
             f"b1{mag}", f"b1{phase}", f"b2{mag}", f"b2{phase}",
         )
         self.input_names = [f"{name}_{k}" for k in self._keys]
-        self.output_names = list(den_names) + list(num_names)
+        # numerator heads → expanded real (magnitude, phase) output slots
+        self.output_names = (complex_slot_names(num_names, tail=self.tail)
+                             + list(den_names))
         self._defaults = dict(defaults)
-        self.name = name
 
     # -- helpers ----------------------------------------------------
 
@@ -194,7 +201,7 @@ class KMatrix2WeightsTransform(Transform):
         p = self._inputs(d)
         b1, b2 = self._couplings(p)
         den, num = self._weights(p["m1"], p["m2"], p["g1"], p["g2"], b1, b2)
-        vals = [float(v) for v in den + num]
+        vals = [float(v) for v in num + den]
         return {out: val for out, val in zip(self.output_names, vals)}
 
 
@@ -288,12 +295,13 @@ class KMatrix2Model(BasisModel):
         ]
 
     def get_num_name(self):
-        """Numerator weight slots — (magnitude, phase), same tail as ``ck``."""
-        mag, phase = self.tail
-        return [
-            f"{self.name}_n0{mag}", f"{self.name}_n0{phase}",
-            f"{self.name}_n1{mag}", f"{self.name}_n1{phase}",
-        ]
+        """Numerator weight **head** names (one per ``num_basis`` row).
+
+        The complex ``(magnitude, phase)`` slots are the tail-expanded
+        names from :meth:`num_slot_names` (``ck`` convention); the head is
+        also a valid single real-parameter name.
+        """
+        return [f"{self.name}_n0", f"{self.name}_n1"]
 
     # -- weights ----------------------------------------------------
 
@@ -305,7 +313,7 @@ class KMatrix2Model(BasisModel):
         overrides honoured, model defaults fill the rest).
         """
         params = {} if params is None else params
-        names = self.get_den_name() + self.get_num_name()
+        names = self.get_den_name() + self.num_slot_names()
         if all(n in params for n in names):
             return params
         phys = self._phys()
@@ -324,14 +332,31 @@ class KMatrix2Model(BasisModel):
         return [float(np.real(r[n])) for n in self.get_den_name()]
 
     def _num_weights(self, params):
-        """Reassemble ``n_i = mag·exp(i·phase)`` from the real tail slots."""
-        r = self._resolved(params)
+        """Reassemble the complex numerator weights from the real slots.
+
+        Each head ``h`` is read as the expanded pair
+        ``h{mag}`` / ``h{phase}`` → ``mag·exp(i·phase)``.  If the expanded
+        slots are absent but the bare head ``h`` is present, its value is
+        used directly (a *real* numerator weight, no exponential).
+        """
+        params = {} if params is None else params
         mag, phase = self.tail
+        resolved = None
         out = []
-        for base in (f"{self.name}_n0", f"{self.name}_n1"):
-            m = float(np.real(r[f"{base}{mag}"]))
-            p = float(np.real(r[f"{base}{phase}"]))
-            out.append(m * np.exp(1j * p))
+        for head in self.get_num_name():
+            mn, pn = f"{head}{mag}", f"{head}{phase}"
+            if mn in params or pn in params:
+                m = float(np.real(params.get(mn, 0.0)))
+                p = float(np.real(params.get(pn, 0.0)))
+                out.append(m * np.exp(1j * p))
+            elif head in params:
+                out.append(params[head])          # bare real weight
+            else:
+                if resolved is None:
+                    resolved = self._resolved(params)
+                m = float(np.real(resolved[mn]))
+                p = float(np.real(resolved[pn]))
+                out.append(m * np.exp(1j * p))
         return out
 
     # -- transform --------------------------------------------------

@@ -141,8 +141,8 @@ def test_denominator_weights_real_rows_complex():
         assert all(np.isrealobj(v) for v in out.values())
         gk = [out[name] for name in km.get_den_name()]
         assert np.all(np.imag(gk) == 0), gk
-        # numerator outputs are also real Cartesian slots
-        assert all(np.isrealobj(out[name]) for name in km.get_num_name())
+        # numerator outputs are real Cartesian/polar slots
+        assert all(np.isrealobj(out[name]) for name in km.num_slot_names())
 
     rows = km.den_basis(m)
     assert all(np.iscomplexobj(r) for r in rows)
@@ -165,7 +165,7 @@ def test_phases_flow_through_numerator_path():
     m1s, m2s = case["m1"] ** 2, case["m2"] ** 2
     n0 = b1 * m2s + b2 * m1s
     n1 = -(b1 + b2)
-    n0m, n0p, n1m, n1p = (out[name] for name in mdl.get_num_name())
+    n0m, n0p, n1m, n1p = (out[name] for name in mdl.num_slot_names())
     # numerator outputs use the (magnitude, phase) tail convention
     assert n0m == pytest.approx(abs(n0), rel=1e-14, abs=1e-15)
     assert n0p == pytest.approx(np.angle(n0), rel=1e-14, abs=1e-15)
@@ -201,8 +201,11 @@ def test_transform_outputs_feed_ckproduct():
     out = tr.apply_forward(dict(params))
 
     tail = mdl.tail
-    w0 = CKProduct([[f"{mdl.name}_n0"]], tail=tail).build_ck(out)[0]
-    w1 = CKProduct([[f"{mdl.name}_n1"]], tail=tail).build_ck(out)[0]
+    heads = mdl.get_num_name()
+    assert heads == [f"{mdl.name}_n0", f"{mdl.name}_n1"]
+    # one CKProduct over the head names: the tail is applied by the
+    # consumer, which looks up the expanded slots the transform produced
+    w0, w1 = CKProduct([[heads[0]], [heads[1]]], tail=tail).build_ck(out)
 
     b1, b2 = complex(case["b1"]), complex(case["b2"])
     m1s, m2s = case["m1"] ** 2, case["m2"] ** 2
@@ -222,6 +225,26 @@ def test_transform_outputs_feed_ckproduct():
     ref = _direct_km2(m, case, m_pi=mdl.m_pi)
     assert np.allclose(amp, ref, rtol=1e-12, atol=1e-14)
     assert np.allclose(mdl.amplitude(m, params), amp, rtol=1e-12, atol=1e-14)
+
+
+def test_bare_head_real_numerator_weight():
+    """A real numerator weight may be given as one parameter named the head."""
+    mdl = _km2_model()
+    m = _mass_grid(0.8, 1.35)
+    params = {"k2_n0": 2.5, "k2_n1": -0.7}
+
+    nw = mdl._num_weights(params)
+    assert nw[0] == pytest.approx(2.5, rel=0, abs=0)
+    assert nw[1] == pytest.approx(-0.7, rel=0, abs=0)
+
+    # amplitude with the bare-head path vs the manual basis ratio
+    resolved = mdl._resolved(params)
+    den = np.zeros_like(m, dtype=complex)
+    for name, row in zip(mdl.get_den_name(), mdl.den_basis(m)):
+        den = den + resolved[name] * row
+    num_rows = mdl.num_basis(m)
+    amp = (2.5 * num_rows[0] - 0.7 * num_rows[1]) / den
+    assert np.allclose(mdl.amplitude_raw(m, params), amp, rtol=0, atol=0)
 
 
 # ── 2. kmatrix2 amplitude == the direct formula ──────────────────────
@@ -256,10 +279,11 @@ def test_basis_route_equals_raw_amplitude():
     num_rows = mdl.num_basis(m)
     den_rows = mdl.den_basis(m)
     assert len(num_rows) == 2
-    assert len(mdl.get_num_name()) == 4      # real Cartesian slots
+    assert len(mdl.get_num_name()) == 2      # one head per basis row
+    assert len(mdl.num_slot_names()) == 4    # expanded (mag, phase) slots
     assert len(den_rows) == len(mdl.get_den_name()) == 5
     assert all(np.iscomplexobj(r) for r in num_rows + den_rows)
-    assert all(np.isrealobj(resolved[n]) for n in mdl.get_num_name())
+    assert all(np.isrealobj(resolved[n]) for n in mdl.num_slot_names())
     assert np.all(np.imag([resolved[n] for n in mdl.get_den_name()]) == 0)
 
     num = np.zeros_like(m, dtype=complex)
@@ -289,15 +313,16 @@ def test_transform_forward_weights_and_names():
     mdl = _km2_model()
     tr = mdl.make_basis_transform()
     assert isinstance(tr, KMatrix2WeightsTransform)
-    assert tr.output_names == mdl.get_den_name() + mdl.get_num_name()
-    # default complex_tail() = ("r", "i"): magnitude/phase slots
+    # default complex_tail() = ("r", "i"): magnitude/phase input slots
     assert tr.input_names == [
         "k2_m1", "k2_m2", "k2_g1", "k2_g2",
         "k2_b1r", "k2_b1i", "k2_b2r", "k2_b2i",
     ]
-    assert mdl.get_num_name() == [
+    assert mdl.get_num_name() == ["k2_n0", "k2_n1"]     # heads (one per row)
+    assert mdl.num_slot_names() == [
         "k2_n0r", "k2_n0i", "k2_n1r", "k2_n1i",
     ]
+    assert tr.output_names == mdl.num_slot_names() + mdl.get_den_name()
 
     case = PHASE_CASE
     params = _phys_params("k2", **case)
@@ -389,7 +414,7 @@ def test_amplitude_gradient_chain_with_real_cotangents():
     # The numerator outputs are polar (mag, phase) of n_i, and
     # Q = Re(S_i·n_i) with S_i = Σ c·N_i/D, so
     #   ∂Q/∂mag = Re(S·e^{iθ}),   ∂Q/∂phase = −mag·Im(S·e^{iθ})
-    n0m, n0p, n1m, n1p = mdl.get_num_name()
+    n0m, n0p, n1m, n1p = mdl.num_slot_names()
     cot = {}
     for row, mag_name, phase_name in (
             (num_rows[0], n0m, n0p),
@@ -472,11 +497,12 @@ def test_complex_tail_scope_renames_coupling_slots():
             "k2_m1", "k2_m2", "k2_g1", "k2_g2",
             "k2_b1rho", "k2_b1phi", "k2_b2rho", "k2_b2phi",
         ]
-        # numerator weight slots carry the same tail (they become ck slots)
-        assert mdl.get_num_name() == [
+        # numerator heads are tail-independent; the expanded slots rename
+        assert mdl.get_num_name() == ["k2_n0", "k2_n1"]
+        assert mdl.num_slot_names() == [
             "k2_n0rho", "k2_n0phi", "k2_n1rho", "k2_n1phi",
         ]
-        assert tr.output_names == mdl.get_den_name() + mdl.get_num_name()
+        assert tr.output_names == mdl.num_slot_names() + mdl.get_den_name()
         defaults = mdl.get_defaults()
         for name in tr.input_names:
             assert name in defaults
