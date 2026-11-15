@@ -73,11 +73,14 @@ os.environ['HOME'] = '/tmp'
 os.environ['TABPWA_HASH_DIR'] = '/tmp'
 sys.path.insert(0, '$TMP_SRC')
 from tabpwa.cuda.build import set_arch, build
+# sm_70 needs a CUDA 12 toolkit: CUDA 13 dropped compute_70, and the
+# builder then resolves TABPWA_NVCC/CUDA_HOME to one that still has it.
 set_arch('sm_70,sm_75,sm_86,sm_89')
 print('Building kernels...', end='')
 ok = build()
 print(' OK' if ok else ' FAILED')
-" 2>&1
+raise SystemExit(0 if ok else 1)   # never ship a partial kernel set
+" 2>&1 || { echo "kernel build FAILED"; exit 1; }
 mkdir -p "$APP_DIR/usr/lib/tabpwa/cuda"
 cp "$TMP_SRC/tabpwa/cuda/"libcuda_kernels_*.so "$APP_DIR/usr/lib/tabpwa/cuda/" 2>/dev/null || true
 rm -rf "$TMP_SRC"

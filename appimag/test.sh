@@ -58,6 +58,8 @@ import sys, os
 os.environ['TABPWA_CUDA_DIR'] = '/usr/lib/tabpwa/cuda'
 sys.path.insert(0, '/home/jiangy/github/project71/src')
 from tabpwa.cuda.build import set_arch, build
+# sm_70 needs a CUDA 12 toolkit (CUDA 13 dropped compute_70); the builder
+# resolves TABPWA_NVCC/CUDA_HOME to a toolkit that supports it.
 set_arch('sm_70,sm_75,sm_86')
 ok = build()
 print(f'   kernels: {\"OK\" if ok else \"FAILED\"}')

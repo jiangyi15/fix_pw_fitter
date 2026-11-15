@@ -277,17 +277,55 @@ the registered list.
 
 ### CUDA Build
 
-Kernels auto-build on import — `.so` is rebuilt automatically when the corresponding `.cu` source file changes (SHA-256 check).  Force rebuild all or specify arch:
+Kernels auto-build on import — `.so` is rebuilt automatically when its build
+key changes (source, **target arch**, tag, nvcc version, schema — SHA-256).
+The CLI is **incremental by default** and takes name globs:
 
 ```bash
-python -m tabpwa.cuda.build                       # auto-detect (nvidia-smi)
+python -m tabpwa.cuda.build                        # build what is stale (all)
+python -m tabpwa.cuda.build --list                 # what exists / what is stale
+python -m tabpwa.cuda.build pwa_gen                # substring: only pwa_gen kernels
+python -m tabpwa.cuda.build 'v5_*'                 # glob on the source name
+python -m tabpwa.cuda.build pwa_gen --force        # rebuild that subset
 python -m tabpwa.cuda.build --arch sm_86           # single arch
-python -m tabpwa.cuda.build --arch sm_70,sm_86     # fat binary (multi-arch)
+python -m tabpwa.cuda.build --arch sm_75,sm_86     # fat binary (multi-arch)
 ```
+
+Selection is `fnmatch` on the source name, the stem and both library names; a
+**bare word is a substring match** (`pwa_gen` → `kernels_v5_pwa_gen_bw.cu` …
+four kernels), so no wildcards are needed for the common case.  An empty
+selection means *everything*, and a pattern that matches nothing is a **hard
+error** with the available list — a typo must not look like a successful
+no-op.  `TABPWA_HASH_DIR` relocates the `.hash` bookkeeping for a read-only
+source tree (the binaries still land next to the sources).
 
 Auto-detection priority:
 1. `nvidia-smi` → exact `-arch=sm_XY` for the installed GPU
 2. `nvcc --version` → fat binary: `sm_70+sm_86` (CUDA < 13) or `sm_86` only (CUDA ≥ 13)
+
+`--arch` is **validated** against `nvcc --list-gpu-arch`: CUDA 13 dropped
+`compute_70`, and asking for it raises instead of failing every kernel
+quietly.  The arch is part of the build key, so a native `sm_120` binary is
+never mistaken for a fat `sm_70,sm_86` one (that used to ship locally-only
+cubins into the AppImage).
+
+**Toolkit selection** — `TABPWA_NVCC` > `CUDA_HOME`/`CUDA_PATH` > `PATH` >
+well-known prefixes.  When `--arch` names an SM the preferred toolkit cannot
+emit, the builder picks the next one that can, so `sm_70` on a CUDA-13 host
+resolves to the CUDA 12 toolkit instead of failing::
+
+    CUDA_HOME=/path/to/cuda-12.9 python -m tabpwa.cuda.build --arch sm_70,sm_86
+
+That is how the AppImage (which bundles CUDA 12.8) gets `sm_70`; on a CUDA 13
+toolkit without a cu12 fallback, `set_arch('sm_70')` raises with the supported
+list.  The host compiler follows the same idea: `TABPWA_CC`/`CC`, then
+`gcc-14`…`gcc-11` (CUDA rejects *future* gcc majors, so gcc-13 often beats the
+default gcc 15), then the conda-forge `x86_64-conda-linux-gnu-g++`.
+
+One `ensure()` costs **two** nvcc invocations: a shared compiler-compat probe
+(cached per process, invalidated by `set_arch`) and the kernel itself.  It
+used to be four — the probe was re-run per kernel *and* compiled a real,
+unrelated kernel as its target.
 
 ## Kernel policy
 
