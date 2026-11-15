@@ -673,6 +673,60 @@ class CUDABackendV5PWAGenBW(_CUDABackend):
         return Q, grads, P
 
 
+@register_backend("cuda_v5_pwa_gen_bwt", model="pwa_gen")
+class CUDABackendV5PWAGenBWT(_CUDABackend):
+    """CUDA v5 PWA gen bwt — **case-1 copy** of
+    :class:`CUDABackendV5PWAGenBW`, tuned by profiling.
+
+    Same model, same host contract, same parameters and gradients; only the
+    fused tile differs:
+
+    * the tile holds 4 events instead of 8.  The tile is 4 arrays of
+      ``TE·n_wave`` fp64, so at 198 waves the 8-event version needed 50 KiB
+      of shared memory and got exactly ONE resident block per SM; 26 KiB
+      gives three, which is what hides phase A's fp64 latency.
+    * the complex ``1/BW`` uses one fp64 reciprocal + two multiplies instead
+      of two fp64 divides.  An fp64 divide runs at ~1/24 of an fp64 FMA on
+      this device and that line is the single hottest arithmetic in the
+      kernel (19 % of a call; 6 % in this form).
+
+    Measured with the interleaved A/B harness
+    (``tests/profile_pwa_gen_ab.py``, which is required here because the GPU
+    throttles 2730 -> 180 MHz inside one run): **0.74-0.80x** the compute
+    time of ``cuda_v5_pwa_gen_bw`` at n = 65536 / 262144, on the kmatrix2 and
+    the two-BW shapes, ``resolution_size`` 1 and 8.  ``Q`` / ``P`` / ``ck`` /
+    ``coeff`` / ``dnorm`` agree to ~1e-15 or better: the two changes differ
+    only in rounding — a 1-ulp reciprocal and a different fp64 atomic
+    accumulation order — so nothing is bit-identical and nothing needs to
+    be.
+    """
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self._resolution_size = int(resolution_size)
+        self._last_dnorm = None
+        super().__init__(kernel_config, batch_size=batch_size)
+
+    def _make_kernel(self, kc, bs):
+        from tabpwa.cuda._v5_pwa_gen_bwt import CUDAKernelV5PWAGenBWT as K
+        return K(kc, batch_size=bs, resolution_size=self._resolution_size)
+
+    @property
+    def dnorm_on_gpu(self):
+        return True
+
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        Q, grads, P = self.kernel.compute(params, data_handle, norm=norm,
+                                          return_p=return_p)
+        if norm is not None:
+            dn = self.kernel._last_dnorm
+            if dn is None:
+                raise RuntimeError(
+                    "cuda_v5_pwa_gen_bwt kernel did not provide "
+                    "_last_dnorm")
+            grads = dict(grads)
+            grads["norm"] = float(dn)
+        return Q, grads, P
+
+
 @register_backend("cuda_v5_pwa_s0cw", model="pwa")
 class CUDAKernelV5PWAS0CWBackend(_CUDABackend):
     """CUDA v5 PWA s0cw — the s0c kernel with the GROUP-WEIGHTED log NLL.

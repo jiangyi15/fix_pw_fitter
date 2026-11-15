@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Benchmark ``cuda_v5_pwa_gen_bw`` against ``cuda_v5_pwa_gen_flat``.
+"""Benchmark ``cuda_v5_pwa_gen_bw`` and its tuned copy ``gen_bwt`` against
+``cuda_v5_pwa_gen_flat``.
 
 Both kernels are the same fused tile / grouped log-sum ``pwa_gen`` kernel;
 they differ ONLY in how the denominator coefficient block is laid out:
@@ -59,6 +60,7 @@ import numpy as np
 
 from tabpwa.amp_model import build_amplitude_model
 from tabpwa.cuda._v5_pwa_gen_bw import CUDAKernelV5PWAGenBW
+from tabpwa.cuda._v5_pwa_gen_bwt import CUDAKernelV5PWAGenBWT
 from tabpwa.cuda._v5_pwa_gen_flat import CUDAKernelV5PWAGenFlat
 from benchmark_pwa_kernels import _rate, _time, tile_case
 from benchmark_pwa_gen_s0e import _km_case
@@ -70,7 +72,8 @@ N_WAVE_MB = 96          # flat sibling's shared tile limit (see the docstring)
 CFG_MB = "tests/config_pwa_gen_mb.yml"
 
 VARIANTS = (("gen_flat", CUDAKernelV5PWAGenFlat),
-            ("gen_bw", CUDAKernelV5PWAGenBW))
+            ("gen_bw", CUDAKernelV5PWAGenBW),
+            ("gen_bwt", CUDAKernelV5PWAGenBWT))
 
 _WARMUP, _TRIALS, _RS = 2, 5, 1
 
@@ -94,13 +97,15 @@ def _mb_case(n_wave_target=N_WAVE_MB, n_events=256):
     P0 = int(kc0.get("n_proj", 1) or 1)
     nw0 = int(kc0["matrix_angle"].shape[1])
     N0 = nw0 // P0
+    n_res0 = np.asarray(kc0["bw_order"]).size // nw0
     k = max(1, int(round(n_wave_target / nw0)))
     kc = tile_case(kc0, P0, k)          # n_wave = nw0 * k (projections kept)
-    # the per-wave tables follow the per-projection tiling
-    for key in ("n_index",):
-        a = np.asarray(kc0[key])
-        kc[key] = np.concatenate([np.tile(a[p * N0:(p + 1) * N0], k)
-                                  for p in range(P0)])
+    # ``n_index`` is per (wave, factor) -- size n_wave·n_res, factor-minor
+    # like ``bw_order`` -- so the per-projection block is N0·n_res entries
+    # and tiling repeats whole (wave, factor) rows.
+    a = np.asarray(kc0["n_index"]).reshape(P0, N0, n_res0)
+    kc["n_index"] = np.concatenate(
+        [np.tile(a[p], (k, 1)) for p in range(P0)]).reshape(-1)
     n_wave = int(kc["matrix_angle"].shape[1])
 
     rng = np.random.default_rng(11)
