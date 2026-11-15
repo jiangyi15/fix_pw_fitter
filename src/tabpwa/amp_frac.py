@@ -46,9 +46,33 @@ class AmplitudeFractions:
         self._data = data            # None = whatever the fitter holds later
         self._handle = None            # resolved lazily, see _get_handle()
         self._own = False              # True when we loaded it ourselves
-        self._params, self._resolved = fitter.build_params(fit_result.x)
-        self._n_ck = len(self._params["ck"])
         self._cache = {}  # mask_tuple -> (total, grad_dict)
+        # the one point (fit_result.x); resolved on first use, see _point()
+        self._params = self._resolved = None
+        self._point()
+        self._n_ck = len(self._params["ck"])
+
+    def _point(self):
+        """``(x, params, resolved)`` of the fitted point — the instance's only
+        point.
+
+        A fraction, a yield or an uncertainty here is a statement about *this
+        fit result*, not about an arbitrary parameter vector, so there is
+        exactly one point and it is taken from ``fit_result.x``.  Every
+        quantity the instance hands out (the integrand, each ``Fwd``, the
+        ratio, the covariance) is evaluated there, so they combine
+        meaningfully.
+
+        ``Fitter.build_params`` is cached on ``(x, cm.revision)``, so this is
+        cheap per call and a constraint change is picked up automatically (the
+        revision bump invalidates that cache).
+        """
+        x = np.asarray(self.fit_result.x, dtype=float).ravel()
+        params, resolved = self.fitter.build_params(x)
+        if getattr(self, "_params", None) is not params:
+            self._params, self._resolved = params, resolved
+            self._cache.clear()          # mask memo is per parameter point
+        return x, params, resolved
 
     # ── sample ────────────────────────────────────────────────────
 
@@ -203,7 +227,7 @@ class AmplitudeFractions:
             ck[~keep] = 0.0j
         return ck
 
-    def fwd_integrate(self, masks, handle, x=None):
+    def fwd_integrate(self, masks, handle):
         """Per-**handle** integrand: one ``Fwd`` per mask for that sample.
 
         This is the unit :meth:`tabpwa.fitter.Fitter.sum_stream` accumulates;
@@ -224,15 +248,13 @@ class AmplitudeFractions:
         Args:
             masks: list of ck-index iterables (``[[1], [2], [1, 2]]``).
             handle: a backend handle (from ``backend.load_data``).
-            x: the flat parameter vector the chain is taken at (``None`` =
-                the fit's ``fit_result.x``).
-
-        There is no ``phys=`` override: a dual's value and its gradient must
-        describe the same point, and the gradient is chained at
-        ``fit_result.x``.  Evaluating the model elsewhere while keeping a
-        gradient taken here was silently wrong (measured: value moved, gradient
-        off by 0.22 from the FD of the same overridden observable).  A
-        different point needs a different ``AmplitudeFractions``.
+        The point is the fit result's — this class is an *interpretation of
+        one fit*, not a function of any parameter vector.  There is therefore
+        no ``x=`` and no ``phys=`` override: for another point, build another
+        ``AmplitudeFractions`` (or a new fit result).  Both used to exist and
+        both were silently wrong — a value evaluated at one point with a
+        gradient chained at another (measured: gradient off by 0.22 from the
+        FD of the same overridden observable).
 
         Returns:
             ``[Fwd, ...]`` — one per mask, the ck gradient masked exactly
@@ -240,8 +262,11 @@ class AmplitudeFractions:
             over a *fixed* coupling legitimately has a zero gradient.
         """
         f = self.fitter
-        if x is None:
-            x = self.fit_result.x
+        # ONE point for the whole call: the kernel params, the backward and the
+        # chain all come from the fit result's x, so every returned dual's
+        # value and gradient describe the same point — which is what makes a
+        # ratio of them meaningful.
+        x, params, resolved = self._point()
 
         out = []
         for mask in masks:
@@ -253,12 +278,7 @@ class AmplitudeFractions:
                 keep[list(mask)] = True
                 ck_g[~keep] = 0.0j
                 kg = dict(kg, ck=ck_g)
-            # mirror the unbatched path exactly: the kernel backward and the
-            # chain to ``x`` both run at the model frame
-            # (``self._resolved``), so a blinded fit answers identically with
-            # and without ``batch=``.
-            out.append(f.fwd_of(Q, f.fwd_backward(kg, self._resolved),
-                                resolved=self._resolved, x=x))
+            out.append(f.fwd_of(Q, f.fwd_backward(kg, resolved), x))
         return out
 
     def fractions(self, masks, denominator=None, param_names=None,
@@ -295,8 +315,7 @@ class AmplitudeFractions:
         # construction (``set_blind``, ``set_scale``, …) moves the model frame,
         # and the three routes must not disagree because one of them read a
         # stale snapshot.  Cheap: one forward resolve.
-        self._params, self._resolved = fitter.build_params(self.fit_result.x)
-        self._cache.clear()
+        self._point()
 
         if param_names is None:
             param_names = self._default_param_names()

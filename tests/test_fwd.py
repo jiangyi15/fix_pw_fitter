@@ -142,8 +142,8 @@ def test_fitter_fwd_of_rejects_raw_kernel_blocks():
         with pytest.raises(ValueError, match="not raw kernel blocks"):
             f.fwd_of(1.0, {block: np.ones(2)}, x=x)
 
-    # and a missing point is an error, not a stale-`_last_xk` guess
-    with pytest.raises(ValueError, match="needs the parameter point"):
+    # x is a required argument now (no stale-`_last_xk` fallback to misuse)
+    with pytest.raises(TypeError):
         f.fwd_of(1.0, {"p": 1.0})
 
 
@@ -711,8 +711,7 @@ def test_sum_stream_param_form_chains_at_the_given_x():
 
     got = f.sum_stream(p_a, res_a, x=x_a, batch=32)
     whole = f.sum_stream(p_a, res_a, x=x_a)
-    expect = f.fwd_of(*f._compute_and_chain(p_a, f._phsp_holder, res_a),
-                      resolved=res_a, x=x_a)
+    expect = f.fwd_of(*f._compute_and_chain(p_a, f._phsp_holder, res_a), x=x_a)
     atol = 1e-10 * np.abs(expect.grad).max()
     np.testing.assert_allclose(got.grad, expect.grad, rtol=1e-11, atol=atol)
     np.testing.assert_allclose(whole.grad, expect.grad, rtol=1e-11, atol=atol)
@@ -722,3 +721,30 @@ def test_sum_stream_param_form_chains_at_the_given_x():
     with pytest.raises(ValueError, match="needs `x`"):
         f.sum_stream(p_a, res_a)
     f.free()
+
+
+def test_fwd_of_has_exactly_one_point_argument():
+    """``x`` is the only point: the resolved frame is derived, never passed.
+
+    Two independent point arguments would let a caller chain a gradient taken
+    at one point through another point's transforms — meaningless, and not
+    detectable downstream because the value still looks right.  Every quantity
+    that is to be combined has to come from the same ``x``.
+    """
+    import inspect
+    import numpy as np
+
+    f = _fitter()
+    params = list(inspect.signature(f.fwd_of).parameters)
+    assert params == ["value", "grad_dict", "x"], params
+
+    x = f.initial_values(seed=3)
+    names = f.fwd_names()
+    a = f.fwd_of(2.0, {names[0]: 1.0}, x)
+    b = f.fwd_of(3.0, {names[0]: -1.0}, x)
+    # combining two duals from one x is meaningful
+    r = a / b
+    assert r.grad.shape == (len(names),)
+    # the gradient is the chain at that x, evaluated through that x's frame
+    np.testing.assert_allclose(
+        a.grad, f.cm.full_gradient({names[0]: 1.0}, f.build_params(x)[1], x))

@@ -8,9 +8,12 @@ tape and without hand-written quotient rules.
 
 There is no layout object: the parameter space *is* the gradient vector's
 index space, fixed by the caller.  :class:`tabpwa.fitter.Fitter` owns it
-(``fwd_names()`` / ``fwd_parameter(name)`` / ``fwd_of(value, grad_dict)``),
+(``fwd_names()`` / ``fwd_parameter(name)`` / ``fwd_of(value, grad_dict, x)``),
 so every ``Fwd`` in one fit shares the same ordering; the operators check
 the vector length, so mixing two spaces raises instead of broadcasting.
+``fwd_of`` takes **one** point argument (``x``) and derives the resolved frame
+from it, so a value and its gradient can never come from different points —
+which is what makes a ratio or a covariance of duals meaningful.
 
 Scope, deliberately narrow:
 

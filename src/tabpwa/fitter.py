@@ -907,11 +907,36 @@ class Fitter:
         subtract it; it does not make this frame unphysical.  What the analyst
         prints, saves and reads is :meth:`report_params` — the real values
         shifted by the unknown offset.
+
+        The result is cached for one ``x`` (~1.5 ms for a 365-name model, and
+        the likelihood calls this once per iteration, a streamed ``fractions``
+        once per chunk).  The cache is a pure function of ``(x, constraint
+        state)``, so it is **cleared by the constraint manager** when the
+        pipeline changes — that is a property of the source, not something a
+        caller has to remember to compare.
+
+        The returned dicts are the cached objects — treat them as read-only
+        (``dict(params)`` before mutating, as ``lineshape_common`` does).
         """
         x = np.asarray(x, dtype=float).ravel()
-        resolved = self.cm.flat_resolve(x)
+        cm = self.cm
+        if not getattr(self, "_params_cache_wired", False):
+            cm.add_invalidator(self._drop_params_cache)
+            self._params_cache_wired = True
+
+        cache = getattr(self, "_params_cache", None)
+        if cache is not None and cache[0].shape == x.shape \
+                and np.array_equal(cache[0], x):
+            return cache[1], cache[2]
+
+        resolved = cm.flat_resolve(x)
         params = self._kernel_builder.forward(resolved)
+        self._params_cache = (x.copy(), params, resolved)
         return params, resolved
+
+    def _drop_params_cache(self):
+        """Forget the cached ``build_params`` result (constraints changed)."""
+        self._params_cache = None
 
     def report_params(self, x):
         """The **blinded display** frame: what the analyst is shown.
@@ -2037,8 +2062,8 @@ class Fitter:
                     if param_form:
                         out = [self.fwd_of(
                             *self._compute_and_chain(prm, handle, resolved,
-                                                     norm),
-                            resolved=resolved, x=x) for prm in params]
+                                                     norm), x=x)
+                            for prm in params]
                         yield out[0] if len(params) == 1 else out
                     else:
                         yield fn(handle)
@@ -2164,7 +2189,7 @@ class Fitter:
                           for n in keys])
         return values, J @ chain
 
-    def fwd_of(self, value, grad_dict, resolved=None, x=None):
+    def fwd_of(self, value, grad_dict, x):
         """``Fwd`` for one summed quantity: ``value`` + gradient over ``x``.
 
         ``value`` is a scalar the kernel returned for a sample
@@ -2176,28 +2201,32 @@ class Fitter:
         kernel slots, not parameter names.
 
         The returned gradient spans the **free parameters in ``x`` order**
-        (:meth:`fwd_names`) — the space a fit covariance (``hess_inv``)
-        lives in.  The resolved dict is *not* that space: it holds aliases
+        (:meth:`fwd_names`) — the space a fit covariance (``hess_inv``) lives
+        in.  The resolved dict is *not* that space: it holds aliases
         (``rhoB_width`` is ``rhoA_width``), derived values
-        (``resolved = bounds(x)``, so ``d resolved/dx`` is not 1) and
-        unpacked names.  The chain therefore always goes through
-        ``cm.full_gradient(grad_dict, resolved, x)``, so a name that reaches
-        a free slot only through an alias/transform/bounds still carries its
+        (``resolved = bounds(x)``, so ``d resolved/dx`` is not 1) and unpacked
+        names.  The chain therefore goes through
+        ``cm.full_gradient(grad_dict, resolved, x)``, so a name that reaches a
+        free slot only through an alias/transform/bounds still carries its
         contribution instead of being dropped.  Skipping it makes
         ``R.sigma(hess_inv)`` wrong (measured on ``config_amp``: 0.00759
         instead of the finite-difference 0.003813).
 
-        *x* must be the point the gradient was evaluated at.  There is no
-        implicit fallback to the last evaluated point: a stale ``x`` yields a
-        gradient that is silently wrong (same value, wrong derivative), so a
-        missing *x* is an error rather than a guess.
+        **``x`` is the only point parameter, and ``resolved`` is derived from
+        it** — never passed alongside.  Two separate arguments would let a
+        caller chain a gradient taken at one point through the transforms of
+        another, which is meaningless (and locally undetectable: the value
+        would still look right).  Every quantity that is to be combined — a
+        ratio, a difference, a covariance — must come from the same ``x``;
+        that is the contract this signature enforces.  For another point,
+        build another ``AmplitudeFractions`` / use another ``x``.
 
         Args:
             value: the scalar (a plain number from ``compute``).
-            grad_dict: ``{resolved name: d value / d name}``.
-            resolved: the resolved parameter dict at *x* (recomputed when
-                omitted).
-            x: the flat free-parameter vector the gradient belongs to.
+            grad_dict: ``{resolved name: d value / d name}`` — the result of
+                ``_kernel_builder.backward(grads, build_params(x)[1])``, i.e.
+                the kernel backward **at this same x**.
+            x: the flat free-parameter vector the value and gradient belong to.
         """
         from .fwd import Fwd
 
@@ -2208,15 +2237,8 @@ class Fitter:
                 "_kernel_builder.backward(grads, resolved)), not raw kernel "
                 f"blocks: got keys {sorted(grad_dict)[:6]}")
 
-        if x is None:
-            raise ValueError(
-                "fwd_of needs the parameter point x= (the resolved -> free "
-                "chain depends on it); there is no implicit fallback to the "
-                "last evaluated point, which would silently chain at the "
-                "wrong x")
         x = np.asarray(x, dtype=float).ravel()
-        if resolved is None:
-            resolved = self.build_params(x)[1]     # model frame (the kernel's)
+        resolved = self.build_params(x)[1]         # the model frame at this x
         grad = self.cm.full_gradient(grad_dict, resolved, x)
         return Fwd(value, np.asarray(grad, dtype=float))
 

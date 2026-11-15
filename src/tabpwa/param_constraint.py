@@ -1237,6 +1237,13 @@ class ConstraintManager:
         # No registry resolution at set time; applied at the dict level.
         self.bounds = Boundary()
 
+        # Objects caching a derived-of-resolve value (``Fitter.build_params``)
+        # register a no-argument callback here; ``_invalidate`` runs them
+        # whenever the pipeline changes.  A version counter would work too, but
+        # then every consumer has to remember to compare it — clearing at the
+        # source cannot be forgotten.
+        self._invalidators = []
+
         # Variable registry (rebuilt on constraint change)
         self._var_registry = None
 
@@ -1750,7 +1757,17 @@ class ConstraintManager:
 
     # ── rebuild ─────────────────────────────────────────────────
 
+    def add_invalidator(self, fn):
+        """Register *fn* (no arguments) to run when the pipeline changes."""
+        self._invalidators.append(fn)
+
+    def _invalidate(self):
+        """Drop anything derived from the current constraint state."""
+        for fn in list(self._invalidators):
+            fn()
+
     def _rebuild(self):
+        self._invalidate()
         # Collect names that are genuinely produced by a transform
         # (output where the name is NOT also an input of the same transform).
         # In-place transforms (LinearTransform: same name in/out) are excluded.
