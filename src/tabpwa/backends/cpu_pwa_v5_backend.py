@@ -20,8 +20,6 @@ from .core import ComputeBackend, register_backend
 
 @register_backend("cpu_v5_pwa", model="pwa")
 @register_backend("cpu_v5_pwa_gen", model="pwa")
-@register_backend("cpu_v5_pwa", model="pwa_gen")
-@register_backend("cpu_v5_pwa_gen", model="pwa_gen")
 class CPUPWAV5Backend(ComputeBackend):
     """CPU PWA grouped-log-sum backend (C + OpenMP, float64).
 

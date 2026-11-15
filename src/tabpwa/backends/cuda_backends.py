@@ -128,7 +128,6 @@ class CUDABackendV3AmpCache(_CUDABackend):
 
 
 @register_backend("cuda_v4_pwa", model="pwa")
-@register_backend("cuda_v4_pwa", model="pwa_gen")
 @register_backend("default", model="pwa")
 class CUDABackendV4PWA(_CUDABackend):
     """CUDA v4 PWA — projection-sum PWA on the ampcache infrastructure.

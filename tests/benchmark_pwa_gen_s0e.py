@@ -71,7 +71,7 @@ def _km_case(n_wave_target=N_WAVE, n_events=256):
     k = max(1, int(round(n_wave_target / nw0)))
     kc = tile_case(kc0, P0, k)          # n_wave = nw0 * k (projections kept)
     # the pwa_gen per-wave tables follow the per-projection tiling
-    for key in ("n_index", "n_mass_index"):
+    for key in ("n_index",):
         a = np.asarray(kc0[key])
         kc[key] = np.concatenate([np.tile(a[p * N0:(p + 1) * N0], k)
                                   for p in range(P0)])

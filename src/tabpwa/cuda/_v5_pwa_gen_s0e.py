@@ -209,7 +209,8 @@ class CUDAKernelV5PWAGenS0E:
             raise ValueError(
                 "cuda_v5_pwa_gen_s0e needs exactly ONE BW per chain "
                 f"(top -> R + X), got n_res = {self.n_res} — use "
-                "cuda_v5_pwa(_s0c/_s0d) for multi-BW chains")
+                "cuda_v5_pwa_gen_flat or cuda_v5_pwa_gen_bw for multi-BW "
+                "chains")
 
         bw = np.asarray(c["bw_order"]).reshape(-1)
         if bw.size != self.n_wave:

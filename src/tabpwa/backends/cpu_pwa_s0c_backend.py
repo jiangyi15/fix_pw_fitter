@@ -3,7 +3,6 @@ from .core import ComputeBackend, register_backend
 
 
 @register_backend("cpu_pwa_s0c", model="pwa")
-@register_backend("cpu_pwa_s0c", model="pwa_gen")
 class CPUPWAS0CBackend(ComputeBackend):
     """CPU PWA s0c backend (C + OpenMP, float64).
 

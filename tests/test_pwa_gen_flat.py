@@ -47,10 +47,10 @@ denominator is a PRODUCT of two factors and the factor widths are ragged):
    runs the same fixture;
 9. ``resolution_size = 1``: ``P`` / ``Q`` / ``ck`` / ``coeff`` / ``dnorm``
    vs ``cpu_pwa_gen`` (the reference any-``n_res`` implementation) and vs
-   ``numpy_pwa`` — the fp32 amplitude-cache floor;
+   ``numpy_pwa_gen`` — the fp32 amplitude-cache floor;
 10. ``resolution_size = 8`` with group-normalised weights (``w = 1/8``, so
     ``W_g == 1`` and the group objective equals the CPU one): ``Q`` /
-    ``ck`` / ``coeff`` / ``dnorm`` vs ``cpu_v5_pwa`` at the same group size,
+    ``ck`` / ``coeff`` / ``dnorm`` vs ``cpu_pwa_gen`` at the same group size,
     ``P`` vs ``cpu_pwa_gen``, and ``Q`` vs an independent numpy group sum
     over the returned ``P``;
 11. FD of ``dcoeff`` at ``n_res == 2`` over slots of BOTH factors;
@@ -105,12 +105,12 @@ def test_registration():
     assert "cuda_v5_pwa_gen_flat" not in backends_for_model("pwa")
     # the pwa_gen capability guard accepts it (class name, as _CUDABackend
     # passes it) and a plain pwa_gen config needs no guard at all
-    check_backend_support(Fitter(CFG_KM, backend="numpy_pwa").kernel_config,
+    check_backend_support(Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config,
                           "CUDABackendV5PWAGenFlat")
-    check_backend_support(Fitter(CFG_KM, backend="numpy_pwa").kernel_config,
+    check_backend_support(Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config,
                           "cuda_v5_pwa_gen_flat")
 
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     b = create_backend("cuda_v5_pwa_gen_flat", kc, model="pwa_gen",
                        resolution_size=8)
     assert b.kernel.resolution_size == 8
@@ -125,7 +125,7 @@ def test_multi_bw_chain_shape_and_cpu_backend():
     ``bw_{w,0}·bw_{w,1}``: the k-matrix factor carries 5 basis rows, the
     plain BW 3, so the flat layout drops 2 slots per second factor.
     """
-    f = Fitter(CFG_MB, backend="numpy_pwa")
+    f = Fitter(CFG_MB, backend="cpu_pwa_gen")
     kc = f.kernel_config
     n_wave = kc["matrix_angle"].shape[1]
     assert np.asarray(kc["bw_order"]).size // n_wave == 2      # n_res == 2
@@ -166,7 +166,7 @@ def test_multi_bw_chain_shape_and_cpu_backend():
 # ── multi-BW gates: n_res == 2 against the CPU oracles ───────────────
 
 def _mb():
-    f = Fitter(CFG_MB, backend="numpy_pwa")
+    f = Fitter(CFG_MB, backend="cpu_pwa_gen")
     kc = f.kernel_config
     x = f.initial_values(seed=1)
     params, _res = f.build_params(x)
@@ -188,33 +188,24 @@ def _numpy_group_nll(P, w, bkg, norm, rs):
 
 
 def test_multi_bw_matches_cpu_pwa_gen():
-    """rs=1: ``cpu_pwa_gen`` (any n_res) and ``numpy_pwa`` are the oracles."""
+    """rs=1: ``cpu_pwa_gen`` (any n_res) and ``numpy_pwa_gen`` are the oracles.
+
+    Both references report ``dQ/dcoeff`` per (wave, factor), the same layout
+    the flat kernel uses, so every block is compared directly.
+    """
     _f, kc, params = _mb()
     data = _synth(kc, NEV, 5)
 
     kf = CUDAKernelV5PWAGenFlat(kc, resolution_size=1)
     Q, g, P = kf.compute(params, kf.load_data(data), norm=1.3)
 
-    for name in ("cpu_pwa_gen", "numpy_pwa"):
+    for name in ("cpu_pwa_gen", "numpy_pwa_gen"):
         ref = create_backend(name, kc, model="pwa_gen")
         Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
         assert _rel(P, Pr) < 1e-6, (name, "P")
         assert abs(Q - Qr) <= 1e-6 * abs(Qr), (name, "Q", Q, Qr)
         assert _rel(g["ck"], gr["ck"]) < 1e-5, (name, "ck")
-        if name == "cpu_pwa_gen":
-            # the per-(wave, factor) reference
-            assert _rel(g["coeff"], gr["coeff"]) < 1e-5, (name, "coeff")
-        else:
-            # ``numpy_pwa`` attributes a shared BW's gradient to its first
-            # copy only (the model's transform sums over the copies), so
-            # compare the per-BW total, which is what the fitter consumes.
-            gc = np.asarray(g["coeff"]).reshape(kf.n_fact, -1)
-            grc = np.asarray(gr["coeff"]).reshape(kf.n_fact, -1)
-            bow = np.asarray(kc["bw_order"]).reshape(-1)
-            base = bow % len(np.unique(bow))
-            for b in np.unique(base):
-                m = base == b
-                assert _rel(gc[m].sum(0), grc[m].sum(0)) < 1e-5, (name, b)
+        assert _rel(g["coeff"], gr["coeff"]) < 1e-5, (name, "coeff")
         assert abs(kf._last_dnorm - ref.kernel._last_dnorm) \
             <= 1e-6 * abs(ref.kernel._last_dnorm), (name, "dnorm")
         ref.free()
@@ -222,7 +213,7 @@ def test_multi_bw_matches_cpu_pwa_gen():
 
 
 def test_multi_bw_grouped_nll_at_rsize_8():
-    """rs=8: the grouped log-sum, vs ``cpu_v5_pwa`` and a numpy group sum."""
+    """rs=8: the grouped log-sum, vs ``cpu_pwa_gen`` and a numpy group sum."""
     _f, kc, params = _mb()
     rs = 8
     data = _grouped(_synth(kc, 256, 5), rs)
@@ -235,7 +226,7 @@ def test_multi_bw_grouped_nll_at_rsize_8():
     Qn = _numpy_group_nll(P, w, np.asarray(data["bkg"]), 1.3, rs)
     assert abs(Q - Qn) <= 1e-10 * abs(Qn), (Q, Qn)
 
-    ref = create_backend("cpu_v5_pwa", kc, model="pwa_gen",
+    ref = create_backend("cpu_pwa_gen", kc, model="pwa_gen",
                          resolution_size=rs)
     Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
     assert abs(Q - Qr) <= 1e-6 * abs(Qr), (Q, Qr)
@@ -354,7 +345,7 @@ def test_fitter_multi_bw_fd():
 
 @pytest.mark.parametrize("rs", [1, 8])
 def test_equal_width_anchor(rs):
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     assert "den_row" not in kc and "n_table" not in kc      # default basis
     data = _synth(kc, NEV, 5)
 
@@ -381,7 +372,7 @@ def test_equal_width_anchor(rs):
 
 @pytest.mark.parametrize("rs", [1, 8])
 def test_kmatrix2_anchor(rs):
-    f = Fitter(CFG_KM, backend="numpy_pwa")
+    f = Fitter(CFG_KM, backend="cpu_pwa_gen")
     kc = f.kernel_config
     data = _synth(kc, NEV, 5)
     x = f.initial_values(seed=1)
@@ -408,7 +399,7 @@ def test_kmatrix2_anchor(rs):
 
 def _ragged():
     """``kmatrix2`` (5 rows) next to a plain BW (3 rows) in one ``pwa_gen``."""
-    f = Fitter(_mixed_cfg(), backend="numpy_pwa")
+    f = Fitter(_mixed_cfg(), backend="cpu_pwa_gen")
     kc = f.kernel_config
     assert "den_row" in kc and kc["den_row"].shape[1] == 5
     assert np.any(np.asarray(kc["den_row"]) == -1)          # padded encoding

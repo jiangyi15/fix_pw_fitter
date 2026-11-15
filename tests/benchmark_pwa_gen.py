@@ -67,9 +67,9 @@ def _gen_case(kc):
     out["n_table"] = np.stack([np.ones(grid_n, complex), grid ** 2 + 0j])
     out["n_min"] = float(kc["gamma_min"])
     out["n_delta"] = float(kc["gamma_delta"])
+    # per (wave, factor); the mass column is ``mass_index[bw_order[f]]``,
+    # which the kernels derive themselves -- there is no ``n_mass_index``
     out["n_index"] = np.tile(np.array([0, 1], np.int32), n_wave // 2)
-    out["n_mass_index"] = np.asarray(kc["mass_index"])[
-        np.asarray(kc["bw_order"]).reshape(-1)].astype(np.int32)
     out["den_row"] = np.tile(np.array([[0, 1, 2]], np.int32), (n_bw, 1))
     out["den_table"] = (grid ** 4 + 0j)[None, :]
     out["den_min"] = float(kc["gamma_min"])
@@ -142,8 +142,11 @@ def run(sizes, n_comp, n_proj, warmup, trials, backends):
             for _name, kc, generic in cases:
                 data = _events(kc, ne, rng)
                 params = _params(kc, rng, generic)
-                be = create_backend(spec, kc, model="pwa_gen"
-                                    if generic else "pwa")
+                # a pwa_gen-only backend has no plain-``pwa``
+                # registration (the kernels are separate), so each case
+                # names the engine for ITS model
+                be = create_backend(spec["pwa_gen" if generic else "pwa"],
+                                    kc, model="pwa_gen" if generic else "pwa")
                 dh = be.load_data(data)
                 t = _bench(lambda: be.compute(params, dh, norm=float(ne) * .5,
                                               return_p=True), warmup, trials)
@@ -163,14 +166,19 @@ def main():
     ap.add_argument("--n-proj", type=int, default=2)
     ap.add_argument("--warmup", type=int, default=1)
     ap.add_argument("--trials", type=int, default=3)
-    ap.add_argument("--backends", default="cpu_pwa_s0c,numpy_pwa")
+    ap.add_argument("--backends", default="cpu_pwa_gen,numpy_pwa_gen",
+                    help="cpu_pwa_gen (registered for both models) or "
+                         "numpy_pwa_gen (pwa_gen only)")
     args = ap.parse_args()
 
     sizes = ([int(x) for x in args.sizes.split(",")] if args.sizes
              else PRESETS[args.preset][:2])
-    labels = {"cpu_pwa_s0c": "cpu_pwa_s0c", "cpu_pwa_gen": "cpu_pwa_gen",
-              "cpu_v5_pwa": "cpu_v5_pwa", "numpy_pwa": "numpy_pwa"}
-    backends = [(labels[b], b) for b in args.backends.split(",") if b]
+    # backend name per amplitude model; ``numpy_pwa_gen`` covers only
+    # ``pwa_gen``, so its plain-``pwa`` columns come from ``numpy_pwa``
+    labels = {"cpu_pwa_gen": ("cpu_pwa_gen", "cpu_pwa_gen"),
+              "numpy_pwa_gen": ("numpy_pwa", "numpy_pwa_gen")}
+    backends = [(b, {"pwa": labels[b][0], "pwa_gen": labels[b][1]})
+                for b in args.backends.split(",") if b]
     run(sizes, args.n_comp, args.n_proj, args.warmup, args.trials, backends)
 
 

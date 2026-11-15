@@ -6,15 +6,21 @@ exactly like ``pwa`` (the model only emits them when a resonance actually
 carries a free numerator basis / an extended denominator basis).
 
 1. **Numerator table** ``n_table`` / ``n_index``
-   One extra table row per free numerator basis function.  Every wave gets
-   a numerator row index ``n_index[w]`` (int32, ``0`` = the constant row),
-   so the per-event amplitude factor is::
+   One extra table row per free numerator basis function.  Every *(wave,
+   factor)* gets a numerator row index ``n_index[f]`` (int32, ``0`` = the
+   constant row; ``f = w·n_res + r``, the ``bw_order`` layout), so the
+   per-event amplitude factor of a wave is::
 
-       amp_w(e) = fa_w(e) · fl_w(e) · N_{n_index[w]}(m_e)
+       amp_w(e) = fa_w(e) · fl_w(e) · Π_r N_{n_index[w·n_res+r]}(m_{c_r}(e))
 
-   with ``N_0 ≡ 1``.  Row 0 is built as exactly ``1`` and the factor is
-   applied **only when some ``n_index != 0``**, so an all-zero index array
-   is bit-identical to the plain PWA path.
+   where ``c_r = mass_index[bw_order[w·n_res+r]]`` is that factor's **own**
+   mass column — the same one its denominator propagator reads, so a chain
+   carrying a numerator on two BWs is evaluated at two different masses
+   (``B → R1 x, R1 → R2 y`` gives ``N_R1(m_R1)·N_R2(m_R2)``).
+
+   ``N_0 ≡ 1``: row 0 is built as exactly ``1`` and the factor is applied
+   **only when some ``n_index != 0``**, so an all-zero index array is
+   bit-identical to the plain PWA path.
 
 2. **Generic denominator coefficients** ``den_row`` / ``den_table``
    The kernel denominator is the opaque basis sum
@@ -25,8 +31,9 @@ carries a free numerator basis / an extended denominator basis).
    ``grads["coeff"]``), which is what a ``BasisModel`` denominator
    (``[1, m², m⁴, −i·ρ, +i·s·ρ]`` …) needs.
 
-   ``den_row`` is ``int32 (n_unique_bw, n_basis)``; the entry encodes the
-   basis function of that slot:
+   ``den_row`` is ``int32 (n_unique_bw, n_basis)`` — one row per **unique
+   base BW**, indexed per (wave, factor) through ``bw_order`` — and the entry
+   encodes the basis function of that slot:
 
    ======  =========================================================
    ``-1``  ``F = 0``            (padding — coefficient 0, gradient 0)
@@ -176,12 +183,17 @@ def fill_den_F(config, kernel, mass, kinds, rows, cols):
 
 
 def den_domain(mass, coeff, slots, F):
-    """``BW_b(e) = Σ_j coeff[b, j] · F_{slots[b, j]}(e)`` per unique BW.
+    """``bw_b(e) = Σ_j coeff[b, j] · F_{slots[b, j]}(e)`` per slot block.
+
+    A *block* is one row of ``slots``; the two layouts in use are one row per
+    **unique base BW** (the CUDA ``gen_bw``/``gen_s0e`` addressing) and one
+    row per **(wave, factor)** (the flat/CPU addressing, ``b = f``).  This
+    helper is layout-agnostic: pass matching ``coeff``/``slots``.
 
     Args:
         mass: ``(n_events, n_mass)`` mass columns.
-        coeff: ``(n_bw, n_basis)`` real coefficients.
-        slots: ``(n_bw, n_basis)`` **unique-slot indices** (the reshaped
+        coeff: ``(n_blk, n_basis)`` real coefficients.
+        slots: ``(n_blk, n_basis)`` **unique-slot indices** (the reshaped
             ``slot_map`` from :func:`build_den_slots`), not the raw
             ``den_row`` encoding.  Padding (``ZERO_KIND``) is a real slot
             whose basis value is 0, so it never needs a special case here.
@@ -189,13 +201,13 @@ def den_domain(mass, coeff, slots, F):
             :func:`fill_den_F`, combined here).
 
     Returns:
-        complex ``(n_events, n_bw)``.
+        complex ``(n_events, n_blk)``.
     """
     coeff = np.asarray(coeff, dtype=np.float64)
     slots = np.asarray(slots, dtype=np.int64)
     n_bw = slots.shape[0]
     out = np.zeros((mass.shape[0], n_bw), dtype=complex)
-    # one reused gather buffer: the per-slot (n_events, n_bw) block is the
+    # one reused gather buffer: the per-slot (n_events, n_blk) block is the
     # denominator's own size, so avoid re-allocating it for every slot
     buf = np.empty((mass.shape[0], n_bw), dtype=complex)
     for j in range(slots.shape[1]):
@@ -205,9 +217,11 @@ def den_domain(mass, coeff, slots, F):
 
 
 def den_domain_grad(dQ_dbw, slots, F):
-    """``dQ/dcoeff[b, j] = 2·Re Σ_e dQ/dBW_b(e) · F_{slots[b,j]}(e)``.
+    """``dQ/dcoeff[b, j] = 2·Re Σ_e dQ/dbw_b(e) · F_{slots[b,j]}(e)``.
 
-    ``slots`` is the reshaped unique-slot map (see :func:`den_domain`).
+    ``slots`` is the reshaped unique-slot map and ``b`` the same slot block
+    :func:`den_domain` used (a unique BW, or a (wave, factor)); the caller
+    passes ``dQ/dbw`` in that same layout.
     """
     dQ_dbw = np.asarray(dQ_dbw)
     slots = np.asarray(slots, dtype=np.int64)
@@ -224,13 +238,14 @@ def den_domain_grad(dQ_dbw, slots, F):
 def check_backend_support(config, backend_name):
     """Refuse a pwa_gen config a backend cannot evaluate yet.
 
-    The CPU/NumPy backends implement the numerator factor and the generic
-    coefficient basis; the CUDA kernels read ``m0``/``g0`` directly
-    (kernels untouched), so both extensions are unsupported there — with the
-    single exception of ``cuda_v5_pwa_gen_s0e``, a case-1 kernel copy that
-    builds its own combined basis table and folds the numerator into its
-    amp-cache fill.  An ``n ≡ 1``, default-basis ``pwa_gen`` config is
-    exactly the plain PWA config and therefore works everywhere.
+    This is the guard on the CUDA backends' single construction point: a
+    CUDA kernel that reads ``m0``/``g0`` directly (all of them except the
+    ``gen_*`` family, which are case-1 copies carrying their own combined
+    basis table and the numerator in their amp-cache fill) cannot evaluate
+    either extension.  The CPU/NumPy pwa_gen backends never reach this
+    guard — they are separate registrations, not shared kernels.  An
+    ``n ≡ 1``, default-basis ``pwa_gen`` config is exactly the plain PWA
+    config and therefore works everywhere.
     """
     if has_numerator(config) or has_generic_den(config):
         # ``_CUDABackend`` passes its CLASS name here (the backend is built

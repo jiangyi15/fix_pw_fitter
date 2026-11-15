@@ -3,7 +3,8 @@
 Gates:
   A. a config whose resonances use the *default* ``BasisModel`` basis
      reproduces ``pwa`` bit for bit (kernel config on every key, NLL and
-     gradients) on ``numpy_pwa`` and ``cpu_pwa_s0c``;
+     gradients) on the pwa_gen implementations ``cpu_pwa_gen`` /
+     ``numpy_pwa_gen``;
   B. a ``kmatrix2`` resonance reproduces the direct
      ``Σ g_ls·(P/(1−iρK))·fa·fl`` amplitude (P and NLL, rel 1e-10) and the
      gradients of every physical parameter match central differences;
@@ -25,7 +26,12 @@ from tabpwa.param_constraint import CKProduct, complex_tail
 CFG_BASIS = "tests/config_pwa_gen.yml"
 CFG_KM = "tests/config_pwa_gen_km.yml"
 
-BACKENDS = ["numpy_pwa", "cpu_pwa_s0c"]
+# the CPU backends registered for ``pwa_gen``: the dedicated C+OpenMP
+# implementation (``cpu_pwa_gen``, alias ``cpu_v4_pwa``).  ``numpy_pwa`` /
+# ``cpu_v5_pwa`` / ``cpu_pwa_s0c`` are the *pwa* backends and are not
+# extended for the basis model — the NumPy oracle is its own kernel
+# (``numpy_pwa_gen``), checked separately since it is the slow reference.
+BACKENDS = ["cpu_pwa_gen", "cpu_v4_pwa"]
 
 
 def _mixed_cfg():
@@ -185,25 +191,37 @@ def test_registration():
     assert AMPLITUDE_MODELS["pwa_gen"] is AMPLITUDE_MODELS["pwa_basis"]
     m = build_amplitude_model(CFG_BASIS)
     assert m.name == "pwa_gen"
-    for name in ("numpy_pwa", "cpu_pwa_s0c", "cpu_pwa_gen", "cpu_v4_pwa",
-                 "cpu_v5_pwa", "default"):
-        assert name in backends_for_model("pwa_gen"), name
+    allowed = set(backends_for_model("pwa_gen"))
+    for name in ("cpu_pwa_gen", "cpu_v4_pwa", "default", "numpy_pwa_gen",
+                 "cuda_v5_pwa_gen_s0e", "cuda_v5_pwa_gen_flat",
+                 "cuda_v5_pwa_gen_bw", "shard"):
+        assert name in allowed, name
+    # the plain-PWA backends are NOT registered here: a basis model is served
+    # by its own implementations, not by extending a working kernel
+    for name in ("numpy_pwa", "cpu_v5_pwa", "cpu_pwa_s0c", "cuda_v4_pwa"):
+        assert name not in allowed, name
 
 
 def test_schema_absent_for_plain_pwa():
     """The new kernel-config keys stay out of a plain ``pwa`` config."""
-    kc = Fitter(_cfg(CFG_BASIS, amp_model="pwa"), backend="numpy_pwa").kernel_config
-    for key in ("n_table", "n_index", "n_mass_index", "den_row", "den_table"):
+    kc = Fitter(_cfg(CFG_BASIS, amp_model="pwa"), backend="cpu_pwa_gen").kernel_config
+    for key in ("n_table", "n_index", "den_row", "den_table"):
         assert key not in kc, key
 
 
 def test_schema_present_for_kmatrix2():
-    f = Fitter(CFG_KM, backend="numpy_pwa")
+    f = Fitter(CFG_KM, backend="cpu_pwa_gen")
     kc = f.kernel_config
     assert kc["n_table"].shape[0] == 2                     # {1, m²}
     assert np.array_equal(kc["n_table"][0], np.ones(kc["n_table"].shape[1]))
-    assert np.array_equal(kc["n_index"], np.array([0, 1] * kc["n_blocks"]
-                                                  * kc["n_proj"]))
+    # one numerator row index per (wave, factor) -- the ``bw_order`` layout
+    assert kc["n_index"].shape == (np.asarray(kc["bw_order"]).size,)
+    assert np.array_equal(kc["n_index"],
+                          np.tile([0, 1], kc["n_index"].size // 2))
+    # the numerator reads the factor's OWN BW mass column, the same
+    # ``mass_index[bw_order]`` the denominator propagator uses; there is no
+    # separate ``n_mass_index`` to fall out of sync with it
+    assert "n_mass_index" not in kc
     # 1, −m², and the three extra rows (m⁴, −iρ, +i·s·ρ) of kmatrix2
     assert np.array_equal(kc["den_row"][0], np.array([0, 1, 2, 3, 4]))
     assert kc["den_table"].shape[0] == 3
@@ -329,27 +347,45 @@ def test_gate_c_ck_outer_product(backend):
 
 # ── gate D: backend scope ────────────────────────────────────────────
 
-def test_cuda_refuses_pwa_gen_extensions():
-    kc = Fitter(CFG_KM, backend="numpy_pwa").kernel_config
-    with pytest.raises(ValueError, match="pwa_gen numerator not supported"):
+def test_plain_pwa_cuda_backend_is_not_registered_for_pwa_gen():
+    """A basis model is served by its own kernels, not by a plain-PWA one.
+
+    ``cuda_v4_pwa`` (like ``numpy_pwa`` / ``cpu_pwa_s0c``) is registered for
+    ``pwa`` only, so no pwa_gen config ever reaches it.
+    """
+    kc = Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config
+    with pytest.raises(ValueError, match="unknown backend 'cuda_v4_pwa'"):
         create_backend("cuda_v4_pwa", kc, model="pwa_gen")
 
 
-def test_cuda_accepts_default_basis_pwa_gen():
+def test_guard_still_refuses_an_unlisted_kernel():
+    """The pwa_gen support guard keeps refusing kernels outside its allow set.
+
+    It is what stops a *new* CUDA backend from silently reading ``m0``/``g0``
+    on a config that carries a numerator or an extended basis.
+    """
+    from tabpwa.pwa_gen_support import check_backend_support
+    kc = Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config
+    with pytest.raises(ValueError, match="pwa_gen numerator not supported"):
+        check_backend_support(kc, "CUDABackendV4PWA")
+
+
+def test_guard_accepts_default_basis_pwa_gen():
     """N ≡ 1 + default basis is the plain pwa config — no error (and no GPU
     kernel is built when the guard passes: only the guard is exercised)."""
     from tabpwa.pwa_gen_support import check_backend_support
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
-    check_backend_support(kc, "cuda_v4_pwa")          # must not raise
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
+    check_backend_support(kc, "CUDABackendV4PWA")     # must not raise
 
 
-def test_cpu_backends_agree():
+def test_pwa_gen_backends_agree():
+    """``numpy_pwa_gen`` and ``cpu_pwa_gen`` are the same model, two engines."""
     out = {}
-    for be in ("numpy_pwa", "cpu_pwa_s0c", "cpu_pwa_gen", "cpu_v5_pwa"):
+    for be in ("numpy_pwa_gen", "cpu_pwa_gen", "cpu_v4_pwa"):
         f = _loaded(CFG_KM, be, n_phsp=200, n_data=120)
         x = f.initial_values(seed=3)
         out[be] = (f.get_nll(x)[0], f.get_nll(x)[1])
-    ref_nll, ref_g = out["numpy_pwa"]
+    ref_nll, ref_g = out["numpy_pwa_gen"]
     for be, (nll, g) in out.items():
         assert abs(nll - ref_nll) / abs(ref_nll) < 1e-12, be
         assert np.max(np.abs(g - ref_g)) < 1e-10 * max(1.0, np.max(np.abs(ref_g))), be
@@ -376,17 +412,21 @@ def test_mixed_kmatrix2_and_plain_resonance(backend):
     assert np.max(np.abs(P - P_dir) / P_dir) < 1e-10
 
 
-def test_mixed_plain_resonance_is_bit_identical():
+def test_mixed_plain_resonance_reproduces_the_m0_g0_path():
     """The plain resonance alone reproduces the non-generic (``m0``/``g0``)
-    path bit for bit.
+    path to fp64 round-off.
 
     ``chi``: the generic path tabulates ``−i·γ`` on the *same* gamma grid the
     plain path interpolates, so switching the k-matrix partner on must not
-    change the BW wave at all.
+    change the BW wave at all.  The two routes are separate engines
+    (``numpy_pwa_gen``'s ``Σ coeff·F`` vs ``numpy_pwa``'s
+    ``m0² − m² − i·m0·Σ g0·γ``), so the agreement is algebraic — same terms,
+    different summation order — and lands at the last bit, not literally
+    bit-identical.
     """
     from tabpwa.numpy_pwa import NumpyPWA
 
-    f = _loaded(_mixed_cfg(), "numpy_pwa", n_phsp=200, n_data=120)
+    f = _loaded(_mixed_cfg(), "numpy_pwa_gen", n_phsp=200, n_data=120)
     x = f.initial_values(seed=1)
     params, resolved = f.build_params(x)
     offsets = {nm: (off, mult) for nm, off, mult in _chain_offsets(f)}
@@ -403,25 +443,27 @@ def test_mixed_plain_resonance_is_bit_identical():
     Qm, _gm, Pm = k_mix.compute(params, k_mix.load_data(f._data_np), norm=None)
 
     # the same config/recoil without the k-matrix resonance: the non-generic
-    # plain path (m0/g0, no den_row)
+    # plain path (m0/g0, no den_row) — a plain ``pwa`` model, whose reference
+    # kernel is ``numpy_pwa``
     d0 = _mixed_cfg()
     d0["particle"]["pipi"] = ["bw"]
+    d0["amp_model"] = "pwa"
     f0 = Fitter(d0, backend="numpy_pwa")
-    assert not f0.model._pg_generic
+    assert "den_row" not in f0.kernel_config
     k0 = NumpyPWA(f0.kernel_config)
     p0 = {"ck": np.array([ck[bw_off]]),
           "m0": np.array([resolved["bw_mass"]]),
           "g0": np.array([resolved["bw_width"]])}
     Q0, _g0, P0 = k0.compute(p0, k0.load_data(f._data_np), norm=None)
 
-    assert np.array_equal(Pm, P0)
+    assert np.allclose(Pm, P0, rtol=1e-14, atol=0)
     assert Qm == pytest.approx(Q0, rel=1e-14)
 
 
 # ── B2: two distinct kmatrix2 resonances (slot-map indexing) ─────────
 
 def test_two_kmatrix2_resonances_match_cpu_and_direct():
-    """Two distinct k-matrices: ``numpy_pwa`` / ``cpu_pwa_s0c`` / the
+    """Two distinct k-matrices: ``numpy_pwa_gen`` / ``cpu_pwa_gen`` / the
     particle models' own ``Σ g_j G_j`` agree.
 
     With one unique BW the raw ``den_row`` encoding happens to equal the
@@ -432,8 +474,8 @@ def test_two_kmatrix2_resonances_match_cpu_and_direct():
     from tabpwa.pwa_gen_support import build_den_slots
 
     d = _two_km_cfg()
-    fn = _loaded(d, "numpy_pwa", n_phsp=200, n_data=120)
-    fc = _loaded(d, "cpu_pwa_s0c", n_phsp=200, n_data=120)
+    fn = _loaded(d, "numpy_pwa_gen", n_phsp=200, n_data=120)
+    fc = _loaded(d, "cpu_pwa_gen", n_phsp=200, n_data=120)
     kc = fn.kernel_config
     assert kc["den_row"].shape == (2, 5)
 
@@ -467,7 +509,7 @@ def test_cp_blocks_build_and_equal_the_block_free_nll():
     block is a pure second copy.  With the partner's ``ck`` switched off
     the block config is exactly the block-free config.
     """
-    from tabpwa.numpy_pwa import NumpyPWA
+    from tabpwa.numpy_pwa_gen import NumpyPWAGen
 
     d0 = _cfg(CFG_KM)
     d0["particle"]["jpsi"]["spins"] = [0]
@@ -475,8 +517,8 @@ def test_cp_blocks_build_and_equal_the_block_free_nll():
     dcp["particle"]["jpsi"]["spins"] = [0]
     dcp["data"]["cp_particles"] = [["pip", "pim"]]
 
-    f0 = _loaded(d0, "numpy_pwa", n_phsp=200, n_data=120)
-    fc = _loaded(dcp, "numpy_pwa", n_phsp=200, n_data=120)
+    f0 = _loaded(d0, "numpy_pwa_gen", n_phsp=200, n_data=120)
+    fc = _loaded(dcp, "numpy_pwa_gen", n_phsp=200, n_data=120)
     assert int(fc.kernel_config["n_blocks"]) == 2
     assert int(f0.kernel_config.get("n_blocks", 1)) == 1
 
@@ -496,9 +538,8 @@ def test_cp_blocks_build_and_equal_the_block_free_nll():
     k_cp = fc.backend.kernel
     Qc, _gc, Pc = k_cp.compute(params, k_cp.load_data(fc._data_np), norm=None)
 
-    p0 = {"ck": params["ck"][:nb], "coeff": params["coeff"][:nb],
-          "m0": params["m0"], "g0": params["g0"]}
-    k0 = NumpyPWA(f0.kernel_config)
+    p0 = {"ck": params["ck"][:nb], "coeff": params["coeff"][:nb]}
+    k0 = NumpyPWAGen(f0.kernel_config)
     Q0, _g0, P0 = k0.compute(p0, k0.load_data(fc._data_np), norm=None)
     assert Qc == pytest.approx(Q0, rel=1e-12)
     assert np.allclose(Pc, P0, rtol=1e-12, atol=0)
@@ -516,7 +557,7 @@ def test_generic_drops_mass_width_not_consumed_by_the_kernel():
     """
     from tabpwa.param_constraint import complex_tail
 
-    f = Fitter(CFG_KM, backend="numpy_pwa")
+    f = Fitter(CFG_KM, backend="cpu_pwa_gen")
     names = f.free_param_names()
     assert "k2_mass" not in names
     assert "k2_width" not in names
@@ -539,17 +580,54 @@ def test_generic_drops_mass_width_not_consumed_by_the_kernel():
     assert params["m0"].size == 0 and params["g0"].size == 0
 
 
-# ── M4: numpy must refuse a generic config without ``coeff`` ─────────
+# ── M4: the NumPy reference refuses a generic config without ``coeff`` ─
 
-def test_numpy_generic_requires_coeff():
-    from tabpwa.numpy_pwa import NumpyPWA
+def test_numpy_pwa_gen_requires_coeff():
+    from tabpwa.numpy_pwa_gen import NumpyPWAGen
 
-    kc = Fitter(CFG_KM, backend="numpy_pwa").kernel_config
-    kern = NumpyPWA(kc)
+    kc = Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config
+    kern = NumpyPWAGen(kc)
     data = _synth(kc, 10, 1)
-    params = {"ck": np.ones(kern.n_wave_base, dtype=complex),
-              "m0": np.zeros(1), "g0": np.zeros(1)}
-    with pytest.raises(ValueError, match="requires params\\['coeff'\\]"):
+    params = {"ck": np.ones(kern.n_wave_base, dtype=complex)}
+    with pytest.raises(ValueError, match="needs params\\['coeff'\\]"):
+        kern.compute(params, kern.load_data(data), norm=None)
+
+
+def test_numpy_pwa_gen_default_basis_is_the_m0_g0_path():
+    """A config without ``den_row`` keeps the plain ``m0``/``g0`` propagator,
+    so the reference covers every ``pwa_gen`` config — and it agrees with
+    ``numpy_pwa`` (the plain-``pwa`` kernel) on the same numbers."""
+    from tabpwa.numpy_pwa import NumpyPWA
+    from tabpwa.numpy_pwa_gen import NumpyPWAGen
+
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
+    assert "den_row" not in kc
+    gen = NumpyPWAGen(kc)
+    ref = NumpyPWA(kc)
+    data = _synth(kc, 10, 1)
+    params = {"ck": np.array([0.4 + 0.3j]),
+              "m0": np.array([0.77]), "g0": np.array([0.15])}
+    Qg, gg, Pg = gen.compute(params, gen.load_data(data), norm=None)
+    Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=None)
+    assert np.allclose(Pg, Pr, rtol=0, atol=1e-14)
+    assert Qg == pytest.approx(Qr, rel=1e-14)
+    for key in ("ck", "m0", "g0"):
+        assert np.allclose(gg[key], gr[key], rtol=1e-12, atol=1e-14), key
+
+
+def test_numpy_pwa_gen_rejects_coeff_on_the_plain_path():
+    """The two propagators are not interchangeable at the parameter level:
+    handing basis weights to an ``m0``/``g0`` config must raise, not be
+    silently ignored."""
+    from tabpwa.numpy_pwa_gen import NumpyPWAGen
+
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
+    kern = NumpyPWAGen(kc)
+    data = _synth(kc, 10, 1)
+    params = {"ck": np.array([0.4 + 0.3j]),
+              "m0": np.array([0.77]), "g0": np.array([0.15]),
+              "coeff": np.zeros((1, 5))}
+    with pytest.raises(ValueError, match="plain m0/g0 propagator"):
         kern.compute(params, kern.load_data(data), norm=None)
 
 
@@ -573,7 +651,7 @@ def test_zero_kind_is_a_negative_sentinel():
 # ── minor: one gamma-grid accessor ───────────────────────────────────
 
 def test_gamma_grid_accessor_is_shared():
-    f = Fitter(CFG_KM, backend="numpy_pwa")
+    f = Fitter(CFG_KM, backend="cpu_pwa_gen")
     grid, g_min, g_delta = f.model.gamma_grid()
     _table, t_min, t_delta = f.model.build_gamma_table()
     assert g_min == t_min

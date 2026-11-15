@@ -8,8 +8,12 @@ layout as ``cpu_pwa_s0c`` (direct pole parameters ``s0 = m0²`` /
 multi-resonance chains are built exactly like the CUDA sibling.
 
 Thin alias: it constructs the ``cpu_v5_pwa`` kernel at
-``resolution_size=1``, whose branch for that size IS the v4 per-event NLL
-bit for bit (one C kernel / one shared library behind both names).
+``resolution_size=1`` by default, whose branch for that size IS the v4
+per-event NLL bit for bit (one C kernel / one shared library behind both
+names).  ``resolution_size`` is exposed as the same kwarg the kernel takes,
+so the *grouped* objective of this model is available here too (the
+grouped-vs-per-event comparison in the ``cuda_v5_pwa_gen_*`` fixtures needs
+a pwa_gen reference at the same group size).
 """
 from .core import ComputeBackend, register_backend
 
@@ -26,11 +30,12 @@ class CPUPWAGenBackend(ComputeBackend):
     ``n_res > 1`` it is the CPU sibling of ``cuda_v4_pwa``.
     """
 
-    def __init__(self, kernel_config, batch_size=50000):
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
         self.kernel = None   # free/__del__ must be safe if the build fails
+        self._resolution_size = int(resolution_size)
         from tabpwa.cpu._pwa_v5 import CPUKernelPWAV5 as K
         self.kernel = K(kernel_config, batch_size=batch_size,
-                        resolution_size=1)
+                        resolution_size=self._resolution_size)
 
     def load_data(self, data_np):
         return self.kernel.load_data(data_np)

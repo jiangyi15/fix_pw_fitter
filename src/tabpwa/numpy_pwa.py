@@ -46,11 +46,8 @@ class NumpyPWA:
 
     def __init__(self, config, cp_block=False):
         from tabpwa.numpy_kernel import NumpyKernel
-        from tabpwa.pwa_gen_support import has_numerator, has_generic_den
         self.config = config
         self.cp_block = bool(cp_block)
-        self._n_on = has_numerator(config)
-        self._den_generic = has_generic_den(config)
         self.n_wave = config["matrix_angle"].shape[1]
         self.n_proj_base = int(config.get("n_proj", 1) or 1)
         self.n_proj = self.n_proj_base * (2 if self.cp_block else 1)
@@ -94,40 +91,15 @@ class NumpyPWA:
         ne = mass.shape[0]
 
         # ── forward amplitude chain (identical to the original kernel) ────
-        if self._den_generic and "coeff" not in params:
-            raise ValueError(
-                "numpy_pwa: generic denominator (den_row) requires "
-                "params['coeff'] — the m0/g0 path does not implement an "
-                "explicit coefficient basis")
-        use_coeff = self._den_generic
-        kc = self.config
-        if use_coeff:
-            coeff = np.asarray(params["coeff"], dtype=float)
-            enc_bw = np.asarray(kc["den_row"])
-            bow = np.asarray(k.bw_order).reshape(-1)
-            uniq_bw, first = np.unique(bow, return_index=True)
-            coeff_bw = np.zeros((len(k.mass_index), enc_bw.shape[1]))
-            coeff_bw[uniq_bw] = coeff[first]
-            from tabpwa.pwa_gen_support import (
-                build_den_slots, fill_den_F, den_domain, den_domain_grad)
-            kinds, d_rows, d_cols, slot_flat, _nu = build_den_slots(
-                enc_bw, np.asarray(k.mass_index))
-            # ``F`` is indexed by unique-slot id, not by the raw den_row
-            # encoding — pass the reshaped slot map to the domain calls.
-            slots = slot_flat.reshape(enc_bw.shape)
-            F_r, F_i = fill_den_F(kc, k, mass, kinds, d_rows, d_cols)
-            F = F_r + 1j * F_i
-            bw_dom = den_domain(mass, coeff_bw, slots, F)
-        else:
-            g0_all = np.take(g0, k.g0_index)
-            g0_m = np.take(mass, k.g0_mass_index, axis=-1)
-            g_interp = k.interp_catmull_rom(
-                k.gamma_table, k.g0_index, g0_m, k.gamma_min, k.gamma_delta)
-            g_bw = (g0_all * g_interp) @ k.matrix_gamma
+        g0_all = np.take(g0, k.g0_index)
+        g0_m = np.take(mass, k.g0_mass_index, axis=-1)
+        g_interp = k.interp_catmull_rom(
+            k.gamma_table, k.g0_index, g0_m, k.gamma_min, k.gamma_delta)
+        g_bw = (g0_all * g_interp) @ k.matrix_gamma
 
-            m0_all = np.take(m0, k.m0_index)
-            m0_m = np.take(mass, k.mass_index, axis=-1)
-            bw_dom = m0_all ** 2 - m0_m ** 2 - 1j * m0_all * g_bw
+        m0_all = np.take(m0, k.m0_index)
+        m0_m = np.take(mass, k.mass_index, axis=-1)
+        bw_dom = m0_all ** 2 - m0_m ** 2 - 1j * m0_all * g_bw
         bw_dom_all = np.take(bw_dom, k.bw_order, axis=-1)
         bw_dom_r = bw_dom_all.reshape(ne, n_wave, k.n_res)
         bw_p = np.prod(bw_dom_r, axis=-1)
@@ -143,11 +115,7 @@ class NumpyPWA:
         fa = ka @ k.matrix_angle
 
         one_over_bw = 1.0 / bw_p
-        if self._n_on:
-            from tabpwa.pwa_gen_support import numerator_product
-            common = one_over_bw * (fa * fl_p * numerator_product(kc, k, mass))
-        else:
-            common = one_over_bw * (fa * fl_p)           # (ne, n_wave) p-major
+        common = one_over_bw * (fa * fl_p)               # (ne, n_wave) p-major
 
         cm = common.reshape(ne, P, N)
         # A_p = Σ_k ck_k·cm[e,p,k]: stacked BLAS gemv over (ne·P, N) rows is
@@ -184,28 +152,14 @@ class NumpyPWA:
                       .reshape(ne, N * k.n_res)
                       @ k._bw_scatter[:N * k.n_res])     # (ne, n_unique_bw)
 
-        if use_coeff:
-            # ``coeff`` is stored per (wave, factor) but the BW denominator is
-            # evaluated once per unique BW (the copies are identical by
-            # construction), so ``dQ_dbw_dom`` is the total derivative of the
-            # SHARED coefficient: attribute it to the representative copy and
-            # leave the duplicates at zero.  The model's basis transform sums
-            # over the copies, which then recovers the total dQ/dweight (the
-            # per-factor CPU kernels distribute it instead).
-            gc = den_domain_grad(dQ_dbw_dom, slots, F)
-            grad_coeff = np.zeros_like(coeff)
-            grad_coeff[first] = gc[uniq_bw]
-            grad_m0 = np.zeros(len(m0))
-            grad_g0 = np.zeros(len(g0))
-        else:
-            dbw_dom_dm0 = 2 * m0_all - 1j * g_bw
-            grad_m0 = np.sum(2 * np.real(dQ_dbw_dom * dbw_dom_dm0),
-                             axis=0) @ k._m0_scatter
+        dbw_dom_dm0 = 2 * m0_all - 1j * g_bw
+        grad_m0 = np.sum(2 * np.real(dQ_dbw_dom * dbw_dom_dm0),
+                         axis=0) @ k._m0_scatter
 
-            dQ_dg_bw = dQ_dbw_dom * (-1j * m0_all)
-            dQ_dg = dQ_dg_bw @ k.matrix_gamma.T
-            grad_g0 = np.sum(2 * np.real(dQ_dg * g_interp),
-                             axis=0) @ k._g0_scatter
+        dQ_dg_bw = dQ_dbw_dom * (-1j * m0_all)
+        dQ_dg = dQ_dg_bw @ k.matrix_gamma.T
+        grad_g0 = np.sum(2 * np.real(dQ_dg * g_interp),
+                         axis=0) @ k._g0_scatter
 
         if norm is not None:
             b = bkg if not np.isscalar(bkg) else np.full(ne, float(bkg))
@@ -215,8 +169,6 @@ class NumpyPWA:
             self._last_dnorm = None
 
         grads = {"ck": grad_ck, "m0": grad_m0, "g0": grad_g0}
-        if use_coeff:
-            grads["coeff"] = grad_coeff
         return Q, grads, (P_e if return_p else None)
 
 

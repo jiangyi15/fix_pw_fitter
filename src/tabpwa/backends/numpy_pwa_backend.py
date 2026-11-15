@@ -4,7 +4,6 @@ from tabpwa.numpy_pwa import NumpyPWA
 
 
 @register_backend("numpy_pwa", model="pwa")
-@register_backend("numpy_pwa", model="pwa_gen")
 class NumpyPWABackend(ComputeBackend):
     """CPU backend wrapping the ``NumpyPWA`` kernel (params: ck/m0/g0)."""
 

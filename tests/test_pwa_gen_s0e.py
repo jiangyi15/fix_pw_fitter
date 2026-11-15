@@ -96,9 +96,9 @@ def _host_Q(P, weight, bkg, norm, rs):
 def test_registration():
     assert "cuda_v5_pwa_gen_s0e" in backends_for_model("pwa_gen")
     assert "cuda_v5_pwa_gen_s0e" not in backends_for_model("pwa")
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     # the kernel-scope guard accepts this backend (and only this one)
-    check_backend_support(Fitter(CFG_KM, backend="numpy_pwa").kernel_config,
+    check_backend_support(Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config,
                           "CUDABackendV5PWAGenS0E")
     check_backend_support(kc, "CUDABackendV5PWAGenS0E")
     # exactly one pwa_gen GPU log-sum kernel: no sibling / alias remains
@@ -116,7 +116,7 @@ def test_rejects_multi_bw_chains():
 # ── gate 1: unit weights at rsize=1 is cuda_v5_pwa_s0e, bit for bit ──
 
 def test_gate_a_default_basis_unit_weights_is_s0e_bitwise():
-    f = Fitter(CFG_BASIS, backend="numpy_pwa")
+    f = Fitter(CFG_BASIS, backend="cpu_pwa_gen")
     kc = f.kernel_config
     assert "n_table" not in kc and "den_row" not in kc
     data = _synth(kc, NEV, 5)
@@ -145,7 +145,7 @@ def test_gate_a_default_basis_unit_weights_is_s0e_bitwise():
 
 def test_gate_a_norm_none_path_is_unchanged():
     """The ``use_norm == 0`` path is per-event linear — any weights."""
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     data = _synth(kc, NEV, 9)          # non-unit weights on purpose
     ref = CUDAKernelV5PWAS0E(kc, resolution_size=8)
     gen = CUDAKernelV5PWAGenS0E(kc, resolution_size=8)
@@ -169,7 +169,7 @@ def test_gate_b_rsize1_non_unit_weights_matches_per_event_cpu():
     ``-Σ log(w·pdf)`` and is off by ``Σ log w`` — reported below so the
     discrimination is visible.
     """
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     data = _synth(kc, NEV, 5)
     w = np.asarray(data["weight"])
     assert not np.allclose(w, 1.0)                    # non-unit on purpose
@@ -230,7 +230,7 @@ def test_gate_c_host_w_formula(rs):
     1e-9 relative is the fp64 atomic accumulation order across blocks (the
     host sums sequentially, the kernel atomically) — the math is identical.
     """
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     data = _synth(kc, NEV, 3)
     assert not np.allclose(data["weight"], 1.0)
     norm = 0.87
@@ -254,7 +254,7 @@ def test_gate_c_host_w_formula(rs):
 
 @pytest.mark.parametrize("rs", [1, 8])
 def test_gate_d_zero_weight_group(rs):
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     data = _synth(kc, NEV, 3)
     w = np.array(data["weight"])
     w[:rs] = 0.0                       # one COMPLETE group with W_g == 0
@@ -285,7 +285,7 @@ def test_gate_e_kmatrix2_direct_vs_cpu():
 
     p = fg.build_params(x)[0]
     Qn, gn, Pn = fg.backend.compute(p, fg._data_holder, norm=None)
-    ref = create_backend("cpu_pwa_s0c", kc, model="pwa_gen")
+    ref = create_backend("cpu_pwa_gen", kc, model="pwa_gen")
     hr = ref.load_data(fg._data_np)
     Qr, gr, Pr = ref.compute(p, hr, norm=None)
     assert _rel(Pn, Pr) < 1e-6
@@ -408,7 +408,7 @@ def test_gate_g_loads_next_to_s0e():
 # ── grouped log-sum bookkeeping carried over from s0e ───────────────
 
 def test_partial_last_group_warns():
-    kc = Fitter(CFG_BASIS, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_BASIS, backend="cpu_pwa_gen").kernel_config
     k = CUDAKernelV5PWAGenS0E(kc, resolution_size=8)
     data = _synth(kc, 5, 3)          # 5 not a multiple of 8
     with pytest.warns(RuntimeWarning):
@@ -423,7 +423,7 @@ def test_generic_does_not_upload_bogus_gamma_columns():
     explicit; uploading ``argmax(matrix_gamma, axis=1)`` (and the unused
     g0 arrays) is both meaningless and misleading.
     """
-    kc = Fitter(CFG_KM, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config
     k = CUDAKernelV5PWAGenS0E(kc, resolution_size=1)
     try:
         assert k._generic

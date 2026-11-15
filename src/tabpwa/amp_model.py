@@ -602,12 +602,12 @@ class PWAGen(PWA):
             kc["wave_names"] = names
 
         # ── numerator table / per-factor index ──────────────────────
-        # ``n_index[f]`` / ``n_mass_index[f]`` with ``f = w·n_res + r``,
-        # exactly like ``bw_order``: factor ``r`` reads the mass column of
-        # its OWN BW, so ``N_R1(m_R1) · N_R2(m_R2)`` is expressible.
-        # ``n_index`` only: the mass column of a factor is already
-        # ``mass_index[bw_order[f]]`` — the kernel derives it exactly as it
-        # does for the denominator, so no second column array is needed.
+        # ``n_index[f]`` with ``f = w·n_res + r``, exactly like ``bw_order``:
+        # factor ``r`` reads the mass column of its OWN BW, so
+        # ``N_R1(m_R1) · N_R2(m_R2)`` is expressible.  ``n_index`` only: the
+        # mass column of a factor is already ``mass_index[bw_order[f]]`` —
+        # the kernel derives it exactly as it does for the denominator, so no
+        # second column array is needed (and none can fall out of sync).
         n_wave_e = n_exp
         n_idx = np.zeros((n_wave_e, n_res), dtype=np.int32)
         for i, (k, combo) in enumerate(exp):

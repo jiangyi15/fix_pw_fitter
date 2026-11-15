@@ -30,7 +30,7 @@ Gates:
    (ratios reported for all three fixtures);
 4. ragged + multi-BW correctness — ``n_res == 2`` against ``cpu_pwa_gen``
    (the reference any-``n_res`` implementation) and the ``rs = 8`` grouped
-   log-sum against ``cpu_v5_pwa`` + an independent numpy group sum;
+   log-sum against ``cpu_pwa_gen`` + an independent numpy group sum;
 5. finite differences of ``dcoeff`` at ``n_res == 2`` (central, h=1e-6,
    rtol 1e-4), through the padded params contract;
 6. factor independence — reciprocal rescaling of a wave's two factors leaves
@@ -85,7 +85,7 @@ def _rand_params(k):
 def _params_and_data(cfg, n=NEV, seed=5):
     """``(kc, params, data)``: random m0/g0 params for the default basis, the
     fitter's own basis weights for a generic (``den_row``) config."""
-    f = Fitter(cfg, backend="numpy_pwa")
+    f = Fitter(cfg, backend="cpu_pwa_gen")
     kc = f.kernel_config
     k0 = CUDAKernelV5PWAGenBW(kc, resolution_size=1)
     try:
@@ -110,7 +110,7 @@ def _copy_totals(g, n_fact, n_bw, bw_of_factor):
 def test_registration():
     assert "cuda_v5_pwa_gen_bw" in backends_for_model("pwa_gen")
     assert "cuda_v5_pwa_gen_bw" not in backends_for_model("pwa")
-    kc = Fitter(CFG_KM, backend="numpy_pwa").kernel_config
+    kc = Fitter(CFG_KM, backend="cpu_pwa_gen").kernel_config
     check_backend_support(kc, "CUDABackendV5PWAGenBW")
     check_backend_support(kc, "cuda_v5_pwa_gen_bw")
 
@@ -166,7 +166,7 @@ def test_block_size():
     ratios = {}
     for cfg, equal_width in ((CFG_BASIS, True), (CFG_KM, True),
                              (CFG_MB, False)):
-        kc = Fitter(cfg, backend="numpy_pwa").kernel_config
+        kc = Fitter(cfg, backend="cpu_pwa_gen").kernel_config
         kb = CUDAKernelV5PWAGenBW(kc, resolution_size=1)
         kf = CUDAKernelV5PWAGenFlat(kc, resolution_size=1)
 
@@ -247,7 +247,7 @@ def test_multi_bw_matches_cpu_pwa_gen():
 
 
 def test_multi_bw_grouped_nll_at_rsize_8():
-    """``rs = 8``: the grouped log-sum vs ``cpu_v5_pwa`` and a numpy sum."""
+    """``rs = 8``: the grouped log-sum vs ``cpu_pwa_gen`` and a numpy sum."""
     kc, params, _d = _mb()
     rs = 8
     data = _grouped(_synth(kc, 256, 5), rs)
@@ -259,7 +259,7 @@ def test_multi_bw_grouped_nll_at_rsize_8():
     Qn = _numpy_group_nll(P, w, np.asarray(data["bkg"]), 1.3, rs)
     assert abs(Q - Qn) <= 1e-10 * abs(Qn)
 
-    ref = create_backend("cpu_v5_pwa", kc, model="pwa_gen", resolution_size=rs)
+    ref = create_backend("cpu_pwa_gen", kc, model="pwa_gen", resolution_size=rs)
     Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
     assert abs(Q - Qr) <= 1e-6 * abs(Qr)
     assert _rel(P, Pr) < 1e-6
