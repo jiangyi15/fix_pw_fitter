@@ -12,6 +12,11 @@ Each entry reports the B0 (g_ls) and B0bar (g_lsbar) fraction side by side.
 Usage:
     python scripts/calc_fractions.py fit_results.json -o fractions.csv
     python scripts/calc_fractions.py fit_results.json --max-events 5000
+    python scripts/calc_fractions.py fit_results.json --batch 50000
+
+``--batch N`` streams the phase space through ``Fitter.sum_stream`` (one
+``load_data`` per chunk) instead of loading it whole, so peak memory is one
+chunk of ``N`` events; the values and errors are identical.
 """
 
 import sys, os, argparse, csv
@@ -26,6 +31,11 @@ def discover_groups(config):
     """Return list of ``(label, ls_mask, lsbar_mask)`` for each category.
 
     Two lists returned: ``groups_3pi`` and ``groups_B_R1R2``.
+
+    This is the **B → 4π channel script's** grouping (four pion finals, two
+    identical pairs, CP blocks): it assumes a three-level tree
+    (``B → R1 R2``, each ``R → ππ``) and the 8-block (4 ls + 4 lsbar) ck
+    layout.  A config with a different topology is not this script's case.
     """
     idx = 0
     chain_ranges = []
@@ -80,7 +90,7 @@ def discover_groups(config):
     return groups_3pi, groups_B
 
 
-def compute_section(af, groups, title):
+def compute_section(af, groups, title, batch=None):
     """Compute fractions for a list of (label, ls_mask, lsbar_mask) tuples.
 
     Returns list of ``(label, v_ls, e_ls, v_lsbar, e_lsbar)``.
@@ -93,7 +103,7 @@ def compute_section(af, groups, title):
     for _, ls, lsbar in groups:
         all_masks.append(ls)
         all_masks.append(lsbar)
-    vals, errs = af.fractions(all_masks)
+    vals, errs = af.fractions(all_masks, batch=batch)
 
     rows = []
     for i, (label, _, _) in enumerate(groups):
@@ -116,9 +126,16 @@ def main():
     ap = argparse.ArgumentParser(description="Amplitude fractions from fit result")
     ap.add_argument("fit_json", help="JSON from Fitter.save_params()")
     ap.add_argument("--config", default="config_amp.yml", help="Config YAML")
-    ap.add_argument("--phsp", default="data/phsp_arrays.npz", help="Phase-space NPZ")
+    ap.add_argument("--phsp", default=None,
+                    help="Phase-space file (.npz kernel arrays or momentum "
+                         ".npy); default: the config's data.phsp_noeff "
+                         "(efficiency-free), falling back to data.phsp")
     ap.add_argument("--max-events", type=int, default=None,
                     help="Limit phsp events (faster testing)")
+    ap.add_argument("--batch", type=int, default=None,
+                    help="Events per chunk: stream the phase space through "
+                         "sum_stream instead of loading it whole (peak memory "
+                         "is one chunk; slower because each chunk is loaded)")
     ap.add_argument("--backend", default=None,
                     help="Compute backend (default: config's config.backend)")
     ap.add_argument("-o", "--output", default=None,
@@ -134,7 +151,18 @@ def main():
         f.load_constraints(constraints_path)
         print(f"  Loaded constraints from {constraints_path}")
 
-    phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
+    # Fractions are ratios of Σw|A|² integrals, so the phase space must not be
+    # weighted by detector efficiency: configs carry that sample as
+    # ``phsp_noeff`` (``phsp`` is the efficiency-corrected one, which would
+    # bias the ratio).  ``--phsp`` overrides both; the config's angle layout,
+    # path map and sidecars apply either way.
+    phsp = (f.load_dataset("phsp_noeff", path=args.phsp,
+                           max_events=args.max_events)
+            or f.load_dataset("phsp", path=args.phsp,
+                              max_events=args.max_events))
+    if phsp is None:
+        raise SystemExit("no phase space: neither data.phsp_noeff nor "
+                         "data.phsp is configured, and --phsp was not given")
     f.set_phsp(phsp)
 
     # ── Load fit result (auto-detects _error_matrix.npy) ──────────
@@ -153,11 +181,12 @@ def main():
 
     # ── Compute (terminal output) ─────────────────────────────────
     rows_3pi = compute_section(af, groups_3pi,
-                               "Resonance → 3π  (Rx → Ry+π, Ry → ππ)")
+                               "Resonance → 3π  (Rx → Ry+π, Ry → ππ)",
+                               batch=args.batch)
     if groups_B:
         print()
     rows_B = compute_section(af, groups_B,
-                             "B → R1 R2  (R1, R2 → ππ)")
+                             "B → R1 R2  (R1, R2 → ππ)", batch=args.batch)
 
     # ── CSV output ────────────────────────────────────────────────
     if args.output:

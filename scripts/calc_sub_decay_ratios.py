@@ -111,7 +111,17 @@ def _setup(args):
         f.load_constraints(cp)
     else:
         print(f"WARNING: no constraints file at {cp}")
-    phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
+    # the sample comes from the fitter's generic loader (config angle layout
+    # and path map), with the explicit file overriding data.phsp
+    # a fraction is a ratio of integrals, so the unweighted (efficiency-free)
+    # phase space is the right measure; ``phsp`` is the fallback
+    phsp = (f.load_dataset("phsp_noeff", path=args.phsp,
+                           max_events=args.max_events)
+            or f.load_dataset("phsp", path=args.phsp,
+                              max_events=args.max_events))
+    if phsp is None:
+        raise SystemExit("no phase space: --phsp was not given and neither "
+                         "data.phsp_noeff nor data.phsp is configured")
     f.set_phsp(phsp)
     return f
 
@@ -284,7 +294,10 @@ def main():
         description="Sub-decay branching ratios for 3π resonances")
     ap.add_argument("fit_json")
     ap.add_argument("--config", default=_default_path("config_angle.yml"))
-    ap.add_argument("--phsp", default=_default_path("data/phsp_noeff_sym_arrays.npz"))
+    ap.add_argument("--phsp", default=None,
+                    help="Phase-space file (.npz kernel arrays or momentum "
+                         ".npy); default: the config's data.phsp_noeff "
+                         "(efficiency-free), falling back to data.phsp")
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default=None,
                     help="Compute backend (use an f64 backend — f32 "

@@ -211,7 +211,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("fit_json")
     ap.add_argument("--config", default=_SCRIPT_DIR + "/config_amp.yml")
-    ap.add_argument("--phsp", default=_SCRIPT_DIR + "/data/phsp_noeff_sym_arrays.npz")
+    ap.add_argument("--phsp", default=None,
+                    help="Phase-space file (.npz kernel arrays or momentum "
+                         ".npy); default: the config's data.phsp_noeff "
+                         "(efficiency-free), falling back to data.phsp")
     ap.add_argument("--max-events", type=int, default=None)
     ap.add_argument("--backend", default=None,
                     help="Backend for fraction/error computation.  Use an "
@@ -234,7 +237,17 @@ def main():
         with open(args.fit_json) as _fh:
             f.load_fixed_from_dict(_json.load(_fh))
 
-    phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
+    # the sample comes from the fitter's generic loader (config angle layout
+    # and path map), with the explicit file overriding data.phsp
+    # unweighted phase space (a fraction is a ratio of integrals): prefer the
+    # efficiency-free sample, fall back to the corrected one
+    phsp = (f.load_dataset("phsp_noeff", path=args.phsp,
+                           max_events=args.max_events)
+            or f.load_dataset("phsp", path=args.phsp,
+                              max_events=args.max_events))
+    if phsp is None:
+        raise SystemExit("no phase space: --phsp was not given and neither "
+                         "data.phsp_noeff nor data.phsp is configured")
     phsp['time'] = np.zeros(phsp['mass'].shape[0])
     f.set_phsp(phsp)
 

@@ -1342,12 +1342,19 @@ class ConstraintManager:
 
             offset = U(-1, 1) * scale
 
-        The fit model runs on the unblinded (physical) values (and
-        compensates — the fitted model is correct), while the after-
-        bounds values that are printed and saved are the **blinded
-        report frame**.  The offset is deterministic from ``seed`` (+
-        the name) but opaque: seeing the seed only tells you a shift was
-        applied, not its size.  Unblind reported values with
+        The program itself always uses the **real physics**: the fit, the
+        kernel, the likelihood and every observable read the full resolve
+        (the *model* frame).  The shift exists only so that
+        :meth:`blind_result` can subtract it — the value handed to the
+        analyst is:
+
+            report = real physics - offset   (i.e. the real value hidden
+                                              behind an unknown bias)
+
+        The offset is deterministic from ``seed`` (+ the name) but opaque:
+        seeing the seed only tells you a shift was applied, not its size.
+        Nothing inside the program consumes the report frame — it is display
+        and save only.  Unblind whatever you are shown with
         :meth:`unblind_result`.
 
         Args:
@@ -1498,11 +1505,11 @@ class ConstraintManager:
     def flat_resolve(self, x, stop_after=None):
         """Flat array → resolved dict, with defaults for completeness.
 
-        The blind shift is always applied between bounds and fixed, so
-        the full resolve is the *model* frame (the fit sees shifted
-        values and compensates).  ``stop_after='bounds'`` returns the
-        *report* frame — the after-bounds (blinded) values that are
-        printed and saved.
+        The blind shift is applied between bounds and fixed, so the full
+        resolve is the *model* frame — the real physics, and the point the
+        fit and the kernel work at.  ``stop_after='bounds'`` returns the
+        *report* frame (the real values minus the blind offset), which
+        exists only for display and for saving.
 
         Args:
             stop_after: ``'bounds'``, ``'blind'``, ``'fixed'``, ``'same'``,
@@ -1519,15 +1526,15 @@ class ConstraintManager:
         complete dict with defaults for any parameters not produced by
         the pipeline.
 
-        The blind transform sits **between the range and fixed**: the
-        value after the bounds stage is shifted by the seed-derived
-        offset, and the fit model is evaluated on those shifted values
-        — the optimisation compensates the constant offset, so the
-        fitted model stays correct.  The values *before* the shift
-        (``stop_after='bounds'``, or :meth:`blind_result` of the full
-        resolve) are the **blinded report frame**: they differ from the
-        true values by the unknown offset and are what gets printed and
-        saved.
+        The blind transform sits **between the range and fixed**: the value
+        after the bounds stage carries the seed-derived offset, purely so
+        that :meth:`blind_result` can remove it again.  The full resolve is
+        therefore the *model* frame — the real physics, which is what the fit
+        and the kernel use; the program never consumes the blinded numbers
+        internally.  The values *before* the shift
+        (``stop_after='bounds'``, or :meth:`blind_result` of the full resolve)
+        are the **report frame**: the real values hidden behind an unknown
+        bias, shown to and saved for the analyst.
 
         Args:
             stop_after: ``'bounds'``, ``'blind'``, ``'fixed'``, ``'same'``,

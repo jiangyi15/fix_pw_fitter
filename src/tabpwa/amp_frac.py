@@ -28,46 +28,112 @@ class AmplitudeFractions:
     Args:
         fitter: :class:`~tabpwa.fitter.Fitter` instance (with data loaded).
         fit_result: ``OptimizeResult`` from ``fitter.fit()``.
-        data: optional data handle for computing |A|² sums.
-              If ``None`` (default), uses `fitter._phsp_holder`.
+        data: the sample to integrate over, as a **numpy dict**
+              (``mass``/``q``/``angle``/``weight``/``bkg``).  ``None``
+              (default) = the fitter's phase-space arrays.  A backend handle
+              is not accepted: the sample is loaded here, lazily, and is what
+              a batched run slices.
     """
 
     def __init__(self, fitter, fit_result, data=None):
+        if data is not None and not (isinstance(data, dict) and "mass" in data):
+            raise TypeError(
+                "AmplitudeFractions: data must be a numpy dict of events "
+                f"(mass/q/angle/weight/bkg), not {type(data).__name__}")
         self.fitter = fitter
         self.fit_result = fit_result
-        self._data = fitter._phsp_holder if data is None else data
+        self._given = data is not None
+        self._data = data            # None = whatever the fitter holds later
+        self._handle = None            # resolved lazily, see _get_handle()
+        self._own = False              # True when we loaded it ourselves
         self._params, self._resolved = fitter.build_params(fit_result.x)
         self._n_ck = len(self._params["ck"])
         self._cache = {}  # mask_tuple -> (total, grad_dict)
 
-    # ── internal helpers ──────────────────────────────────────────
+    # ── sample ────────────────────────────────────────────────────
 
-    def _ck_masked(self, mask):
-        """Return a copy of *ck* with entries outside *mask* zeroed."""
-        ck = self._params["ck"].copy()
-        if mask is not None:
-            for i in range(self._n_ck):
-                if i not in mask:
-                    ck[i] = 0.0j
-        return ck
+    @property
+    def _np(self):
+        """The arrays of the sample — read live, not snapshotted.
+
+        ``set_phsp`` after construction must be visible to a batched run;
+        caching this at ``__init__`` made ``batch=None`` follow the new sample
+        while ``batch=N`` sliced the old one.
+        """
+        if self._given:
+            return self._data
+        return getattr(self.fitter, "_phsp_np", None)
+
+    def _get_handle(self):
+        """The backend handle of the sample.
+
+        Resolution order: the arrays given to the constructor (loaded here,
+        and ours to free); else the fitter's ``_phsp_holder`` from
+        ``set_phsp`` (used as-is); else a load of the fitter's
+        ``_phsp_np`` arrays.
+
+        The fitter's holder is re-checked on every call: ``set_phsp`` frees and
+        replaces it, so a cached one would integrate the *old* sample (and the
+        freed one would raise).  Only a handle we loaded ourselves is cached.
+        """
+        f = self.fitter
+        if not self._given:
+            holder = getattr(f, "_phsp_holder", None)
+            if holder is not None:
+                if self._own:                 # the sample changed underneath us
+                    self.close()
+                self._handle, self._own = holder, False
+                return self._handle
+        if self._handle is None:
+            if self._given and self._np is not None:
+                self._handle = f.backend.load_data(self._np)
+                self._own = True
+            elif self._np is not None:
+                self._handle = f.backend.load_data(self._np)
+                self._own = True
+            else:
+                raise RuntimeError(
+                    "amplitude fractions: no sample — call set_phsp() on the "
+                    "fitter or pass data=arrays")
+        return self._handle
+
+    def close(self):
+        """Free the handle we loaded (idempotent; the fitter's is untouched)."""
+        h, self._handle = self._handle, None
+        own, self._own = self._own, False
+        if own and h is not None and hasattr(h, "free"):
+            h.free()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ── internal helpers ──────────────────────────────────────────
 
     def _mask_key(self, mask):
         """Hashable key for *mask* (``None`` = all ck)."""
         return tuple(sorted(mask)) if mask is not None else None
 
-    def _compute_total_and_grad(self, p, mask):
+    def _compute_total_and_grad(self, p, mask, handle=None, resolved=None):
         """Run kernel with a given ck mask and return (total, grad_dict).
 
         Results are cached by mask so repeated calls with the same mask
         (e.g. denominator shared across sub-channels) skip the backend.
+        *handle* overrides the sample (a chunk); the cache is then bypassed,
+        since a mask name no longer identifies a value.
         """
-        key = self._mask_key(mask)
+        key = self._mask_key(mask) if handle is None else None
         if key is not None and key in self._cache:
             return self._cache[key]
 
         p = dict(p)
-        p["ck"] = self._ck_masked(mask)
-        Q, grads, _ = self.fitter.backend.compute(p, self._data, norm=None)
+        # mask the *given* ck, not the best-fit one: the finite-difference
+        # path perturbs it through ``_phys_to_params``
+        p["ck"] = self._ck_masked(mask, p["ck"])
+        Q, grads, _ = self.fitter.backend.compute(
+            p, self._get_handle() if handle is None else handle, norm=None)
         total = float(Q)
 
         # Mask the ck gradient exactly like the couplings; every other
@@ -80,7 +146,8 @@ class AmplitudeFractions:
                 if i not in mask:
                     ck_grad[i] = 0.0j
             grads["ck"] = ck_grad
-        grad = self.fitter._kernel_builder.backward(grads, self._resolved)
+        grad = self.fitter._kernel_builder.backward(
+            grads, self._resolved if resolved is None else resolved)
 
         if key is not None:
             self._cache[key] = (total, grad)
@@ -106,15 +173,107 @@ class AmplitudeFractions:
         """
         return list(self.fitter.cm.var_registry.flat_names)
 
-    # ── public API ────────────────────────────────────────────────
+    # ── public contributions (what the fitter integrates) ─────────
 
-    def fractions(self, masks, denominator=None, param_names=None, jac=True):
+    def integrand(self, mask):
+        """Per-event integrand of one ck mask at the fitted point.
+
+        Returns ``{"params": kernel params, "resolved": physical dict,
+        "mask": mask}`` — the per-sample integrand that
+        :meth:`~tabpwa.fitter.Fitter.sum_stream` accumulates.  The masked
+        ``ck`` is already in ``params``, so the caller of the integration only
+        has to pick the measure (phsp, data, a chunk of either) and the
+        normalisation.
+
+        Always the model frame at ``fit_result.x``; there is no override —
+        a value taken at another point does not belong to this instance's
+        gradient (see :meth:`fwd_integrate`).
+        """
+        params = dict(self._params)
+        params["ck"] = self._ck_masked(mask, params["ck"])
+        return {"params": params, "resolved": dict(self._resolved),
+                "mask": mask}
+
+    def _ck_masked(self, mask, ck=None):
+        """Copy of *ck* with entries outside *mask* zeroed (boolean mask)."""
+        ck = np.array(self._params["ck"] if ck is None else ck, copy=True)
+        if mask is not None:
+            keep = np.zeros(ck.shape[0], dtype=bool)
+            keep[list(mask)] = True
+            ck[~keep] = 0.0j
+        return ck
+
+    def fwd_integrate(self, masks, handle, x=None):
+        """Per-**handle** integrand: one ``Fwd`` per mask for that sample.
+
+        This is the unit :meth:`tabpwa.fitter.Fitter.sum_stream` accumulates;
+        the streaming itself (chunking, loading, freeing, summing) is the
+        fitter's job, not this class's.  Give it a backend handle and it
+        returns ``sum w.|A_mask|^2`` with its gradient for *that* handle::
+
+            out = f.sum_stream(lambda h: af.fwd_integrate(masks, h),
+                               data=arrays, batch=50_000)
+            R   = out[0] / out[2]                  # value + exact gradient
+            band = R.sigma(fit_result.hess_inv)    # no cal_uncertainties call
+
+        The gradient spans the free parameters in ``x`` order, because the
+        chaining is delegated to :meth:`tabpwa.fitter.Fitter.fwd_of` (which
+        runs ``cm.full_gradient``) — the resolved-name gradient is never
+        re-indexed by literal name, so aliases and bounds Jacobians survive.
+
+        Args:
+            masks: list of ck-index iterables (``[[1], [2], [1, 2]]``).
+            handle: a backend handle (from ``backend.load_data``).
+            x: the flat parameter vector the chain is taken at (``None`` =
+                the fit's ``fit_result.x``).
+
+        There is no ``phys=`` override: a dual's value and its gradient must
+        describe the same point, and the gradient is chained at
+        ``fit_result.x``.  Evaluating the model elsewhere while keeping a
+        gradient taken here was silently wrong (measured: value moved, gradient
+        off by 0.22 from the FD of the same overridden observable).  A
+        different point needs a different ``AmplitudeFractions``.
+
+        Returns:
+            ``[Fwd, ...]`` — one per mask, the ck gradient masked exactly
+            like the couplings and carried to the free parameters.  A mask
+            over a *fixed* coupling legitimately has a zero gradient.
+        """
+        f = self.fitter
+        if x is None:
+            x = self.fit_result.x
+
+        out = []
+        for mask in masks:
+            spec = self.integrand(mask)
+            Q, kg, _ = f.backend.compute(spec["params"], handle, norm=None)
+            if mask is not None:                     # mask the ck gradient
+                ck_g = np.array(kg["ck"], copy=True)
+                keep = np.zeros(ck_g.shape[0], dtype=bool)
+                keep[list(mask)] = True
+                ck_g[~keep] = 0.0j
+                kg = dict(kg, ck=ck_g)
+            # mirror the unbatched path exactly: the kernel backward and the
+            # chain to ``x`` both run at the model frame
+            # (``self._resolved``), so a blinded fit answers identically with
+            # and without ``batch=``.
+            out.append(f.fwd_of(Q, f.fwd_backward(kg, self._resolved),
+                                resolved=self._resolved, x=x))
+        return out
+
+    def fractions(self, masks, denominator=None, param_names=None,
+                  jac=True, batch=None):
         """Compute mean fractions and propagated uncertainties.
 
         ``R_i = Σ w·|A_mask_i|² / Σ w·|A_denom|²``
 
-        Uses a single 3‑point sweep (``jac=False``) or analytical
-        gradients (``jac=True``) via ``cal_uncertainties_multi``.
+        Values are always the same three weighted sums; only the uncertainty
+        route differs: ``jac=True`` (default) uses the kernel's analytic
+        gradient, ``jac=False`` a central-difference sweep.  ``batch=N``
+        streams either route one chunk at a time (``2·len(x)`` model
+        evaluations per sweep for the FD one, so it is proportionally slower).
+        ``param_names`` names the parameters handed to the analytic callback;
+        an empty or unknown set yields zero errors on every route.
 
         Args:
             masks: list of ck-index iterables, e.g. ``[[0,1,2], [3,4,5]]``.
@@ -123,27 +282,47 @@ class AmplitudeFractions:
                          present in the resolved dict).
             jac: if True, use analytical gradient from the kernel's
                  backward pass instead of finite differences.
-
+            batch: events per chunk.  ``None`` (default) integrates the whole
+                 phase space in one pass; ``N`` streams it through
+                 :meth:`~tabpwa.fitter.Fitter.sum_stream`, so peak memory is
+                 one chunk — same values, more loads.
         Returns:
             ``(values, errors)`` — two 1-D arrays of length ``len(masks)``.
         """
+        fitter, R = self.fitter, self
+
+        # Re-derive the parameter point: a constraint change after
+        # construction (``set_blind``, ``set_scale``, …) moves the model frame,
+        # and the three routes must not disagree because one of them read a
+        # stale snapshot.  Cheap: one forward resolve.
+        self._params, self._resolved = fitter.build_params(self.fit_result.x)
+        self._cache.clear()
+
         if param_names is None:
             param_names = self._default_param_names()
 
-        fitter, R = self.fitter, self
+        # Both analytic routes evaluate the model at the SAME point: the
+        # MODEL frame (``self._params``/``self._resolved``, built by
+        # ``build_params``), which is what the kernel computes at and what
+        # ``cal_uncertainties_multi`` now hands *fun*.  The blinded *report*
+        # frame only removes the offset for display; evaluating there would
+        # describe a parameter point the fit never fitted.
 
-        def fun_3pt(phys):
-            """Forward‑only: compute fractions from weighted sums."""
-            p = R._phys_to_params(phys)
-            total_den, _ = R._compute_total_and_grad(p, denominator)
-            vals = []
-            for m in masks:
-                total_num, _ = R._compute_total_and_grad(p, m)
-                vals.append(total_num / total_den)
-            return np.array(vals)
+        def streamed():
+            """(denominator Fwd, [mask Fwds]) via the chunked sum."""
+            order = [denominator] + list(masks)
+            if R._np is None:
+                raise ValueError(
+                    "fractions: no sample to stream — call set_phsp() on the "
+                    "fitter or pass data=arrays")
+            out = fitter.sum_stream(
+                lambda h: R.fwd_integrate(order, h),
+                data=R._np, batch=batch)
+            return out[0], out[1:]
 
         def fun_jac(phys):
             """Forward + backward: fractions + analytical gradient dicts."""
+            R._cache.clear()          # the memo is per evaluation, not per mask
             p = R._phys_to_params(phys)
 
             # Denominator (computed once, shared across all masks)
@@ -172,9 +351,78 @@ class AmplitudeFractions:
 
             return values, grad_dicts
 
-        fun = fun_jac if jac else fun_3pt
+        hess_inv = getattr(self.fit_result, "hess_inv", None)
 
-        vals, cov = fitter.cal_uncertainties_multi(
-            fun, param_names, self.fit_result, jac=jac)
-        errs = np.sqrt(np.diag(cov))
-        return vals, errs
+        def err(row):
+            """``sqrt(row C row^T)``; no covariance -> 0, as always."""
+            if hess_inv is None:
+                return 0.0
+            return float(np.sqrt(max(float(row @ hess_inv @ row), 0.0)))
+
+        if not jac:
+            # Values only: no backward pass is needed for a finite-difference
+            # sweep, so this skips ``_compute_total_and_grad``'s chaining.
+            # The sums are returned with the denominator LAST and divided
+            # once: a ratio cannot be summed over chunks (Σ num/den per chunk
+            # is not Σnum/Σden).
+            def sums_on(handle, phys):
+                p = R._phys_to_params(phys)
+                return np.array([float(fitter.backend.compute(
+                    dict(p, ck=R._ck_masked(m, p["ck"])), handle,
+                    norm=None)[0]) for m in list(masks) + [denominator]])
+
+            def obs(phys):
+                R._cache.clear()
+                if batch is None:
+                    s = sums_on(R._get_handle(), phys)
+                else:
+                    # honour ``batch=``: one chunk resident at a time, same
+                    # guarantee as the analytic route (at 2·n sweeps, so the
+                    # loads multiply — that is the price of finite differences)
+                    s = fitter.sum_stream(
+                        lambda h: sums_on(h, phys), data=R._np, batch=batch)
+                return s[:-1] / s[-1]
+
+            # x basis: a fraction depends on every parameter, so stepping the
+            # flat slots is both complete and the cheaper sweep.  (The named
+            # basis of ``fd_jacobian`` is for observables with a small,
+            # genuinely complete name set — see ``get_bw_params``.)
+            vals, J = fitter.fd_jacobian(obs, fit_result=self.fit_result)
+            return list(vals), np.array([err(row) for row in J])
+
+        if batch is None:
+            # Whole sample: the established covariance pipeline — analytic
+            # grad dicts by resolved name, reduced to ``x`` by
+            # ``cm.full_gradient`` inside ``cal_uncertainties_multi``.
+            vals, cov = fitter.cal_uncertainties_multi(
+                fun_jac, param_names, self.fit_result, jac=True)
+            return vals, np.sqrt(np.diag(cov))
+
+        # Streamed: ``fwd_of`` already chained each chunk's gradient to ``x``,
+        # so the dual ratio is the observable and the uncertainty is its
+        # quadratic form — the same diagonal the unbatched route computes,
+        # without a second chaining.
+        den, nums = streamed()
+        ratios = [n / den for n in nums]
+
+        # ``param_names`` does not restrict the covariance span on either
+        # route: it names the parameters handed to the (analytic) callback,
+        # and that callback's gradient dict already covers everything the
+        # kernel produced.  The streamed route therefore takes the dual's full
+        # x gradient, exactly like the unbatched one — masking it to
+        # ``param_names`` would make the two disagree, because those names and
+        # the kernel's own gradient keys are different vocabularies (12 free
+        # slot names vs 22 resolved names, only 2 in common, on
+        # ``config_pwa_gen_mb``).
+        # An empty/unknown ``param_names`` means "no parameter to vary" on the
+        # unbatched route (it returns a zero covariance), so the streamed one
+        # must say zero too rather than the full error.
+        no_names = not any(n in self._resolved for n in param_names)
+
+        def sigma(r):
+            if hess_inv is None or no_names:
+                return 0.0
+            g = r.grad
+            return float(np.sqrt(max(float(g @ hess_inv @ g), 0.0)))
+
+        return [r.value for r in ratios], np.array([sigma(r) for r in ratios])

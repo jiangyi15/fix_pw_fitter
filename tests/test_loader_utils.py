@@ -129,3 +129,60 @@ def test_load_npz_max_events_takes_first_rows(tmp_path):
     assert d["mass"].shape[0] == 25
     assert np.allclose(d["mass"], full["mass"][:25])
     assert np.allclose(d["weight"], full["weight"][:25])
+
+
+def test_load_dataset_explicit_path_and_max_events(cfg, tmp_path):
+    """path= overrides the config file; max_events keeps the first rows."""
+    f = _fitter(cfg)
+    full = f.load_dataset("data")                         # from the config
+    n = full["mass"].shape[0]
+    assert n == 40
+
+    # a different kernel-array file for the same prefix
+    arr = tmp_path / "other.npz"
+    np.savez(arr, mass=full["mass"][:7], q=full["q"][:7],
+             angle=full["angle"][:7], weight=full["weight"][:7])
+    got = f.load_dataset("data", path=str(arr))
+    assert got["mass"].shape[0] == 7
+    assert np.allclose(got["mass"], full["mass"][:7])
+
+    # max_events on the config path and on the explicit path
+    cut = f.load_dataset("data", max_events=11)
+    assert cut["mass"].shape[0] == 11
+    assert np.allclose(cut["mass"], full["mass"][:11])
+    cut2 = f.load_dataset("data", path=str(arr), max_events=4)
+    assert cut2["mass"].shape[0] == 4
+    f.free()
+
+
+def test_load_dataset_path_momenta_slices_sidecars(cfg, tmp_path):
+    """A momenta .npy override is converted; weight/bg follow max_events."""
+    f = _fitter(cfg)
+    conf = f.config.dic["data"]
+    mom = np.load(str(conf["data"]))
+    small = tmp_path / "mom_small.npy"
+    np.save(small, mom[:15])
+
+    got = f.load_dataset("data", path=str(small))
+    assert got["mass"].shape[0] == 15
+    # the config's sidecars are longer than the new sample: sliced, not error
+    assert got["weight"].shape[0] == 15
+    assert got["bkg"].shape[0] == 15
+    f.free()
+
+
+def test_load_dataset_path_rejects_unknown_suffix(cfg, tmp_path):
+    f = _fitter(cfg)
+    bad = tmp_path / "x.txt"
+    bad.write_text("nope")
+    with pytest.raises(ValueError, match="expected a"):
+        f.load_dataset("data", path=str(bad))
+    with pytest.raises(FileNotFoundError):
+        f.load_dataset("data", path=str(tmp_path / "missing.npz"))
+    f.free()
+
+
+def test_load_dataset_unconfigured_prefix_returns_none(cfg):
+    f = _fitter(cfg)
+    assert f.load_dataset("phsp_rec") is None
+    f.free()

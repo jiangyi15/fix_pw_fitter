@@ -6,6 +6,10 @@ Reports per-operation wall time for the two regimes a PWA fit sees —
 overhead of a ratio built from duals versus plain floats, so the numbers can
 be compared with a kernel ``compute`` call (~0.5–30 ms).
 
+There is no ``Layout``: a dual's gradient is a dense vector, so the parameter
+space is simply its length.  ``Fwd(value, grad)`` is the constructor;
+``Fitter.fwd_of`` / ``Fitter.fwd_parameter`` build them from names.
+
 Usage::
 
     python tests/benchmark_fwd.py
@@ -21,7 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from tabpwa.fwd import Fwd, Layout  # noqa: E402
+from tabpwa.fwd import Fwd  # noqa: E402
 
 
 def _bench(fn, repeat=20000):
@@ -40,16 +44,17 @@ def _bench(fn, repeat=20000):
 def main():
     rows = []
     for n in (50, 1000):
-        lay = Layout([f"p{i}" for i in range(n)])
-        a = Fwd.of(2.0, {f"p{i}": 1.0 for i in range(n)}, lay)
-        b = Fwd.of(3.0, {f"p{i}": -1.0 for i in range(n)}, lay)
+        a = Fwd(2.0, np.ones(n))
+        b = Fwd(3.0, -np.ones(n))
+        seed = np.zeros(n)
+        seed[0] = 1.0
         rows.append((
             n,
             _bench(lambda: a + b),
             _bench(lambda: a * b),
             _bench(lambda: a / b),
             _bench(lambda: a.sqrt()),
-            _bench(lambda: Fwd.of(1.0, {"p0": 1.0}, lay)),
+            _bench(lambda: Fwd(1.0, seed)),
         ))
 
     print(f"{'n_var':>6} {'a+b':>8} {'a*b':>8} {'a/b':>8} {'sqrt':>8} {'create':>8}"
@@ -58,9 +63,8 @@ def main():
         print(f"{n:6d} {add:8.3f} {mul:8.3f} {div:8.3f} {sq:8.3f} {new:8.3f}")
 
     for n in (50, 1000):
-        lay = Layout([f"p{i}" for i in range(n)])
-        num = Fwd.of(3.0, {f"p{i}": 0.5 for i in range(n)}, lay)
-        den = Fwd.of(12.0, {f"p{i}": -0.25 for i in range(n)}, lay)
+        num = Fwd(3.0, np.full(n, 0.5))
+        den = Fwd(12.0, np.full(n, -0.25))
 
         def ratio():
             for _ in range(100):
@@ -72,6 +76,12 @@ def main():
 
         print(f"n_var={n:5d}: 100 ratios {_bench(ratio, 2000):7.1f} µs   "
               f"plain floats {_bench(plain, 2000):7.1f} µs")
+
+    # sigma(cov) is one quadratic form: n^2 work, the only O(n^2) operation
+    for n in (50, 1000):
+        d = Fwd(1.0, np.full(n, 1.0 / n))
+        cov = np.eye(n)
+        print(f"n_var={n:5d}: sigma(eye) {_bench(lambda: d.sigma(cov), 200):7.1f} µs")
 
     print("\nreference: one kernel compute() over 200k events ≈ 0.5–30 ms")
 

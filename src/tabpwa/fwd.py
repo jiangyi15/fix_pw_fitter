@@ -28,10 +28,16 @@ Cost is ``O(n_params)`` per operation and in practice numpy-overhead bound
 
 Example::
 
-    a = fitter.fwd_of(total_num, grad_num)     # value + gradient by name
-    b = fitter.fwd_of(total_den, grad_den)
-    r = a / b                                  # value + exact gradient
-    sigma = r.sigma(cov)                       # sqrt(g C g^T)
+    a = fitter.fwd_of(total_num, grad_num, x=x)   # value + x-space gradient
+    b = fitter.fwd_of(total_den, grad_den, x=x)
+    r = a / b                                     # value + exact gradient
+    sigma = r.sigma(hess_inv)                     # sqrt(g C g^T)
+
+``x`` is the flat free-parameter vector the kernel ran at: a ``Fwd``'s
+``grad`` is a gradient over *that* space (``Fitter.fwd_names()`` is its
+ordering), because that is the space a fit covariance describes.  The
+kernel's raw gradient is by resolved name, so ``fwd_of`` applies the
+constraint chain (``cm.full_gradient``) once, at the point it is given.
 """
 
 import functools
@@ -41,7 +47,8 @@ import numpy as np
 __all__ = ["Fwd", "rows", "sin", "cos", "exp", "atan2",
            "polar", "reim", "magnitude", "abs", "mod", "log", "sqrt",
            "erf", "gamma", "loggamma",
-           "dual", "cov", "corr", "corr_matrix",
+           "dual", "cov", "corr", "corr_matrix", "batch_sum",
+           "data_split",
            "C"]
 
 _NUM = (int, float, np.integer, np.floating)
@@ -65,6 +72,116 @@ def corr_matrix(duals, cov_matrix):
         for j in range(n):
             out[i, j] = duals[i].correlation(duals[j], cov_matrix)
     return out
+
+
+def _tree_add_fwd(a, b):
+    """Structural ``a + b`` for ``Fwd``/number leaves in dicts or sequences.
+
+    Mirrors ``tfpwa.data.batch_sum``'s "first result seeds, the rest are
+    added" — but for a pytree of duals.
+    """
+    if isinstance(a, (Fwd, _NUM)) or isinstance(b, (Fwd, _NUM)):
+        return a + b
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a) != set(b):
+            raise ValueError(f"batch_sum: structure differs: {sorted(a)} vs "
+                             f"{sorted(b)}")
+        return {k: _tree_add_fwd(a[k], b[k]) for k in a}
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            raise ValueError("batch_sum: sequences differ in length")
+        items = [_tree_add_fwd(x, y) for x, y in zip(a, b)]
+        return type(a)(*items) if hasattr(a, "_fields") else type(a)(items)
+    # any other leaf pair (arrays, plain numbers) adds as itself — that is
+    # what lets ``sum_stream`` carry values-only contributions, not just duals
+    try:
+        return a + b
+    except TypeError:
+        raise TypeError(f"batch_sum: cannot add {type(a).__name__} and "
+                        f"{type(b).__name__}") from None
+
+
+def _tree_len(tree):
+    """Event count of a data pytree: the first **non-scalar** array leaf's
+    ``shape[0]``.
+
+    Scalar leaves (a per-dataset constant) carry no event axis, so they are
+    skipped rather than indexed.
+    """
+    if isinstance(tree, dict):
+        leaves = tree.values()
+    elif isinstance(tree, (list, tuple)):
+        leaves = tree
+    else:
+        leaves = (tree,)
+    for leaf in leaves:
+        if isinstance(leaf, (dict, list, tuple)):
+            try:
+                return _tree_len(leaf)
+            except (IndexError, TypeError):
+                continue
+        arr = np.asarray(leaf)
+        if arr.ndim == 0:
+            continue                      # a constant, not an event axis
+        return int(arr.shape[0])
+    raise ValueError("_tree_len: no array leaf with an event axis")
+
+
+def _tree_slice(tree, sl, axis=0):
+    """Slice every array leaf of *tree* on *axis* (structure preserved)."""
+    if isinstance(tree, dict):
+        return {k: _tree_slice(v, sl, axis) for k, v in tree.items()}
+    if isinstance(tree, (list, tuple)):
+        items = [_tree_slice(v, sl, axis) for v in tree]
+        return type(tree)(*items) if hasattr(tree, "_fields") else type(tree)(items)
+    arr = np.asarray(tree)
+    if arr.ndim == 0:
+        return tree
+    idx = [slice(None)] * arr.ndim
+    idx[axis] = sl
+    return arr[tuple(idx)]
+
+
+def data_split(tree, batch, axis=0):
+    """Yield contiguous chunks of *batch* events — ``tfpwa.data.data_split``.
+
+    Walks a pytree of arrays and slices every array leaf on *axis*; scalar
+    leaves pass through unchanged, and the structure is preserved.  The
+    companion of :func:`batch_sum` (and what ``Fitter.sum_stream`` uses):
+
+        for chunk in data_split(arrays, 50_000):
+            ...
+    """
+    n = _tree_len(tree)
+    if n == 0:
+        return                      # empty sample: no chunks (not a bad batch)
+    step = n if batch is None else int(batch)
+    if step <= 0:
+        raise ValueError(f"data_split: batch must be > 0, got {batch}")
+    for lo in range(0, n, step):
+        yield _tree_slice(tree, slice(lo, lo + step), axis)
+
+
+def batch_sum(fn, chunks):
+    """Accumulate ``fn(chunk)`` over *chunks* (the ``tfpwa.data.batch_sum``
+    pattern: the first result seeds, every later one is added).
+
+    Works for a single ``Fwd`` and for any pytree of them, so a chunked
+    evaluation needs no reduction bookkeeping::
+
+        total = batch_sum(lambda h: fwd_of(*compute(h), x=x), chunks)
+    """
+    total = None
+    seen = False
+    for chunk in chunks:
+        out = fn(chunk)
+        if not seen:
+            total, seen = out, True
+        else:
+            total = _tree_add_fwd(total, out)
+    if not seen:
+        raise ValueError("batch_sum: no chunks")
+    return total
 
 
 def rows(values, jacobian):
@@ -278,8 +395,6 @@ class Fwd:
         return f"Fwd(value={self.value:.12g}, n_grad={self.grad.size})"
 
 
-_builtin_abs = abs
-_EMPTY = np.zeros(0)
 
 
 # ── dispatch: numbers in, numbers out; any Fwd promotes them all ────────

@@ -31,9 +31,39 @@ Usage:
 """
 
 import time
+import warnings
+
 import numpy as np
 
 from .fit_result import FitResult
+from .fwd import batch_sum, data_split as _data_split   # no cycle
+
+def _as_real_observable(out, where):
+    """A real 1-D observable array (a complex one is an error, not a cast)."""
+    arr = np.asarray(out)
+    if np.iscomplexobj(arr):
+        raise ValueError(
+            f"{where}: the observable is complex — return a real one "
+            "(Re, Im, |y|^2, ...); Fwd is real-valued")
+    return np.atleast_1d(arr.astype(float))
+
+
+_NO_CHUNK = object()
+
+
+def _chain_first(first, rest):
+    """Yield *first*, then everything in *rest* (an iterator)."""
+    yield first
+    yield from rest
+
+
+def _cov_return(G, hess_inv, values, return_cov):
+    """``(values, cov)`` or ``(values, errors)`` from ``G @ C @ G.T``."""
+    cov = G @ hess_inv @ G.T
+    if return_cov:
+        return values, cov
+    return values, np.sqrt(np.maximum(np.diag(cov), 0.0))
+
 
 class Fitter:
     """Global fitter: config → objects → compute with norm constraint."""
@@ -169,19 +199,28 @@ class Fitter:
         ``reset=True`` to replace all previous ones.
 
         The transform sits **between the range and fixed** in the
-        constraint pipeline: the value after the bounds stage is shifted
-        by a **standalone** seed-derived offset of magnitude ``scale``
+        constraint pipeline: the value after the bounds stage is shifted by a
+        **standalone** seed-derived offset of magnitude ``scale``
         (``offset = U(-1, 1) * scale``; a ``{name: scale}`` dict sets
         per-parameter magnitudes) — independent of the parameter bounds.
-        The fit model runs on the unblinded (physical) values, so the
-        fitted model is correct — while the after-bounds values that get
-        printed and saved (``get_uncertainties``, ``save_params``,
-        ``report_params``) are the **blinded report frame**.  The offset
-        is deterministic from ``seed`` plus the parameter name but
-        opaque: seeing the seed only tells you *a* shift was applied,
-        not its size.  Unblind reported values with
-        ``cm.unblind_result`` to recover the true values.  Errors are
-        unaffected (constant shift).
+
+        **The program always works with the real physics.**  The shift is an
+        internal bookkeeping offset, not a change to the model: the fit, the
+        kernel, the likelihood and every observable are evaluated at the
+        *model frame* (``build_params(x)[1]``), which is the true physical
+        point.  Only what is **shown/saved** (``report_params``,
+        ``get_uncertainties``, ``save_params``, ``plot_*``) carries the bias:
+
+            report frame = model frame - offset   (the blinded display)
+
+        So the reported value is *not* the real physics — it is the real value
+        plus an unknown, seed-derived bias, which is the point of blinding.
+        The offset is deterministic from ``seed`` plus the parameter name but
+        opaque: seeing the seed only tells you *a* shift was applied, not its
+        size.  Unblind with ``cm.unblind_result`` to recover the real values.
+        Errors are unaffected (a constant shift), which is why uncertainty
+        propagation must run at the **model** frame — evaluating at the report
+        frame would propagate around a point the fit never fitted.
 
         Delegates to :attr:`cm`.
         """
@@ -393,7 +432,7 @@ class Fitter:
             f"data.{key}: config path {val!r} not found (resolved to "
             f"{resolved!r}; path_map={current_path_map() or {}})")
 
-    def load_dataset(self, prefix):
+    def load_dataset(self, prefix, path=None, max_events=None):
         """One generic loader for any dataset prefix.
 
         ``prefix`` is looked up in the config ``data`` section and may be
@@ -407,43 +446,88 @@ class Fitter:
           ``{prefix}_bg_value``, ``dat_order`` reordering, on-the-fly
           conversion to kernel arrays).
 
+        This is the config-aware entry point: the angle layout comes from
+        ``kernel_config["angle_k"]``, so a pure-PWA config (4 components)
+        loads correctly without the caller passing ``n_angle_comp``.
+
+        Args:
+            prefix: the config ``data:`` prefix (``"phsp"``, ``"data"``, …).
+            path: an **explicit file** overriding the config value — a
+                kernel-ready ``.npz`` or a ``(N, n_finals, 4)`` momenta
+                ``.npy``.  The ``{prefix}_weight`` / ``{prefix}_bg_value``
+                sidecars still come from the config when it declares them.
+            max_events: keep only the first N events.
+
         Returns the kernel-array dict, or ``None`` if the prefix is not
-        configured.
+        configured (and no *path* was given).
         """
         n_comp = int(self.kernel_config["angle_k"].shape[1])
-        arr = self._resolve_data_key(f"{prefix}_arr")
-        if arr:
-            return self.load_npz(arr, n_angle_comp=n_comp)[0]
-        mom = self._resolve_data_key(prefix)
-        if mom is None:
-            return None
-        if str(mom).endswith(".npz"):
-            return self.load_npz(mom, n_angle_comp=n_comp)[0]
-        return self.load_momenta_conf(prefix)
+        if path is None:
+            arr = self._resolve_data_key(f"{prefix}_arr")
+            if arr:
+                return self.load_npz(arr, max_events=max_events,
+                                     n_angle_comp=n_comp)[0]
+            src = self._resolve_data_key(prefix)
+            if src is None:
+                return None
+        else:
+            import os
+            if not str(path).endswith((".npz", ".npy")):
+                raise ValueError(
+                    f"load_dataset({prefix!r}, path={path!r}): expected a "
+                    ".npz (kernel arrays) or .npy (momenta) file")
+            if not os.path.isfile(str(path)):
+                raise FileNotFoundError(f"{prefix}: {path} not found")
+            src = str(path)
+        if src.endswith(".npz"):
+            return self.load_npz(src, max_events=max_events,
+                                 n_angle_comp=n_comp)[0]
+        return self.load_momenta_conf(prefix, path=src, max_events=max_events)
 
-    def load_momenta_conf(self, prefix):
+    def load_momenta_conf(self, prefix, path=None, max_events=None):
         """Generic prefix loader: ``{prefix}`` (+ optional ``{prefix}_weight``
         and ``{prefix}_bg_value`` keys under the config ``data`` section)
         -> kernel-ready arrays, or None if the prefix is not configured.
 
         The exact same routine serves ``data`` / ``phsp`` and any other
-        prefix (e.g. ``data_rec`` / ``phsp_rec``).
+        prefix (e.g. ``data_rec`` / ``phsp_rec``).  *path* overrides the
+        configured momenta file; *max_events* keeps the first N rows
+        (sidecars are sliced with them).
         """
-        mom_path = self._resolve_data_key(prefix)
+        mom_path = str(path) if path is not None else self._resolve_data_key(prefix)
         if not mom_path:
             return None
         momenta = np.load(mom_path, mmap_mode="r")
         if momenta.ndim != 3 or momenta.shape[-1] != 4:
             raise ValueError(f"{prefix}: expected (n, n_finals, 4), got "
                              f"{momenta.shape}")
+        if max_events is not None and max_events < momenta.shape[0]:
+            momenta = momenta[:max_events]
         w_path = self._resolve_data_key(f"{prefix}_weight")
         weight = np.load(w_path) if w_path else np.ones(momenta.shape[0])
+        if w_path and len(weight) != momenta.shape[0]:
+            # a *longer* sidecar is a superset of the sample (sliced, matching
+            # max_events); a *shorter* one cannot cover it — say so here
+            # instead of letting it surface as a numpy broadcast error deep
+            # inside set_phsp
+            if len(weight) > momenta.shape[0]:
+                warnings.warn(
+                    f"{prefix}_weight has {len(weight)} entries but the sample "
+                    f"has {momenta.shape[0]} — using the first "
+                    f"{momenta.shape[0]}", RuntimeWarning, stacklevel=2)
+                weight = weight[:momenta.shape[0]]
+            else:
+                raise ValueError(
+                    f"{prefix}_weight: {len(weight)} entries but "
+                    f"{momenta.shape[0]} events")
 
         # Optional per-event background contribution {prefix}_bg_value
         bg_path = self._resolve_data_key(f"{prefix}_bg_value")
         bg = None
         if bg_path:
             bg = np.load(bg_path).astype(np.float64).ravel()
+            if len(bg) > momenta.shape[0]:
+                bg = bg[:momenta.shape[0]]
             if len(bg) != momenta.shape[0]:
                 raise ValueError(
                     f"{prefix}_bg_value: {len(bg)} entries but {momenta.shape[0]} "
@@ -811,16 +895,18 @@ class Fitter:
     # ── unified pipeline (forward + backward) ─────────────────────
 
     def build_params(self, x):
-        """Full forward pipeline: flat x → kernel params dict (model frame).
+        """Full forward pipeline: flat ``x`` → kernel params dict.
 
-        Returns ``(params, resolved)`` where *resolved* is the *model*
-        frame: the blind offsets have been applied between bounds and
-        fixed, so the kernel evaluates the shifted physics.  The fit
-        compensates the constant offset, so the fitted model is correct.
+        Returns ``(params, resolved)`` where *resolved* is the **model
+        frame**: the real physics.  This is the point the kernel, the
+        likelihood and every observable are evaluated at, and therefore the
+        only frame a derivative may be taken around.
 
-        The *report* frame (what the analyst prints, saves, and reads) is
-        obtained with :meth:`report_params` — the after-bounds (blinded)
-        values.
+        The blind machinery keeps its seed-derived offset in this pipeline
+        (between bounds and fixed) purely so that :meth:`report_params` can
+        subtract it; it does not make this frame unphysical.  What the analyst
+        prints, saves and reads is :meth:`report_params` — the real values
+        shifted by the unknown offset.
         """
         x = np.asarray(x, dtype=float).ravel()
         resolved = self.cm.flat_resolve(x)
@@ -828,13 +914,19 @@ class Fitter:
         return params, resolved
 
     def report_params(self, x):
-        """Resolved parameters as reported to the analyst (blinded frame).
+        """The **blinded display** frame: what the analyst is shown.
 
-        The after-bounds values of the fit — the fit result in the
-        blinded frame (true value minus the unknown seed offset).  This
-        is the frame that gets printed, saved, and used for observable
-        uncertainties.  Unblind with ``cm.unblind_result(reported)`` to
-        recover the true values.
+        ``build_params(x)[1]`` is the real physics (the model frame the kernel
+        and the fit use).  This method subtracts the seed-derived blind offset
+        from it, so a reported number is the true value **plus an unknown
+        bias** — that is the whole point of blinding, and it means a reported
+        value is *not* a physical value.
+
+        Use this frame for printing, saving and plots.  Do **not** use it to
+        evaluate the model or to propagate uncertainties: the fit optimises
+        the model frame, so a derivative taken around the report frame
+        describes a parameter point that was never fitted.
+        ``cm.unblind_result(reported)`` recovers the real values.
         """
         return self.cm.blind_result(
             self.build_params(np.asarray(x, dtype=float).ravel())[1])
@@ -1492,28 +1584,46 @@ class Fitter:
           - an ``OptimizeResult`` from :meth:`fit()` — saves values + errors + status
           - a flat numpy array ``x`` — saves values only (no errors/status)
 
-        The JSON structure:
-            value:         {name_r: float, ...}   resolved + blinded frame
-            error:         {name_r: float, ...}   after-bounds frame
-            value_bounded: {name_r: float, ...}   the values ``error`` belongs to
+        The JSON structure — note **``error`` belongs to ``value_bounded``,
+        not to ``value``**::
+
+            value:         {name: float}   resolved frame, blinded (what the
+                                           analyst reads; includes scale /
+                                           blind / mass-width transforms)
+            value_bounded: {name: float}   after-bounds frame, before those
+                                           transforms — the frame ``error``
+                                           was computed in
+            error:         {name: float}   sigma paired with ``value_bounded``
             status:        {NLL, Ndf, jac, success, message, rhorho}
+
+        So to quote a value with its uncertainty, use
+        ``value_bounded ± error``.  Pairing ``error`` with ``value`` is wrong
+        whenever a scale / blind / mass-width / custom transform is present:
+        with ``set_scale({"a": 2.0})`` the reported sigma comes out a factor 2
+        too small (0.2837 printed against ``value`` 0.8300, when the matching
+        pair is ``value_bounded`` 0.4150 ± 0.2837).
+
+        To convert: ``error`` is a sigma in the **after-bounds** frame, so the
+        resolved-frame sigma is ``|dRes/dB| * error`` — *not*
+        ``|dRes/d x| * error`` (those differ by ``|dB/dx|``, 0.011 on the
+        ``config_amp`` fixture, i.e. two orders of magnitude).  Both factors are
+        available from ``cm.full_gradient``; ``_params_from_fit`` is where the
+        bounded pairing is produced.
 
         Handles bound transforms, fixed params, same-param aliases,
         scale params, and time parameter defaults automatically.
 
-        Known limitation (errors):
-            the ``error`` values are propagated through the **bound**
-            transform only, and are keyed by the flat (raw) parameter
-            names.  The ``value`` section holds the fully resolved, blinded
-            values.  So for a parameter behind a scale / blind / mass-width
-            / custom transform ``value`` and ``error`` are in different
-            frames -- e.g. with ``set_scale({"a": 2.0})`` the reported sigma
-            is a factor 2 too small (verified: value 1.5498, sigma 0.001235
-            vs the correct 0.002470).  ``value_bounded`` therefore stores the
-            after-bounds value that each ``error`` belongs to, so the file is
-            self-consistent; propagating to the resolved frame would need the
-            Jacobian of the whole ``ConstraintManager.resolve`` pipeline, not
-            just ``BoundTransform.trans_err``.
+        Error frame (why ``value_bounded`` exists):
+            the ``error`` values are propagated through the **bound** transform
+            only and are keyed by the flat (raw) names, so they live in the
+            after-bounds frame.  ``value`` is the fully resolved, blinded frame.
+            Those differ for any parameter behind a scale / blind / mass-width
+            / custom transform, which is exactly why each ``error`` is written
+            beside the ``value_bounded`` it belongs to — the file stays
+            self-consistent and no error is silently paired with a value from
+            another transform stage.  Propagating to the resolved frame instead
+            would need the full ``ConstraintManager`` Jacobian
+            (``cm.full_gradient``), not just ``BoundTransform.trans_err``.
 
         Args:
             fit_result: OptimizeResult from fit() method.
@@ -1801,7 +1911,7 @@ class Fitter:
         """
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        resolved = self.report_params(x0)
+        resolved = self.build_params(x0)[1]      # model frame, see below
 
         names = [n for n in param_names if n in resolved]
         if not names:
@@ -1821,39 +1931,6 @@ class Fitter:
             return value, 0.0
         std = float(np.sqrt(max(gf @ hess_inv @ gf, 0.0)))
         return value, std
-
-    def _fd_grad_dicts(self, fun, names, resolved):
-        """Finite-difference gradient dicts for each observable.
-
-        Returns ``(values, grad_dicts)`` where *grad_dicts[i]* maps
-        each parameter name to ``d(obs[i])/d(name)``.
-        """
-        import numpy as np
-        fit_dict = {n: float(resolved[n]) for n in names}
-        values = list(fun(fit_dict))
-        grad_dicts = [{} for _ in range(len(values))]
-        for name in names:
-            base = float(resolved[name])
-            eps = 1e-5 * max(1.0, abs(base))
-            rp = dict(resolved); rp[name] = base + eps
-            vp = fun({n: float(rp[n]) for n in names})
-            rm = dict(resolved); rm[name] = base - eps
-            vm = fun({n: float(rm[n]) for n in names})
-            for i in range(len(values)):
-                grad = (vp[i] - vm[i]) / (2 * eps)
-                if grad != 0.0:
-                    grad_dicts[i][name] = grad
-        return values, grad_dicts
-
-    def _cov_from_G(self, G, hess_inv):
-        """Covariance matrix and diagonal errors from gradient matrix G.
-
-        *G* has shape ``(n_obs, n_free)``.  Returns ``(cov, errors)``
-        where *cov* = ``G @ hess_inv @ G.T``.
-        """
-        cov = G @ hess_inv @ G.T
-        err = np.sqrt(np.maximum(np.diag(cov), 0.0))
-        return cov, err
 
     # -- forward-mode duals -----------------------------------------
     def fwd_names(self):
@@ -1883,106 +1960,265 @@ class Fitter:
         grad[i] = 1.0
         return Fwd(value, grad)
 
-    @staticmethod
-    def _as_real_observable(out, where):
-        arr = np.asarray(out)
-        if np.iscomplexobj(arr):
+    def fwd_backward(self, kernel_grads, resolved):
+        """Chain kernel gradient blocks (``ck``/``m0``/``g0``) to names.
+
+        The companion of :meth:`fwd_of`: a ``compute()`` returns
+        ``{"ck": ..., "m0": ...}``; this maps it onto the physical parameters
+        so the result can be fed to ``fwd_of`` / :meth:`sum_stream`.
+        """
+        return self._kernel_builder.backward(kernel_grads, resolved)
+
+    def sum_stream(self, fn, resolved=None, data=None, batch=None, norm=None,
+                   x=None):
+        """Sum a **chunked** contribution over a sample.
+
+        *fn* receives a backend handle and returns whatever you want summed —
+        a number, a :class:`tabpwa.fwd.Fwd`, or any pytree of those (dict /
+        list / tuple) — and the chunks are added up leaf by leaf.  ``+`` is
+        the only operation, so a plain number and a dual are both supported:
+        the leaf type decides whether a gradient comes along.
+
+        Chunks are **outer**: one ``load_data`` per chunk, every output reads
+        that same handle, so per-handle caches are built once per chunk.
+
+        Args:
+            fn: ``fn(handle) -> value | pytree``; or a kernel-param dict /
+                list of dicts, in which case the helper computes each of them
+                on the handle and turns the result into a dual with
+                *resolved* (so the variable loop lives here).
+            resolved: physical-parameter dict for the param-dict form.
+            x: the flat parameter vector the param-dict form chains its
+                gradient at.  Required by that form (a dual's gradient is
+                meaningless without the point it was taken at); ignored by
+                the callable form, whose *fn* builds its own duals.
+            data: numpy dict of the sample; ``None`` = the fitter's phsp.
+            batch: events per chunk; ``None`` = one pass over the whole
+                sample (the fitter's existing handle, nothing freed).
+            norm: forwarded to ``backend.compute`` (``None`` = unnormalised).
+
+        Returns:
+            The summed contribution, in the shape *fn* returned.
+        """
+        param_form = not callable(fn)
+        if param_form:
+            if resolved is None:
+                raise ValueError(
+                    "sum_stream: the param-dict form needs `resolved` (the "
+                    "physical dict, e.g. build_params(x)[1])")
+            if x is None:
+                raise ValueError(
+                    "sum_stream: the param-dict form needs `x` (the flat "
+                    "vector those params were built from) — the dual chain "
+                    "resolved -> free depends on it")
+            params = [fn] if isinstance(fn, dict) else list(fn)
+        else:
+            params = None
+
+        if data is None and batch is None:
+            chunks = [self._phsp_holder]
+            own_handle = False
+        else:
+            if batch is not None and int(batch) <= 0:
+                raise ValueError(f"sum_stream: batch must be > 0, got {batch}")
+            arrays = self._phsp_np if data is None else data
+            if not isinstance(arrays, dict):
+                raise TypeError(
+                    "sum_stream: pass the numpy arrays (a handle cannot be "
+                    "sliced); use data=None for the fitter's phsp")
+            chunks = _data_split(arrays, batch)
+            own_handle = True
+
+        def contributions():
+            """One contribution per chunk, the handle freed before the next."""
+            for chunk in chunks:
+                handle = self.backend.load_data(chunk) if own_handle else chunk
+                try:
+                    if param_form:
+                        out = [self.fwd_of(
+                            *self._compute_and_chain(prm, handle, resolved,
+                                                     norm),
+                            resolved=resolved, x=x) for prm in params]
+                        yield out[0] if len(params) == 1 else out
+                    else:
+                        yield fn(handle)
+                finally:
+                    if own_handle and hasattr(handle, "free"):
+                        handle.free()
+
+        # ``batch_sum`` is exactly this fold (first seeds, later ones add) and
+        # keeps one accumulated tree alive instead of one per chunk.  The
+        # empty case is checked here, *before* the fold: wrapping it in
+        # ``except ValueError`` would also swallow a callback's own
+        # ``ValueError`` and misreport it as an empty sample.
+        it = iter(contributions())
+        first = next(it, _NO_CHUNK)
+        if first is _NO_CHUNK:
             raise ValueError(
-                f"{where}: the observable is complex — return a real one "
-                "(Re, Im, |y|^2, ...); Fwd is real-valued")
-        return np.atleast_1d(arr.astype(float))
+                "sum_stream: the sample is empty — nothing to sum over")
+        return batch_sum(lambda out: out, _chain_first(first, it))
+
+    def _compute_and_chain(self, params, handle, resolved, norm=None):
+        """``(value, chained gradient dict)`` of one kernel-param dict."""
+        Q, grads, _ = self.backend.compute(params, handle, norm=norm)
+        return Q, self.fwd_backward(grads, resolved)
 
     def fd_jacobian(self, fn, args=(), kwargs=None, *, fit_result=None,
-                    x=None, rel=1e-5):
-        """Central-difference Jacobian of ``fn`` w.r.t. the free parameters.
+                    x=None, rel=1e-5, names=None):
+        """Central-difference Jacobian of ``fn``, in ``x`` space.
 
-        *fn* is called as ``fn(phys, *args, **kwargs)`` with a **physical**
-        parameter dict (the resolved dict, at most one entry perturbed) and
-        returns a scalar or a 1-D array — the observables whose
-        uncertainties you want.  The extra arguments are passed **explicitly**
-        (``args`` tuple, ``kwargs`` dict) rather than collected variadically,
-        so the fitter's own keywords (``fit_result``, ``x``, ``rel``) can
-        never be swallowed by the callable's ``**kwargs``.
+        *fn* is called as ``fn(phys, *args, **kwargs)`` (resolved dict in, a
+        real scalar or 1-D array out).  ``args``/``kwargs`` are passed
+        explicitly — never collected variadically — so the fitter's own
+        keywords cannot be swallowed by the callable's ``**kwargs``.
 
-        The perturbation is applied to the free names in ``fwd_names()``
-        order (the same space :class:`tabpwa.fwd.Fwd` uses), so the rows can
-        be handed straight to :func:`tabpwa.fwd.rows`.
+        Returns ``(values, J)`` with ``J[i, j] = d values[i] / d x[j]``:
+        exactly what :func:`tabpwa.fwd.rows` and ``Fwd.sigma`` consume.
 
-        The observable must be **real**: :class:`tabpwa.fwd.Fwd` is real, so
-        a complex model quantity has to be handed over as the quantity you
-        actually plot (``Re``/``Im``, ``|y|²``, a ratio …) — a complex
-        return raises instead of being silently truncated.
+        Two sweeps give that same matrix, differing only in cost:
+
+        * ``names=None`` (default) steps the flat slots and re-resolves
+          (``build_params(x ± h e_j)[1]`` — the MODEL frame) — ``2·len(x)``
+          evaluations.  Aliases
+          move together and the bounds Jacobian is included by construction,
+          so it cannot be wrong; use it when the observable depends on many
+          parameters (a fit fraction depends on all of them).
+        * ``names=[...]`` steps those resolved *values* and chains the result
+          analytically (``cm.full_gradient``, no model evaluation) —
+          ``2·len(names)`` evaluations.  Cheaper for a small set (a
+          Breit-Wigner mass/width), but the set must be **complete**: aliased
+          names share one ``x`` slot, so omitting one under-counts it.
+
+        The observable must be **real** — a complex return raises rather than
+        being silently truncated.
 
         Args:
             fn: ``fn(phys_dict, *args, **kwargs) -> float | array`` (real).
-            args: positional arguments forwarded to *fn* after the dict.
-            kwargs: keyword arguments forwarded to *fn*.
-            fit_result: an ``OptimizeResult`` (for ``x``).
-            x: the parameter vector, when *fit_result* is not given.
+            args / kwargs: forwarded to *fn* after the phys dict.
+            fit_result / x: the point (``fit_result.x`` wins).
             rel: relative step (``h = rel * max(1, |value|)``).
+            names: perturb these resolved names instead of the flat slots.
 
         Returns:
-            ``(values, J)`` with ``values`` the unperturbed output (1-D) and
-            ``J[i, j] = d values[i] / d param_j``.
+            ``(values, J)`` — ``J.shape == (values.size, len(x))``.
         """
         if fit_result is not None:
             x = fit_result.x
         if x is None:
             raise ValueError("fd_jacobian needs fit_result or x")
-        resolved = self.report_params(x)
-        names = [n for n in self.fwd_names() if n in resolved]
+        x = np.asarray(x, dtype=float).ravel()
+        # The MODEL frame (``build_params``), not the blinded *report* frame:
+        # a blind shift is part of the model the fit optimises (the fit
+        # re-optimises against it), so the physical point at x is the model
+        # one.  ``report_params`` only removes the offset for display, and
+        # evaluating the model there answers a different question.
+        resolved = self.build_params(x)[1]
 
         extra_kw = dict(kwargs or {})
 
         def call(phys):
-            return fn(phys, *args, **extra_kw)
+            return _as_real_observable(fn(phys, *args, **extra_kw),
+                                       "fd_jacobian")
 
+        if names is None:
+            # flat slots: aliases move together, bounds Jacobian included
+            values = call(resolved)
+            J = np.zeros((values.size, x.size))
+            for j in range(x.size):
+                h = rel * max(1.0, abs(float(x[j])))
+                up, dn = x.copy(), x.copy()
+                up[j] += h
+                dn[j] -= h
+                J[:, j] = (call(self.build_params(up)[1])
+                           - call(self.build_params(dn)[1])) / (2.0 * h)
+            return values, J
+
+        # named resolved values, chained to x afterwards
+        keys = [n for n in names if n in resolved]
+        dropped = [n for n in names if n not in resolved]
+        if not keys:
+            raise ValueError(
+                "fd_jacobian: none of the requested names are resolved")
+        if dropped:
+            # silence here is the under-count failure mode: a caller who
+            # believes it swept N parameters gets N-1 columns
+            warnings.warn(
+                f"fd_jacobian: {len(dropped)} requested name(s) are not "
+                f"resolved and were skipped: {dropped[:4]}",
+                RuntimeWarning, stacklevel=2)
+        # only the perturbed names need a float: a config may carry a
+        # non-float (complex) resolved entry that is not being differentiated
         base = dict(resolved)
-        values = self._as_real_observable(call(base), "fd_jacobian")
-        J = np.zeros((values.size, len(names)), dtype=float)
-        for j, name in enumerate(names):
-            v = float(resolved[name])
+        values = call(base)
+        J = np.zeros((values.size, len(keys)))
+        for j, name in enumerate(keys):
+            v = float(base[name])
             h = rel * max(1.0, abs(v))
-            up = dict(base)
+            up, dn = dict(base), dict(base)
             up[name] = v + h
-            dn = dict(base)
             dn[name] = v - h
-            J[:, j] = (self._as_real_observable(call(up), "fd_jacobian")
-                       - self._as_real_observable(call(dn), "fd_jacobian")) \
-                / (2.0 * h)
-        return values, J
+            J[:, j] = (call(up) - call(dn)) / (2.0 * h)
 
-    def fwd_of(self, value, grad_dict):
-        """``Fwd`` for one summed quantity: ``value`` + gradient by name.
+        # phys -> x: analytic chain, one row per perturbed name
+        chain = np.array([self.cm.full_gradient({n: 1.0}, resolved, x)
+                          for n in keys])
+        return values, J @ chain
+
+    def fwd_of(self, value, grad_dict, resolved=None, x=None):
+        """``Fwd`` for one summed quantity: ``value`` + gradient over ``x``.
 
         ``value`` is a scalar the kernel returned for a sample
-        (``compute(..., norm=None)`` gives ``Q = Σ_e w_e·P(e)``) and
-        *grad_dict* must be the **chained** gradient of that same scalar,
-        ``{physical_name: dvalue/dname}`` — e.g. the result of
-        ``_kernel_builder.backward(grads, resolved)``.  Raw kernel blocks
-        (``{"ck": …, "m0": …, "g0": …}``) are rejected: they carry kernel
-        slots, not parameter names.
+        (``compute(..., norm=None)`` gives ``Q = sum_e w_e.P(e)``) and
+        *grad_dict* must be the **chained-by-name** gradient of that same
+        scalar — the result of ``_kernel_builder.backward(grads, resolved)``,
+        i.e. ``{physical_name: dvalue/dname}``.  Raw kernel blocks
+        (``{"ck": ..., "m0": ..., "g0": ...}``) are rejected: they carry
+        kernel slots, not parameter names.
 
-        Names outside :meth:`fwd_names` are ignored (fixed parameters, or a
-        block attributed to a shared BW — they have no slot in the fixed
-        space).
+        The returned gradient spans the **free parameters in ``x`` order**
+        (:meth:`fwd_names`) — the space a fit covariance (``hess_inv``)
+        lives in.  The resolved dict is *not* that space: it holds aliases
+        (``rhoB_width`` is ``rhoA_width``), derived values
+        (``resolved = bounds(x)``, so ``d resolved/dx`` is not 1) and
+        unpacked names.  The chain therefore always goes through
+        ``cm.full_gradient(grad_dict, resolved, x)``, so a name that reaches
+        a free slot only through an alias/transform/bounds still carries its
+        contribution instead of being dropped.  Skipping it makes
+        ``R.sigma(hess_inv)`` wrong (measured on ``config_amp``: 0.00759
+        instead of the finite-difference 0.003813).
+
+        *x* must be the point the gradient was evaluated at.  There is no
+        implicit fallback to the last evaluated point: a stale ``x`` yields a
+        gradient that is silently wrong (same value, wrong derivative), so a
+        missing *x* is an error rather than a guess.
+
+        Args:
+            value: the scalar (a plain number from ``compute``).
+            grad_dict: ``{resolved name: d value / d name}``.
+            resolved: the resolved parameter dict at *x* (recomputed when
+                omitted).
+            x: the flat free-parameter vector the gradient belongs to.
         """
         from .fwd import Fwd
 
-        if any(k in grad_dict for k in ("ck", "m0", "g0", "scalar")):
+        if any(k in grad_dict for k in ("ck", "m0", "g0", "scalar",
+                                        "coeff", "norm")):
             raise ValueError(
                 "fwd_of expects physical-name gradients (e.g. "
                 "_kernel_builder.backward(grads, resolved)), not raw kernel "
                 f"blocks: got keys {sorted(grad_dict)[:6]}")
 
-        names = self.fwd_names()
-        index = {n: i for i, n in enumerate(names)}
-        grad = np.zeros(len(names), dtype=float)
-        for name, g in grad_dict.items():
-            i = index.get(name)
-            if i is not None:
-                grad[i] = float(np.real(g))
-        return Fwd(value, grad)
+        if x is None:
+            raise ValueError(
+                "fwd_of needs the parameter point x= (the resolved -> free "
+                "chain depends on it); there is no implicit fallback to the "
+                "last evaluated point, which would silently chain at the "
+                "wrong x")
+        x = np.asarray(x, dtype=float).ravel()
+        if resolved is None:
+            resolved = self.build_params(x)[1]     # model frame (the kernel's)
+        grad = self.cm.full_gradient(grad_dict, resolved, x)
+        return Fwd(value, np.asarray(grad, dtype=float))
 
     def cal_uncertainties_multi(self, fun, param_names, fit_result, jac=False,
                                 return_cov=True):
@@ -1999,32 +2235,37 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        resolved = self.report_params(x0)
+        # model frame: the point the kernel computes at (see fd_jacobian)
+        resolved = self.build_params(x0)[1]
         names = [n for n in param_names if n in resolved]
 
+        # The callback sees exactly the names that will be differentiated, in
+        # both branches: a `fun` reading a name outside `param_names` must fail
+        # loudly (``KeyError``, as before) rather than be silently
+        # under-counted by a sweep that never perturbs it.
+        fit_dict = {n: float(resolved[n]) for n in names}
         if jac:
-            fit_dict = {n: float(resolved[n]) for n in names}
             values, grad_dicts = fun(fit_dict)
-            values = list(values)
         else:
-            values, grad_dicts = self._fd_grad_dicts(fun, names, resolved)
-
+            values, grad_dicts = fun(fit_dict), None
+        values = list(values)
         n_obs = len(values)
+
+        # no covariance (or nothing to differentiate): zero errors, no sweep
         if hess_inv is None or not names:
-            return (values, np.zeros((n_obs, n_obs))) if return_cov else (values, np.zeros(n_obs))
+            return ((values, np.zeros((n_obs, n_obs))) if return_cov
+                    else (values, np.zeros(n_obs)))
+
+        if not jac:
+            # the named sweep returns the x-space matrix directly
+            values, G = self.fd_jacobian(fun, x=x0, names=names)
+            return _cov_return(G, hess_inv, list(values), return_cov)
 
         G = np.zeros((n_obs, len(x0)))
         for i in range(n_obs):
-            if not grad_dicts[i]:
-                continue
-            G[i] = self.cm.full_gradient(
-                grad_dicts[i], resolved, x0)
-
-        if return_cov:
-            cov, _ = self._cov_from_G(G, hess_inv)
-            return values, cov
-        var = np.sum(G * (G @ hess_inv), axis=1)
-        return values, np.sqrt(np.maximum(var, 0.0))
+            if grad_dicts[i]:
+                G[i] = self.cm.full_gradient(grad_dicts[i], resolved, x0)
+        return _cov_return(G, hess_inv, values, return_cov)
 
     def cal_uncertainties_multi_vec(self, fun, param_names, fit_result, jac=False,
                                     return_cov=True):
@@ -2055,37 +2296,35 @@ class Fitter:
 
         x0 = fit_result.x
         hess_inv = getattr(fit_result, 'hess_inv', None)
-        resolved = self.report_params(x0)
+        # model frame (see cal_uncertainties_multi)
+        resolved = self.build_params(x0)[1]
         names = [n for n in param_names if n in resolved]
 
+        # same contract as ``cal_uncertainties_multi``: the callback sees only
+        # the differentiable names
+        fit_dict = {n: float(resolved[n]) for n in names}
         if jac:
-            fit_dict = {n: float(resolved[n]) for n in names}
             values, grad_dicts = fun(fit_dict)
-            values = list(values)
         else:
-            values, grad_dicts = self._fd_grad_dicts(fun, names, resolved)
-
+            values, grad_dicts = fun(fit_dict), None
+        values = list(values)
         n_obs = len(values)
+
         if hess_inv is None or not names:
-            return (values, np.zeros((n_obs, n_obs))) if return_cov else (values, np.zeros(n_obs))
+            return ((values, np.zeros((n_obs, n_obs))) if return_cov
+                    else (values, np.zeros(n_obs)))
 
-        # Jacobian of resolved params w.r.t. flat x — computed once
+        if not jac:
+            values, G = self.fd_jacobian(fun, x=x0, names=names)
+            return _cov_return(G, hess_inv, list(values), return_cov)
+
+        # the resolved -> x Jacobian once, reused for every observable
         J, _ = self.jacobian(x0, names)
-
-        # G[i, :] = Σⱼ d(obsᵢ)/d(nameⱼ) · d(nameⱼ)/d(x)
         G = np.zeros((n_obs, len(x0)))
         for i in range(n_obs):
-            if not grad_dicts[i]:
-                continue
-            for name, grad_val in grad_dicts[i].items():
-                j_idx = names.index(name)
-                G[i] += grad_val * J[j_idx]
-
-        if return_cov:
-            cov, _ = self._cov_from_G(G, hess_inv)
-            return values, cov
-        var = np.sum(G * (G @ hess_inv), axis=1)
-        return values, np.sqrt(np.maximum(var, 0.0))
+            for name, g in grad_dicts[i].items():
+                G[i] += g * J[names.index(name)]
+        return _cov_return(G, hess_inv, values, return_cov)
 
     def get_particle_model(self, particle_name):
         """Find a particle model by resonance name.

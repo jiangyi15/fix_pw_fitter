@@ -99,12 +99,22 @@ def _setup_fitter(args):
         print(f"  Loaded constraints from {cp}")
     else:
         print(f"WARNING: no constraints file at {cp}")
-    phsp, _ = Fitter.load_npz(args.phsp, max_events=args.max_events)
+    # the sample comes from the fitter's generic loader (config angle layout,
+    # path map and sidecars), not the legacy load_npz default
+    # a fraction is a ratio of integrals, so the unweighted (efficiency-free)
+    # phase space is the right measure; ``phsp`` is the fallback
+    phsp = (f.load_dataset("phsp_noeff", path=args.phsp,
+                           max_events=args.max_events)
+            or f.load_dataset("phsp", path=args.phsp,
+                              max_events=args.max_events))
+    if phsp is None:
+        raise SystemExit(f"no phase space: data.phsp is not configured and "
+                         f"--phsp was not given")
     f.set_phsp(phsp)
     return f
 
 
-def _compute_groups(f, stems, af):
+def _compute_groups(f, stems, af, batch=None):
     """Build masks, compute fractions for all groups."""
     n_base = len(f.full_decay.get_partial_waves_params())
 
@@ -124,13 +134,13 @@ def _compute_groups(f, stems, af):
         all_masks.append(ls)
         all_masks.append(lsbar)
 
-    vals, errs = af.fractions(all_masks)
+    vals, errs = af.fractions(all_masks, batch=batch)
     return groups, vals, errs, split_ls, n_base
 
 
 # ── Output: terminal ───────────────────────────────────────────────────────
 
-def _output_terminal(groups, vals, errs, af, split_ls):
+def _output_terminal(groups, vals, errs, af, split_ls, batch=None):
     """Terminal output."""
     print("\n" + "=" * 80)
     print("  Amplitude fractions by first decay")
@@ -152,7 +162,7 @@ def _output_terminal(groups, vals, errs, af, split_ls):
                 sub_ls, sub_lsbar = split_ls(sub_idxs)
                 sub_masks.append(sub_ls)
                 sub_masks.append(sub_lsbar)
-            sub_vals, sub_errs = af.fractions(sub_masks)
+            sub_vals, sub_errs = af.fractions(sub_masks, batch=batch)
             for j, (wave_lbl, _) in enumerate(waves):
                 sv, se = sub_vals[2 * j], sub_errs[2 * j]
                 svb, seb = sub_vals[2 * j + 1], sub_errs[2 * j + 1]
@@ -169,7 +179,8 @@ def _output_terminal(groups, vals, errs, af, split_ls):
     return csv_rows
 
 
-def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path, compile_pdf=True):
+def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path,
+                  compile_pdf=True, batch=None):
     """LaTeX/PDF output."""
 
     def _fmt(v, e):
@@ -199,7 +210,7 @@ def _output_latex(groups, vals, errs, af, split_ls, label_fn, output_path, compi
                 sub_ls, sub_lsbar = split_ls(sub_idxs)
                 sub_masks.append(sub_ls)
                 sub_masks.append(sub_lsbar)
-            sub_vals, sub_errs = af.fractions(sub_masks)
+            sub_vals, sub_errs = af.fractions(sub_masks, batch=batch)
             for j, (wave_lbl, _) in enumerate(waves):
                 sv, se = sub_vals[2*j], sub_errs[2*j]
                 sbv, sbe = sub_vals[2*j+1], sub_errs[2*j+1]
@@ -239,8 +250,14 @@ def main():
         description="Fit fractions by first decay (B → X + Y)")
     ap.add_argument("fit_json", help="JSON from Fitter.save_params()")
     ap.add_argument("--config", default=_default_path("config_angle.yml"))
-    ap.add_argument("--phsp", default=_default_path("data/phsp_arrays.npz"))
+    ap.add_argument("--phsp", default=None,
+                    help="Phase-space file (.npz kernel arrays or momentum "
+                         ".npy); default: the config's data.phsp_noeff "
+                         "(efficiency-free), falling back to data.phsp")
     ap.add_argument("--max-events", type=int, default=None)
+    ap.add_argument("--batch", type=int, default=None,
+                    help="Events per chunk: stream the phase space through "
+                         "sum_stream (peak memory is one chunk)")
     ap.add_argument("--backend", default=None,
                     help="Compute backend (use an f64 backend — f32 "
                          "backends like cuda32_v3 give noisy gradients "
@@ -263,10 +280,12 @@ def main():
     label_fn = _make_label_fn(name_map)
 
     stems = group_ck_stems(f.model, label_fn)
-    groups, vals, errs, split_ls, _ = _compute_groups(f, stems, af)
+    groups, vals, errs, split_ls, _ = _compute_groups(f, stems, af,
+                                                      batch=args.batch)
 
     # ── Terminal output (always) ───────────────────────────────────
-    csv_rows = _output_terminal(groups, vals, errs, af, split_ls)
+    csv_rows = _output_terminal(groups, vals, errs, af, split_ls,
+                                batch=args.batch)
 
     # ── CSV output ─────────────────────────────────────────────────
     if args.output:
@@ -283,7 +302,7 @@ def main():
     if args.output:
         tex_path = args.output + ".tex"
         _output_latex(groups, vals, errs, af, split_ls, label_fn,
-                      tex_path, compile_pdf=True)
+                      tex_path, compile_pdf=True, batch=args.batch)
 
 
 if __name__ == "__main__":

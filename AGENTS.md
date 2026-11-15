@@ -17,6 +17,24 @@ separate step, verify green, then commit as a **single standalone git
 command**.  A red or incomplete verification must never be committed,
 and a commit must never ride on the tail of a test pipeline.
 
+**Never commit unfinished work.**  A commit is a self-contained unit that
+must stand on its own: the feature it names is implemented, tested and
+verified *in that commit*, not "will be fixed in the next one".  Concretely,
+do not commit when any of these is true:
+
+- a test for the change is written but failing (or not written yet);
+- a guard/validation the change obviously needs is missing, or a known
+  defect in the new code path is still open;
+- the change only makes sense together with an uncommitted edit elsewhere
+  (a half-migrated API, a doc that contradicts the code);
+- the verification had to be narrowed (skipped tests, a smaller suite, an
+  environment workaround) and the reason is not part of the commit message.
+
+If the work is in that state, keep it in the working tree (or stage it),
+say what is missing, and wait — do not "checkpoint" it as a commit.  A
+follow-up fix commit is for problems *discovered later*, never for work
+the author already knew was incomplete at commit time.
+
 ## Backend Selection
 
 | Backend | Flag | Note |
@@ -69,8 +87,19 @@ fixed once by the fitter —
 ```python
 f.fwd_names()                       # the free parameters, x-slot order
 f.fwd_parameter("rho_mass")         # unit tangent: grad[i] = 1 at that slot
-f.fwd_of(total, grads)              # from a compute()'s (value, {name: d}) pair
+f.fwd_of(total, grads, x=x)         # from a compute()'s (value, {name: d}) pair
+f.fwd_backward(kernel_grads, resolved)   # ck/m0/g0 blocks -> parameter names
+f.sum_stream(fn, batch=50_000)      # sum a chunked contribution
+f.sum_stream(params, resolved, x=x, batch=50_000)  # or param dicts
 ```
+
+`sum_stream` is a **sum**, not a forward-mode feature: a contribution may be a
+number, an array or a `Fwd`, or any pytree of those, and the chunks are added
+up leaf by leaf (`fwd.batch_sum`: the `tfpwa.data.data_merge` recursion with
+`+` as the leaf operation, which also carries plain values — that is how the
+finite-difference route streams).  `fwd.data_split` does the chunking, chunks
+**outer** so one `load_data` serves every output, and only one accumulated tree
+is ever alive.
 
 so every `Fwd` in one fit shares the ordering and the operators raise (not
 broadcast) when two different spaces meet.  `sigma(cov)` gives
@@ -105,6 +134,92 @@ def lorentz(m, m0, w):
     return w * w / ((m * m - m0 * m0) ** 2 + w * w)   # number or dual
 ```
 
+`AmplitudeFractions` (fraction = `Σ w·|A_mask|² / Σ w·|A_all|²`) provides only
+the **per-handle integrand**; chunking, loading and accumulation are the
+fitter's (`sum_stream`), never the fraction class's:
+
+```python
+af  = AmplitudeFractions(fitter, fit_result)
+out = f.sum_stream(lambda h: af.fwd_integrate([[1], [2], [1, 2]], h),
+                   data=arrays, batch=50_000)      # [Fwd, Fwd, Fwd]
+R   = out[0] / out[2]                              # value + exact gradient
+band = R.sigma(fit_result.hess_inv)
+```
+
+The sample is given as **arrays** (`data=` a numpy dict) or left `None` for the
+fitter's phase space — never a handle.  The handle resolves lazily: the given
+arrays (loaded here, freed by `close()`), else `fitter._phsp_holder` from
+`set_phsp` (used as-is, never freed), else a load of `fitter._phsp_np`.  A
+batched run slices whichever arrays are in play, so it integrates the sample
+you asked for, not the fitter's.  The load is **lazy and never whole-sample** in
+that mode: `batch=` streams one chunk per `load_data` (a 120-event sample at
+`batch=32` gives loads of 32/32/32/24 and leaves `af._handle is None`), so the
+peak memory really is one chunk.
+
+A `Fwd`'s gradient is **`x`-space** — the space `hess_inv` lives in — and the
+only reduction from the kernel's resolved-name gradient to it is
+`cm.full_gradient(grad_dict, resolved, x)`.  Resolved is *not* that space: it
+holds aliases (`rhoB_width` is `rhoA_width`), bounded values
+(`resolved = bounds(x)`, so `d resolved/dx` is 0.011 for `rhoA_width` in the
+`config_amp` fixture) and unpacked names.  Indexing resolved names literally
+into the `fwd_names()` vector drops 198 of 349 gradient names and gives
+`sigma` 0.00759 instead of the true 0.003813.
+
+`Fitter.fwd_of(value, grad_dict, resolved=None, x=None)` is that single
+assembly point, and **requires** the point: no fallback to `_last_xk` (a stale
+`x` chains to the wrong gradient while the value stays identical, so nothing
+downstream can notice).  `sum_stream(fn, resolved, x=…, batch=…)`'s param-dict
+form demands `x` for the same reason.
+
+`af.fwd_integrate(masks, handle, phys=None, x=None)` delegates to it and
+returns one `Fwd` per mask; it never loads or frees, which is what makes it a
+`sum_stream` chunk callback.  A mask over a *fixed* coupling legitimately has
+a zero gradient.
+
+`fractions(masks, denominator=None, param_names=None, jac=True, batch=None)`
+— `batch=None` keeps `cal_uncertainties_multi` (analytic gradients by resolved
+name, reduced to `x` inside it), `batch=N` streams
+through `sum_stream` and takes `R.sigma(hess_inv)` on the dual that already
+spans `x`.  All three agree to 1e-9, blinded or not.
+
+**Which frame they evaluate at is not a detail.**  Blinding is display-only:
+the program always works with the real physics (`build_params(x)[1]`, the
+model frame — what the kernel, the likelihood and the fit use), and
+`report_params(x)` returns those real values *minus* the seed-derived offset,
+i.e. the real value hidden behind an unknown bias, for printing and saving.
+Nothing internal consumes the report frame.  So every derivative here is taken
+around the **model** frame (`fd_jacobian`, `cal_uncertainties_multi`,
+`fwd_of`'s default).  Evaluating at the report frame — which is what
+`report_params` used to be used for — gives the fraction of a parameter point
+the fit never fitted: measured 3.29 vs 3.33 on `pwa_gen_mb`, and the two
+routes then disagree by 1 %.
+
+`jac=False` sweeps finite differences over the flat slots — aliases move
+together and the bounds Jacobian is included, so it cannot be wrong — and
+`batch=` streams it like the analytic route (at `2·len(x)` evaluations, so the
+loads multiply; that is the price of finite differences).
+
+`Fitter.fd_jacobian(fn, …, names=None)` is the one FD entry point: `names=None`
+is that flat-slot sweep, `names=[…]` steps those resolved values and chains to
+`x` analytically (`2·len(names)` evaluations instead of `2·len(x)`).  The named
+form is for an observable with a small **genuinely complete** set (a
+Breit-Wigner mass/width — `get_bw_params` passes exactly its 2 names); it is
+not a shortcut for a fraction, which depends on every parameter the model
+consumes (more names than `x` on the `pwa_gen` fixtures), so `fractions` only
+offers the `x` sweep.  A requested name that is not resolved warns rather than
+being silently dropped.
+
+The mask memo is cleared per evaluation — it used to go stale across
+perturbations, and `_compute_total_and_grad` re-derived `ck` from the best-fit
+params instead of the perturbed ones, silently returning zero errors.
+
+`scripts/calc_fractions.py` / `calc_first_decay_fractions.py` expose this as
+`--batch N`, and every fraction script takes its sample from
+`Fitter.load_dataset(prefix, path=…, max_events=…)` — the config-aware loader,
+whose angle layout comes from `kernel_config["angle_k"]`.  The static
+`Fitter.load_npz` must not be used for a sample: its `n_angle_comp` defaults
+to 3 (legacy B→4π), so a pure-PWA config loads into the wrong shape.
+
 For a **curve or grid** (many outputs, few parameters) don't build one dual
 per point by hand — take the FD Jacobian and map it:
 
@@ -120,13 +235,18 @@ band  = [d.sigma(cov) for d in duals]
 `fd_jacobian(fn, args=(), kwargs=None, *, fit_result=…, x=…, rel=…)` calls
 `fn(phys, *args, **kwargs)` with the extra arguments given **explicitly**
 (not collected variadically), so the fitter's own keywords can never be
-swallowed by the callable's `**kwargs`.  It uses central differences over the free names
-(`fwd_names()`, physical inputs, so transform-derived slots update
-correctly), costs
-`2·n_var` evaluations of the function and returns `(values, J)` with
-`J[i, j] = d value_i / d param_j` — the same row layout `rows()` turns into
-duals.  That is the cheap form for a mass scan: one vectorised evaluation of
-the grid plus `2·n_var` tangent sweeps, not `n_points` scalar dual chains.
+swallowed by the callable's `**kwargs`.  It uses central differences in
+**`x` space** — step `j` moves flat slot `j` and re-resolves
+(`build_params(x ± h·e_j)[1]`, the model frame — *not* the blinded
+`report_params`), so `J[i, j] = ∂values[i]/∂x[j]` and
+`rows(y, J).sigma(hinv)` is the correct error.  (An earlier version perturbed
+the *resolved* dict and its docstring still claimed `x`; the two differ by the
+bounds Jacobian — `f0(980)_mass` 1.0 vs 0.548 — so `sigma` was wrong on every
+bounded parameter.)  It costs `2·n_var` evaluations and returns
+`(values, J)` with `J[i, j] = ∂ value_i / ∂ x_j` — the row layout `rows()`
+turns into duals.  That is the cheap form for a mass scan: one vectorised
+evaluation of the grid plus `2·n_var` tangent sweeps, not `n_points` scalar
+dual chains.
 The observable must be **real** (`Re`, `Im`, `|y|²`, a ratio …): `Fwd` is
 real-valued, so a complex return raises rather than being silently truncated
 (`abs(lineshape(...))**2` above, not the complex `lineshape` itself).
@@ -752,7 +872,7 @@ Example configs remain at the repo root as copies of the `tests/`
 versions (examples only — the suite never reads them).
 
 ```bash
-pytest tests/ -v                        # 539 tests
+pytest tests/ -v                        # 1032 tests
 pytest tests/test_fitter_constraints.py  # constraint pipeline
 pytest tests/test_new_apis.py            # LinearTransform, fmt_meas, get_defaults, …
 tests/validate_gradients.py              # 3-point gradient validation (all 6 backends)

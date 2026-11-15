@@ -72,6 +72,36 @@ Relative paths keep their existing anchor: config files anchor on the
 config's directory; dict configs resolve relative to the CWD (a dict has no
 anchor).
 
+## `load_dataset(prefix, path=…, max_events=…)`
+
+`Fitter.load_dataset` is the config-aware loader and the one scripts should
+call.  The angle layout comes from the fitter's own
+`kernel_config["angle_k"]`, so a pure-PWA config (4 components) loads
+correctly — unlike the static `Fitter.load_npz`, whose `n_angle_comp`
+defaults to the legacy B→4π value 3.
+
+```python
+phsp = f.load_dataset("phsp")                       # the config's data.phsp
+phsp = f.load_dataset("phsp", path="other.npz")     # explicit kernel arrays
+phsp = f.load_dataset("phsp", path="mom.npy")       # explicit momenta (N, F, 4)
+phsp = f.load_dataset("phsp", max_events=5000)      # first 5000 rows
+```
+
+* `path` accepts a `.npz` (kernel arrays) or a `(N, n_finals, 4)` momenta
+  `.npy`; anything else is rejected.
+* A `.npz` is self-contained: its own `weight` / `bkg_raw` arrays are used and
+  the config's `{prefix}_weight` / `{prefix}_bg_value` are **ignored** (an
+  `.npz` cannot be split into momenta + sidecars that would have to agree).
+* A momenta `.npy` **does** take those sidecars from the config — they are
+  part of the same dataset.  `max_events` slices the first N rows and slices
+  longer sidecars with them; a shorter sidecar is an error, and a longer one
+  warns on truncation.
+* An explicit `path=` is used as given (relative paths resolve against the
+  CWD); config values resolve through the path map, anchored on the config's
+  directory.
+* An unconfigured prefix returns `None` (no exception) when no `path` is
+  given.
+
 ## Example: farm config used locally
 
 ```yaml
