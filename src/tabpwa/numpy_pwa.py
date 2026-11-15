@@ -144,8 +144,8 @@ class NumpyPWA:
 
         one_over_bw = 1.0 / bw_p
         if self._n_on:
-            from tabpwa.pwa_gen_support import numerator_values
-            common = one_over_bw * (fa * fl_p * numerator_values(kc, k, mass))
+            from tabpwa.pwa_gen_support import numerator_product
+            common = one_over_bw * (fa * fl_p * numerator_product(kc, k, mass))
         else:
             common = one_over_bw * (fa * fl_p)           # (ne, n_wave) p-major
 

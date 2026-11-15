@@ -62,12 +62,36 @@ def has_numerator(config):
 
 
 def numerator_values(config, kernel, mass):
-    """``N_{n_index[w]}(m_e)`` as a complex ``(n_events, n_wave)`` array."""
+    """Per-factor numerators ``N_{n_index[f]}(m_{n_mass_index[f]})``.
+
+    ``f = w·n_res + r`` (the ``bw_order`` layout), so a chain carrying a
+    numerator on more than one BW factor is evaluated at each factor's **own**
+    mass.  Returns ``(n_events, n_fact)`` complex.
+    """
     idx = np.asarray(config["n_index"])
-    cols = np.asarray(config["n_mass_index"])
+    # each factor reads its OWN BW's mass column -- the same
+    # ``mass_index[bw_order]`` the denominator propagator uses
+    cols = np.asarray(config["mass_index"])[np.asarray(config["bw_order"])]
     m = np.take(mass, cols, axis=-1)
     return kernel.interp_catmull_rom(
         config["n_table"], idx, m, config["n_min"], config["n_delta"])
+
+
+def numerator_product(config, kernel, mass):
+    """``Π_r N_{n_index[w·n_res+r]}`` — ``(n_events, n_wave)`` complex.
+
+    The product runs over a wave's factors, each at its own mass (row 0 is
+    the constant 1, so an all-constant config gives ``1``).
+    """
+    vals = numerator_values(config, kernel, mass)
+    idx = np.asarray(config["n_index"]).reshape(-1)
+    # ``n_wave`` comes from the angular matrix, ``n_res`` is then implied
+    n_wave = int(np.asarray(config["matrix_angle"]).shape[1])
+    n_res = max(1, idx.size // n_wave)
+    # (n_events, n_wave, n_res): multiply across the factor axis
+    vals = vals[:, :n_wave * n_res].reshape(vals.shape[0], n_wave, n_res)
+    live = np.asarray(idx, bool).reshape(n_wave, n_res)[None, :, :]
+    return np.prod(np.where(live, vals, 1.0), axis=-1)
 
 
 # ── generic denominator ──────────────────────────────────────────────

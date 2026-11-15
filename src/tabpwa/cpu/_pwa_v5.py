@@ -409,8 +409,8 @@ class CPUKernelPWAV5:
         fa = ka @ k.matrix_angle
         amp = fa * fl_p                                   # (ne, n_wave)
         if self._n_on:
-            from tabpwa.pwa_gen_support import numerator_values
-            amp = amp * numerator_values(self.config, k, mass)
+            from tabpwa.pwa_gen_support import numerator_product
+            amp = amp * numerator_product(self.config, k, mass)
 
         # ── iteration-invariant basis functions at the unique slots ──
         # (all of them derived from the SAME extended table + interp)

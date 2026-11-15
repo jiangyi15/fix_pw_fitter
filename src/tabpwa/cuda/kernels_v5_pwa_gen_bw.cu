@@ -237,7 +237,7 @@ __global__ void amp_cache_fill_gen_kernel(
     const double* __restrict__ fl_table,
     double fl_min, double fl_delta,
     const int* __restrict__ rep_of_slot,
-    int n_wave, int n_angle_k, int n_angle_total, int n_angle_comp,
+    int n_wave, int n_res, int n_angle_k, int n_angle_total, int n_angle_comp,
     int n_decay, int n_momentum, int fl_table_bins,
     int n_uniq,
     // pwa_gen numerator table (NULL -> no factor)
@@ -289,11 +289,18 @@ __global__ void amp_cache_fill_gen_kernel(
         }
         double ar = fr * fl, ai = fi * fl;
         if (n_index != NULL) {
-            // pwa_gen numerator: n_index[w] == 0 is the constant row (1),
-            // short-circuited so the N ≡ 1 config stays bit-identical.
-            int ni = n_index[w];
-            if (ni != 0) {
-                double me = mass[(size_t)event_idx * n_mass + n_mass_index[w]];
+            // pwa_gen numerator, one factor per BW (like ``bw_order``):
+            // ``f = w·n_res + r`` is indexed by ``n_index[f]`` and reads the
+            // mass column ``n_mass_index[f]`` of THAT factor's resonance, so
+            // a chain with a numerator on two resonances multiplies
+            // ``N_R1(m_R1) · N_R2(m_R2)``.  Row 0 is the constant 1 and is
+            // short-circuited, keeping an N == 1 config bit-identical.
+            const int nf0 = w * n_res;
+            for (int r = 0; r < n_res; r++) {
+                int ni = n_index[nf0 + r];
+                if (ni == 0) continue;
+                double me = mass[(size_t)event_idx * n_mass
+                                 + n_mass_index[nf0 + r]];
                 complex N = interp_complex_gen_device(
                     n_table_r, n_table_i, ni, me,
                     n_min, inv_n_delta, n_bins);
@@ -1400,7 +1407,7 @@ static int fill_amp_cache_chunk_gen(ComputeContextGen* c, DataHandleGen* h,
         mom, c->fl_type, c->fl_q_index, c->fl_order,
         c->fl_table, c->fl_min, c->fl_delta,
         c->rep_of_slot,
-        c->n_wave, c->n_angle_k, c->n_angle_total, c->n_angle_comp,
+        c->n_wave, c->n_res, c->n_angle_k, c->n_angle_total, c->n_angle_comp,
         c->n_decay, c->n_momentum, c->fl_table_bins, c->n_uniq,
         c->n_table_real, c->n_table_imag,
         c->n_num_rows, c->n_num_bins, c->n_min, c->n_inv_delta,

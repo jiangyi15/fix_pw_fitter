@@ -339,65 +339,84 @@ class PWAGen(PWA):
         """Mass grid shared with ``build_gamma_table`` (for ``den_table``)."""
         return self.gamma_grid()
 
-    def _pg_chain_rows(self, chain):
-        """Free numerator rows of a chain: ``[(head names, N(m) callable)]``.
+    def _pg_chain_factors(self, chain):
+        """Numerator factors of a chain, **one entry per BW factor**.
 
-        One row per combination of the chain's ``BasisModel`` numerator
-        weights (a single model in the common case).  Empty when the chain
-        has no free numerator basis.
+        Returns ``[{slot, heads, rows, mass_col}]`` in ``bw_order`` order
+        (``slot`` = the chain's factor position ``r``): a chain
+        ``B -> R1 x, R1 -> R2 y, R2 -> z w`` carries a numerator on both
+        ``R1`` and ``R2``, each evaluated at **its own** mass, so the factors
+        cannot be collapsed into one row with one mass column.
+
+        ``heads``/``rows`` are the free basis weights and tabulated rows of
+        that factor; a factor without a free numerator basis contributes
+        ``heads=()`` and a single constant row.
         """
         from tabpwa.particle_model.base import BasisModel
 
-        parts = []
-        for decay in chain.decays[1:]:
-            mdl = decay.core._model
-            if not isinstance(mdl, BasisModel):
-                continue
-            heads = list(mdl.get_num_name())
-            if not heads:
-                continue
-            if mdl.make_basis_transform() is None:
-                raise ValueError(
-                    f"pwa_gen: particle model '{mdl.name}' declares numerator "
-                    f"weights {heads} but no basis transform — the weights "
-                    f"would never be resolved")
-            n_rows = len(mdl.num_basis(np.zeros(1)))
-            if n_rows != len(heads):
-                raise ValueError(
-                    f"pwa_gen: '{mdl.name}' has {len(heads)} numerator weight "
-                    f"names but {n_rows} num_basis rows")
-            parts.append((mdl, heads))
-        if not parts:
-            return []
-
-        import itertools
+        # factor order along the chain == bw_order order (decays[1:])
         out = []
-        for combo in itertools.product(*[range(len(h)) for _m, h in parts]):
-            heads = tuple(h[i] for (_m, h), i in zip(parts, combo))
-
-            def N(m, parts=parts, combo=combo):
-                arr = None
-                for (mdl, _h), i in zip(parts, combo):
-                    row = np.asarray(mdl.num_basis(m)[i], dtype=complex)
-                    arr = row if arr is None else arr * row
-                return arr
-
-            out.append((heads, N))
+        for slot, decay in enumerate(chain.decays[1:]):
+            mdl = decay.core._model
+            heads, rows = [], [None]
+            if isinstance(mdl, BasisModel):
+                heads = list(mdl.get_num_name())
+                if heads:
+                    if mdl.make_basis_transform() is None:
+                        raise ValueError(
+                            f"pwa_gen: particle model '{mdl.name}' declares "
+                            f"numerator weights {heads} but no basis "
+                            f"transform — the weights would never be resolved")
+                    n_rows = len(mdl.num_basis(np.zeros(1)))
+                    if n_rows != len(heads):
+                        raise ValueError(
+                            f"pwa_gen: '{mdl.name}' has {len(heads)} numerator "
+                            f"weight names but {n_rows} num_basis rows")
+                    rows = [lambda m, mdl=mdl, i=i: np.asarray(
+                        mdl.num_basis(m)[i], dtype=complex)
+                        for i in range(len(heads))]
+            out.append({"slot": slot, "name": decay.core.name,
+                        "heads": heads, "rows": rows})
         return out
 
-    def _pg_num_column(self, chain):
-        """Base-block mass column of the chain's numerator resonance."""
-        from tabpwa.particle_model.base import BasisModel
-        for decay in chain.decays[1:]:
-            mdl = decay.core._model
-            if isinstance(mdl, BasisModel) and mdl.get_num_name():
-                m_name = f"{mdl.name}_mass"
-                for b, key in enumerate(self.unique_bw):
-                    if key[0] == m_name:
-                        return int(self._pg_base_mass_index[b])
-                raise ValueError(
-                    f"pwa_gen: no Breit-Wigner slot for '{m_name}'")
-        return 0
+    def _pg_chain_rows(self, chain):
+        """Numerator-row combinations of a chain (count = its wave expansion).
+
+        Compatibility view over :meth:`_pg_chain_factors`: the kernel lays the
+        numerator out per (wave, factor) like ``bw_order``, but a chain still
+        expands into the product of its factors' free rows, and that product
+        is what this returns (one entry per combination).
+        """
+        import itertools
+
+        facs = [f for f in self._pg_chain_factors(chain)
+                if f["heads"] and f["rows"]]
+        if not facs:
+            return []
+        out = []
+        for combo in itertools.product(*[[rf for rf in f["rows"]] for f in facs]):
+            heads = tuple(h for f, rf in zip(facs, combo)
+                          for h in [f["heads"][f["rows"].index(rf)]])
+            out.append((heads, combo))
+        return out
+
+    def _pg_factor_mass_column(self, chain, slot):
+        """Mass column of one BW factor of *chain* (its own resonance).
+
+        ``slot`` indexes the factor in ``bw_order`` order (``decays[1:]``).
+        Unlike a chain-wide column, this lets two numerator-bearing
+        resonances on one chain read two different masses.
+        """
+        decay = chain.decays[1 + slot]
+        name = decay.core.name
+        m_name = f"{name}_mass"
+        for b, key in enumerate(self.unique_bw):
+            if key[0] == m_name:
+                return int(self._pg_base_mass_index[b])
+        # no BW slot for this factor (a constant/contact term): its own mass
+        # column is still the right argument, taken from the base table
+        raise ValueError(
+            f"pwa_gen: numerator factor '{name}' has no Breit-Wigner slot")
 
     def _pg_den_basis(self, name, model, grid, tr):
         """``(weight names, finished rows G_j)`` of a resonance denominator.
@@ -505,52 +524,60 @@ class PWAGen(PWA):
         self._pg_generic = bool(any_transform)
 
         # ── numerator rows per base wave + expanded wave list ────────
-        chain_rows = {}
+        # ── numerator rows per (base wave, FACTOR) ──────────────────
+        # A chain may carry a numerator on more than one BW factor
+        # (``B -> R1 x, R1 -> R2 y``), each at its own mass, so the layout
+        # mirrors ``bw_order``: one entry per (wave, factor), not per wave.
+        chain_fac = {}
         per_wave = []
         for ls, chain in waves:
             cid = id(chain)
-            if cid not in chain_rows:
-                chain_rows[cid] = self._pg_chain_rows(chain)
-            per_wave.append(chain_rows[cid])
+            if cid not in chain_fac:
+                chain_fac[cid] = self._pg_chain_factors(chain)
+            per_wave.append(chain_fac[cid])
 
         n_table = [np.ones_like(grid, dtype=complex)]
         n_row_cache = {}
+
+        def _row_of(fac, rowfun):
+            """Table row index of one factor's basis row (0 = constant)."""
+            key = (id(fac), id(rowfun))
+            if key in n_row_cache:
+                return n_row_cache[key]
+            g = None if rowfun is None else rowfun(grid)
+            if g is None or np.all(g == 1):
+                n_row_cache[key] = 0
+                return 0
+            n_row_cache[key] = len(n_table)
+            n_table.append(np.asarray(g, dtype=complex))
+            return n_row_cache[key]
+
+        # the expansion of a wave is the product of its factors' free rows
         mult = np.ones(n_base, dtype=np.int32)
-        num_col = np.zeros(n_base, dtype=np.int32)
-        exp = []                  # (base wave, row position) per expanded wave
+        exp = []                  # (base wave, [rowfun per factor])
         comb_exp = []
         for k, (ls, chain) in enumerate(waves):
-            rows = per_wave[k]
-            num_col[k] = self._pg_num_column(chain)
-            if not rows:
+            facs = per_wave[k]
+            free = [(f, rf) for f in facs if f["heads"] for rf in f["rows"]]
+            if not free:
                 mult[k] = 1
                 exp.append((k, None))
                 comb_exp.append(tuple(base_combs[k]))
                 continue
-            mult[k] = len(rows)
-            for r, (heads, Nfun) in enumerate(rows):
-                exp.append((k, r))
-                comb_exp.append(tuple(base_combs[k]) + tuple(heads))
-                cid = id(chain)
-                if (cid, r) in n_row_cache:
-                    continue
-                g = Nfun(grid)
-                if np.all(g == 1):
-                    n_row_cache[(cid, r)] = 0
-                else:
-                    n_row_cache[(cid, r)] = len(n_table)
-                    n_table.append(np.asarray(g, dtype=complex))
+            import itertools
+            combos = list(itertools.product(*[
+                [(f, rf) for rf in f["rows"]]
+                for f in facs if f["heads"] and f["rows"]]))
+            mult[k] = len(combos)
+            for combo in combos:
+                heads = tuple(h for (f, _rf) in combo
+                              for h in
+                              [f["heads"][f["rows"].index(_rf)]])
+                exp.append((k, combo))
+                comb_exp.append(tuple(base_combs[k]) + heads)
 
         n_exp = len(exp)
-        # per-expanded-wave numerator row index / mass column
-        n_index_e = np.zeros(n_exp, dtype=np.int32)
-        n_col_e = np.zeros(n_exp, dtype=np.int32)
-        for i, (k, r) in enumerate(exp):
-            n_col_e[i] = num_col[k]
-            if r is not None:
-                n_index_e[i] = n_row_cache[(id(waves[k][1]), r)]
-
-        has_num = any(r is not None for _k, r in exp)
+        has_num = any(c is not None for _k, c in exp)
         if not has_num and not self._pg_generic:
             # plain path: nothing to add — the config is exactly pwa's
             self._pg_combs = [tuple(c) for c in base_combs]
@@ -558,7 +585,7 @@ class PWAGen(PWA):
 
         # ── expand the per-wave arrays (p-major, block-major) ────────
         strip_mass = self.n_topo * self.n_res
-        exp_k = np.array([k for k, _r in exp], dtype=np.int64)
+        exp_k = np.array([k for k, _c in exp], dtype=np.int64)
         old_idx = np.concatenate([
             b * P * n_base + p * n_base + exp_k
             for b in range(C) for p in range(P)])
@@ -574,13 +601,38 @@ class PWAGen(PWA):
                     names.append(str(kc["wave_names"][k]))
             kc["wave_names"] = names
 
-        # ── numerator table / index ─────────────────────────────────
+        # ── numerator table / per-factor index ──────────────────────
+        # ``n_index[f]`` / ``n_mass_index[f]`` with ``f = w·n_res + r``,
+        # exactly like ``bw_order``: factor ``r`` reads the mass column of
+        # its OWN BW, so ``N_R1(m_R1) · N_R2(m_R2)`` is expressible.
+        # ``n_index`` only: the mass column of a factor is already
+        # ``mass_index[bw_order[f]]`` — the kernel derives it exactly as it
+        # does for the denominator, so no second column array is needed.
+        n_wave_e = n_exp
+        n_idx = np.zeros((n_wave_e, n_res), dtype=np.int32)
+        for i, (k, combo) in enumerate(exp):
+            for r, fac in enumerate(per_wave[k]):
+                if not fac["heads"]:
+                    continue
+                chosen = None
+                if combo is not None:
+                    for (f, rf) in combo:
+                        if f is fac:
+                            chosen = rf
+                            break
+                n_idx[i, r] = _row_of(fac, chosen)
+
         kc["n_table"] = np.stack(n_table)
         kc["n_min"] = n_min
         kc["n_delta"] = n_delta
-        kc["n_index"] = np.tile(n_index_e, C * P)
-        kc["n_mass_index"] = np.concatenate(
-            [np.tile(n_col_e + b * strip_mass, P) for b in range(C)])
+        # ``n_idx`` is already in ``exp`` order, and ``matrix_angle``'s
+        # columns are exactly ``old_idx`` — which selects ``exp`` indices
+        # ``p·n_base + k``, i.e. it walks ``exp`` in order once per
+        # projection.  So the numerator block is the ``exp``-order rows
+        # tiled over (block, projection) — the same shape as the wave axis,
+        # factor-minor like ``bw_order``.
+        kc["n_index"] = np.ascontiguousarray(
+            np.tile(n_idx.reshape(-1), C * P), dtype=np.int32)
 
         # ── generic coefficient basis ───────────────────────────────
         if self._pg_generic:

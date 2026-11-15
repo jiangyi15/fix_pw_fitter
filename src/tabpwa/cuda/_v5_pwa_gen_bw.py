@@ -149,16 +149,22 @@ def _amp_cache_layout(config, n_on):
     n_decay = config["fl_order"].size // n_wave
     cols = config["matrix_angle"].T
     fl_rows = np.asarray(config["fl_order"]).reshape(n_wave, n_decay)
+    # factors per wave: the numerator index is laid out per (wave, factor)
+    n_res = max(1, np.asarray(config["bw_order"]).size // n_wave)
     if n_on:
         n_idx = np.asarray(config["n_index"], dtype=np.int64)
-        n_col = np.asarray(config["n_mass_index"], dtype=np.int64)
+        # per-(wave, factor) numerator rows and the mass column each factor
+        # reads (``mass_index[bw_order]``, the denominator's own choice);
+        # both go into the cache key, since they change the cached amp.
+        n_col = np.asarray(config["mass_index"], dtype=np.int64)[
+            np.asarray(config["bw_order"], dtype=np.int64)]
     keys = {}
     slot_of_wave = np.zeros(n_wave, dtype=np.int32)
     rep_of_slot = []
     for w in range(n_wave):
         key = (cols[w].tobytes(), fl_rows[w].tobytes(),
-               int(n_idx[w]) if n_on else 0,
-               int(n_col[w]) if n_on else 0)
+               n_idx[w * n_res:(w + 1) * n_res].tobytes() if n_on else 0,
+               n_col[w * n_res:(w + 1) * n_res].tobytes() if n_on else 0)
         s = keys.get(key)
         if s is None:
             s = len(rep_of_slot)
@@ -273,13 +279,18 @@ class CUDAKernelV5PWAGenBW:
             self._n_table = np.asarray(c["n_table"], np.complex128)
             self._n_index = np.ascontiguousarray(
                 np.asarray(c["n_index"], np.int32))
+            # per (wave, factor): the factor's OWN BW mass column, i.e. the
+            # the factor's own BW mass column — the same
+            # ``mass_index[bw_order[f]]`` the denominator uses
             self._n_mass_index = np.ascontiguousarray(
-                np.asarray(c["n_mass_index"], np.int32))
-            if self._n_index.size != self.n_wave \
-                    or self._n_mass_index.size != self.n_wave:
+                np.asarray(c["mass_index"])[self.bw_order], np.int32)
+            # per (wave, factor), like ``bw_order``: each factor reads its
+            # OWN resonance's mass column
+            if self._n_index.size != self.n_fact \
+                    or self._n_mass_index.size != self.n_fact:
                 raise ValueError(
                     "cuda_v5_pwa_gen_bw: n_index/n_mass_index must have "
-                    "n_wave entries")
+                    f"{self.n_fact} entries (n_wave·n_res)")
             self._n_min = float(c["n_min"])
             self._n_delta = float(c["n_delta"])
             if self._n_delta == 0.0:
@@ -642,10 +653,14 @@ class CUDAKernelV5PWAGenBW:
             (self._n_table.shape[0] if self._n_on else 0),
             (self._n_table.shape[1] if self._n_on else 0),
             self._n_min, self._n_delta,
+            # per (wave, factor) -- n_fact entries, NOT n_wave: the arrays
+            # are indexed ``f = w·n_res + r``, so a short length would upload
+            # only the first wave's factors and leave the rest of the device
+            # buffer uninitialised (read back as 0)
             (_ib(self._n_index) if self._n_on else _ffi.NULL),
-            (self.n_wave if self._n_on else 0),
+            (self._n_index.size if self._n_on else 0),
             (_ib(self._n_mass_index) if self._n_on else _ffi.NULL),
-            (self.n_wave if self._n_on else 0))
+            (self._n_mass_index.size if self._n_on else 0))
         if self._ctx == _ffi.NULL:
             raise RuntimeError(
                 "cuda_v5_pwa_gen_bw: context creation failed "
