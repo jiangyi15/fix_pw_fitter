@@ -35,6 +35,32 @@
  *
  * One fused kernel over a tile of `FLAT_TE` events; `ka` is evaluated once
  * per (event, angle basis) and reused by every (wave, projection).
+ *
+ * ## Grouped log-sum objective (`resolution_size` = rs > 1, normed only)
+ *
+ * The per-event NLL is replaced by one log per group of `rs` contiguous
+ * events (group g covers global events [g·rs, min((g+1)·rs, ne))):
+ *
+ *     W_g  = Σ_{e∈g} w_e
+ *     S_g  = Σ_{e∈g} w_e·(P_e/norm + bkg_e)          Pb_g = Σ_{e∈g} w_e·P_e
+ *     Q    = -Σ_g W_g·log(S_g/W_g)                   (skipped when W_g <= 0)
+ *     dQ/dP_e = -(W_g/S_g)·(w_e/norm)                (scale_g = -W_g/S_g)
+ *     dnorm   = Σ_g W_g·Pb_g/(S_g·norm²)
+ *
+ * A group of 100 events spans several tiles, so the tile kernel cannot hold
+ * a group's partials in shared memory.  The grouped path is a multi-pass
+ * shape over the SAME tile kernel with an `int mode` switch:
+ *
+ *   mode 1 (P)    : forward, write P_out[ge], atomicAdd the group partials
+ *                   into the global gS/gPb/gW arrays (no gradient phases).
+ *   `grp_nll`     : one thread per group folds them into Q/dnorm (into `acc`)
+ *                   and writes gscale[g] = -W_g/S_g.
+ *   `scale`       : one thread per event, dqp[ge] = gscale[ge/rs]·w_e/norm.
+ *   mode 2 (grad) : forward again, build dA = dqp[ge]·conj(A), gradient phases.
+ *
+ * `rs == 1` and `use_norm == 0` keep the original single-pass shape (mode 0)
+ * untouched, so `rs == 1` follows exactly the per-event arithmetic (the Q /
+ * dnorm sums are still `atomicAdd`-order dependent, as they always were).
  */
 
 #include <cuda_runtime.h>
@@ -155,6 +181,10 @@ __global__ void flat_tile_kernel(
     const double* __restrict__ ck_r, const double* __restrict__ ck_i,
     const double* __restrict__ coeff,
     double norm, int use_norm,
+    /* grouped log-sum (mode 1/2 only; NULL in the single-pass path) */
+    int mode, int rsize,
+    double* __restrict__ gS, double* __restrict__ gPb,
+    double* __restrict__ gW, const double* __restrict__ dqp,
     /* data */
     const double* __restrict__ mass, const double* __restrict__ mom,
     const double* __restrict__ ang,
@@ -294,7 +324,16 @@ __global__ void flat_tile_kernel(
         s_pe[e] = pe;
         s_q[e] = use_norm ? wv * (pe / norm + bv) : wv * pe;
         if (P_out) P_out[ge] = pe;
-        if (use_norm) {
+        if (mode == 1) {
+            /* grouped log-sum, pass A: per-group partials (a group spans
+               tiles, so these live in global memory) */
+            const int g = ge / rsize;
+            atomicAdd(gS + g, wv * (pe / norm + bv));
+            atomicAdd(gPb + g, wv * pe);
+            atomicAdd(gW + g, wv);
+        } else if (mode == 2) {
+            /* grouped log-sum, pass B: the objective is already folded */
+        } else if (use_norm) {
             atomicAdd(acc + 0, -wv * log(pe / norm + bv));
             atomicAdd(acc + 1, wv * pe / (norm * (pe + bv * norm)));
         } else {
@@ -303,15 +342,19 @@ __global__ void flat_tile_kernel(
     }
     __syncthreads();
 
+    if (mode == 1) return;      /* pass A: no gradient phases */
+
     for (int idx = tid; idx < evn * n_proj; idx += nt) {
         const int e = idx / n_proj;
         const int ge = e0 + e;
         const double wv = weight[ge], bv = bkg[ge];
         const double pe = s_pe[e];
-        const double dqp = use_norm ? -wv / (pe + bv * norm) : wv;
+        /* mode 2 carries the group scale from the global dqp array */
+        const double dqpe = (mode == 2) ? dqp[ge]
+                         : (use_norm ? -wv / (pe + bv * norm) : wv);
         const double ar = s_A[idx * 2 + 0], ai = s_A[idx * 2 + 1];
-        s_dA[idx * 2 + 0] = dqp * ar;      /* dQ/dA = dQ/dP · conj(A) */
-        s_dA[idx * 2 + 1] = -dqp * ai;
+        s_dA[idx * 2 + 0] = dqpe * ar;      /* dQ/dA = dQ/dP · conj(A) */
+        s_dA[idx * 2 + 1] = -dqpe * ai;
     }
     __syncthreads();
 
@@ -417,8 +460,69 @@ __global__ void flat_tile_kernel(
 }
 
 /*=============================================================================
+ * Grouped log-sum helpers (resolution_size > 1, normed calls)
+ *===========================================================================*/
+
+/* Fold the per-group partials into Q/dnorm and publish the group scale.
+   One block over the groups, tree-reduced into `acc` (Q, dnorm). */
+__global__ void flat_grp_nll_kernel(
+    const double* __restrict__ gS, const double* __restrict__ gPb,
+    const double* __restrict__ gW,
+    int n_groups, double norm,
+    double* __restrict__ gscale, double* __restrict__ acc)
+{
+    extern __shared__ double sh[];
+    const int tid = threadIdx.x, bs = blockDim.x;
+    double* sq = sh;
+    double* sn = sh + bs;
+    double q = 0.0, dn = 0.0;
+    for (int g = tid; g < n_groups; g += bs) {
+        const double W = gW[g];
+        if (W <= 0.0) { gscale[g] = 0.0; continue; }
+        const double S = gS[g];
+        q += -W * log(S / W);
+        dn += W * gPb[g] / (S * norm * norm);
+        gscale[g] = -W / S;
+    }
+    sq[tid] = q; sn[tid] = dn;
+    __syncthreads();
+    for (int st = bs / 2; st > 0; st >>= 1) {
+        if (tid < st) { sq[tid] += sq[tid + st]; sn[tid] += sn[tid + st]; }
+        __syncthreads();
+    }
+    if (tid == 0) { atomicAdd(acc + 0, sq[0]); atomicAdd(acc + 1, sn[0]); }
+}
+
+/* dqp[ge] = gscale[ge/rsize] · w_e/norm — one thread per event. */
+__global__ void flat_scale_kernel(
+    const double* __restrict__ gscale, const double* __restrict__ weight,
+    double norm, int rsize, int ne, double* __restrict__ dqp)
+{
+    const int ge = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ge >= ne) return;
+    dqp[ge] = gscale[ge / rsize] * weight[ge] / norm;
+}
+
+/*=============================================================================
  * Host side
  *===========================================================================*/
+/* Per-LOAD state.  Every `load_data` call allocates its own handle, so the
+   phase-space sample and the data sample coexist: the ``Fitter`` keeps both
+   alive for the whole fit and integrates the norm over the phase-space one
+   while evaluating the likelihood on the data one.  Nothing here may live on
+   ``FlatCtx`` — the context is shared by all handles of one kernel instance. */
+typedef struct {
+    /* loaded data (device) */
+    double *mass, *mom, *ang, *weight, *bkg;
+    double *P_dev;
+    double *h_P;                /* pinned per-event P staging [ne] */
+    int ne;
+    /* grouped log-sum scratch (rsize > 1 only) */
+    int rsize;                  /* group size captured at load time */
+    int n_groups;
+    double *gS, *gPb, *gW, *gscale, *dqp;
+} FlatDataHandle;
+
 typedef struct {
     /* config arrays (device) */
     int *fl_q_index, *num_m_index, *bas_m_index, *angle_index;
@@ -429,15 +533,11 @@ typedef struct {
     int n_wave, n_proj, n_res, n_decay, n_basis, n_ab, n_comp;
     int n_mass, n_momentum, n_angle_total;
     int batch_size;
-    /* loaded data (device) */
-    double *mass, *mom, *ang, *weight, *bkg;
-    double *P_dev;
-    int ne;
+    int rsize;                  /* grouped log-sum group size (>= 1) */
     /* per-call param staging (pinned) */
     double *h_ck_r, *h_ck_i, *h_coeff;
     double *p_ck_r, *p_ck_i, *p_coeff;
     double *acc, *h_acc;
-    double* h_P;
     double *g_ck_r, *g_ck_i, *g_coeff;
     cudaStream_t stream;
     int smem_bytes;
@@ -470,6 +570,8 @@ static size_t _flat_shm_bytes(int n_ab, int n_wave, int n_proj, int n_res) {
 
 extern "C" {
 
+void cuda_free_data_flat_pwa_gen(void* vh);   /* fwd: used by load_data fail */
+
 void* cuda_create_context_flat_pwa_gen(
     const double* fl_table, int n_fl_table, const int* fl_q_index,
     int n_fl_q, const double* num_r, const double* num_i, int n_num,
@@ -482,7 +584,7 @@ void* cuda_create_context_flat_pwa_gen(
     double q_min, double q_delta, int q_bins,
     int n_wave, int n_proj, int n_res, int n_decay, int n_basis,
     int n_ab, int n_comp, int n_mass, int n_momentum, int n_angle_total,
-    int batch_size)
+    int batch_size, int rsize)
 {
     FlatCtx* c = (FlatCtx*)calloc(1, sizeof(FlatCtx));
     if (!c) return NULL;
@@ -507,6 +609,7 @@ void* cuda_create_context_flat_pwa_gen(
     c->n_comp = n_comp; c->n_mass = n_mass; c->n_momentum = n_momentum;
     c->n_angle_total = n_angle_total;
     c->batch_size = batch_size > 0 ? batch_size : FLAT_BATCH;
+    c->rsize = rsize > 0 ? rsize : 1;
 
     c->smem_bytes = (int)_flat_shm_bytes(n_ab, n_wave, n_proj, n_res);
     int optin = 0;
@@ -541,27 +644,56 @@ void* cuda_load_data_flat_pwa_gen(void* vctx, const double* mass,
                                   const int* n_ang_, const double* weight,
                                   const double* bkg, int ne)
 {
-    FlatCtx* c = (FlatCtx*)vctx;
+    const FlatCtx* c = (const FlatCtx*)vctx;
     (void)n_mass_; (void)n_mom_; (void)n_ang_;
-    c->ne = ne;
-    c->mass = _up_dbl(mass, ne * c->n_mass);
-    c->mom = _up_dbl(mom, ne * c->n_momentum);
-    c->ang = _up_dbl(ang, ne * c->n_angle_total * c->n_comp);
-    c->weight = _up_dbl(weight, ne);
-    c->bkg = _up_dbl(bkg, ne);
-    CUDA_CHECK(cudaMalloc(&c->P_dev, (size_t)ne * sizeof(double)));
-    CUDA_CHECK(cudaMallocHost(&c->h_P, (size_t)ne * sizeof(double)));
-    return c;
+    if (!c || ne <= 0) return NULL;
+    FlatDataHandle* h = (FlatDataHandle*)calloc(1, sizeof(FlatDataHandle));
+    if (!h) return NULL;
+    h->ne = ne;
+    h->mass = _up_dbl(mass, ne * c->n_mass);
+    h->mom = _up_dbl(mom, ne * c->n_momentum);
+    h->ang = _up_dbl(ang, ne * c->n_angle_total * c->n_comp);
+    h->weight = _up_dbl(weight, ne);
+    h->bkg = _up_dbl(bkg, ne);
+    if (cudaMalloc(&h->P_dev, (size_t)ne * sizeof(double)) != cudaSuccess)
+        goto fail;
+    if (cudaMallocHost(&h->h_P, (size_t)ne * sizeof(double)) != cudaSuccess) {
+        h->h_P = NULL;
+        goto fail;
+    }
+    /* grouped log-sum scratch: n_groups arrays + one dqp slot per event */
+    h->rsize = c->rsize > 0 ? c->rsize : 1;
+    if (h->rsize > 1) {
+        h->n_groups = (ne + h->rsize - 1) / h->rsize;
+        if (h->n_groups > 0) {
+            if (cudaMalloc(&h->gS, (size_t)h->n_groups * sizeof(double))
+                    != cudaSuccess) goto fail;
+            if (cudaMalloc(&h->gPb, (size_t)h->n_groups * sizeof(double))
+                    != cudaSuccess) goto fail;
+            if (cudaMalloc(&h->gW, (size_t)h->n_groups * sizeof(double))
+                    != cudaSuccess) goto fail;
+            if (cudaMalloc(&h->gscale, (size_t)h->n_groups * sizeof(double))
+                    != cudaSuccess) goto fail;
+            if (cudaMalloc(&h->dqp, (size_t)ne * sizeof(double))
+                    != cudaSuccess) goto fail;
+        }
+    }
+    return h;
+fail:
+    cudaGetLastError();          /* clear the sticky error for the caller */
+    cuda_free_data_flat_pwa_gen(h);
+    return NULL;
 }
 
-void cuda_free_data_flat_pwa_gen(void* vctx) {
-    FlatCtx* c = (FlatCtx*)vctx;
-    if (!c) return;
-    cudaFree(c->mass); cudaFree(c->mom); cudaFree(c->ang);
-    cudaFree(c->weight); cudaFree(c->bkg); cudaFree(c->P_dev);
-    if (c->h_P) cudaFreeHost(c->h_P);
-    c->mass = c->mom = c->ang = c->weight = c->bkg = c->P_dev = NULL;
-    c->h_P = NULL;
+void cuda_free_data_flat_pwa_gen(void* vh) {
+    if (!vh) return;
+    FlatDataHandle* h = (FlatDataHandle*)vh;
+    cudaFree(h->mass); cudaFree(h->mom); cudaFree(h->ang);
+    cudaFree(h->weight); cudaFree(h->bkg); cudaFree(h->P_dev);
+    cudaFree(h->gS); cudaFree(h->gPb); cudaFree(h->gW);
+    cudaFree(h->gscale); cudaFree(h->dqp);
+    if (h->h_P) cudaFreeHost(h->h_P);
+    free(h);
 }
 
 void cuda_free_context_flat_pwa_gen(void* vctx) {
@@ -582,13 +714,15 @@ void cuda_free_context_flat_pwa_gen(void* vctx) {
 }
 
 void cuda_compute_flat_pwa_gen(
-    void* vctx, const double* ck_r, const double* ck_i,
+    void* vctx, void* vdh, const double* ck_r, const double* ck_i,
     const double* coeff, double norm, int use_norm,
     double* oQ, double* oDn, double* oP,
     double* og_ck_r, double* og_ck_i, double* og_coeff)
 {
     FlatCtx* c = (FlatCtx*)vctx;
+    FlatDataHandle* h = (FlatDataHandle*)vdh;
     const int N = c->n_wave, NB = c->n_basis;
+    const int ne = h ? h->ne : 0;
 
     memcpy(c->h_ck_r, ck_r, (size_t)N * sizeof(double));
     memcpy(c->h_ck_i, ck_i, (size_t)N * sizeof(double));
@@ -608,25 +742,71 @@ void cuda_compute_flat_pwa_gen(
     memset(og_ck_i, 0, (size_t)N * sizeof(double));
     memset(og_coeff, 0, (size_t)NB * sizeof(double));
 
-    if (c->ne > 0) {
-        const int tiles = (c->ne + FLAT_TE - 1) / FLAT_TE;
+    /* grouped log-sum objective: only for a normed call with rsize > 1 and
+       the scratch present (i.e. it was allocated for this data load) */
+    const int rs = (h && h->rsize > 0) ? h->rsize : 1;
+    const int grouped = (rs > 1 && use_norm && ne > 0 &&
+                         h->gS && h->dqp) ? 1 : 0;
+    const int n_group = grouped ? h->n_groups : 0;
+
+    if (ne > 0) {
+        const int tiles = (ne + FLAT_TE - 1) / FLAT_TE;
         size_t shm = (size_t)c->smem_bytes;
+        if (grouped) {
+            cudaMemsetAsync(h->gS, 0, (size_t)n_group * sizeof(double),
+                            c->stream);
+            cudaMemsetAsync(h->gPb, 0, (size_t)n_group * sizeof(double),
+                            c->stream);
+            cudaMemsetAsync(h->gW, 0, (size_t)n_group * sizeof(double),
+                            c->stream);
+        }
+        /* pass A (grouped) or the single fused pass (rs == 1 / no norm) */
+        const int mode_a = grouped ? 1 : 0;
         flat_tile_kernel<<<tiles, FLAT_BLOCK, shm, c->stream>>>(
             c->fl_table, c->fl_q_index, c->num_r, c->num_i, c->num_m_index,
             c->bas_r, c->bas_i, c->bas_m_index, c->gamma,
             c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
             c->m_min, c->m_delta, c->m_bins, c->q_min, c->q_delta, c->q_bins,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
-            c->mass, c->mom, c->ang, c->weight, c->bkg,
-            c->ne, c->n_wave, c->n_proj, c->n_res, c->n_decay, c->n_basis,
+            mode_a, rs, h->gS, h->gPb, h->gW, NULL,
+            h->mass, h->mom, h->ang, h->weight, h->bkg,
+            ne, c->n_wave, c->n_proj, c->n_res, c->n_decay, c->n_basis,
             c->n_ab, c->n_comp, c->n_mass, c->n_momentum, c->n_angle_total,
-            oP ? c->P_dev : NULL,
+            oP ? h->P_dev : NULL,
             c->g_ck_r, c->g_ck_i, c->g_coeff, c->acc);
         CUDA_CHECK(cudaGetLastError());
+
+        if (grouped) {
+            /* fold the group partials, then the per-event dQ/dP */
+            flat_grp_nll_kernel<<<1, FLAT_BLOCK, 2 * FLAT_BLOCK * sizeof(double),
+                                  c->stream>>>(
+                h->gS, h->gPb, h->gW, n_group, norm, h->gscale, c->acc);
+            CUDA_CHECK(cudaGetLastError());
+            const int gblk = (ne + FLAT_BLOCK - 1) / FLAT_BLOCK;
+            flat_scale_kernel<<<gblk, FLAT_BLOCK, 0, c->stream>>>(
+                h->gscale, h->weight, norm, rs, ne, h->dqp);
+            CUDA_CHECK(cudaGetLastError());
+            /* pass B: recompute the forward quantities, now with the
+               finished per-event dQ/dP, and run the gradient phases */
+            flat_tile_kernel<<<tiles, FLAT_BLOCK, shm, c->stream>>>(
+                c->fl_table, c->fl_q_index, c->num_r, c->num_i,
+                c->num_m_index, c->bas_r, c->bas_i, c->bas_m_index, c->gamma,
+                c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
+                c->m_min, c->m_delta, c->m_bins, c->q_min, c->q_delta,
+                c->q_bins,
+                c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
+                2, rs, h->gS, h->gPb, h->gW, h->dqp,
+                h->mass, h->mom, h->ang, h->weight, h->bkg,
+                ne, c->n_wave, c->n_proj, c->n_res, c->n_decay, c->n_basis,
+                c->n_ab, c->n_comp, c->n_mass, c->n_momentum,
+                c->n_angle_total,
+                NULL, c->g_ck_r, c->g_ck_i, c->g_coeff, c->acc);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 
-    if (oP)
-        cudaMemcpyAsync(c->h_P, c->P_dev, (size_t)c->ne * sizeof(double),
+    if (oP && h)
+        cudaMemcpyAsync(h->h_P, h->P_dev, (size_t)ne * sizeof(double),
                         cudaMemcpyDeviceToHost, c->stream);
     cudaMemcpyAsync(c->h_acc, c->acc, 2 * sizeof(double),
                     cudaMemcpyDeviceToHost, c->stream);
@@ -640,7 +820,7 @@ void cuda_compute_flat_pwa_gen(
 
     *oQ = c->h_acc[0];
     *oDn = c->h_acc[1];
-    if (oP) memcpy(oP, c->h_P, (size_t)c->ne * sizeof(double));
+    if (oP) memcpy(oP, h->h_P, (size_t)ne * sizeof(double));
 }
 
 int cuda_get_device_count_flat_pwa_gen(void) {

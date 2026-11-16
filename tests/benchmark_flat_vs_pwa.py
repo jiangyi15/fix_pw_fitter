@@ -87,6 +87,10 @@ def main():
     ap.add_argument("--sizes", default="65536,262144")
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--rsize", type=int, default=1,
+                    help="resolution_size for the flat pwa_gen backends "
+                         "(grouped log-sum; real use is 10..100).  The "
+                         "plain-pwa baselines stay per-event.")
     args = ap.parse_args()
 
     flat_backends = ("cuda_flat_pwa_gen", "cuda_flat_cache_pwa_gen")
@@ -113,7 +117,8 @@ def main():
 
     print("=" * 78)
     print(f"flat pwa_gen (n ≡ 1): n_wave={n_wave} "
-          f"n_proj={np.asarray(fkc['angle_matrix']).shape[1]} n_basis={n_basis}")
+          f"n_proj={np.asarray(fkc['angle_matrix']).shape[1]} n_basis={n_basis}"
+          f"  resolution_size={args.rsize}")
     print(f"plain pwa          : n_wave={info['n_wave']} "
           f"n_proj={info['n_proj']} N={info['N']}")
     print("=" * 78)
@@ -134,7 +139,8 @@ def main():
         insts = {}
         for name in flat_backends:
             try:
-                k = create_backend(name, fkc, model="pwa_gen")
+                k = create_backend(name, fkc, model="pwa_gen",
+                                   resolution_size=args.rsize)
                 insts[name] = (k, k.load_data(fdata), fparams, fnorm)
             except Exception as e:                            # noqa: BLE001
                 print(f"  {name} SKIP {type(e).__name__}: {str(e)[:50]}")

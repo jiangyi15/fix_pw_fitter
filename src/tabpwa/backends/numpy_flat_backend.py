@@ -47,12 +47,26 @@ class NumpyFlatBackend(ComputeBackend):
 
     Returns ``(Q, grads, P)`` with ``grads = {"ck", "coeff"}``, both in the
     shapes accepted above.
+
+    ``resolution_size`` selects the objective:
+
+    * ``1`` (default) — the per-event NLL ``-Σ_e w_e·log(P_e/norm + bkg_e)``;
+    * ``> 1`` — the grouped log-sum, one log per group of consecutive events
+      with the group's TOTAL weight, ``Q = -Σ_g W_g·log(S_g/W_g)`` where
+      ``S_g = Σ_{e∈g} w_e·(P_e/norm + bkg_e)`` and ``W_g = Σ_{e∈g} w_e``.
+      A zero-weight group is inert; the last group is short when ``ne`` is
+      not a multiple of ``resolution_size``.
+
+    ``P`` is the per-event intensity in BOTH modes — grouping changes the
+    objective, never the per-event quantity.
     """
 
-    def __init__(self, kernel_config, batch_size=20000):
+    def __init__(self, kernel_config, batch_size=20000, resolution_size=1):
         self.config = kernel_config
         self._check_shapes()
         self._last_dnorm = None
+        #: events per grouped-log-sum group; 1 = the per-event NLL
+        self.resolution_size = max(1, int(resolution_size))
 
     # ── the shape contract ──────────────────────────────────────────
     def _check_shapes(self):
@@ -257,13 +271,38 @@ class NumpyFlatBackend(ComputeBackend):
 
         weight = np.asarray(d.get("weight", np.ones(ne)), np.float64)
         bkg = d.get("bkg", 1.0)
+        bv = bkg if not np.isscalar(bkg) else np.full(ne, float(bkg))
         if norm is None:
             Q = float(np.sum(weight * P_e))
             dQ_dP = weight
-        else:
-            bv = bkg if not np.isscalar(bkg) else np.full(ne, float(bkg))
+        elif self.resolution_size == 1:
             Q = float(-np.sum(weight * np.log(P_e / norm + bv)))
             dQ_dP = -weight / (P_e + bv * norm)
+        else:
+            # ── grouped log-sum with the group TOTAL weight ──────────
+            #   Q = -Σ_g W_g·log(S_g/W_g),  S_g = Σ_{e∈g} w_e·(P_e/norm + bkg_e)
+            #   dQ/dP_e = -(W_g/S_g)·(w_e/norm)
+            # Groups are consecutive events aligned to the GLOBAL index; the
+            # last group is short when ne is not a multiple of rs, so it is
+            # zero-PADDED to a rectangle and the pad rows carry w = 0 (they
+            # add nothing to S_g, Pb_g or W_g).
+            rs = self.resolution_size
+            ng = (ne + rs - 1) // rs
+            pad = ng * rs - ne
+            w_g = np.concatenate([weight, np.zeros(pad)]).reshape(ng, rs)
+            p_g = np.concatenate([P_e, np.zeros(pad)]).reshape(ng, rs)
+            b_g = np.concatenate([bv, np.zeros(pad)]).reshape(ng, rs)
+            W_g = w_g.sum(axis=1)
+            S_g = (w_g * (p_g / norm + b_g)).sum(axis=1)
+            safe = W_g > 0.0
+            # a zero-weight group is inert: log() of it is skipped, not -inf
+            Q = float(-np.sum(np.where(
+                safe,
+                W_g * np.log(np.where(safe, S_g, 1.0)
+                             / np.where(safe, W_g, 1.0)),
+                0.0)))
+            scale = np.where(safe, -W_g / np.where(safe, S_g, 1.0), 0.0)
+            dQ_dP = (scale[:, None] * (w_g / norm)).reshape(-1)[:ne]
 
         # ── backward ────────────────────────────────────────────────
         # dQ/dA_p = dQ/dP · conj(A_p);  every gradient below is the same
@@ -310,10 +349,26 @@ class NumpyFlatBackend(ComputeBackend):
         grads = {"ck": grad_ck, "coeff": grad_coeff}
         if norm is not None:
             # the fitter's contract: a normed compute must return the native
-            # d(NLL)/d(norm) alongside the parameter blocks
-            bv = bkg if not np.isscalar(bkg) else np.full(ne, float(bkg))
-            self._last_dnorm = float(np.sum(
-                weight * P_e / (norm * (P_e + bv * norm))))
+            # d(NLL)/d(norm) alongside the parameter blocks.
+            #   per-event : Σ w·P / (norm·(P + b·norm))
+            #   grouped   : Σ_g W_g·Pb_g / (S_g·norm²),  Pb_g = Σ w·P
+            if self.resolution_size == 1:
+                self._last_dnorm = float(np.sum(
+                    weight * P_e / (norm * (P_e + bv * norm))))
+            else:
+                rs = self.resolution_size
+                ng = (ne + rs - 1) // rs
+                pad = ng * rs - ne
+                w_g = np.concatenate([weight, np.zeros(pad)]).reshape(ng, rs)
+                p_g = np.concatenate([P_e, np.zeros(pad)]).reshape(ng, rs)
+                b_g = np.concatenate([bv, np.zeros(pad)]).reshape(ng, rs)
+                W_g = w_g.sum(axis=1)
+                S_g = (w_g * (p_g / norm + b_g)).sum(axis=1)
+                Pb_g = (w_g * p_g).sum(axis=1)
+                safe = W_g > 0.0
+                self._last_dnorm = float(np.sum(np.where(
+                    safe, W_g * Pb_g / (np.where(safe, S_g, 1.0) * norm * norm),
+                    0.0)))
             grads["norm"] = self._last_dnorm
         else:
             self._last_dnorm = None

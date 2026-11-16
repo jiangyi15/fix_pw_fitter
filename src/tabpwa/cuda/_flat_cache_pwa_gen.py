@@ -48,13 +48,13 @@ void* cuda_create_context_flat_cache(
     const double*,int, const int*,int, const double*,int,
     const double*,int, const double*,const double*,int,
     double,double,int, double,double,int,
-    int,int,int,int,int, int,int,int,int,int, int);
+    int,int,int,int,int, int,int,int,int,int, int,int);
 void* cuda_load_data_flat_cache(void*,const double*,const int*,
     const double*,const int*, const double*,const int*,
     const double*,const double*,int);
 void cuda_free_data_flat_cache(void*);
 void cuda_free_context_flat_cache(void*);
-void cuda_compute_flat_cache(void*,const double*,const double*,
+void cuda_compute_flat_cache(void*,void*,const double*,const double*,
     const double*,double,int, double*,double*,double*,double*,double*,double*);
 int cuda_get_device_count_flat_cache(void);
 void cuda_get_device_name_flat_cache(char*,int);
@@ -64,6 +64,38 @@ void cuda_get_device_name_flat_cache(char*,int);
     if not lib_path:
         raise RuntimeError("cuda_flat_cache_pwa_gen: library not found")
     return _ffi.dlopen(lib_path)
+
+
+class FlatCacheDataHandle:
+    """One loaded sample — a per-load C handle, never the context.
+
+    The fitter holds the phase-space handle and the data handle at the same
+    time (``_compute_norm_batched`` integrates over one while ``get_nll_raw``
+    evaluates the other), so each ``load_data`` must own its arrays.  The
+    ``FCDataHandle`` on the C side is exactly that; this object owns it and
+    frees it once, on ``free()`` or at garbage collection.
+    """
+
+    __slots__ = ("ptr", "ne", "_lib", "_keep", "__weakref__")
+
+    def __init__(self, ptr, lib, ne):
+        self.ptr = ptr
+        self._lib = lib
+        self.ne = int(ne)
+        self._keep = []
+
+    def free(self):
+        """Idempotent: the second call (and a NULL handle) is a no-op."""
+        if self.ptr is not None:
+            self._lib.cuda_free_data_flat_cache(self.ptr)
+            self.ptr = None
+            self._keep.clear()
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
 
 
 def dedup_basis(config):
@@ -85,13 +117,18 @@ def dedup_basis(config):
 class CUDAKernelFlatCachePWAGen:
     """Fused-tile CUDA implementation with a cached amplitude and deduped basis."""
 
-    def __init__(self, config, batch_size=50000):
+    def __init__(self, config, batch_size=50000, resolution_size=1):
         global _lib
         if "fl_index" in config or "num_index" in config:
             raise ValueError(
                 "cuda_flat_cache_pwa_gen: pass the FULL (non-deduped) config "
                 "— this backend does its own dedup, and a config that already "
                 "carries fl_index/num_index has a different row layout")
+        resolution_size = int(resolution_size)
+        if resolution_size < 1:
+            raise ValueError(
+                "cuda_flat_cache_pwa_gen: resolution_size must be >= 1, got "
+                f"{resolution_size}")
         if _lib is None:
             _lib = _load_lib()
         self._lib = _lib
@@ -113,6 +150,8 @@ class CUDAKernelFlatCachePWAGen:
         self.n_momentum = int(np.max(c["fl_q_index"])) + 1
         self.n_angle_total = int(np.max(c["angle_index"])) + 1
         self.batch_size = int(batch_size)
+        #: events per grouped-log-sum group; 1 = the per-event objective
+        self.resolution_size = resolution_size
         self._last_dnorm = None
 
         # ── the backend-internal dedup ──────────────────────────────
@@ -166,16 +205,20 @@ class CUDAKernelFlatCachePWAGen:
             self.n_wave, self.n_proj, self.n_res, self.n_decay,
             self.n_basis, self.n_ab, self.n_comp,
             self.n_mass, self.n_momentum, self.n_angle_total,
-            self.batch_size)
+            self.batch_size, self.resolution_size)
         if not self._ctx:
             raise RuntimeError(
                 "cuda_flat_cache_pwa_gen: context creation failed")
         self._keep = keep_alive
-        self._handle = None
 
     # ── data ────────────────────────────────────────────────────────
     def load_data(self, data):
-        self.free_data()
+        """Build a FRESH handle; nothing is freed or overwritten here.
+
+        The fitter keeps several samples alive at once (phase space + data),
+        so a ``free_data()`` at the top of this method — or a mutable
+        ``self._handle`` slot — would make the second load clobber the first.
+        """
         mass = np.ascontiguousarray(np.asarray(data["mass"], np.float64))
         mom = np.ascontiguousarray(np.asarray(data["q"], np.float64))
         ang = np.ascontiguousarray(np.asarray(data["angle"], np.float64))
@@ -188,23 +231,22 @@ class CUDAKernelFlatCachePWAGen:
         b = np.ascontiguousarray(np.asarray(
             np.full(ne, float(b)) if np.isscalar(b) else b, np.float64).ravel())
         keep = [mass, mom, ang, w, b]
-        self._keep_data = keep
-        self._handle = self._lib.cuda_load_data_flat_cache(
+        ptr = self._lib.cuda_load_data_flat_cache(
             self._ctx,
             _ffi.cast("double*", _ffi.from_buffer(mass)), _ffi.NULL,
             _ffi.cast("double*", _ffi.from_buffer(mom)), _ffi.NULL,
             _ffi.cast("double*", _ffi.from_buffer(ang)), _ffi.NULL,
             _ffi.cast("double*", _ffi.from_buffer(w)),
             _ffi.cast("double*", _ffi.from_buffer(b)), ne)
-        return {"handle": self._handle, "ne": ne, "_keep": keep}
-
-    def free_data(self):
-        if getattr(self, "_handle", None) is not None:
-            self._lib.cuda_free_data_flat_cache(self._handle)
-            self._handle = None
+        if not ptr:
+            raise RuntimeError(
+                "cuda_flat_cache_pwa_gen: load_data failed (device allocation)")
+        h = FlatCacheDataHandle(ptr, self._lib, ne)
+        h._keep = keep          # keep the numpy buffers alive with the handle
+        return h
 
     def free(self):
-        self.free_data()
+        """Context only.  Handles are owned by whoever called ``load_data``."""
         if getattr(self, "_ctx", None):
             self._lib.cuda_free_context_flat_cache(self._ctx)
             self._ctx = None
@@ -217,8 +259,11 @@ class CUDAKernelFlatCachePWAGen:
 
     # ── compute ─────────────────────────────────────────────────────
     def compute(self, params, data_handle, norm=None, return_p=True):
-        h = data_handle["handle"]
-        ne = data_handle["ne"]
+        ne = data_handle.ne
+        hp = data_handle.ptr
+        if hp is None:
+            raise RuntimeError(
+                "cuda_flat_cache_pwa_gen: this data handle was already freed")
         ck = np.asarray(params["ck"], np.complex128).ravel()
         coeff_full = np.asarray(params["coeff"], np.float64).ravel()
         if ck.size != self.n_wave:
@@ -245,7 +290,7 @@ class CUDAKernelFlatCachePWAGen:
         oQ = _ffi.new("double*")
         oDn = _ffi.new("double*")
         self._lib.cuda_compute_flat_cache(
-            self._ctx,
+            self._ctx, hp,
             _ffi.cast("double*", _ffi.from_buffer(ckr)),
             _ffi.cast("double*", _ffi.from_buffer(cki)),
             _ffi.cast("double*", _ffi.from_buffer(coeff)),
@@ -282,9 +327,10 @@ class CUDAKernelFlatCachePWAGen:
 class CUDAFlatCachePWAGenBackend(ComputeBackend):
     """Backend wrapper for :class:`CUDAKernelFlatCachePWAGen`."""
 
-    def __init__(self, kernel_config, batch_size=50000):
-        self.kernel = CUDAKernelFlatCachePWAGen(kernel_config,
-                                                batch_size=batch_size)
+    def __init__(self, kernel_config, batch_size=50000, resolution_size=1):
+        self.kernel = CUDAKernelFlatCachePWAGen(
+            kernel_config, batch_size=batch_size,
+            resolution_size=resolution_size)
 
     def load_data(self, data_np):
         return self.kernel.load_data(data_np)
