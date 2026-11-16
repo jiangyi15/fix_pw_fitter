@@ -1,0 +1,63 @@
+# pwa_gen with the SAME kmatrix2 resonance in TWO topologies.
+#
+# The point of this fixture: one particle name (`k2`) used by two decay
+# chains means one set of basis weights drives two propagators that read
+# DIFFERENT event mass columns.  So:
+#
+#   * `den_names` has one entry per (topology, wave, basis row) -- many
+#     duplicates of the same 5 names;
+#   * `basis_m_index` puts those rows at TWO columns (0 and 1);
+#   * the basis dedup keeps the two columns apart (key = name, kind, mass
+#     column), folding 20 rows -> 10 rather than -> 5;
+#   * `param_names()` still has only 5 basis weights, because it is ONE
+#     resonance with ONE coupling -- the collapse is correct physics, and
+#     the shared weight drives both.
+#
+# `tests/test_pwa_gen.py::test_same_particle_two_topologies_*` pins that.
+amp_model: pwa_gen
+defaults:
+  n_interp: 20000
+data:
+  dat_order: [pip, pim, eta]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  jpsi:
+    - [pipi, eta]
+    - [pipeta, pim]
+  pipi: [pip, pim]
+  pipeta: [pip, eta]
+particle:
+  $top: jpsi
+  $finals: [pip, pim, eta]
+  pipi: [k2]
+  pipeta: [k2]          # the SAME resonance, a different topology
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    width: 0.30
+    model: kmatrix2
+    m1: 0.8
+    m2: 1.35
+    g1: 0.35
+    g2: 0.55
+    b1: 1.0
+    b2r: 0.6
+    b2i: 0.7

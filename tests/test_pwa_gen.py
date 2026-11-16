@@ -30,6 +30,8 @@ from tabpwa.pwa_gen_config import build_from_groups, dedup
 CFG_BASIS = "tests/config_pwa_gen.yml"
 CFG_KM = "tests/config_pwa_gen_km.yml"
 CFG_MB = "tests/config_pwa_gen_mb.yml"
+# the SAME resonance in two topologies -> one name, two mass columns
+CFG_SAME = "tests/config_pwa_gen_same.yml"
 
 # the pwa_gen implementations: the flat-loop NumPy reference is the only one
 # after the migration (``cuda_*_gen_*`` were removed with the old config)
@@ -342,3 +344,95 @@ def test_mass_width_dropped_when_replaced_by_basis_weights():
     assert "k2_mass" not in names
     assert "k2_width" not in names
     assert "k2_s0" in names and "k2_rho" in names
+
+
+# ── one resonance, two topologies: a name spanning two mass columns ──
+
+def test_same_particle_two_topologies_one_name_two_mass_columns():
+    """``k2`` in two chains: ONE coupling, TWO propagator mass columns.
+
+    This is the case a name-keyed parameter surface has to get right.  The
+    basis rows are per (topology, wave, row), so the same name appears at
+    more than one ``basis_m_index`` — the rows are different functions of the
+    event (different mass column), but the *weight* is one physical number.
+    """
+    from tabpwa.pwa_gen_config import build_from_groups
+    f = Fitter(CFG_SAME)
+    f.apply_constrains()
+    kc = f.kernel_config
+    names = kc["den_names"]
+    bmi = np.asarray(kc["basis_m_index"])
+
+    # one name, more than one mass column
+    cols = {}
+    for i, nm in enumerate(names):
+        cols.setdefault(nm, set()).add(int(bmi[i]))
+    spanning = {nm: sorted(c) for nm, c in cols.items() if len(c) > 1}
+    assert spanning, "fixture must have a name at two mass columns"
+    for nm, cc in spanning.items():
+        assert len(cc) == 2, (nm, cc)
+
+    # ... but only ONE fitted weight per name
+    free = set(f.free_param_names())
+    assert len([n for n in free if n in set(names)]) == len(set(names))
+
+
+def test_same_particle_dedup_keeps_the_two_mass_columns():
+    """The fold must not merge rows that read different mass columns.
+
+    Folding them would make one coefficient drive a table row sampled at the
+    wrong mass — silently.  The key includes the mass column precisely so
+    this cannot happen.
+    """
+    from tabpwa.pwa_gen_config import build_from_groups, dedup
+    m = Fitter(CFG_SAME).model
+    full = build_from_groups(m, n_interp=200)
+    dd = dedup(full)
+    n_full = np.asarray(full["basis_table"]).shape[0]
+    n_dd = np.asarray(dd["basis_table"]).shape[0]
+    # 4 waves x 5 rows = 20 -> folds to 2 columns x 5 = 10, NOT 5
+    assert n_dd < n_full
+    assert sorted(set(int(c) for c in dd["basis_m_index"])) == [0, 1]
+    assert int(dd["basis_m_index"].max()) + 1 == 2
+
+
+def test_same_particle_full_and_dedup_agree():
+    """The folded config evaluates to the same amplitude."""
+    from tabpwa.backends.numpy_flat_backend import NumpyFlatBackend
+    from tabpwa.pwa_gen_config import build_from_groups, dedup
+    f = Fitter(CFG_SAME)
+    f.apply_constrains()
+    kc = f.kernel_config
+    m = f.model
+    full = build_from_groups(m, n_interp=2000)
+    dd = dedup(full)
+    data = _synth(kc, 32, 5)
+    x = f.initial_values(seed=1)
+    params, _res = f.build_params(x)
+    keep = np.asarray(dd["basis_keep"])
+
+    bf = NumpyFlatBackend(full)
+    P_full = bf.compute({"ck": params["ck"], "coeff": params["coeff"]},
+                        bf.load_data(data), norm=1.3)[2]
+    bd = NumpyFlatBackend(dd)
+    P_dd = bd.compute({"ck": params["ck"],
+                      "coeff": np.asarray(params["coeff"])[keep]},
+                      bd.load_data(data), norm=1.3)[2]
+    assert _rel(P_dd, P_full) < 1e-12
+
+
+def test_same_particle_gradients_match_fd():
+    """Every free parameter, including the shared basis weight, is correct."""
+    f = _loaded(CFG_SAME)
+    x = f.initial_values(seed=1)
+    nll, grad = f.get_nll(x)
+    assert np.isfinite(nll) and np.all(np.isfinite(grad))
+    names = f.free_param_names()
+    h = 1e-6
+    for i, nm in enumerate(names):
+        xp, xm = x.copy(), x.copy()
+        xp[i] += h
+        xm[i] -= h
+        fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * h)
+        assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (
+            nm, grad[i], fd)
