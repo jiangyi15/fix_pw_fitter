@@ -698,7 +698,7 @@ def test_sum_stream_param_form_chains_at_the_given_x():
     """
     from tabpwa import Fitter
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     import numpy as np
     from test_pwa_gen import _synth

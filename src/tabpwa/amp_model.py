@@ -24,12 +24,15 @@ Registered models:
   time-dependent flavour-tagged mixing: adds the six scalar parameters.
 """
 
+import itertools
+
 import numpy as np
 
 from tabpwa.base_model import BaseModel, row_block_factors
+from tabpwa.pwa_gen_flat_params import FlatKernelParams
 from tabpwa.kernel_params import (
     BuildKernelParams, PWAKernelParams, FlavourTagMixKernelParams,
-    PolarisedKernelParams, PWAGenKernelParams)
+    PolarisedKernelParams)
 
 # Legacy time/mixing scalar parameters (D0-D0bar flavour-tagged mixing).
 LEGACY_SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod",
@@ -175,8 +178,12 @@ class AmplitudeModel(BaseModel):
         """Resolved ↔ kernel parameter transform for this model.
 
         The model owns the transform's constructor input, so callers only
-        see the returned object.
+        see the returned object.  A transform that also needs the built
+        kernel config (the flat ``pwa_gen`` one) sets
+        ``params_transform_wants_config = True``.
         """
+        if getattr(self, "params_transform_wants_config", False):
+            return self.params_transform_cls(self, self.build_kernel_config())
         return self.params_transform_cls(self)
 
     def extra_transforms(self):
@@ -257,7 +264,10 @@ class PWAGen(PWA):
     """
 
     name = "pwa_gen"
-    params_transform_cls = PWAGenKernelParams
+    # ``FlatKernelParams`` needs the built config (it reads basis_table /
+    # den_names to shape the flat coeff vector)
+    params_transform_cls = FlatKernelParams
+    params_transform_wants_config = True
 
     def __init__(self, config):
         super().__init__(config)
@@ -270,12 +280,58 @@ class PWAGen(PWA):
 
     # ── kernel config ────────────────────────────────────────────────
     def build_kernel_config(self):
-        """Base PWA config plus the (optional) basis extensions."""
+        """The flat ``pwa_gen`` kernel config.
+
+        Built from the model's own description (:meth:`_pg_host_records`) plus
+        :func:`tabpwa.pwa_gen_config.build_from_groups` — the ``pwa`` base
+        config is **not** consulted: its arrays belong to the old kernel
+        vocabulary (``bw_order``/``fl_order``/``den_row``/``matrix_angle`` …),
+        none of which a flat-config backend reads.
+
+        Only the host-side metadata the fitter needs is carried over: the ck
+        map, the block counts and the parameter-name lists.
+        """
         if self._pg_kc is not None:
             return self._pg_kc
         with self._default_context():
-            kc = super().build_kernel_config()
-            self._pg_attach(kc)
+            exp, mult, C, P, n_base = self._pg_host_records(
+                n_blocks=self.decay_tree.n_perm * self.decay_tree.n_cp)
+            from tabpwa.pwa_gen_config import build_from_groups
+            kc = build_from_groups(self)
+        # ── host metadata (names / counts, no kernel arrays) ────────
+        kc["n_blocks"] = int(C)
+        kc["n_perm"] = self.decay_tree.n_perm
+        kc["n_cp"] = self.decay_tree.n_cp
+        kc["n_identical"] = self.decay_tree.n_perm
+        kc["n_proj"] = int(P)
+        kc["n_proj_base"] = int(P)
+        kc["top_states"] = [int(x) for x in self._helicity_top_states()] or None
+        # ``ck_map`` is deliberately NOT emitted: it is derived from the same
+        # expansion and ``get_ck_map()`` computes it on demand.  Including it
+        # here would recurse (``get_ck_map`` -> ``build_kernel_config``).
+        m0, g0 = [], []
+        for _, ch in self.full_decay.get_partial_waves():
+            for idx, d in enumerate(ch.decays):
+                if idx != 0:
+                    nm = d.core.name + "_mass"
+                    if nm not in m0:
+                        m0.append(nm)
+                    for gn in d.core._model.get_gamma_name():
+                        if gn not in g0:
+                            g0.append(gn)
+        kc["m0_names"] = m0
+        kc["g0_names"] = g0
+        try:
+            from tabpwa.helicity_angle import (decay_chain_to_tree,
+                                               tree_vertices, canonical_variables,
+                                               to_spin)
+            first = self.full_decay.get_partial_waves()[0][1]
+            nv = len(tree_vertices(decay_chain_to_tree(first)))
+            topj0 = to_spin(first.decays[0].core.J) == 0
+            kc["variables"] = canonical_variables(nv, top_j0=topj0)
+            kc["top_j0"] = bool(topj0)
+        except Exception:
+            pass
         self._pg_kc = kc
         return kc
 
@@ -462,34 +518,37 @@ class PWAGen(PWA):
                 f"pwa_gen: '{name}' denominator basis row 1 must be m²")
         return names, rows
 
-    def _pg_attach(self, kc):
-        """Expand the wave axis and attach ``n_*`` / ``den_*`` tables."""
+    def _pg_host_records(self, n_blocks=1):
+        """Resolve the model's own description — **no kernel arrays**.
+
+        A ``pwa_gen`` model needs, independently of which arrays a kernel
+        reads:
+
+        * ``_pg_den_names`` / ``_pg_bws`` — the per-resonance denominator
+          basis: its weight names and the rows/transform they come from.
+          ``PWAgenWeightsTransform`` publishes those names as transform
+          outputs, so the constraint pipeline can resolve them.
+        * ``_pg_generic`` — whether an explicit coefficient basis is in use
+          (it decides whether the weight transform is registered at all).
+        * ``_pg_combs`` — the expanded ck combinations (``ck_w = g_ls·n_i``),
+          which ``get_ck_map`` turns into the parameter slots.
+
+        This is the whole of the kernel-config-independent state; the arrays
+        a kernel consumes are built by
+        :func:`tabpwa.pwa_gen_config.build_from_groups` from these records.
+        """
         from tabpwa.particle_model.base import BasisModel
 
         models = self._pg_particle_models()
         waves = list(self.full_decay.get_partial_waves())
         n_base = len(waves)
-        C = int(kc.get("n_blocks", 1) or 1)
-        P = int(kc.get("n_proj", 1) or 1)
-        n_wave = kc["matrix_angle"].shape[1]
-        if n_wave != C * P * n_base:
-            raise ValueError(
-                f"pwa_gen: n_wave={n_wave} != n_blocks·n_proj·n_wave_base = "
-                f"{C}·{P}·{n_base}")
-        n_res = int(kc["bw_order"].size // n_wave)
-        n_decay = int(kc["fl_order"].size // n_wave)
-        base_combs = list(self.full_decay.get_partial_waves_params())
-        self._pg_base_mass_index = [int(x) for x in kc["mass_index"]]
-
-        grid, n_min, n_delta = self._pg_grid()
+        C = int(n_blocks or 1)
+        P = len(self._helicity_external_states())
+        grid, _n_min, _n_delta = self._pg_grid()
 
         # ── denominator basis per (base) unique BW ───────────────────
-        den_names = []
-        bws = []
-        extra_rows = []           # tabulated finished basis functions
-        extra_pos = {}
-        any_transform = False
-        for b, key in enumerate(self.unique_bw):
+        den_names, bws, any_transform = [], [], False
+        for key in self.unique_bw:
             name = key[0][:-len("_mass")]
             mdl = models[name]
             mk = getattr(mdl, "make_basis_transform", None)
@@ -500,34 +559,13 @@ class PWAGen(PWA):
             den_names.append(names)
             bws.append({"name": name, "model": mdl, "transform": tr,
                         "den_names": names, "rows": rows})
-
-        # Every row past the two built-ins (1, m²) is tabulated as a
-        # finished basis function with an explicit weight.  This must run
-        # for ALL Breit–Wigner slots — including plain models — whenever
-        # the generic coefficient basis is needed: a config that mixes a
-        # BasisModel with an ordinary resonance then has a ``den_row`` for
-        # every slot instead of a KeyError.  Plain weights are
-        # ``[m0², −1, m0·g_l]`` (see PWAgenWeightsTransform.forward).
-        if any_transform:
-            for rec in bws:
-                name = rec["name"]
-                for j in range(2, len(rec["rows"])):
-                    pos = extra_pos.get((name, j))
-                    if pos is None:
-                        pos = len(extra_rows)
-                        extra_pos[(name, j)] = pos
-                        extra_rows.append(rec["rows"][j])
-
-        n_bw = len(self.unique_bw)
         self._pg_den_names = den_names
         self._pg_bws = bws
         self._pg_generic = bool(any_transform)
 
-        # ── numerator rows per base wave + expanded wave list ────────
-        # ── numerator rows per (base wave, FACTOR) ──────────────────
-        # A chain may carry a numerator on more than one BW factor
-        # (``B -> R1 x, R1 -> R2 y``), each at its own mass, so the layout
-        # mirrors ``bw_order``: one entry per (wave, factor), not per wave.
+        # ── expanded ck combinations ────────────────────────────────
+        # One ck slot per (chain, numerator-row combination); the heads of a
+        # chain's numerator rows append to its plain ``g_ls`` tuple.
         chain_fac = {}
         per_wave = []
         for ls, chain in waves:
@@ -535,133 +573,29 @@ class PWAGen(PWA):
             if cid not in chain_fac:
                 chain_fac[cid] = self._pg_chain_factors(chain)
             per_wave.append(chain_fac[cid])
+        base_combs = list(self.full_decay.get_partial_waves_params())
 
-        n_table = [np.ones_like(grid, dtype=complex)]
-        n_row_cache = {}
-
-        def _row_of(fac, rowfun):
-            """Table row index of one factor's basis row (0 = constant)."""
-            key = (id(fac), id(rowfun))
-            if key in n_row_cache:
-                return n_row_cache[key]
-            g = None if rowfun is None else rowfun(grid)
-            if g is None or np.all(g == 1):
-                n_row_cache[key] = 0
-                return 0
-            n_row_cache[key] = len(n_table)
-            n_table.append(np.asarray(g, dtype=complex))
-            return n_row_cache[key]
-
-        # the expansion of a wave is the product of its factors' free rows
         mult = np.ones(n_base, dtype=np.int32)
-        exp = []                  # (base wave, [rowfun per factor])
-        comb_exp = []
-        for k, (ls, chain) in enumerate(waves):
-            facs = per_wave[k]
-            free = [(f, rf) for f in facs if f["heads"] for rf in f["rows"]]
+        exp = []                       # (base wave, combo|None)
+        comb_exp = []                  # the ck tuple of each expanded wave
+        for k, facs in enumerate(per_wave):
+            free = [f for f in facs if f["heads"] and f["rows"]]
             if not free:
                 mult[k] = 1
                 exp.append((k, None))
                 comb_exp.append(tuple(base_combs[k]))
                 continue
-            import itertools
             combos = list(itertools.product(*[
-                [(f, rf) for rf in f["rows"]]
-                for f in facs if f["heads"] and f["rows"]]))
+                [(f, rf) for rf in f["rows"]] for f in free]))
             mult[k] = len(combos)
             for combo in combos:
-                heads = tuple(h for (f, _rf) in combo
-                              for h in
-                              [f["heads"][f["rows"].index(_rf)]])
+                heads = tuple(h for (f, rf) in combo
+                              for h in [f["heads"][f["rows"].index(rf)]])
                 exp.append((k, combo))
                 comb_exp.append(tuple(base_combs[k]) + heads)
-
-        n_exp = len(exp)
-        has_num = any(c is not None for _k, c in exp)
-        if not has_num and not self._pg_generic:
-            # plain path: nothing to add — the config is exactly pwa's
-            self._pg_combs = [tuple(c) for c in base_combs]
-            return
-
-        # ── expand the per-wave arrays (p-major, block-major) ────────
-        strip_mass = self.n_topo * self.n_res
-        exp_k = np.array([k for k, _c in exp], dtype=np.int64)
-        old_idx = np.concatenate([
-            b * P * n_base + p * n_base + exp_k
-            for b in range(C) for p in range(P)])
-        kc["matrix_angle"] = kc["matrix_angle"][:, old_idx]
-        bw_rows = np.asarray(kc["bw_order"]).reshape(-1, n_res)
-        kc["bw_order"] = bw_rows[old_idx].reshape(-1)
-        fl_rows = np.asarray(kc["fl_order"]).reshape(-1, n_decay)
-        kc["fl_order"] = fl_rows[old_idx].reshape(-1)
-        if "wave_names" in kc:
-            names = []
-            for k, _ls in enumerate(waves):
-                for _ in range(int(mult[k])):
-                    names.append(str(kc["wave_names"][k]))
-            kc["wave_names"] = names
-
-        # ── numerator table / per-factor index ──────────────────────
-        # ``n_index[f]`` with ``f = w·n_res + r``, exactly like ``bw_order``:
-        # factor ``r`` reads the mass column of its OWN BW, so
-        # ``N_R1(m_R1) · N_R2(m_R2)`` is expressible.  ``n_index`` only: the
-        # mass column of a factor is already ``mass_index[bw_order[f]]`` —
-        # the kernel derives it exactly as it does for the denominator, so no
-        # second column array is needed (and none can fall out of sync).
-        n_wave_e = n_exp
-        n_idx = np.zeros((n_wave_e, n_res), dtype=np.int32)
-        for i, (k, combo) in enumerate(exp):
-            for r, fac in enumerate(per_wave[k]):
-                if not fac["heads"]:
-                    continue
-                chosen = None
-                if combo is not None:
-                    for (f, rf) in combo:
-                        if f is fac:
-                            chosen = rf
-                            break
-                n_idx[i, r] = _row_of(fac, chosen)
-
-        kc["n_table"] = np.stack(n_table)
-        kc["n_min"] = n_min
-        kc["n_delta"] = n_delta
-        # ``n_idx`` is already in ``exp`` order, and ``matrix_angle``'s
-        # columns are exactly ``old_idx`` — which selects ``exp`` indices
-        # ``p·n_base + k``, i.e. it walks ``exp`` in order once per
-        # projection.  So the numerator block is the ``exp``-order rows
-        # tiled over (block, projection) — the same shape as the wave axis,
-        # factor-minor like ``bw_order``.
-        kc["n_index"] = np.ascontiguousarray(
-            np.tile(n_idx.reshape(-1), C * P), dtype=np.int32)
-
-        # ── generic coefficient basis ───────────────────────────────
-        if self._pg_generic:
-            n_slots = max((len(nm) for nm in den_names), default=2)
-            base_den = np.full((n_bw, n_slots), -1, dtype=np.int32)
-            for b, names in enumerate(den_names):
-                name = self.unique_bw[b][0][:-len("_mass")]
-                for j in range(len(names)):
-                    if j == 0:
-                        base_den[b, j] = 0
-                    elif j == 1:
-                        base_den[b, j] = 1
-                    else:
-                        pos = extra_pos.get((name, j))
-                        if pos is None:            # tail of a mixed config
-                            raise ValueError(
-                                f"pwa_gen: no tabulated denominator basis "
-                                f"row for '{name}' slot {j} — the resonance "
-                                f"cannot join a generic coefficient config")
-                        base_den[b, j] = 2 + pos
-            kc["den_row"] = np.tile(base_den, (C, 1))
-            kc["den_table"] = (np.stack(extra_rows) if extra_rows
-                               else np.zeros((0, grid.size), dtype=complex))
-            kc["den_min"] = n_min
-            kc["den_delta"] = n_delta
-
         self._pg_combs = comb_exp
-        kc["ck_map"] = list(comb_exp)
-
+        self._pg_mult = mult
+        return exp, mult, C, P, n_base
 
 @register_amplitude_model("polarised_pwa")
 class PolarisedPWA(PWA):

@@ -55,18 +55,18 @@ def test_empty_selection_means_everything():
 
 def test_substring_selection():
     """A bare word is a substring match — no wildcards needed."""
-    got = {s for s, _l in B.select(["pwa_gen"])}
-    assert got == {s for s, _l in B.variants() if "pwa_gen" in s}
+    got = {s for s, _l in B.select(["pwa_s0"])}
+    assert got == {s for s, _l in B.variants() if "pwa_s0" in s}
     assert len(got) >= 3                       # s0e, flat, bw, bwt
-    assert all("pwa_gen" in s for s in got)
+    assert all("pwa_s0" in s for s in got)
 
 
 def test_glob_selection():
     got = {s for s, _l in B.select(["kernels_v5_*"])}
     assert got and all(s.startswith("kernels_v5_") for s in got)
     # a pattern can also address the library name
-    by_lib = {s for s, _l in B.select(["libcuda_kernels_v5_pwa_gen*"])}
-    assert by_lib == {s for s in got if "pwa_gen" in s}
+    by_lib = {s for s, _l in B.select(["libcuda_kernels_v5_pwa_s0*"])}
+    assert by_lib and all("pwa_s0" in s for s in by_lib)
 
 
 def test_multiple_patterns_are_unioned():
@@ -82,7 +82,7 @@ def test_unmatched_pattern_is_an_error():
     with pytest.raises(ValueError, match="no kernel matches"):
         B.select(["there_is_no_such_kernel"])
     with pytest.raises(ValueError, match="no kernel matches"):
-        B.select(["pwa_gen", "there_is_no_such_kernel"])   # one bad, one good
+        B.select(["pwa_s0", "there_is_no_such_kernel"])    # one bad, one good
 
 
 # ── incremental default ────────────────────────────────────────────
@@ -129,12 +129,12 @@ def test_build_cli_lists_and_reports_status(capsys=None):
     env["PYTHONPATH"] = os.path.join(root, "src") + os.pathsep + \
         env.get("PYTHONPATH", "")
     r = subprocess.run([sys.executable, "-m", "tabpwa.cuda.build", "--list",
-                        "pwa_gen"], capture_output=True, text=True, env=env,
+                        "pwa_s0"], capture_output=True, text=True, env=env,
                        timeout=300)
     assert r.returncode == 0, r.stderr[-800:]
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     assert lines and all("libcuda_kernels_" in ln for ln in lines)
-    assert all("pwa_gen" in ln for ln in lines)
+    assert all("pwa_s0" in ln for ln in lines)
 
 
 def test_build_cli_rejects_an_unknown_kernel():

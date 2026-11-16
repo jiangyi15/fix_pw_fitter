@@ -379,7 +379,7 @@ def test_uncertainties_agree_with_x_space_finite_differences():
     from tabpwa.amp_frac import AmplitudeFractions
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 120, 1))
     f.set_data(_synth(f.kernel_config, 80, 2))
@@ -446,13 +446,15 @@ def test_named_sweep_equals_the_x_sweep_for_the_names_it_covers():
     from tabpwa import Fitter
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 60, 1))
     x = f.initial_values(seed=3)
     flat = list(f.cm.var_registry.flat_names)
 
-    name = "k2_m1"
+    # a name that exists in the pwa_gen parameter surface (the basis weights
+    # replace the physical mass/width, so ``k2_m1`` is gone)
+    name = "k2_m4"
     j = flat.index(name)
     fn = lambda d: [float(d[name])]
 
@@ -486,7 +488,7 @@ def test_fractions_evaluate_the_model_frame_not_the_display_frame():
     from tabpwa.amp_frac import AmplitudeFractions
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 120, 1))
     f.set_data(_synth(f.kernel_config, 80, 2))
@@ -528,7 +530,7 @@ def test_param_names_means_the_same_on_every_route():
     from tabpwa.amp_frac import AmplitudeFractions
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 120, 1))
     f.set_data(_synth(f.kernel_config, 80, 2))
@@ -558,7 +560,7 @@ def test_fractions_sees_constraint_changes_after_construction():
     from tabpwa.amp_frac import AmplitudeFractions
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 120, 1))
     f.set_data(_synth(f.kernel_config, 80, 2))
@@ -585,7 +587,7 @@ def test_fractions_follows_set_phsp_after_construction():
     from tabpwa.amp_frac import AmplitudeFractions
     from test_pwa_gen import _synth
 
-    f = Fitter("tests/config_pwa_gen_mb.yml", backend="cpu_pwa_gen")
+    f = Fitter("tests/config_pwa_gen_mb.yml", backend="numpy_flat")
     f.apply_constrains()
     f.set_phsp(_synth(f.kernel_config, 120, 1))
     f.set_data(_synth(f.kernel_config, 80, 2))
