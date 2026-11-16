@@ -124,34 +124,101 @@ __global__ void fc_fill_kernel(
     cache[gid] = make_float2((float)(fl * nr), (float)(fl * ni));
 }
 
-/* ── the per-iteration tile: D, the projection sum, and both gradients ── */
-__global__ void fc_tile_kernel(
-    const float2* __restrict__ cache,        /* [ne, n_wave]  F = fl·nu */
-    const double* __restrict__ bas_r,        /* [n_basis, m_bins] */
-    const double* __restrict__ bas_i,
+/* ── load-time fill of the two coeff/ck-independent caches ─────────────
+ *
+ * ``basis_m(m_e)`` depends on (m, e) only and ``fa_{e,k,p}`` on (e, k, p)
+ * only, so both are fixed for the whole fit.  Interpolating them once here
+ * removes every interpolation and every angular reconstruction from the hot
+ * path — v1 redid the basis inside phase 5's
+ * ``n_res·n_basis·n_proj·n_ab`` loop, which is ~100 M redundant
+ * interpolations per call on the _mb fixture.
+ */
+__global__ void fc_fill_static_kernel(
+    const double* __restrict__ bas_r, const double* __restrict__ bas_i,
     const int* __restrict__ bas_m_index,
-    const double* __restrict__ gamma,        /* [n_wave, n_res, n_basis] */
-    const int* __restrict__ angle_index,
-    const double* __restrict__ angle_k,
-    const double* __restrict__ angle_b,
-    const double* __restrict__ am_r,         /* [n_wave, n_proj, n_ab] */
-    const double* __restrict__ am_i,
     double m_min, double m_delta, int m_bins,
+    const int* __restrict__ angle_index, const double* __restrict__ angle_k,
+    const double* __restrict__ angle_b,
+    const double* __restrict__ am_r, const double* __restrict__ am_i,
+    const double* __restrict__ mass, const double* __restrict__ ang,
+    int ne, int n_basis, int n_wave, int n_proj, int n_ab, int n_comp,
+    int n_mass, int n_angle_total,
+    float2* __restrict__ bas_cache, float2* __restrict__ fa_cache)
+{
+    /* basis: one thread per (event, basis row) */
+    const int nb_total = ne * n_basis;
+    for (int g = blockIdx.x * blockDim.x + threadIdx.x; g < nb_total;
+         g += gridDim.x * blockDim.x) {
+        const int e = g / n_basis, m = g - e * n_basis;
+        const double mv = mass[(size_t)e * n_mass + bas_m_index[m]];
+        double vr, vi;
+        fc_interp_c(bas_r, bas_i, m, mv, m_min, m_delta, m_bins, &vr, &vi);
+        bas_cache[g] = make_float2((float)vr, (float)vi);
+    }
+    /* fa: one thread per (event, wave, projection) */
+    const int fa_total = ne * n_wave * n_proj;
+    for (int g = blockIdx.x * blockDim.x + threadIdx.x; g < fa_total;
+         g += gridDim.x * blockDim.x) {
+        const int e = g / (n_wave * n_proj);
+        const int rest = g - e * (n_wave * n_proj);
+        const int k = rest / n_proj, p = rest - k * n_proj;
+        double far = 0.0, fai = 0.0;
+        for (int a = 0; a < n_ab; a++) {
+            const int col = angle_index[a];
+            double prod = 1.0;
+            for (int j = 0; j < n_comp; j++) {
+                const double th =
+                    ang[((size_t)e * n_angle_total + col) * n_comp + j];
+                prod *= cos(th * angle_k[a * n_comp + j]
+                            + angle_b[a * n_comp + j]);
+            }
+            const int o = (k * n_proj + p) * n_ab + a;
+            far += prod * am_r[o];
+            fai += prod * am_i[o];
+        }
+        fa_cache[g] = make_float2((float)far, (float)fai);
+    }
+}
+
+/* ── the per-iteration tile: D, the projection sum, and both gradients ── */
+/*  fc_tile_kernel_v2 — replaces the fused tile in kernels_flat_cache_pwa_gen.
+ *
+ *  Differences from v1, all of them "stop recomputing things that cannot
+ *  change between iterations":
+ *
+ *  1. **basis values are cached** (`bas_cache`, `[ne, n_basis]` float2).  The
+ *     interpolation ``basis_m(m_e)`` depends on ``(m, e)`` only — not on
+ *     ``coeff`` — and v1 redid it inside phase 5's
+ *     ``n_res·n_basis·n_proj·n_ab`` loop, i.e. up to 100 M redundant
+ *     interpolations per call on `_mb` for 0.5 M distinct values.  With the
+ *     cache the denominator is a plain dot product over the selector.
+ *
+ *  2. **`fa` is cached** (`fa_cache`, `[ne, n_wave, n_proj]` float2).  It
+ *     depends on ``(e, k, p)`` only, and v1 rebuilt it in phases 2, 4 and 5.
+ *
+ *  Both caches are filled once in ``load_data`` alongside ``F``, so a compute
+ *  call now does: the denominator (a ``coeff``-carrying dot product), the
+ *  projection sum, and the two gradient chains — no interpolation and no
+ *  angular reconstruction in the hot path.
+ */
+__global__ void fc_tile_kernel(
+    const float2* __restrict__ cache,      /* [ne, n_wave]     F = fl·nu  */
+    const float2* __restrict__ bas_cache,  /* [ne, n_basis]    basis_m(m) */
+    const float2* __restrict__ fa_cache,   /* [ne·n_wave·n_proj]  fa      */
+    const int* __restrict__ bas_m_index,   /* [n_basis]  (unused: cached) */
+    const double* __restrict__ gamma,      /* [n_wave, n_res, n_basis]    */
     const double* __restrict__ ck_r, const double* __restrict__ ck_i,
     const double* __restrict__ coeff,
     double norm, int use_norm,
-    const double* __restrict__ mass, const double* __restrict__ ang,
     const double* __restrict__ weight, const double* __restrict__ bkg,
     int ne, int n_wave, int n_proj, int n_res, int n_basis,
-    int n_ab, int n_comp, int n_mass, int n_angle_total,
     double* __restrict__ P_out,
     double* __restrict__ g_ck_r, double* __restrict__ g_ck_i,
     double* __restrict__ g_coeff,
     double* __restrict__ acc)
 {
     extern __shared__ double sh[];
-    double* s_ka = sh;                                    /* [TE·n_ab]   */
-    double* s_s  = s_ka + (size_t)FC_TE * n_ab;           /* [TE·n_wave·n_res·2] */
+    double* s_s  = sh;                                   /* [TE·n_wave·n_res·2] */
     double* s_D  = s_s  + (size_t)FC_TE * n_wave * n_res * 2;
     double* s_A  = s_D  + (size_t)FC_TE * n_wave * 2;
     double* s_dA = s_A  + (size_t)FC_TE * n_proj * 2;
@@ -162,26 +229,10 @@ __global__ void fc_tile_kernel(
     const int evn = min(FC_TE, ne - e0);
     if (evn <= 0) return;
 
-    /* ka — once per (event, angle basis) */
-    for (int idx = tid; idx < evn * n_ab; idx += nt) {
-        const int e = idx / n_ab, a = idx - e * n_ab;
-        const int ge = e0 + e;
-        const int col = angle_index[a];
-        double prod = 1.0;
-        for (int j = 0; j < n_comp; j++) {
-            const double th =
-                ang[((size_t)ge * n_angle_total + col) * n_comp + j];
-            prod *= cos(th * angle_k[a * n_comp + j]
-                        + angle_b[a * n_comp + j]);
-        }
-        s_ka[idx] = prod;
-    }
-    __syncthreads();
-
-    /* denominator factors and their product — the only coeff-dependent work */
+    /* ── phase 1: the denominator — a dot product over the CACHED basis ── */
     for (int idx = tid; idx < evn * n_wave; idx += nt) {
         const int e = idx / n_wave, k = idx - e * n_wave;
-        const int ge = e0 + e;
+        const float2* bv = bas_cache + (size_t)(e0 + e) * n_basis;
         double dr = 1.0, di = 0.0;
         for (int l = 0; l < n_res; l++) {
             double sr = 0.0, si = 0.0;
@@ -189,13 +240,9 @@ __global__ void fc_tile_kernel(
             for (int m = 0; m < n_basis; m++) {
                 const double g = gamma[gb + m];
                 if (g == 0.0) continue;
-                const double mv = mass[(size_t)ge * n_mass + bas_m_index[m]];
-                double vr, vi;
-                fc_interp_c(bas_r, bas_i, m, mv, m_min, m_delta, m_bins,
-                            &vr, &vi);
                 const double w = g * coeff[m];
-                sr += w * vr;
-                si += w * vi;
+                sr += w * (double)bv[m].x;
+                si += w * (double)bv[m].y;
             }
             s_s[((e * n_wave + k) * n_res + l) * 2 + 0] = sr;
             s_s[((e * n_wave + k) * n_res + l) * 2 + 1] = si;
@@ -208,28 +255,22 @@ __global__ void fc_tile_kernel(
     }
     __syncthreads();
 
-    /* A_{e,p} = Σ_k ck_k · F/D · fa_{k,p} */
+    /* ── phase 2: A_{e,p} = Σ_k ck_k · F/D · fa   (fa cached) ─────────── */
     for (int idx = tid; idx < evn * n_proj; idx += nt) {
         const int e = idx / n_proj, p = idx - e * n_proj;
         double ar = 0.0, ai = 0.0;
         for (int k = 0; k < n_wave; k++) {
-            double far = 0.0, fai = 0.0;
-            for (int a = 0; a < n_ab; a++) {
-                const double ka = s_ka[e * n_ab + a];
-                if (ka == 0.0) continue;
-                const int o = (k * n_proj + p) * n_ab + a;
-                far += ka * am_r[o];
-                fai += ka * am_i[o];
-            }
             const float2 F = cache[(size_t)(e0 + e) * n_wave + k];
+            const float2 fa = fa_cache[(size_t)(e0 + e) * n_wave * n_proj
+                                       + (size_t)k * n_proj + p];
             const double fr = (double)F.x, fi = (double)F.y;
             const double dr = s_D[(e * n_wave + k) * 2 + 0];
             const double di = s_D[(e * n_wave + k) * 2 + 1];
             const double den = dr * dr + di * di;
             const double crn = (fr * dr + fi * di) / den;
             const double cin = (fi * dr - fr * di) / den;
-            const double tr = crn * far - cin * fai;
-            const double ti = crn * fai + cin * far;
+            const double tr = crn * (double)fa.x - cin * (double)fa.y;
+            const double ti = crn * (double)fa.y + cin * (double)fa.x;
             ar += ck_r[k] * tr - ck_i[k] * ti;
             ai += ck_r[k] * ti + ck_i[k] * tr;
         }
@@ -238,7 +279,7 @@ __global__ void fc_tile_kernel(
     }
     __syncthreads();
 
-    /* P_e, the objective, and dQ/dP */
+    /* ── phase 3: P_e, the objective, dQ/dP ───────────────────────────── */
     for (int e = tid; e < evn; e += nt) {
         double pe = 0.0;
         for (int p = 0; p < n_proj; p++) {
@@ -270,7 +311,7 @@ __global__ void fc_tile_kernel(
     }
     __syncthreads();
 
-    /* grad ck — raw Wirtinger half (the 2·Re convention is downstream) */
+    /* ── phase 4: grad ck ─────────────────────────────────────────────── */
     for (int k = tid; k < n_wave; k += nt) {
         double sr = 0.0, si = 0.0;
         for (int e = 0; e < evn; e++) {
@@ -282,18 +323,12 @@ __global__ void fc_tile_kernel(
             const double crn = (fr * dr + fi * di) / den;
             const double cin = (fi * dr - fr * di) / den;
             for (int p = 0; p < n_proj; p++) {
-                double far = 0.0, fai = 0.0;
-                for (int a = 0; a < n_ab; a++) {
-                    const double ka = s_ka[e * n_ab + a];
-                    if (ka == 0.0) continue;
-                    const int o = (k * n_proj + p) * n_ab + a;
-                    far += ka * am_r[o];
-                    fai += ka * am_i[o];
-                }
+                const float2 fa = fa_cache[(size_t)(e0 + e) * n_wave * n_proj
+                                           + (size_t)k * n_proj + p];
                 const double gar = s_dA[(e * n_proj + p) * 2 + 0];
                 const double gai = s_dA[(e * n_proj + p) * 2 + 1];
-                const double tr = crn * far - cin * fai;
-                const double ti = crn * fai + cin * far;
+                const double tr = crn * (double)fa.x - cin * (double)fa.y;
+                const double ti = crn * (double)fa.y + cin * (double)fa.x;
                 sr += gar * tr - gai * ti;
                 si += gar * ti + gai * tr;
             }
@@ -303,65 +338,73 @@ __global__ void fc_tile_kernel(
     }
     __syncthreads();
 
-    /* grad coeff — dQ/ds_l then 2·Re(dQ/ds_l · gamma · basis_m) */
+    /* ── phase 5: grad coeff ──────────────────────────────────────────────
+       dQ/dcommon_k = Σ_p dQ/dA_p·ck_k·fa_{k,p}       (fa cached)
+       dQ/dD_k      = -dQ/dcommon_k · common_k / D_k
+       dQ/ds_{k,l}  = dQ/dD_k · Π_{l'≠l} s_{k,l'}
+       dQ/dcoeff_m += 2Re Σ_e Σ_l dQ/ds_{k,l}·gamma[k,l,m]·basis_m(m_e)
+       The basis value is CACHED, so the inner (e) loop has no interpolation
+       and no projection loop: hoist the (e) sum of dQ/ds out of (m). */
     for (int k = tid; k < n_wave; k += nt) {
         for (int l = 0; l < n_res; l++) {
+            /* gs[e] = dQ/ds_{k,l} for the whole tile (complex) */
+            /* reuse s_A's storage is unsafe; use a small stack array bound
+               by FC_TE */
+            double gsr[FC_TE], gsi[FC_TE];
+            for (int e = 0; e < evn; e++) {
+                const int ge = e0 + e;
+                /* dQ/dcommon */
+                double dcr = 0.0, dci = 0.0;
+                for (int p = 0; p < n_proj; p++) {
+                    const float2 fa =
+                        fa_cache[(size_t)ge * n_wave * n_proj
+                                 + (size_t)k * n_proj + p];
+                    const double gar = s_dA[(e * n_proj + p) * 2 + 0];
+                    const double gai = s_dA[(e * n_proj + p) * 2 + 1];
+                    const double tr = gar * (double)fa.x - gai * (double)fa.y;
+                    const double ti = gar * (double)fa.y + gai * (double)fa.x;
+                    dcr += ck_r[k] * tr - ck_i[k] * ti;
+                    dci += ck_r[k] * ti + ck_i[k] * tr;
+                }
+                const float2 F = cache[(size_t)ge * n_wave + k];
+                const double fr = (double)F.x, fi = (double)F.y;
+                const double dr = s_D[(e * n_wave + k) * 2 + 0];
+                const double di = s_D[(e * n_wave + k) * 2 + 1];
+                const double den = dr * dr + di * di;
+                const double crn = (fr * dr + fi * di) / den;
+                const double cin = (fi * dr - fr * di) / den;
+                const double qr = -(dcr * crn - dci * cin);
+                const double qi = -(dcr * cin + dci * crn);
+                const double ddr = (qr * dr + qi * di) / den;
+                const double ddi = (qi * dr - qr * di) / den;
+                /* Π_{l'≠l} s_{k,l'} */
+                double pr = 1.0, pi = 0.0;
+                for (int l2 = 0; l2 < n_res; l2++) {
+                    if (l2 == l) continue;
+                    const double ur =
+                        s_s[((e * n_wave + k) * n_res + l2) * 2 + 0];
+                    const double ui =
+                        s_s[((e * n_wave + k) * n_res + l2) * 2 + 1];
+                    const double t_r = pr * ur - pi * ui;
+                    pi = pr * ui + pi * ur;
+                    pr = t_r;
+                }
+                gsr[e] = ddr * pr - ddi * pi;
+                gsi[e] = ddi * pr + ddr * pi;
+            }
+            /* now one pass over m, reading the cached basis only */
             for (int m = 0; m < n_basis; m++) {
                 const double g = gamma[(k * n_res + l) * n_basis + m];
                 if (g == 0.0) continue;
                 double out = 0.0;
                 for (int e = 0; e < evn; e++) {
-                    const int ge = e0 + e;
-                    double dcr = 0.0, dci = 0.0;
-                    for (int p = 0; p < n_proj; p++) {
-                        double far = 0.0, fai = 0.0;
-                        for (int a = 0; a < n_ab; a++) {
-                            const double ka = s_ka[e * n_ab + a];
-                            if (ka == 0.0) continue;
-                            const int o = (k * n_proj + p) * n_ab + a;
-                            far += ka * am_r[o];
-                            fai += ka * am_i[o];
-                        }
-                        const double gar = s_dA[(e * n_proj + p) * 2 + 0];
-                        const double gai = s_dA[(e * n_proj + p) * 2 + 1];
-                        const double tr = gar * far - gai * fai;
-                        const double ti = gar * fai + gai * far;
-                        dcr += ck_r[k] * tr - ck_i[k] * ti;
-                        dci += ck_r[k] * ti + ck_i[k] * tr;
-                    }
-                    const float2 F = cache[(size_t)ge * n_wave + k];
-                    const double fr = (double)F.x, fi = (double)F.y;
-                    const double dr = s_D[(e * n_wave + k) * 2 + 0];
-                    const double di = s_D[(e * n_wave + k) * 2 + 1];
-                    const double den = dr * dr + di * di;
-                    const double crn = (fr * dr + fi * di) / den;
-                    const double cin = (fi * dr - fr * di) / den;
-                    const double qr = -(dcr * crn - dci * cin);
-                    const double qi = -(dcr * cin + dci * crn);
-                    const double ddr = (qr * dr + qi * di) / den;
-                    const double ddi = (qi * dr - qr * di) / den;
-                    double pr = 1.0, pi = 0.0;
-                    for (int l2 = 0; l2 < n_res; l2++) {
-                        if (l2 == l) continue;
-                        const double ur =
-                            s_s[((e * n_wave + k) * n_res + l2) * 2 + 0];
-                        const double ui =
-                            s_s[((e * n_wave + k) * n_res + l2) * 2 + 1];
-                        const double t_r = pr * ur - pi * ui;
-                        pi = pr * ui + pi * ur;
-                        pr = t_r;
-                    }
-                    const double gsr = ddr * pr - ddi * pi;
-                    const double gsi = ddi * pr + ddr * pi;
-                    const double mv =
-                        mass[(size_t)ge * n_mass + bas_m_index[m]];
-                    double br, bi;
-                    fc_interp_c(bas_r, bas_i, m, mv, m_min, m_delta, m_bins,
-                                &br, &bi);
+                    const float2 bv =
+                        bas_cache[(size_t)(e0 + e) * n_basis + m];
                     /* complex product: Re(gs·b) = gsr·br − gsi·bi */
-                    out += 2.0 * (gsr * br - gsi * bi) * g;
+                    out += 2.0 * (gsr[e] * (double)bv.x
+                                  - gsi[e] * (double)bv.y);
                 }
-                atomicAdd(g_coeff + m, out);
+                atomicAdd(g_coeff + m, out * g);
             }
         }
     }
@@ -378,9 +421,12 @@ typedef struct {
     int m_bins, q_bins;
     int n_wave, n_proj, n_res, n_decay, n_basis, n_ab, n_comp;
     int n_mass, n_momentum, n_angle_total;
-    /* data + the cached amplitude */
-    double *mass, *mom, *ang, *weight, *bkg;
-    float2 *cache;
+    /* data: only weight/bkg survive load_data; the kinematics are freed
+       once F / basis / fa are filled (the hot path never reads them) */
+    double *weight, *bkg;
+    float2 *cache;        /* F = fl·nu            [ne, n_wave]          */
+    float2 *bas_cache;    /* basis_m(m_e)         [ne, n_basis]         */
+    float2 *fa_cache;     /* fa_{e,k,p}           [ne, n_wave, n_proj]  */
     double *P_dev, *h_P;
     int ne;
     double *h_ck_r, *h_ck_i, *h_coeff;
@@ -486,14 +532,25 @@ void* cuda_load_data_flat_cache(void* vctx, const double* mass,
     FCtx* c = (FCtx*)vctx;
     (void)nm; (void)nmom; (void)nang;
     c->ne = ne;
-    c->mass = _fc_up_d(mass, ne * c->n_mass);
-    c->mom = _fc_up_d(mom, ne * c->n_momentum);
-    c->ang = _fc_up_d(ang, ne * c->n_angle_total * c->n_comp);
+    /* mass / momentum / angles are consumed ONLY by the two fill kernels
+       below: after them the hot path reads F, basis and fa from their
+       caches and never touches the event kinematics again.  So they are
+       uploaded to temporaries and freed immediately — the per-handle
+       footprint is `ne·(n_wave + n_basis + n_wave·n_proj)` float2 plus
+       weight/bkg, not the raw per-event arrays. */
+    double* t_mass = _fc_up_d(mass, ne * c->n_mass);
+    double* t_mom = _fc_up_d(mom, ne * c->n_momentum);
+    double* t_ang = _fc_up_d(ang, ne * c->n_angle_total * c->n_comp);
     c->weight = _fc_up_d(weight, ne);
     c->bkg = _fc_up_d(bkg, ne);
     CUDA_CHECK(cudaMalloc(&c->P_dev, (size_t)ne * sizeof(double)));
     CUDA_CHECK(cudaMallocHost(&c->h_P, (size_t)ne * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&c->cache, (size_t)ne * c->n_wave * sizeof(float2)));
+    CUDA_CHECK(cudaMalloc(&c->bas_cache,
+                          (size_t)ne * c->n_basis * sizeof(float2)));
+    CUDA_CHECK(cudaMalloc(&c->fa_cache,
+                          (size_t)ne * c->n_wave * c->n_proj
+                          * sizeof(float2)));
 
     /* F is independent of ck/coeff: fill it ONCE, here */
     const int total = ne * c->n_wave;
@@ -502,22 +559,37 @@ void* cuda_load_data_flat_cache(void* vctx, const double* mass,
     fc_fill_kernel<<<blocks, threads, 0, c->stream>>>(
         c->fl_table, c->fl_q_index, c->num_r, c->num_i, c->num_m_index,
         c->m_min, c->m_delta, c->m_bins, c->q_min, c->q_delta, c->q_bins,
-        c->mass, c->mom, ne, c->n_wave, c->n_res, c->n_decay,
+        t_mass, t_mom, ne, c->n_wave, c->n_res, c->n_decay,
         c->n_mass, c->n_momentum, c->cache);
+
+    /* the two coeff/ck-independent caches: basis_m(m_e) and fa_{e,k,p} */
+    const int st_total = ne * c->n_wave * c->n_proj;
+    const int st_blocks = (st_total + threads - 1) / threads;
+    fc_fill_static_kernel<<<st_blocks, threads, 0, c->stream>>>(
+        c->bas_r, c->bas_i, c->bas_m_index, c->m_min, c->m_delta, c->m_bins,
+        c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
+        t_mass, t_ang, ne, c->n_basis, c->n_wave, c->n_proj,
+        c->n_ab, c->n_comp, c->n_mass, c->n_angle_total,
+        c->bas_cache, c->fa_cache);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaStreamSynchronize(c->stream));
+
+    /* the kinematics are no longer needed: every consumer reads a cache */
+    cudaFree(t_mass); cudaFree(t_mom); cudaFree(t_ang);
     return c;
 }
 
 void cuda_free_data_flat_cache(void* vctx) {
     FCtx* c = (FCtx*)vctx;
     if (!c) return;
-    cudaFree(c->mass); cudaFree(c->mom); cudaFree(c->ang);
     cudaFree(c->weight); cudaFree(c->bkg); cudaFree(c->P_dev);
     cudaFree(c->cache);
+    cudaFree(c->bas_cache);
+    cudaFree(c->fa_cache);
     if (c->h_P) cudaFreeHost(c->h_P);
-    c->mass = c->mom = c->ang = c->weight = c->bkg = NULL;
+    c->weight = c->bkg = NULL;
     c->P_dev = NULL; c->cache = NULL; c->h_P = NULL;
+    c->bas_cache = NULL; c->fa_cache = NULL;
 }
 
 void cuda_free_context_flat_cache(void* vctx) {
@@ -562,13 +634,10 @@ void cuda_compute_flat_cache(
     if (c->ne > 0) {
         const int tiles = (c->ne + FC_TE - 1) / FC_TE;
         fc_tile_kernel<<<tiles, FC_BLOCK, (size_t)c->smem_bytes, c->stream>>>(
-            c->cache, c->bas_r, c->bas_i, c->bas_m_index, c->gamma,
-            c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
-            c->m_min, c->m_delta, c->m_bins,
+            c->cache, c->bas_cache, c->fa_cache, c->bas_m_index, c->gamma,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
-            c->mass, c->ang, c->weight, c->bkg,
+            c->weight, c->bkg,
             c->ne, c->n_wave, c->n_proj, c->n_res, c->n_basis,
-            c->n_ab, c->n_comp, c->n_mass, c->n_angle_total,
             oP ? c->P_dev : NULL,
             c->g_ck_r, c->g_ck_i, c->g_coeff, c->acc);
         CUDA_CHECK(cudaGetLastError());
