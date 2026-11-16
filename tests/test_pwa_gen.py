@@ -260,14 +260,20 @@ def test_gate_c_zero_numerator_row_collapses():
 
 # ── gate D: the flat config's internal contract ─────────────────────
 
-def test_builder_appends_per_factor_no_sharing():
-    """Every basis column belongs to exactly one (wave, res) factor."""
+def test_builder_folds_the_basis_on_its_structural_key():
+    """The builder folds ``(coeff name, kind, mass column)``; each column is
+    therefore owned by at least one factor and no two columns are the same
+    quantity."""
+    from tabpwa.pwa_gen_config import build_from_groups
     m = Fitter(CFG_MB).model
     c = build_from_groups(m, n_interp=200)
     gam = np.asarray(c["gamma_matrix"])
     owners = (gam > 0).sum(axis=(0, 1))
-    assert owners.max() == 1, owners
-    assert (owners == 1).all()
+    assert owners.min() >= 1, "a basis column is used by no factor"
+    # every (name, kind, mass column) triple appears exactly once
+    keys = list(zip(c["den_names"], np.asarray(c["basis_kind"]).tolist(),
+                    np.asarray(c["basis_m_index"]).tolist()))
+    assert len(keys) == len(set(keys)), "builder emitted a duplicate row"
 
 
 def test_dedup_folds_only_matching_rows_and_columns():
@@ -388,10 +394,11 @@ def test_same_particle_dedup_keeps_the_two_mass_columns():
     m = Fitter(CFG_SAME).model
     full = build_from_groups(m, n_interp=200)
     dd = dedup(full)
-    n_full = np.asarray(full["basis_table"]).shape[0]
-    n_dd = np.asarray(dd["basis_table"]).shape[0]
-    # 4 waves x 5 rows = 20 -> folds to 2 columns x 5 = 10, NOT 5
-    assert n_dd < n_full
+    # the builder already folded: 4 waves x 5 rows -> 2 columns x 5 = 10,
+    # NOT 5, because the mass column is part of the key
+    n_built = np.asarray(full["basis_table"]).shape[0]
+    assert n_built == 10, n_built
+    assert np.asarray(dd["basis_table"]).shape[0] == n_built   # no-op now
     assert sorted(set(int(c) for c in dd["basis_m_index"])) == [0, 1]
     assert int(dd["basis_m_index"].max()) + 1 == 2
 

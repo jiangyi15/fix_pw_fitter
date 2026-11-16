@@ -18,12 +18,17 @@ Layout rules, which are the point of this config:
   topology share basis rows and ``angle_index[a]`` is the topology's
   event-angle column base.
 * **the denominator basis is one flat list** (``basis_table``) shared through
-  an explicit ``gamma_matrix``.  A row is appended the first time a
-  ``(kind, mass column)`` pair is needed; duplicates are appended as separate
-  entries rather than repaired, so the matrix stays a clean per-(wave, res)
-  block selector.  The matrix carries **structure only** (0/1): the fitted
-  weights are ``params["coeff"]`` at run time, and this builder does not
-  touch them.
+  an explicit ``gamma_matrix``, and it is **folded here** on
+  ``(coeff name, basis kind, mass column)``.  That triple is the row's
+  physical identity, so folding it is lossless: every consumer derives
+  ``n_basis`` from ``basis_table.shape[0]``, and the parameter surface is
+  name-keyed, so a fitter sees the same weights with fewer rows.  The mass
+  column is part of the key deliberately — two rows that read different
+  event columns are different functions of the event (the same resonance in
+  two topologies), and merging them would drive a row sampled at the wrong
+  mass.  ``basis_kind`` / ``basis_key`` record the triple.  The matrix
+  carries **structure only** (0/1): the fitted weights are
+  ``params["coeff"]`` at run time.
 * **no counts are stored.**  ``n_wave`` / ``n_proj`` / ``n_res`` / ``n_decay``
   / ``n_basis`` / ``n_angle_basis`` / ``n_interp`` are all ``shape[...]`` of
   the arrays below, and the kernel asserts the cross-array agreement once at
@@ -165,8 +170,18 @@ def build_from_groups(model, n_interp=None):
     # :func:`dedup`'s job and only :func:`dedup`'s: keeping the builder purely
     # additive means the "full" form and the "deduped" form differ in exactly
     # one way (table size + index values), never in how a row was chosen.
+    # The basis is folded HERE, on the structural key
+    # ``(coeff name, basis kind, mass column)``.  Two rows with the same triple
+    # are the same physical quantity, so folding them is lossless: every
+    # consumer derives ``n_basis`` from ``basis_table.shape[0]`` and the
+    # parameter surface is name-keyed, so a caller sees fewer rows and the
+    # same weights.  Rows that merely look numerically alike are NOT folded —
+    # two identical resonances at different mass columns stay apart, because
+    # the mass column is part of the key (they are different functions of the
+    # event, and merging them would drive a row sampled at the wrong mass).
     models = model._pg_particle_models()
-    basis_rows, basis_col, basis_name = [], [], []
+    basis_rows, basis_col, basis_name, basis_kind = [], [], [], []
+    seen = {}
     gamma_cols = []                     # per (wave, res): its basis columns
     for k, (base, _combo) in enumerate(expansion):
         ls, chain = waves[base]
@@ -187,10 +202,16 @@ def build_from_groups(model, n_interp=None):
                     kind, val = 1, -(mass_grid.astype(float) ** 2) + 0j
                 else:
                     kind, val = 2 + (j - 2), np.asarray(g, complex)
-                slots.append(len(basis_rows))
-                basis_rows.append(val)
-                basis_col.append(col)
-                basis_name.append(str(names[j]))
+                key = (str(names[j]), int(kind), col)
+                pos = seen.get(key)
+                if pos is None:
+                    pos = len(basis_rows)
+                    seen[key] = pos
+                    basis_rows.append(val)
+                    basis_col.append(col)
+                    basis_name.append(str(names[j]))
+                    basis_kind.append(int(kind))
+                slots.append(pos)
             row.append(slots)
         gamma_cols.append(row)
 
@@ -207,6 +228,8 @@ def build_from_groups(model, n_interp=None):
         "num_m_index": num_m_index,
         "basis_table": np.stack(basis_rows),
         "basis_m_index": np.array(basis_col, np.int32),
+        "basis_kind": np.array(basis_kind, np.int32),
+        "basis_key": list(seen),
         "den_names": basis_name,
         "gamma_matrix": gamma_matrix,
         "angle_k": np.array(angle_k, np.int32),
@@ -236,8 +259,13 @@ def dedup(config):
     ===========  ==================================  ==================
     ``fl``       row equal **and** ``q_index`` equal  ``fl_index[k, d]``
     ``num``      row equal **and** ``m_index`` equal  ``num_index[k, r]``
-    ``basis``    row equal **and** ``m_index`` equal  ``gamma_matrix`` remap
     ===========  ==================================  ==================
+
+    The **basis is not folded here** — ``build_from_groups`` already did it,
+    on ``(coeff name, basis kind, mass column)``.  This pass only folds
+    ``fl`` and ``num``, because those are the two tables whose
+    *dimensionality* changes (3-D -> 2-D) and which therefore need the index
+    arrays.
 
     ``fl_q_index`` / ``num_m_index`` / ``basis_m_index`` stay per-use, so a
     consumer still reads exactly one index per (wave, decay) or
@@ -274,32 +302,26 @@ def dedup(config):
     out["num_index"] = mapping_n.reshape(n_wave, n_res).astype(np.int32)
     out["num_m_index"] = mi
 
-    # ── basis: rows + m_index + names, with the selector remapped ────
-    # The builder appends one entry per (factor, basis row), so duplicates are
-    # the norm; this is the ONLY place they are folded.
-    bas = np.asarray(config["basis_table"])
-    bmi = np.asarray(config["basis_m_index"])
-    names = config.get("den_names")
-    keep_b, mapping_b = _dedup_rows(bas, bmi, names)
-    out["basis_table"] = bas[keep_b]
-    out["basis_m_index"] = bmi[keep_b]
-
-    if names is not None:
-        out["den_names"] = [names[i] for i in keep_b]
-
-    # the old→new column map, so a caller holding a full-config coefficient
-    # vector can gather it onto the surviving rows (``coeff[keep_b]``)
+    # ── basis: ALREADY FOLDED BY THE BUILDER ─────────────────────────
+    # ``build_from_groups`` folds the basis on ``(coeff name, kind, mass
+    # column)``, so nothing is left to compress here.  The selector and the
+    # index arrays pass through unchanged; ``dedup`` only folds ``fl`` and
+    # ``num`` (which DO change table dimensionality and therefore need the
+    # ``fl_index``/``num_index`` arrays).
+    out["basis_table"] = np.asarray(config["basis_table"])
+    out["basis_m_index"] = np.asarray(config["basis_m_index"])
+    if "den_names" in config:
+        out["den_names"] = list(config["den_names"])
+    if "basis_kind" in config:
+        out["basis_kind"] = np.asarray(config["basis_kind"])
+    if "basis_key" in config:
+        out["basis_key"] = list(config["basis_key"])
+    keep_b = np.arange(np.asarray(config["basis_table"]).shape[0], dtype=np.int64)
+    mapping_b = keep_b.copy()
     out["basis_keep"] = keep_b
     out["basis_map"] = mapping_b
-
-    # remap the selector: an old column's flag moves to the column its row
-    # survived at.  The selector is 0/1, so a fold ORs the flags — two old
-    # columns folding into one new column still mean "this factor uses it".
     gam = np.asarray(config["gamma_matrix"])
-    new_gam = np.zeros((n_wave, n_res, len(keep_b)), np.float64)
-    for m_old in range(len(bmi)):
-        np.maximum.at(new_gam, (slice(None), slice(None), mapping_b[m_old]),
-                      gam[:, :, m_old])
+    new_gam = gam
     out["gamma_matrix"] = new_gam
     return out
 

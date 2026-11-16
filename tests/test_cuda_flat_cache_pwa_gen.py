@@ -99,29 +99,44 @@ def test_registration():
 # ── gate 2: the backend-internal dedup ──────────────────────────────
 
 def test_dedup_folds_on_the_structural_key():
+    """The BUILDER does the fold; this backend's pass is now the identity.
+
+    The rule is the same either way — ``(coeff name, basis kind, mass
+    column)`` — and because it only changes ``basis_table`` rows and
+    ``gamma_matrix`` columns, every consumer reads ``n_basis`` from a shape.
+    """
     m = Fitter(CFG_MB).model
     c = build_from_groups(m, n_interp=200)
+    n_built = np.asarray(c["basis_table"]).shape[0]
+    # 4 waves x 8 rows folds to 2 factors x ... : fewer rows than uses
+    n_uses = np.asarray(c["gamma_matrix"]).shape[0] * \
+        np.asarray(c["gamma_matrix"]).shape[1]
+    assert n_built <= n_uses
+    # every (name, kind, mass column) triple appears exactly once
+    keys = list(zip(c["den_names"], np.asarray(c["basis_kind"]).tolist(),
+                    np.asarray(c["basis_m_index"]).tolist()))
+    assert len(keys) == len(set(keys))
+    # the local pass is the identity now
     keep, mapping = dedup_basis(c)
-    n_full = np.asarray(c["basis_table"]).shape[0]
-    assert keep.size < n_full, "nothing folded"
-    # every surviving key is unique
-    keys = [(c["den_names"][i], int(c["basis_m_index"][i])) for i in keep]
-    assert len(set(keys)) == len(keys)
-    # and the map sends each original row onto a survivor
-    assert set(mapping.tolist()) == set(range(keep.size))
+    assert np.array_equal(keep, np.arange(n_built))
+    assert np.array_equal(mapping, np.arange(n_built))
 
 
-def test_dedup_is_internal_to_the_backend():
-    """The shared builder still emits every row — dedup did not move there."""
+def test_the_fold_lives_in_the_builder_not_the_backend():
+    """One fold, one place: ``build_from_groups``.
+
+    The backend used to fold privately; now it reads the folded config, so
+    ``n_basis`` is simply the config's own row count and both GPU backends
+    and ``numpy_flat`` agree without knowing who folded.
+    """
     m = Fitter(CFG_MB).model
     c = build_from_groups(m, n_interp=200)
-    n_full = np.asarray(c["basis_table"]).shape[0]
+    n_built = np.asarray(c["basis_table"]).shape[0]
     gpu = CUDAKernelFlatCachePWAGen(c)
     try:
-        assert gpu.n_basis_full == n_full      # caller's vector is full-form
-        assert gpu.n_basis < n_full            # internal fold
-        # the config dict itself is untouched
-        assert np.asarray(c["basis_table"]).shape[0] == n_full
+        assert gpu.n_basis == n_built
+        assert gpu.n_basis_full == n_built          # identical now
+        assert np.array_equal(gpu.basis_keep, np.arange(n_built))
         assert "fl_index" not in c and "num_index" not in c
     finally:
         gpu.free()
@@ -230,14 +245,13 @@ def test_coeff_gradient_matches_fd_per_name():
 
 # ── gate 6: contract ────────────────────────────────────────────────
 
-def test_full_form_coeff_length_is_required():
-    """The caller keeps the full-form vector; the backend gathers it."""
+def test_coeff_length_must_match_the_config():
     ref, gpu, params, data, kc = _pair(CFG_KM, ne=16)
     h = gpu.load_data(data)
     try:
         bad = dict(params)
-        bad["coeff"] = np.zeros(gpu.kernel.n_basis)   # the DEDUPED length
-        with pytest.raises(ValueError, match="FULL n_basis"):
+        bad["coeff"] = np.zeros(gpu.kernel.n_basis + 1)
+        with pytest.raises(ValueError, match="expected n_basis"):
             gpu.compute(bad, h, norm=None)
     finally:
         ref.free()

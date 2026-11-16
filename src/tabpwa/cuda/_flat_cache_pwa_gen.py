@@ -67,44 +67,19 @@ void cuda_get_device_name_flat_cache(char*,int);
 
 
 def dedup_basis(config):
-    """Fold the basis rows on ``(coeff name, kind, mass column)``.
+    """The basis is **already folded** by ``build_from_groups``.
 
-    Returns ``(keep, mapping)``: ``keep`` lists the row indices that survive
-    (in order), ``mapping`` maps each original row onto its survivor.  This is
-    the same fold :func:`tabpwa.pwa_gen_config.dedup` performs, expressed here
-    so it happens **inside this backend** and leaves the shared builder — and
-    therefore every other backend — untouched.
+    The builder keys its fold on ``(coeff name, basis kind, mass column)``,
+    which is the same rule this backend used to apply privately — and because
+    the fold changes only ``basis_table`` rows and ``gamma_matrix`` columns,
+    every consumer picks it up from ``shape[...]``.  So there is nothing left
+    to compress here: this returns the identity mapping, and the function
+    stays only so callers/tests can ask "what would be folded?" without
+    caring which layer did it.
     """
-    names = config["den_names"]
-    col = np.asarray(config["basis_m_index"], np.int64)
-    bas = np.asarray(config["basis_table"])
-    if len(names) != bas.shape[0]:
-        raise ValueError(
-            f"cuda_flat_cache_pwa_gen: den_names has {len(names)} entries but "
-            f"basis_table has {bas.shape[0]} rows")
-
-    # the basis KIND is the row's position within its factor's block, which is
-    # what distinguishes "1" / "−m²" / "den_table[r]" structurally.  Recover it
-    # from the selector: every factor uses a contiguous run of columns of the
-    # same length, so the position inside that run IS the kind.
-    gam = np.asarray(config["gamma_matrix"])
-    kind = np.zeros(len(names), np.int64)
-    for k in range(gam.shape[0]):
-        for l in range(gam.shape[1]):
-            cols = np.nonzero(gam[k, l])[0]
-            for pos, c in enumerate(cols):
-                kind[c] = pos
-
-    seen, keep, mapping = {}, [], np.zeros(len(names), np.int64)
-    for i in range(len(names)):
-        key = (str(names[i]), int(kind[i]), int(col[i]))
-        pos = seen.get(key)
-        if pos is None:
-            pos = len(keep)
-            seen[key] = pos
-            keep.append(i)
-        mapping[i] = pos
-    return np.array(keep, np.int64), mapping
+    n = int(np.asarray(config["basis_table"]).shape[0])
+    ident = np.arange(n, dtype=np.int64)
+    return ident, ident.copy()
 
 
 class CUDAKernelFlatCachePWAGen:
@@ -141,12 +116,13 @@ class CUDAKernelFlatCachePWAGen:
         self._last_dnorm = None
 
         # ── the backend-internal dedup ──────────────────────────────
+        # the builder folded already; this is the identity
         keep, mapping = dedup_basis(c)
         self.basis_keep = keep
         self.basis_map = mapping
         bas = np.asarray(c["basis_table"], np.complex128)[keep]
         bas_m = np.asarray(c["basis_m_index"], np.int64)[keep]
-        self.n_basis_full = int(np.asarray(c["basis_table"]).shape[0])
+        self.n_basis_full = int(np.asarray(c["basis_table"]).shape[0])  # == n_basis
         self.n_basis = int(bas.shape[0])
 
         gam_old = np.asarray(c["gamma_matrix"], np.float64)
@@ -249,12 +225,12 @@ class CUDAKernelFlatCachePWAGen:
             raise ValueError(
                 f"cuda_flat_cache_pwa_gen: ck has {ck.size} entries, expected "
                 f"n_wave = {self.n_wave}")
-        if coeff_full.size != self.n_basis_full:
+        if coeff_full.size != self.n_basis:
             raise ValueError(
                 f"cuda_flat_cache_pwa_gen: coeff has {coeff_full.size} "
-                f"entries, expected the FULL n_basis = {self.n_basis_full} "
-                f"(this backend dedups internally; the caller keeps the "
-                f"full-form vector)")
+                f"entries, expected n_basis = {self.n_basis} "
+                f"(the builder folds the basis, so this is the config's own "
+                f"n_basis)")
         # gather the caller's full-form weights onto the surviving rows
         coeff = np.ascontiguousarray(coeff_full[self.basis_keep])
         ckr = np.ascontiguousarray(ck.real)
