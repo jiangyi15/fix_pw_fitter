@@ -30,6 +30,7 @@ from . import shard_backend        # noqa: F401 — register ShardBackend
 from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
 from . import numpy_flat_backend  # noqa: F401 — register NumpyFlatBackend
 from . import cuda_flat_pwa_gen_backend  # noqa: F401 — register cuda_flat_pwa_gen
+from . import cuda_flat_cache_backend  # noqa: F401 — register cuda_flat_cache_pwa_gen
 from . import polarised_backend    # noqa: F401 — register PolarisedBackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 from . import cpu_pwa_s0c_backend  # noqa: F401 — register CPUPWAS0CBackend
