@@ -103,11 +103,11 @@ def test_flat_schema():
     kc = Fitter(CFG_KM).kernel_config
     for key in ("fl_table", "fl_q_index", "num_table", "num_m_index",
                 "basis_table", "basis_m_index", "gamma_matrix",
-                "angle_k", "angle_b", "angle_index", "angle_matrix",
+                "angle_k", "angle_b", "angle_index", "matrix_angle",
                 "m_min", "m_delta", "q_min", "q_delta"):
         assert key in kc, key
     for gone in ("den_row", "den_table", "n_table", "n_index",
-                 "bw_order", "fl_order", "fl_type", "matrix_angle",
+                 "bw_order", "fl_order", "fl_type", "angle_matrix",
                  "mass_index", "gamma_table"):
         assert gone not in kc, gone
 
@@ -119,12 +119,13 @@ def test_shapes_agree():
         n_wave = np.asarray(kc["fl_table"]).shape[0]
         n_res = np.asarray(kc["num_table"]).shape[1]
         n_basis = np.asarray(kc["basis_table"]).shape[0]
-        n_proj = np.asarray(kc["angle_matrix"]).shape[1]
         n_ab = np.asarray(kc["angle_k"]).shape[0]
+        # n_proj is encoded p-major in matrix_angle's columns, not an axis
+        n_proj = int(np.asarray(kc["matrix_angle"]).shape[1]) // n_wave
         assert np.asarray(kc["fl_q_index"]).shape[0] == n_wave
         assert np.asarray(kc["num_m_index"]).shape == (n_wave, n_res)
         assert np.asarray(kc["gamma_matrix"]).shape == (n_wave, n_res, n_basis)
-        assert np.asarray(kc["angle_matrix"]).shape == (n_wave, n_proj, n_ab)
+        assert np.asarray(kc["matrix_angle"]).shape == (n_ab, n_proj * n_wave)
         assert np.asarray(kc["basis_m_index"]).size == n_basis
         assert len(kc["den_names"]) == n_basis
 
@@ -135,9 +136,12 @@ def test_plain_pwa_has_no_flat_keys():
     # the flat-only vocabulary is absent; the plain ``pwa`` kernel keeps its
     # own ``fl_table`` (a single (n_forms, n_interp) table) and
     # ``matrix_angle``, which is a different key with a different shape.
-    for key in ("basis_table", "num_table", "angle_matrix", "gamma_matrix",
+    for key in ("basis_table", "num_table", "gamma_matrix",
                 "basis_m_index", "num_m_index", "den_names"):
         assert key not in kc, key
+    # `matrix_angle` exists in BOTH vocabularies now — same name, same
+    # (n_angle_basis, ...) order — so it is not a discriminator; the
+    # pwa_gen-only `basis_table` / `gamma_matrix` above are.
     assert "matrix_angle" in kc
     assert np.asarray(kc["fl_table"]).ndim == 2     # (n_forms, n_interp)
 

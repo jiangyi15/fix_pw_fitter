@@ -13,7 +13,7 @@ The point is to be obviously correct rather than fast:
         num_k = Π_r  num_table[k, r][ m_index[k, r] ]
         D_k   = Π_l  Σ_m gamma_matrix[k, l, m] · basis_table[m][ m_index[m] ]
         common_k = fa_k · fl_k · num_k / D_k
-    P_p = |Σ_k ck_k · common_k · angle_matrix[k, p, ·]|²
+    P_p = |Σ_k ck_k · common_k · matrix_angle[·, p·n_wave + k]|²
 
 Any dedup a real backend wants (shared barrier rows, a shared basis block, an
 amplitude cache) happens **inside** the backend, on its own copy.  This one
@@ -103,7 +103,10 @@ class NumpyFlatBackend(ComputeBackend):
                 f"numpy_flat: num_table must be 3-D (full) or 2-D (deduped), "
                 f"got {num.shape}")
         n_basis = np.asarray(c["basis_table"]).shape[0]
-        n_proj = np.asarray(c["angle_matrix"]).shape[1]
+        # ``n_proj`` is encoded in matrix_angle's column count (p-major),
+        # not in a separate axis: columns are ``p*n_wave + k``.
+        _ma_cols = int(np.asarray(c["matrix_angle"]).shape[1])
+        n_proj = max(1, _ma_cols // n_wave)
         n_ab = np.asarray(c["angle_k"]).shape[0]
         checks = [
             ("fl_q_index", c["fl_q_index"], (n_wave, n_decay)),
@@ -116,7 +119,7 @@ class NumpyFlatBackend(ComputeBackend):
             ("angle_k", c["angle_k"], (n_ab, np.asarray(c["angle_k"]).shape[1])),
             ("angle_b", c["angle_b"], np.asarray(c["angle_k"]).shape),
             ("angle_index", c["angle_index"], (n_ab,)),
-            ("angle_matrix", c["angle_matrix"], (n_wave, n_proj, n_ab)),
+            ("matrix_angle", c["matrix_angle"], (n_ab, n_proj * n_wave)),
         ]
         for name in ("fl_index", "num_index"):
             if name in c:
@@ -214,14 +217,15 @@ class NumpyFlatBackend(ComputeBackend):
         ak = np.asarray(c["angle_k"])
         ab = np.asarray(c["angle_b"])
         ai = np.asarray(c["angle_index"])
-        am = np.asarray(c["angle_matrix"])
+        am = np.asarray(c["matrix_angle"])          # (n_ab, n_proj*n_wave)
 
         # counts from the SHAPES of the index arrays (both layouts), never
         # from the table's row count (dedup changes that, the use-count not)
         n_wave, n_decay = np.asarray(fl_q).shape
         n_res = np.asarray(num_m).shape[1]
         n_basis = bas.shape[0]
-        n_proj = am.shape[1]
+        # p-major columns: p*n_wave + k
+        n_proj = max(1, am.shape[1] // n_wave)
         m0, md = float(c["m_min"]), float(c["m_delta"])
         q0, qd = float(c["q_min"]), float(c["q_delta"])
 
@@ -231,11 +235,15 @@ class NumpyFlatBackend(ComputeBackend):
                              f"n_wave = {n_wave}")
         weights = self._coeff(params)
 
-        # ── fa: (ne, n_wave, n_proj) ────────────────────────────────
-        fa = np.zeros((ne, n_wave, n_proj), np.complex128)
+        # ── fa: (ne, n_wave, n_proj), via the historical matrix_angle ──
+        # ka @ matrix_angle is the long-standing idiom; the result is p-major
+        # (`p*n_wave + k`), so it is reshaped to (ne, n_proj, n_wave) and
+        # moved to the (ne, n_wave, n_proj) order the rest of this kernel uses.
+        ka = np.zeros((ne, ak.shape[0]), np.complex128)
         for a in range(ak.shape[0]):
-            prod = np.prod(np.cos(ang[:, ai[a], :] * ak[a] + ab[a]), axis=-1)
-            fa += prod[:, None, None] * am[:, :, a][None, :, :]
+            ka[:, a] = np.prod(np.cos(ang[:, ai[a], :] * ak[a] + ab[a]),
+                               axis=-1)
+        fa = (ka @ am).reshape(ne, n_proj, n_wave).transpose(0, 2, 1)
 
         # ── per-wave barrier × numerator / denominator ──────────────
         # The per-factor denominator products are kept: the backward pass

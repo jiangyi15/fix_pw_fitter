@@ -63,6 +63,24 @@ def _in_grid(kc, ne, seed=0):
     }
 
 
+def _angle_rows_of_block(kc, sl):
+    """Basis rows the waves in ``sl`` select, from the p-major matrix_angle.
+
+    ``matrix_angle`` is ``(n_angle_basis, n_proj*n_wave_full)`` with column
+    ``p*n_wave_full + k`` — the stride is the FULL wave axis
+    (``n_blocks*n_base``), not one block.  The row VALUES of the basis are
+    shared across blocks (the key is ``(column, k, b)``), so a block's rows
+    need not be contiguous.
+    """
+    ma = np.asarray(kc["matrix_angle"])
+    n_ab, n_col = ma.shape
+    n_wave_full = int(np.asarray(kc["fl_table"]).shape[0])
+    n_proj = max(1, n_col // n_wave_full)
+    ks = list(range(*sl.indices(n_wave_full)))
+    cols = [p * n_wave_full + k for p in range(n_proj) for k in ks]
+    return (np.abs(ma[:, cols]) > 0).any(axis=1).nonzero()[0]
+
+
 def _rel(a, b):
     a = np.asarray(a).ravel()
     b = np.asarray(b).ravel()
@@ -110,11 +128,15 @@ def test_every_wave_is_rebased_onto_its_block_band(cfg, n_blocks):
             a = np.asarray(kc[arr])[sl]
             assert a.min() >= b * stride and a.max() < (b + 1) * stride, (
                 f"{arr} block {b} escapes its band")
-        # the angle rows this block's waves select must lie in its band
-        ai = np.asarray(kc["angle_index"])[np.asarray(kc["angle_matrix"])[sl]
-                                           .any(axis=(0, 1)).nonzero()[0]]
-        assert ai.min() >= b * (n_topo) and ai.max() < (b + 1) * n_topo, (
-            f"angle basis rows for block {b} escape its band: {ai}")
+        # the angle rows this block's waves select must reference ITS band.
+        # The basis list is shared and keyed on (column, k, b), so a block's
+        # rows are not contiguous — check per row, not on min/max.
+        rows = _angle_rows_of_block(kc, sl)
+        ai = np.asarray(kc["angle_index"])[rows]
+        inside = (ai >= b * n_topo) & (ai < (b + 1) * n_topo)
+        assert inside.all(), (
+            f"angle basis rows for block {b} reference another block's "
+            f"columns: {ai[~inside]}")
 
 
 def test_single_block_is_unchanged():
@@ -123,7 +145,7 @@ def test_single_block_is_unchanged():
     b, kcb = _model("tests/config_pwa_gen_km.yml")
     assert kca["n_blocks"] == 1
     for key in ("fl_q_index", "num_m_index", "angle_index", "fl_table",
-                "angle_matrix", "gamma_matrix"):
+                "matrix_angle", "gamma_matrix"):
         assert np.array_equal(np.asarray(kca[key]), np.asarray(kcb[key]))
     # the rebasing must be the identity when there is one block
     assert np.asarray(kca["fl_q_index"]).min() == 0
@@ -228,11 +250,19 @@ def test_block_zero_is_the_single_block_config(cfg):
         assert np.array_equal(a, b), f"{arr} block 0 is not un-rebased"
 
     # block 0's angle rows must be block 0's band (the first n_topo columns)
-    used = np.asarray(kc["angle_matrix"])[sl].any(axis=(0, 1)).nonzero()[0]
+    used = _angle_rows_of_block(kc, sl)
     ai = np.asarray(kc["angle_index"])[used]
-    assert ai.min() >= 0 and ai.max() < n_topo
-    assert np.array_equal(np.unique(ai), np.unique(
-        np.asarray(k0["angle_index"])))
+    # block 0's own basis rows must point into its own angle band
+    ai0 = ai[ai < n_topo] if ai.size else ai
+    assert ai0.size > 0 and ai0.min() >= 0 and ai0.max() < n_topo
+    # the basis rows block 0 needs must be exactly those the 1-block config
+    # has: the row VALUES are shared across blocks (the key is
+    # (column, k, b)), so block 0's rows are a subset that must also cover
+    # the 1-block config's set of (angle_index) values.
+    one_block_vals = set(np.asarray(k0["angle_index"]).tolist())
+    assert one_block_vals <= set(ai0.tolist()), (
+        f"block 0 misses basis rows the 1-block config needs: "
+        f"{sorted(one_block_vals - set(ai0.tolist()))}")
 
     # a LATER block must carry a non-zero offset, or nothing was rebased
     later = np.asarray(kc["fl_q_index"])[n_base::]

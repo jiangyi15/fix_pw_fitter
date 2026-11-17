@@ -47,16 +47,27 @@ def _fit_proj(a, axis, n_proj):
 
 
 def tile_flat(kc, n_comp, n_proj):
-    """Tile the flat config to ``n_wave = n_proj · N``, ``N = N0·k``."""
+    """Tile the flat config to ``n_wave = N0·k`` waves and ``n_proj`` projections.
+
+    ``matrix_angle`` is kept in its p-major form ``(n_ab, n_proj·n_wave)``
+    (column ``p·n_wave + k``), so its columns are rebuilt as
+    ``(n_ab, n_proj, n_wave)`` — that IS the p-major grouping — and only then
+    flattened back.
+    """
     out = dict(kc)
     N0 = int(np.asarray(kc["fl_table"]).shape[0])
     k = max(1, int(round(n_comp / N0)))
-    am = np.asarray(kc["angle_matrix"])
+    ma = np.asarray(kc["matrix_angle"])              # (n_ab, P0*N0) p-major
+    n_ab = int(ma.shape[0])
+    P0 = max(1, int(ma.shape[1]) // N0)
+    ma3 = ma.reshape(n_ab, P0, N0)                   # [a, p, k]
+    ma3 = _fit_proj(ma3, 1, int(n_proj))             # [a, P, N0]
+    ma3 = np.tile(ma3, (1, 1, k))                    # [a, P, N0*k]
     out["fl_table"] = np.tile(np.asarray(kc["fl_table"]), (k, 1, 1))
     out["num_table"] = np.tile(np.asarray(kc["num_table"]), (k, 1, 1))
     out["fl_q_index"] = np.tile(np.asarray(kc["fl_q_index"]), (k, 1))
     out["num_m_index"] = np.tile(np.asarray(kc["num_m_index"]), (k, 1))
-    out["angle_matrix"] = np.tile(_fit_proj(am, 1, int(n_proj)), (k, 1, 1))
+    out["matrix_angle"] = np.ascontiguousarray(ma3).reshape(n_ab, -1)
     out["gamma_matrix"] = np.tile(np.asarray(kc["gamma_matrix"]), (k, 1, 1))
     return out
 
@@ -117,7 +128,8 @@ def main():
 
     print("=" * 78)
     print(f"flat pwa_gen (n ≡ 1): n_wave={n_wave} "
-          f"n_proj={np.asarray(fkc['angle_matrix']).shape[1]} n_basis={n_basis}"
+          f"n_proj={int(np.asarray(fkc['matrix_angle']).shape[1]) // n_wave} "
+          f"n_basis={n_basis}"
           f"  resolution_size={args.rsize}")
     print(f"plain pwa          : n_wave={info['n_wave']} "
           f"n_proj={info['n_proj']} N={info['N']}")

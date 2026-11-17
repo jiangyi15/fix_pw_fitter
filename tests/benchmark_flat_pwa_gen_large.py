@@ -13,7 +13,7 @@ numbers are comparable with the pure-PWA family it benchmarks:
 
 The kernel-config vocabulary differs (the flat config has no ``matrix_angle``
 / ``bw_order`` / ``fl_order``), so the tiling is expressed in the flat terms:
-``fl_table`` / ``num_table`` / ``gamma_matrix`` / ``angle_matrix`` repeat
+``fl_table`` / ``num_table`` / ``gamma_matrix`` / ``matrix_angle`` repeat
 along their wave axis, and — because the builder has already folded the basis
 — the repeated waves SHARE the same basis rows, so ``gamma_matrix`` grows
 along its wave axis only.
@@ -72,17 +72,21 @@ def tile_flat(kc, n_comp, n_proj):
 
     fl_tab = np.asarray(kc["fl_table"])          # (N0, n_decay, bins)
     num_tab = np.asarray(kc["num_table"])        # (N0, n_res, bins)
-    am = np.asarray(kc["angle_matrix"])          # (N0, P0, n_ab)
+    ma = np.asarray(kc["matrix_angle"])          # (n_ab, P0*N0) p-major
+    n_ab = int(ma.shape[0])
+    ma3 = ma.reshape(n_ab, max(1, ma.shape[1] // N0), N0)   # [a, p, k]
     fl_q = np.asarray(kc["fl_q_index"])          # (N0, n_decay)
     num_m = np.asarray(kc["num_m_index"])        # (N0, n_res)
     gam = np.asarray(kc["gamma_matrix"])         # (N0, n_res, nb)
 
-    P0 = am.shape[1]
+    P0 = ma3.shape[1]
     out["fl_table"] = np.tile(fl_tab, (k, 1, 1))
     out["num_table"] = np.tile(num_tab, (k, 1, 1))
     out["fl_q_index"] = np.tile(fl_q, (k, 1))
     out["num_m_index"] = np.tile(num_m, (k, 1))
-    out["angle_matrix"] = np.tile(_fit_proj(am, 1, P), (k, 1, 1))
+    ma3 = _fit_proj(ma3, 1, P)                                # [a, P, N0]
+    ma3 = np.tile(ma3, (1, 1, k))                             # [a, P, N]
+    out["matrix_angle"] = np.ascontiguousarray(ma3).reshape(n_ab, -1)
     out["gamma_matrix"] = np.tile(gam, (k, 1, 1))
     return out
 
@@ -129,7 +133,7 @@ def main():
         kc["num_table"] = np.ones_like(np.asarray(kc["num_table"]))
 
     n_wave = int(np.asarray(kc["fl_table"]).shape[0])
-    n_proj = int(np.asarray(kc["angle_matrix"]).shape[1])
+    n_proj = int(np.asarray(kc["matrix_angle"]).shape[1]) // n_wave
     n_res = int(np.asarray(kc["num_table"]).shape[1])
     n_basis = int(np.asarray(kc["basis_table"]).shape[0])
     gam = np.asarray(kc["gamma_matrix"])

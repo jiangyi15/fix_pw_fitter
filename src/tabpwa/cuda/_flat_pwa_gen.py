@@ -132,7 +132,9 @@ class CUDAKernelFlatPWAGen:
 
         c = config
         self.n_wave = int(np.asarray(c["fl_table"]).shape[0])
-        self.n_proj = int(np.asarray(c["angle_matrix"]).shape[1])
+        # n_proj is encoded p-major in matrix_angle's columns
+        self.n_proj = max(1, int(np.asarray(c["matrix_angle"]).shape[1])
+                          // self.n_wave)
         self.n_res = int(np.asarray(c["num_table"]).shape[1])
         self.n_decay = int(np.asarray(c["fl_q_index"]).shape[1])
         self.n_basis = int(np.asarray(c["basis_table"]).shape[0])
@@ -151,7 +153,15 @@ class CUDAKernelFlatPWAGen:
         num = np.asarray(c["num_table"], np.complex128).reshape(
             self.n_wave * self.n_res, -1)
         bas = np.asarray(c["basis_table"], np.complex128)
-        am = np.asarray(c["angle_matrix"], np.complex128)
+        # matrix_angle is (n_ab, n_proj*n_wave) p-major; the kernel reads
+        # (k, p, a), so reshape once here rather than change its inner loop.
+        # matrix_angle is (n_ab, n_proj*n_wave) p-major (column p*n_wave+k);
+        # the kernel indexes (k, p, a), so split the columns as
+        # (n_proj, n_wave) and move the wave axis first.  Contiguous for
+        # upload; the kernel is untouched.
+        am = np.ascontiguousarray(
+            np.asarray(c["matrix_angle"], np.complex128).T.reshape(
+                self.n_proj, self.n_wave, self.n_ab).transpose(1, 0, 2))
 
         def D(a):
             arr, buf = _db(a)

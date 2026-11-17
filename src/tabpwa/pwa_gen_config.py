@@ -4,7 +4,7 @@ The model, per (expanded wave ``k``, projection ``p``, event ``i``):
 
     F_{ipk} = fa_{pk} · Π_d fl_table[k, d]( q_{i, fl_q_index[k, d]} )
                      · Π_r num_table[k, r]( m_{i, num_m_index[k, r]} )
-    fa_{pk} = Σ_a angle_matrix[k, p, a]
+    fa_{p·n_wave+k} = Σ_a matrix_angle[a, p·n_wave+k]
                      · Π_j cos( angle_{i, angle_index[a], j}·angle_k[a, j] + angle_b[a, j] )
     D_{ik}  = Π_l Σ_m gamma_matrix[k, l, m] · basis_table[m]( m_{i, basis_m_index[m]} )
 
@@ -46,7 +46,7 @@ Keys
 ``angle_k``       (n_angle_basis, n_angle)     int32    cos (0) / sin (1)
 ``angle_b``       (n_angle_basis, n_angle)     float64  phase offset
 ``angle_index``   (n_angle_basis,)             int32    event angle column
-``angle_matrix``  (n_wave, n_proj, n_angle_basis) complex
+``matrix_angle``  (n_angle_basis, n_proj·n_wave) complex, p-major
 ``m_min``/``m_delta``                          float    mass grid (num + basis)
 ``q_min``/``q_delta``                          float    momentum grid (fl)
 ``wave_names``    list[str]                             host metadata
@@ -193,13 +193,26 @@ def build_from_groups(model, n_interp=None):
                                     for x in term["b"]])
 
     angle_index = np.array([key[0] for key in basis_pos], np.int32)
-    angle_matrix = np.zeros((n_wave, P, len(basis_pos)), np.complex128)
+    # ``matrix_angle`` keeps the historical layout — ``(n_angle_basis,
+    # n_proj·n_wave)`` with the projection M AJOR, column ``p·n_wave + k`` — so
+    # the long-standing idiom still works verbatim:
+    #
+    #     ka  = Π_j cos(angle·angle_k + angle_b)        (ne, n_angle_basis)
+    #     fa  = ka @ kc["matrix_angle"]                 (ne, n_proj·n_wave)
+    #     fa[:, p*n_wave + k]                           projection p, wave k
+    #
+    # ``n_proj`` is therefore just ``matrix_angle.shape[1] // n_wave`` — it is
+    # NOT a separate count and NOT an axis of this array.  ``ck`` stays one
+    # slot per BASE wave (``len == n_wave``) and is shared by every
+    # projection, which is the flat config's one deliberate change from the
+    # pre-flat layout.
+    matrix_angle = np.zeros((len(basis_pos), P * n_wave), np.complex128)
     for k in range(n_wave):
         topo = wave_topo[k]
         for p in range(P):
             for term in angle_terms[(k, p)]:
                 key = (topo, tuple(term["k"]), tuple(term["b"]))
-                angle_matrix[k, p, basis_pos[key]] += term["coeffs"]
+                matrix_angle[basis_pos[key], p * n_wave + k] += term["coeffs"]
 
     # ── denominator: one flat basis list + the per-(wave, res) selector ──
     # ``den_names`` is the flat coefficient-name list: one entry per appended
@@ -279,7 +292,7 @@ def build_from_groups(model, n_interp=None):
         "angle_k": np.array(angle_k, np.int32),
         "angle_b": np.array(angle_b, np.float64),
         "angle_index": angle_index,
-        "angle_matrix": angle_matrix,
+        "matrix_angle": matrix_angle,
         "m_min": m_min,
         "m_delta": m_delta,
         "q_min": q_min,

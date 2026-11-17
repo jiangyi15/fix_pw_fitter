@@ -7,7 +7,9 @@
  * non-deduped form — reading each table at the index the config names.
  *
  *     ka_{e,a}  = Π_j cos( angle_{e, angle_index[a], j}·angle_k[a,j] + angle_b[a,j] )
- *     fa_{e,k,p} = Σ_a ka_{e,a} · angle_matrix[k,p,a]
+ *     fa_{e,k,p} = Σ_a ka_{e,a} · am[k,p,a]   (am = matrix_angle
+ *                     re-ordered from its p-major (a, p*n_wave+k) form
+ *                     by the wrapper, so this loop is unchanged)
  *     fl_{e,k}  = Π_d fl_table[k,d]( q_{e, fl_q_index[k,d]} )
  *     nu_{e,k}  = Π_r num_table[k,r]( m_{e, num_m_index[k,r]} )        (complex)
  *     s_{e,k,l} = Σ_m gamma[k,l,m]·coeff[m]·basis_m(m_e)               (complex)
@@ -141,7 +143,8 @@ __device__ void flat_den_factor(
     *out_r = sr; *out_i = si;
 }
 
-/* fa_{e,k,p} = Σ_a ka_{e,a}·angle_matrix[k,p,a] (complex). */
+/* fa_{e,k,p} = Σ_a ka_{e,a}·am[k,p,a] (complex); am is the
+ * wrapper's (n_wave, n_proj, n_ab) view of the p-major matrix_angle. */
 __device__ void flat_fa(const double* __restrict__ s_ka,
                         const double* __restrict__ am_r,
                         const double* __restrict__ am_i,
