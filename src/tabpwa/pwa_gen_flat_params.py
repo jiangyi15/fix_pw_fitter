@@ -87,9 +87,11 @@ class FlatKernelParams(BuildKernelParams):
         coeff = np.zeros(self._n_basis, np.float64)
         for m, name in enumerate(self._den_names):
             coeff[m] = float(np.real(resolved[name]))
-        # basis rows encoding F = −m² carry the negated weight
-        for m in self._m2_rows():
-            coeff[m] = -coeff[m]
+        # No sign correction here.  The model's `den_basis` rows are used
+        # verbatim and the shared m² row carries the literal ``"one"`` weight
+        # (fixed to 1), so the kernel sees exactly the expression the model
+        # wrote.  `_m2_rows()` used to SNIFF for a row equal to -m² and negate
+        # its weight to compensate for a builder-side override; both are gone.
         out["coeff"] = coeff
         # this parameterisation is ck + coeff only
         out.pop("m0", None)
@@ -126,9 +128,6 @@ class FlatKernelParams(BuildKernelParams):
                 raise ValueError(
                     f"FlatKernelParams: grads['coeff'] has {g.size} entries, "
                     f"expected n_basis = {self._n_basis}")
-            # undo the m² sign: the kernel's weight was the negated row
-            for m in self._m2_rows():
-                g[m] = -g[m]
             # fan-in: every basis column contributes to its parameter, so the
             # copies the forward pass fanned out are summed back here
             for m, name in enumerate(self._den_names):

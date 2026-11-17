@@ -253,6 +253,15 @@ class Fitter:
         extra = getattr(self.model, "extra_transforms", None)
         if extra is not None:
             transforms.extend(extra())
+        # ``pwa_gen``'s m² basis row carries the SHARED literal weight
+        # ``"one"``: every resonance's m² term has coefficient exactly 1, so
+        # it is one physical constant, not one per resonance.  Pin it, or it
+        # would be a free direction the fit can wander along (the m² row is
+        # not normalised away by anything).
+        den_names = (getattr(self, "kernel_config", None) or {}).get(
+            "den_names") or []
+        if "one" in den_names:
+            self.cm.set_fixed({"one": 1.0}, reset=False)
         # Never reset: on a SHARED cm a reset would wipe the other configs'
         # mass/width transforms; on the private cm there is nothing to wipe
         # on this single call.  Same-name collisions are handled per name

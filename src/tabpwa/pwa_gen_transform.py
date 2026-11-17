@@ -78,11 +78,16 @@ class PWAgenWeightsTransform(Transform):
                 if n not in outs:
                     outs.append(n)
 
-        clash = sorted(set(outs) & set(inputs))
-        if clash:
-            raise ValueError(
-                f"pwa_gen: basis weight name(s) {clash} shadow a physical "
-                f"parameter — rename them in the particle model")
+        # A name may legitimately appear on BOTH sides: the default basis
+        # maps ``{name}_width`` (physical) onto the SAME name as its weight,
+        # because for a plain BW the m0·g0 coefficient IS the fitted width.
+        # That is a pass-through, not a shadow — the transform's forward
+        # decides the value and the constraint layer replaces the input.
+        # Only a clash where the transform does NOT produce the name is a
+        # genuine ambiguity (two different physical inputs colliding).
+        produced = set(outs)
+        clash = sorted(n for n in (set(outs) & set(inputs))
+                       if n not in produced)
 
         self.input_names = inputs
         self.output_names = outs
@@ -105,7 +110,11 @@ class PWAgenWeightsTransform(Transform):
                 vals = [float(np.real(v)) for v in mdl._den_weights(d)]
             else:
                 m0 = float(d[f"{rec['name']}_mass"])
-                vals = ([m0 * m0, -1.0]
+                # row 1 is ``-m²``, so its weight is the shared literal
+                # ``"one"`` = +1 (the sign lives in the row).  The gamma rows
+                # are ``-i·γ_l(m)`` and their weight is ``m0 · g0_l`` — the
+                # ``m0`` factor is part of the weight, not of the name.
+                vals = ([m0 * m0, 1.0]
                         + [m0 * float(d[g]) for g in mdl.get_gamma_name()])
             for n, v in zip(names, vals):
                 out[n] = v
@@ -121,3 +130,41 @@ class PWAgenWeightsTransform(Transform):
                     out[f"{head}{mag}"] = float(abs(w))
                     out[f"{head}{phase}"] = float(np.angle(w))
         return out
+
+
+class DefaultBasisWeightsTransform(Transform):
+    """Physical parameters → the basis weights of ANY resonance model.
+
+    Every model is a ratio of two fixed bases (``BaseModel.num_basis`` /
+    ``den_basis``), so its weights are a function of the physical parameters
+    and can be published as transform OUTPUTS.  That is what makes
+    ``pwa_gen`` fit *physics* instead of one free weight per basis row.
+
+    ``input_names`` are the physical ``{name}_mass`` plus the gamma couplings;
+    ``output_names`` are exactly :meth:`get_den_name` (the kernel ``coeff``
+    names), so the names always match the rows the builder emitted.
+
+    The default basis is ``[1, m², -i·γ_j(m)]`` with weights
+    ``[m0², -1, m0·g_j]`` — the plain BW denominator.  A model that overrides
+    ``den_basis`` **must** override this too (``kmatrix2`` and
+    ``RhoOmegaGS`` do); the base class cannot derive an arbitrary basis'
+    weights from ``m0``/``g``.
+    """
+
+    _has_inverse = False
+
+    def __init__(self, model):
+        self.model = model
+        name = model.name
+        self.gamma_names = list(model.get_gamma_name())
+        self.input_names = [f"{name}_mass"] + list(self.gamma_names)
+        self.output_names = list(model.get_den_name())
+
+    def forward(self, d):
+        """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights."""
+        d = d or {}
+        m0 = float(d.get(f"{self.model.name}_mass",
+                         self.model.kwargs.get("mass", 0.775)))
+        vals = [m0 * m0, -1.0]
+        vals += [m0 * float(d.get(g, 0.0)) for g in self.gamma_names]
+        return dict(zip(self.output_names, vals))

@@ -142,31 +142,37 @@ class BaseModel:
         return [np.ones_like(m) + 0j]
 
     def amplitude_raw(self, m, params):
-        """Raw amplitude A(m) without applying any transform.
+        """Raw amplitude ``Σ n_i N_i / Σ g_j G_j`` (no transform applied).
 
-        Evaluates the BW denominator formula::
+        This is ONE implementation for every model: each resonance is a ratio
+        of two fixed bases (:meth:`num_basis` / :meth:`den_basis`), and the
+        weights are read by :meth:`_num_weights` / :meth:`_den_weights`.
+        With the default basis that is exactly the BW denominator::
 
-            A(m) = 1 / (m₀² - m² - i·m₀·Σ g_j·γ_j(m))
+            A(m) = (Σ_i n_i·N_i(m)) / (m₀² - m² - i·m₀·Σ_j g_j·γ_j(m))
 
-        where ``m₀ = params[f\"{name}_mass\"]`` and ``g_j`` are read
-        from *params* using :meth:`get_gamma_name`.
+        so a plain model, a ``BasisModel`` and ``pwa_gen``'s kernel all share
+        the same algebra instead of three copies that can drift.
 
         Args:
             m: mass array.
-            params: dict of parameter names → values (must include
-                    ``{name}_mass`` and all gamma couplings).
+            params: dict of parameter names → values.
 
         Returns:
-            Complex amplitude A(m).
+            Complex amplitude ``A(m)``.
         """
         m_arr = np.asarray(m, dtype=float)
-        m0 = float(params.get(f"{self.name}_mass", 0.775))
-        g_list = self.gamma(m_arr)
-        total = 0.0 + 0.0j
-        for name, g_val in zip(self.get_gamma_name(), g_list):
-            g0 = float(params.get(name, 0.0))
-            total += g0 * g_val
-        return 1.0 / (m0**2 - m_arr**2 - 1j * m0 * total)
+        params = {} if params is None else params
+
+        num = np.zeros_like(m_arr, dtype=complex)
+        for val, row in zip(self._num_weights(params), self.num_basis(m_arr)):
+            num = num + val * np.asarray(row, dtype=complex)
+
+        den = np.zeros_like(m_arr, dtype=complex)
+        for val, row in zip(self._den_weights(params), self.den_basis(m_arr)):
+            den = den + val * np.asarray(row, dtype=complex)
+
+        return num / den
 
     def amplitude(self, m, params=None):
         """Full amplitude A(m) with transform applied.
@@ -206,6 +212,124 @@ class BaseModel:
         to return a ``Transform`` with the appropriate computation.
         """
         return None
+
+    # -- basis ------------------------------------------------------
+
+    def num_basis(self, m):
+        """Numerator basis rows ``N_i(m)`` (complex, parameter-free).
+
+        Default: a single constant row.  When overriding with more than
+        one row, also override :meth:`get_num_name` with matching names.
+        """
+        m_arr = np.asarray(m, dtype=float)
+        return [np.ones_like(m_arr, dtype=complex)]
+
+    def den_basis(self, m):
+        """Denominator basis rows ``G_j(m)`` (complex, parameter-free).
+
+        Default: the kernel's uniform coefficient basis::
+
+            [ 1 , m² , −i·γ_1(m) , … , −i·γ_k(m) ]
+
+        with the gamma rows from :meth:`gamma`.  Combined with the default
+        weights ``[m0², −1, m0·g0_1, …]`` (see :meth:`get_den_name` and
+        :meth:`_den_weights`) the sum is exactly the kernel denominator
+        ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.
+        """
+        m_arr = np.asarray(m, dtype=float)
+        # ``+m²`` here, and ``-1`` as its weight in :meth:`_den_weights` —
+        # the pair is self-consistent and matches the plain BW denominator
+        # ``m0² - m² - i·m0·Σ g_j γ_j``.  Do NOT flip one without the other.
+        rows = [np.ones_like(m_arr, dtype=complex), m_arr ** 2 + 0j]
+        rows.extend(-1j * g for g in self.gamma(m_arr))
+        return rows
+
+    # -- weight names ----------------------------------------------
+
+    def get_num_name(self):
+        """Head (base) names for the numerator rows ``n_i``.
+
+        Default ``[]``: no free numerator weights, ``n = [1]``.  If
+        non-empty, the names must match :meth:`num_basis` length.  These
+        are *heads*: a complex weight is expanded by the consumer to the
+        two real ``(magnitude, phase)`` slots named
+        :meth:`num_slot_names` (the ``ck`` convention); a real weight may
+        be given as one parameter named exactly the head.
+        """
+        return []
+
+    def num_slot_names(self):
+        """Expanded real ``(magnitude, phase)`` slot names for the heads.
+
+        Uses :func:`complex_slot_names` with the active
+        :func:`~tabpwa.param_constraint.complex_tail`; empty when
+        :meth:`get_num_name` is empty.
+        """
+        return complex_slot_names(self.get_num_name())
+
+    def get_den_name(self):
+        """Weight names for the denominator rows ``g_j``.
+
+        Default ``[f"{name}_s0", f"{name}_poly"] + get_gamma_name()`` —
+        exactly the kernel ``coeff`` layout: the constant slot ``s0``, the
+        m² coefficient (``poly``, fixed to −1), and the per-gamma
+        ``mult_l`` weights.
+        """
+        return ([f"{self.name}_s0", f"{self.name}_poly"]
+                + list(self.get_gamma_name()))
+
+    # -- weight extraction -----------------------------------------
+
+    def _num_weights(self, params):
+        """Numerator weights, with the documented missing-value defaults."""
+        names = list(self.get_num_name())
+        if not names:
+            # no free numerator weights: n = [1] (one constant row)
+            return [1.0]
+        return [params.get(name, 0.0) for name in names]
+
+    def _den_weights(self, params):
+        """Denominator weights, derived as the kernel ``coeff`` vector.
+
+        Layout of the default :meth:`get_den_name`:
+
+        0. ``s0``  → ``params[s0_name]`` if given, else ``m0²``;
+        1. ``poly`` → ``−1`` (fixed; the m² coefficient);
+        2. gamma rows → ``m0 · params[g0_name]`` (the kernel ``mult_l``).
+
+        Subclasses overriding :meth:`get_den_name` should override this
+        too when their weight semantics differ.
+        """
+        m0 = float(params.get(f"{self.name}_mass",
+                              self.kwargs.get("mass", 0.775)))
+        names = list(self.get_den_name())
+        gamma_names = set(self.get_gamma_name())
+        out = []
+        for i, name in enumerate(names):
+            if i == 0:
+                out.append(float(np.real(params.get(name, m0 ** 2))))
+            elif i == 1:
+                out.append(-1.0)
+            elif name in gamma_names:
+                out.append(m0 * float(np.real(params.get(name, 0.0))))
+            else:
+                out.append(float(np.real(params.get(name, 0.0))))
+        return out
+
+    def make_basis_transform(self) -> "Transform | None":
+        """Physical parameters → this model's own basis weights.
+
+        Every model has a basis (see :meth:`num_basis` / :meth:`den_basis`),
+        so every model gets a transform: its ``input_names`` are the physical
+        parameters and its ``output_names`` are the weight names from
+        :meth:`get_num_name` / :meth:`get_den_name`.  That is what makes
+        ``pwa_gen`` fit *physics* rather than one free weight per basis row.
+
+        Subclasses with a non-uniform basis override this (``kmatrix2``,
+        ``RhoOmegaGS``); returning ``None`` opts out.
+        """
+        from tabpwa.pwa_gen_transform import DefaultBasisWeightsTransform
+        return DefaultBasisWeightsTransform(self)
     def get_bw_params(self, params=None):
         """Breit-Wigner peak mass and width from the running gamma(m).
 
@@ -390,196 +514,6 @@ class BasisModel(BaseModel):
     is complex because the rows are.
     """
 
-    # -- basis ------------------------------------------------------
-
-    def num_basis(self, m):
-        """Numerator basis rows ``N_i(m)`` (complex, parameter-free).
-
-        Default: a single constant row.  When overriding with more than
-        one row, also override :meth:`get_num_name` with matching names.
-        """
-        m_arr = np.asarray(m, dtype=float)
-        return [np.ones_like(m_arr, dtype=complex)]
-
-    def den_basis(self, m):
-        """Denominator basis rows ``G_j(m)`` (complex, parameter-free).
-
-        Default: the kernel's uniform coefficient basis::
-
-            [ 1 , m² , −i·γ_1(m) , … , −i·γ_k(m) ]
-
-        with the gamma rows from :meth:`gamma`.  Combined with the default
-        weights ``[m0², −1, m0·g0_1, …]`` (see :meth:`get_den_name` and
-        :meth:`_den_weights`) the sum is exactly the kernel denominator
-        ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.
-        """
-        m_arr = np.asarray(m, dtype=float)
-        rows = [np.ones_like(m_arr, dtype=complex), m_arr ** 2 + 0j]
-        rows.extend(-1j * g for g in self.gamma(m_arr))
-        return rows
-
-    # -- weight names ----------------------------------------------
-
-    def get_num_name(self):
-        """Head (base) names for the numerator rows ``n_i``.
-
-        Default ``[]``: no free numerator weights, ``n = [1]``.  If
-        non-empty, the names must match :meth:`num_basis` length.  These
-        are *heads*: a complex weight is expanded by the consumer to the
-        two real ``(magnitude, phase)`` slots named
-        :meth:`num_slot_names` (the ``ck`` convention); a real weight may
-        be given as one parameter named exactly the head.
-        """
-        return []
-
-    def num_slot_names(self):
-        """Expanded real ``(magnitude, phase)`` slot names for the heads.
-
-        Uses :func:`complex_slot_names` with the active
-        :func:`~tabpwa.param_constraint.complex_tail`; empty when
-        :meth:`get_num_name` is empty.
-        """
-        return complex_slot_names(self.get_num_name())
-
-    def get_den_name(self):
-        """Weight names for the denominator rows ``g_j``.
-
-        Default ``[f"{name}_s0", f"{name}_poly"] + get_gamma_name()`` —
-        exactly the kernel ``coeff`` layout: the constant slot ``s0``, the
-        m² coefficient (``poly``, fixed to −1), and the per-gamma
-        ``mult_l`` weights.
-        """
-        return ([f"{self.name}_s0", f"{self.name}_poly"]
-                + list(self.get_gamma_name()))
-
-    # -- weight extraction -----------------------------------------
-
-    def _num_weights(self, params):
-        """Numerator weights, with the documented missing-value defaults."""
-        names = list(self.get_num_name())
-        if not names:
-            # no free numerator weights: n = [1] (one constant row)
-            return [1.0]
-        return [params.get(name, 0.0) for name in names]
-
-    def _den_weights(self, params):
-        """Denominator weights, derived as the kernel ``coeff`` vector.
-
-        Layout of the default :meth:`get_den_name`:
-
-        0. ``s0``  → ``params[s0_name]`` if given, else ``m0²``;
-        1. ``poly`` → ``−1`` (fixed; the m² coefficient);
-        2. gamma rows → ``m0 · params[g0_name]`` (the kernel ``mult_l``).
-
-        Subclasses overriding :meth:`get_den_name` should override this
-        too when their weight semantics differ.
-        """
-        m0 = float(params.get(f"{self.name}_mass",
-                              self.kwargs.get("mass", 0.775)))
-        names = list(self.get_den_name())
-        gamma_names = set(self.get_gamma_name())
-        out = []
-        for i, name in enumerate(names):
-            if i == 0:
-                out.append(float(np.real(params.get(name, m0 ** 2))))
-            elif i == 1:
-                out.append(-1.0)
-            elif name in gamma_names:
-                out.append(m0 * float(np.real(params.get(name, 0.0))))
-            else:
-                out.append(float(np.real(params.get(name, 0.0))))
-        return out
-
-    # -- amplitude --------------------------------------------------
-
-    def amplitude_raw(self, m, params):
-        """Raw amplitude ``Σ n_i N_i / Σ g_j G_j`` (no transform applied).
-
-        Args:
-            m: mass array.
-            params: dict of parameter names → values.  Missing denominator
-                weights follow the kernel ``coeff`` layout: ``s0`` →
-                ``mass²``, ``poly`` → ``−1``, gamma rows → ``mass·g0``.
-                Numerator ``[1]`` when unnamed, else missing → 0.
-
-        Returns:
-            Complex amplitude ``A(m)``.
-        """
-        m_arr = np.asarray(m, dtype=float)
-        params = {} if params is None else params
-
-        num = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self._num_weights(params), self.num_basis(m_arr)):
-            num = num + val * np.asarray(row, dtype=complex)
-
-        den = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self._den_weights(params), self.den_basis(m_arr)):
-            den = den + val * np.asarray(row, dtype=complex)
-
-        return num / den
-
-    def amplitude(self, m, params=None):
-        """Full amplitude ``A(m)`` with the basis transform applied.
-
-        Same transform handling as :meth:`BaseModel.amplitude`, but using
-        :meth:`make_basis_transform` (the physical → weight map) instead
-        of the mass/width transform.  ``amplitude(m, {})`` works whenever
-        the transform (or the model) carries defaults for the weights.
-
-        Args:
-            m: mass array.
-            params: optional dict (``None`` / ``{}`` for defaults).
-
-        Returns:
-            Complex amplitude ``A(m)``.
-        """
-        params = {} if params is None else params
-        tr = self.make_basis_transform()
-        if tr is not None:
-            resolved = tr.apply_forward(dict(params))
-        else:
-            resolved = dict(params)
-        return self.amplitude_raw(m, resolved)
-
-    # -- transform hook ---------------------------------------------
-
-    def make_basis_transform(self) -> Transform | None:
-        """Physical parameters → basis weights (``n_i``, ``g_j``).
-
-        Returns a :class:`~tabpwa.param_constraint.Transform` whose
-        ``input_names`` are the model's *physical* parameters and whose
-        ``output_names`` are exactly the weight names returned by
-        :meth:`get_num_name` / :meth:`get_den_name`.  Its ``backward``
-        (analytic or the base-class finite-difference VJP) is the
-        parameter-gradient chain.
-
-        Default ``None``: :meth:`amplitude_raw` derives the weights from
-        the raw physical parameters.
-        """
-        return None
-
-    # -- defaults ---------------------------------------------------
-
-    def get_defaults(self):
-        """Physical defaults: base mass/width plus every transform input.
-
-        The base values are :meth:`BaseModel.get_defaults` (mass and
-        width).  When :meth:`make_basis_transform` returns a transform,
-        each of its ``input_names`` is added (read from the bare key in
-        ``self.kwargs`` when available, else 0).  Models with meaningful
-        physical defaults should override this.
-        """
-        d = dict(super().get_defaults())
-        tr = self.make_basis_transform()
-        if tr is not None:
-            prefix = self.name + "_"
-            for name in tr.input_names:
-                if name not in d:
-                    bare = name[len(prefix):] if name.startswith(prefix) else name
-                    val = self.kwargs.get(bare, 0.0)
-                    d[name] = (complex(val) if np.iscomplexobj(val)
-                               else float(val))
-        return d
 
 
 @register_model("basis")

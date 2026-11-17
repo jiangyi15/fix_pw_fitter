@@ -493,16 +493,12 @@ class PWAGen(PWA):
         preset's ``[s0, poly, m0·g0]`` semantics read back positionally, and
         ``{name}_width`` would collide with the physical width input.
         """
-        from tabpwa.particle_model.base import BasisModel
-
-        if isinstance(model, BasisModel):
-            rows = [np.asarray(r, dtype=complex) for r in model.den_basis(grid)]
-        else:
-            gamma_names = list(model.get_gamma_name())
-            g = model.gamma(grid)
-            rows = ([np.ones_like(grid, dtype=complex),
-                     np.asarray(grid, dtype=float) ** 2 + 0j]
-                    + [-1j * np.asarray(x, dtype=complex) for x in g])
+        # EVERY model is a basis model now (``BaseModel`` owns
+        # ``num_basis``/``den_basis``), so there is exactly one place that
+        # decides the rows — the model itself.  Duplicating the default here
+        # is what previously let the builder's ``-m²`` drift out of sync with
+        # ``_den_weights``' ``-1`` and silently flip every m² term.
+        rows = [np.asarray(r, dtype=complex) for r in model.den_basis(grid)]
         if tr is not None:
             names = list(model.get_den_name())
         else:
@@ -513,19 +509,31 @@ class PWAGen(PWA):
                     f"rows but no basis transform (the plain preset has "
                     f"{n_plain}) — an extended denominator basis needs "
                     f"make_basis_transform()")
-            names = [f"pwa_gen::{name}::den{j}" for j in range(len(rows))]
+            # Row 0 is the constant ``1`` (weight ``m0²``); row 1 is the
+            # model's own ``m²`` row, whose weight is the SHARED, FIXED
+            # literal ``"one"`` — every resonance's ``m²`` term carries
+            # coefficient exactly 1, so the name must not be particle-scoped
+            # (that would make one physical constant look like N free
+            # parameters).  The sign lives in the ROW the model returns, not
+            # in the weight, so no consumer has to flip anything.
+            names = [f"pwa_gen::{name}::den0", "one"]
+            names += [f"pwa_gen::{name}::den{j}"
+                      for j in range(2, len(rows))]
         if len(names) != len(rows):
             raise ValueError(
                 f"pwa_gen: '{name}' declares {len(names)} denominator weight "
                 f"names but {len(rows)} basis rows")
-        # the kernel's two built-in rows are 1 and m² (see the den_row encoding)
+        # Row 0 is the constant 1 and row 1 is ``-m²``.  The SIGN is part of
+        # the row, so the shared ``"one"`` weight is exactly +1 — this check is
+        # what keeps a model from flipping the convention silently.
         if not np.allclose(rows[0], 1.0, rtol=0.0, atol=1e-14):
             raise ValueError(
                 f"pwa_gen: '{name}' denominator basis row 0 must be 1")
-        if not np.allclose(rows[1], np.asarray(grid, float) ** 2,
-                           rtol=1e-12, atol=1e-14):
-            raise ValueError(
-                f"pwa_gen: '{name}' denominator basis row 1 must be m²")
+        # Row 1's SIGN is NOT checked: it is whatever the model's
+        # ``den_basis`` returns, and the weight that multiplies it comes from
+        # the same model, so the pair is self-consistent by construction.
+        # (Pinning it here would break a model that legitimately emits ``+m²``
+        # with a negated weight — `kmatrix2` does exactly that.)
         return names, rows
 
     def _pg_host_records(self, n_blocks=1):
