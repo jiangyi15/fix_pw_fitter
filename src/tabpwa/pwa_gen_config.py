@@ -99,40 +99,84 @@ def build_from_groups(model, n_interp=None):
             expansion.append((k, {f["slot"]: rf for f, rf in zip(free, combo)}))
     n_wave = len(expansion)
 
+    # ── block expansion: identical permutations x CP ────────────────────
+    # A declared `identical_particles` permutation and a `cp_particles`
+    # conjugation each add a BLOCK.  The event data concatenates one column
+    # band per block (`build_tree_event_data`: `mass` -> n_blocks·n_topo·n_res,
+    # `q` -> n_blocks·n_topo·n_decay, `angle` -> n_blocks·n_topo), so a block
+    # is exactly a COLUMN OFFSET: the wave axis grows to n_blocks·n_wave and
+    # every per-wave index is rebased by `blk * <per-block stride>`.
+    #
+    # This is why no backend needs to know about blocks: they read
+    # `fl_q_index` / `num_m_index` / `angle_index` as plain column numbers and
+    # iterate `k` over `fl_table.shape[0]`.  Emitting the expanded rows makes
+    # `n_wave` == `len(ck)` on its own (the parameter side already expands,
+    # `get_ck_map`: cp-outer, perm-inner, combo innermost).
+    #
+    # The ORDER must match `get_ck_map` / `block_orders`: block
+    # `b = cp * n_perm + perm`, which is what `DecayTree.block_orders()`
+    # yields (all permutations, then the CP copies of them).
+    # `DecayTree.block_orders()` is the single source of the block list; its
+    # order (all permutations, then their CP copies) matches `get_ck_map`'s
+    # (cp-outer, perm-inner), so block `b` is ck block `b`.
+    blocks = model.decay_tree.block_orders()
+    n_blocks = len(blocks)
+    if n_blocks > 1:
+        base_expansion = expansion
+        expansion = [(blk, base, combo)
+                     for blk, (_order, _is_cp) in enumerate(blocks)
+                     for (base, combo) in base_expansion]
+        n_wave = len(expansion)
+    else:
+        expansion = [(0, base, combo) for (base, combo) in expansion]
+    # a block contributes one topology-sized band to each event buffer
+    q_blk_stride = int(model.n_topo) * n_decay      # q  : n_topo*n_decay
+    m_blk_stride = int(model.n_topo) * n_res        # mass: n_topo*n_res
+    a_blk_stride = int(model.n_topo)                # angle: n_topo
+
     # ── per-(wave, decay): momentum column and barrier row ────────────
     fl_q_index = np.zeros((n_wave, n_decay), np.int32)
     fl_table = np.zeros((n_wave, n_decay, n_interp), np.float64)
     wave_names = [""] * n_wave
-    for k, (base, _combo) in enumerate(expansion):
+    for k, (blk, base, _combo) in enumerate(expansion):
         ls, chain = waves[base]
         topo = topo_id[chain.topo_id()]
         wave_names[k] = str(chain.topo_id())
         for d, decay in enumerate(chain.decays):
-            fl_q_index[k, d] = n_decay * topo + d
+            fl_q_index[k, d] = blk * q_blk_stride + n_decay * topo + d
             fl_table[k, d] = _barrier_row(model._barrier(decay, ls[d][0]),
                                           q_grid)
 
     # ── per-(wave, res): numerator row and mass column ────────────────
     num_table = np.ones((n_wave, n_res, n_interp), np.complex128)
     num_m_index = np.zeros((n_wave, n_res), np.int32)
-    for k, (base, combo) in enumerate(expansion):
+    for k, (blk, base, combo) in enumerate(expansion):
         ls, chain = waves[base]
         for r, fac in enumerate(per_wave_factors[base]):
-            num_m_index[k, r] = _mass_column(model, chain, r)
+            num_m_index[k, r] = blk * m_blk_stride + _mass_column(model,
+                                                                  chain, r)
             rowfun = combo.get(fac["slot"])
             if rowfun is not None:
                 num_table[k, r] = np.asarray(rowfun(mass_grid), complex)
 
     # ── angular basis (shared) + the per-(wave, proj) weights ─────────
-    # The basis is keyed on ``(topo, k, b)`` — the TOPOLOGY, not the wave —
-    # exactly as the model's ``unique_angle_basis`` does.  Two waves of one
-    # topology therefore share basis rows, and ``angle_index[b]`` (the
-    # topology) is the event-angle column base their vertices start at.
+    # The basis is keyed on ``(column base, k, b)`` — the topology, not the
+    # wave — exactly as the model's ``unique_angle_basis`` does.  Two waves of
+    # one topology therefore share basis rows, and ``angle_index[b]`` (the
+    # topology) is the event-angle column base their vertices start at.  The
+    # key uses the BLOCK-REBASED column, so a CP block gets its own rows: its
+    # data columns are the conjugated ones, a different function of the event.
+    #
+    # The formula itself is block-INVARIANT: `_wave_angle_terms` depends only
+    # on (chain, ls, projection), and a CP block is the same chain evaluated
+    # on conjugated momenta (the CP transform is applied to the DATA, in
+    # `build_tree_event_data`, not to the formula).
     angle_terms = {}
     wave_topo = []
-    for k, (base, _combo) in enumerate(expansion):
+    for k, (blk, base, _combo) in enumerate(expansion):
         ls, chain = waves[base]
-        wave_topo.append(topo_id[chain.topo_id()])
+        col_base = blk * a_blk_stride + topo_id[chain.topo_id()]
+        wave_topo.append(col_base)
         for p in range(P):
             angle_terms[(k, p)] = model._wave_angle_terms(chain, ls, states[p])
 
@@ -183,7 +227,7 @@ def build_from_groups(model, n_interp=None):
     basis_rows, basis_col, basis_name, basis_kind = [], [], [], []
     seen = {}
     gamma_cols = []                     # per (wave, res): its basis columns
-    for k, (base, _combo) in enumerate(expansion):
+    for k, (_blk, base, _combo) in enumerate(expansion):
         ls, chain = waves[base]
         row = []
         for r, _fac in enumerate(per_wave_factors[base]):

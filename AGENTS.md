@@ -630,27 +630,40 @@ resonance side by side — the generic path then tabulates *every* resonance's
 rows past the two built-ins, and a plain resonance contributes
 `[m0², −1, m0·g_l]` with the same numbers as the non-generic path.
 
-**Identical-particle / CP blocks (`n_blocks > 1`) are NOT supported by any
-`pwa_gen` backend.**  The parameter side is ready — `get_ck_map()` expands
-`ck` to `n_perm · n_cp · n_base`, and `build_tree_event_data` fills the block
-rows — but the *kernel config* stays base-sized (`fl_table`, `fl_q_index`,
-`num_m_index`, `angle_matrix`, `gamma_matrix` all have `n_wave = n_base`
-rows; `n_blocks`/`n_perm`/`n_cp` are emitted as metadata only) and **no
-backend reads `n_blocks` at all**.  So for such a config every backend
-raises `ck has N entries, expected n_wave = M` with `N = n_blocks·M`:
+**Identical-particle / CP blocks (`n_blocks > 1`) ARE supported, and it is
+purely a build-time index rebasing** — no backend knows blocks exist.
+`build_from_groups` emits the wave axis as `n_blocks · n_base` and rebases
+every per-use index onto its block's column band; the backends already read
+`fl_q_index` / `num_m_index` / `angle_index` as plain column numbers and
+iterate `k` over `fl_table.shape[0]`, so `n_wave == len(ck)` holds by
+construction.  This is why no kernel change was needed: the earlier version
+of this paragraph claimed a backend change was required, and claimed the
+already-removed `bw_order` handled it — both wrong.
 
-    n_blocks = 2, len(ck) = 4, fl_table rows = 2
-      numpy_flat               ValueError: ck has 4 entries, expected n_wave = 2
-      cuda_flat_pwa_gen        ValueError: ck has 4 entries, expected n_wave = 2
-      cuda_flat_cache_pwa_gen  ValueError: ck has 4 entries, expected n_wave = 2
+The block bands come from `build_tree_event_data`, which concatenates one band
+per block: `mass` → `n_blocks·n_topo·n_res`, `q` → `n_blocks·n_topo·n_decay`,
+`angle` → `n_blocks·n_topo`.  So the strides are exactly those three
+quantities, and block `b` owns `[b·stride, (b+1)·stride)`.
 
-Supporting it means one of: expanding the config arrays by block (the
-old `bw_order` modulo trick, which no longer exists in the flat vocabulary),
-or folding the blocks into the kernel the way `cuda_v3*` does for the TD
-model.  The previous text here claimed `bw_order` handled it — that array
-was removed with the old vocabulary, so the claim was stale.  Note there is
-also **no fixture**: every `tests/config_pwa_gen*.yml` declares neither
-`identical_particles` nor `cp_particles`, which is why this gap was invisible.
+The block ORDER must match `get_ck_map()` (cp-outer, perm-inner, combo
+innermost), which is what `DecayTree.block_orders()` already yields (all
+permutations, then their CP copies), so block `b` is ck block `b` — the two
+orderings were checked rather than assumed.
+
+The angle formula is block-**invariant** (`_wave_angle_terms` depends only on
+`chain, ls, projection`); a CP block is the same chain evaluated on conjugated
+momenta, and the CP/parity transform is applied to the DATA.  The angle basis
+KEY, however, uses the block-rebased column, so a CP block gets its own rows —
+its columns are a different function of the event.
+
+Fixtures: `tests/config_pwa_gen_ident.yml` (identical only, 2 blocks) and
+`tests/config_pwa_gen_cp.yml` (identical AND CP on the same pair, 4 blocks —
+the hardest case).  Gates in `tests/test_pwa_gen_blocks.py`, including two
+that do not trust the backends: block 0 must be byte-identical to the
+`n_blocks == 1` config once un-rebased, and the objective must equal the
+quadratic form its own unit responses imply (with a non-zero off-diagonal
+block, i.e. the blocks interfere as amplitudes rather than summing as
+independent intensities).
 
 In the generic path the fitted `coeff` block replaces `m0`/`g0`, so the
 `{name}_mass` / `{name}_width` parameters are **not** free there unless they

@@ -1,0 +1,62 @@
+# pwa_gen with BOTH identical particles and CP conjugation:
+#
+#   identical_particles: [[pip, pip2]]  -> n_perm = 2   (swaps the pair)
+#   cp_particles:        [[pip, pip2]]  -> n_cp   = 2   (conjugate the pair)
+#                                          n_blocks = 4
+#
+# So every base wave is summed over 4 block orderings, all sharing one `ck`:
+#
+#     A_{e,p} = Σ_blocks Σ_k ck_k · (F/D)_{e,k} · fa_{e,p,k}
+#
+# The event data carries one column band per block
+# (`build_tree_event_data` concatenates `mass` -> n_blocks·n_topo·n_res,
+# `q` -> n_blocks·n_topo·n_decay, `angle` -> n_blocks·n_topo), and
+# `build_from_groups` rebases every per-wave index onto its block's band, so
+# the wave axis is `n_blocks · n_base` and `len(ck)` matches by construction.
+#
+# `identical` and `cp` deliberately share the SAME pair here: that is the
+# hardest case (4 distinct blocks over one 2-particle pair) and the one a
+# single-count bug would show up in.  `tests/config_pwa_gen_ident.yml` is the
+# identical-only variant.
+amp_model: pwa_gen
+defaults:
+  n_interp: 4000
+data:
+  dat_order: [pip, pip2, eta]
+  identical_particles: [[pip, pip2]]
+  cp_particles: [[pip, pip2]]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  jpsi:
+    - [pipi, eta]
+  pipi: [pip, pip2]
+particle:
+  $top: jpsi
+  $finals: [pip, pip2, eta]
+  pipi: [k2]
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pip2:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    width: 0.30
+    model: kmatrix2
+    m1: 0.80
+    m2: 1.35
+    g1: 0.35
