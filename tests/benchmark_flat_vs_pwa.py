@@ -104,7 +104,8 @@ def main():
                          "plain-pwa baselines stay per-event.")
     args = ap.parse_args()
 
-    flat_backends = ("cuda_flat_pwa_gen", "cuda_flat_cache_pwa_gen")
+    flat_backends = ("cuda_flat_pwa_gen", "cuda_flat_cache_pwa_gen",
+                     "cuda_flat_pwa_gen2")
     pwa_backends = ("cuda_v5_pwa_s0e", "cuda_v5_pwa_s0c", "cuda_v4_pwa_cache")
 
     # ── the flat case, forced to the plain-pwa model (n ≡ 1) ──────────
