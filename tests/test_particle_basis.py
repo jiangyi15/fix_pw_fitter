@@ -87,7 +87,10 @@ def test_basis_default_matches_bw_bitwise():
     # [1, m², −i·γ] with weights [m0², −1, m0·g0]
     den = basis.den_basis(m)
     assert len(den) == len(basis.get_den_name()) == 3
-    assert basis.get_den_name() == ["r_s0", "r_poly", "r_width"]
+    # the m² weight is the SHARED literal "one" (value -1), not "r_poly":
+    # `poly` is kmatrix2's FITTED polynomial coefficient -(m1^2+m2^2), a
+    # different quantity with a different free/fixed status.
+    assert basis.get_den_name() == ["r_s0", "one", "r_width"]
     assert np.array_equal(den[0], np.ones_like(m, dtype=complex))
     assert np.array_equal(den[1], m ** 2 + 0j)
     assert np.array_equal(den[2], -1j * np.ones_like(m))

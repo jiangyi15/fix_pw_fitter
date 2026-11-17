@@ -165,6 +165,7 @@ class DefaultBasisWeightsTransform(Transform):
         d = d or {}
         m0 = float(d.get(f"{self.model.name}_mass",
                          self.model.kwargs.get("mass", 0.775)))
-        vals = [m0 * m0, -1.0]
+        # the m² slot is the shared literal ``"one"``: row ``-m²``, weight +1
+        vals = [m0 * m0, 1.0]
         vals += [m0 * float(d.get(g, 0.0)) for g in self.gamma_names]
         return dict(zip(self.output_names, vals))

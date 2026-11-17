@@ -237,10 +237,11 @@ class BaseModel:
         ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.
         """
         m_arr = np.asarray(m, dtype=float)
-        # ``+m²`` here, and ``-1`` as its weight in :meth:`_den_weights` —
-        # the pair is self-consistent and matches the plain BW denominator
-        # ``m0² - m² - i·m0·Σ g_j γ_j``.  Do NOT flip one without the other.
-        rows = [np.ones_like(m_arr, dtype=complex), m_arr ** 2 + 0j]
+        # ``-m²`` here, so its weight is exactly the SHARED ``"one"`` = +1 and
+        # the name reads as its value.  The pair gives the plain BW
+        # denominator ``m0² - m² - i·m0·Σ g_j γ_j``.  Do NOT flip one side
+        # without the other — that is what silently reversed every m² term.
+        rows = [np.ones_like(m_arr, dtype=complex), -(m_arr ** 2) + 0j]
         rows.extend(-1j * g for g in self.gamma(m_arr))
         return rows
 
@@ -270,13 +271,22 @@ class BaseModel:
     def get_den_name(self):
         """Weight names for the denominator rows ``g_j``.
 
-        Default ``[f"{name}_s0", f"{name}_poly"] + get_gamma_name()`` —
-        exactly the kernel ``coeff`` layout: the constant slot ``s0``, the
-        m² coefficient (``poly``, fixed to −1), and the per-gamma
-        ``mult_l`` weights.
+        ``[f"{name}_s0", "one"] + get_gamma_name()`` — the kernel ``coeff``
+        layout: the ``m0²`` slot, the m² coefficient, and the per-gamma
+        ``mult_j`` weights.
+
+        The m² weight is the SHARED literal ``"one"``, not ``{name}_poly``.
+        Two reasons:
+
+        * its value is the constant ``−1`` (the row is ``+m²``), identical for
+          every resonance — naming it per resonance would make one physical
+          constant look like N free parameters;
+        * ``poly`` is ``kmatrix2``'s word for a *fitted* polynomial
+          coefficient ``−(m1²+m2²)``, a different quantity with a different
+          free/fixed status.  Reusing the name for a fixed ``−1`` conflated
+          the two.
         """
-        return ([f"{self.name}_s0", f"{self.name}_poly"]
-                + list(self.get_gamma_name()))
+        return [f"{self.name}_s0", "one"] + list(self.get_gamma_name())
 
     # -- weight extraction -----------------------------------------
 
@@ -308,8 +318,9 @@ class BaseModel:
         for i, name in enumerate(names):
             if i == 0:
                 out.append(float(np.real(params.get(name, m0 ** 2))))
-            elif i == 1:
-                out.append(-1.0)
+            elif name == "one":
+                # the m² coefficient: the row is ``-m²``, so this is +1
+                out.append(1.0)
             elif name in gamma_names:
                 out.append(m0 * float(np.real(params.get(name, 0.0))))
             else:
