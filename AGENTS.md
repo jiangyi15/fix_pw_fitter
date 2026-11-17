@@ -630,8 +630,27 @@ resonance side by side — the generic path then tabulates *every* resonance's
 rows past the two built-ins, and a plain resonance contributes
 `[m0², −1, m0·g_l]` with the same numbers as the non-generic path.
 
-Identical-particle / CP blocks (`n_blocks > 1`) are supported: `bw_order`
-entries are reduced modulo the base BW count before the per-BW name lookup.
+**Identical-particle / CP blocks (`n_blocks > 1`) are NOT supported by any
+`pwa_gen` backend.**  The parameter side is ready — `get_ck_map()` expands
+`ck` to `n_perm · n_cp · n_base`, and `build_tree_event_data` fills the block
+rows — but the *kernel config* stays base-sized (`fl_table`, `fl_q_index`,
+`num_m_index`, `angle_matrix`, `gamma_matrix` all have `n_wave = n_base`
+rows; `n_blocks`/`n_perm`/`n_cp` are emitted as metadata only) and **no
+backend reads `n_blocks` at all**.  So for such a config every backend
+raises `ck has N entries, expected n_wave = M` with `N = n_blocks·M`:
+
+    n_blocks = 2, len(ck) = 4, fl_table rows = 2
+      numpy_flat               ValueError: ck has 4 entries, expected n_wave = 2
+      cuda_flat_pwa_gen        ValueError: ck has 4 entries, expected n_wave = 2
+      cuda_flat_cache_pwa_gen  ValueError: ck has 4 entries, expected n_wave = 2
+
+Supporting it means one of: expanding the config arrays by block (the
+old `bw_order` modulo trick, which no longer exists in the flat vocabulary),
+or folding the blocks into the kernel the way `cuda_v3*` does for the TD
+model.  The previous text here claimed `bw_order` handled it — that array
+was removed with the old vocabulary, so the claim was stale.  Note there is
+also **no fixture**: every `tests/config_pwa_gen*.yml` declares neither
+`identical_particles` nor `cp_particles`, which is why this gap was invisible.
 
 In the generic path the fitted `coeff` block replaces `m0`/`g0`, so the
 `{name}_mass` / `{name}_width` parameters are **not** free there unless they
