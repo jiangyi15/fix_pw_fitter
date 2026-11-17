@@ -347,13 +347,24 @@ def test_free_parameters_are_ck_and_coeff_only():
 
 
 def test_mass_width_dropped_when_replaced_by_basis_weights():
-    """``k2_mass``/``k2_width`` are not free when the basis weights replace them."""
+    """``k2_mass``/``k2_width`` are replaced by the basis weights.
+
+    The weights are then transform OUTPUTS, so they are not free either: the
+    free parameters are the resonance model's own physical inputs (here
+    ``kmatrix2``'s ``m1/m2/g1/g2/b1/b2``), which the transform maps onto the
+    basis rows.  (This used to assert the weights themselves were free, which
+    only held while the per-BW transform was missing — see
+    ``PWAGen.build_kernel_config``.)
+    """
     f = Fitter(CFG_KM)
     f.apply_constrains()
-    names = f.free_param_names()
+    names = set(f.free_param_names())
     assert "k2_mass" not in names
     assert "k2_width" not in names
-    assert "k2_s0" in names and "k2_rho" in names
+    # the basis weights are outputs, not inputs
+    assert not (names & set(f.kernel_config["den_names"]))
+    # the transform's own inputs are what is fitted
+    assert {"k2_m1", "k2_m2", "k2_g1", "k2_g2"} <= names
 
 
 # ── one resonance, two topologies: a name spanning two mass columns ──
@@ -382,9 +393,19 @@ def test_same_particle_two_topologies_one_name_two_mass_columns():
     for nm, cc in spanning.items():
         assert len(cc) == 2, (nm, cc)
 
-    # ... but only ONE fitted weight per name
+    # ... and the weight is a TRANSFORM OUTPUT, not a free parameter: the
+    # free parameters are the resonance model's physical inputs.  (This
+    # assertion used to require every weight to be free — that encoded the
+    # bug where `PWAGen.build_kernel_config` never called
+    # `build_single_index`, so `unique_bw` stayed empty and no per-BW basis
+    # transform was ever registered.)
     free = set(f.free_param_names())
-    assert len([n for n in free if n in set(names)]) == len(set(names))
+    weights = set(names)
+    assert not (free & weights), (
+        f"basis weights must be transform outputs, not free: "
+        f"{sorted(free & weights)}")
+    assert f.model._pg_generic, "a basis transform must be registered"
+    assert f.model.extra_transforms(), "PWAgenWeightsTransform missing"
 
 
 def test_same_particle_dedup_keeps_the_two_mass_columns():

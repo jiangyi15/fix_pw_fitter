@@ -1,0 +1,13 @@
+"""cuda_flat_pwa_gen_1bw backend — the flat ``pwa_gen`` tile, ONE BW per chain.
+
+Thin registration shim; the kernel lives in
+:mod:`tabpwa.cuda._flat_pwa_gen_1bw`.  A multi-BW chain (``n_res != 1``) is
+rejected at construction with a ``ValueError`` naming ``cuda_flat_pwa_gen2``.
+"""
+from .core import register_backend
+from tabpwa.cuda import _flat_pwa_gen_1bw as _k
+
+
+@register_backend("cuda_flat_pwa_gen_1bw", model="pwa_gen")
+class CUDAFlatPwaGen1BWBackend(_k.CUDAFlatPwaGen1BWBackend):
+    """Registered alias of the wrapper in ``tabpwa.cuda._flat_pwa_gen_1bw``."""

@@ -294,6 +294,16 @@ class PWAGen(PWA):
         if self._pg_kc is not None:
             return self._pg_kc
         with self._default_context():
+            # The per-BW index lists (`unique_bw`, `unique_gamma`, ...) are
+            # filled by `build_single_index`, which is the ONLY writer.  The
+            # `pwa` path reaches it through `_build_base_kernel_config`, but
+            # `PWAGen` builds from `_pg_host_records` instead and so never
+            # called it — leaving `unique_bw` EMPTY and silently collapsing
+            # every resonance into the non-generic path.  Call it first: it is
+            # idempotent (it appends only unseen ids), and without it the loop
+            # over `self.unique_bw` in `_pg_host_records` iterates nothing, so
+            # no per-BW basis/transform is ever resolved.
+            self.build_single_index()
             exp, mult, C, P, n_base = self._pg_host_records(
                 n_blocks=self.decay_tree.n_perm * self.decay_tree.n_cp)
             from tabpwa.pwa_gen_config import build_from_groups

@@ -452,9 +452,12 @@ def test_named_sweep_equals_the_x_sweep_for_the_names_it_covers():
     x = f.initial_values(seed=3)
     flat = list(f.cm.var_registry.flat_names)
 
-    # a name that exists in the pwa_gen parameter surface (the basis weights
-    # replace the physical mass/width, so ``k2_m1`` is gone)
-    name = "k2_m4"
+    # A name that exists in the pwa_gen parameter surface: the basis weights
+    # replace the physical mass/width, and they are TRANSFORM OUTPUTS, so what
+    # is fitted is the resonance model's own inputs (`kmatrix2`'s m1/m2/g1/...).
+    # (This used to pick `k2_m4`, a basis weight, which was only free while
+    # the per-BW transform was missing -- see PWAGen.build_kernel_config.)
+    name = "k2_m1"
     j = flat.index(name)
     fn = lambda d: [float(d[name])]
 

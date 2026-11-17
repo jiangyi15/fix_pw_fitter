@@ -185,7 +185,8 @@ def test_coeff_gradient_is_one_entry_per_weight(cfg):
             surv = [i for i in range(len(names))
                     if names[i] == nm and not mask[i]]
             assert len(surv) == 1, (nm, surv)
-            assert abs(tot - gc["coeff"][surv[0]]) <= 1e-6 * max(abs(tot), 1e-12), \
+            # float2 cache floor: dcoeff sums one rounding per (e,k,m) term
+            assert abs(tot - gc["coeff"][surv[0]]) <= 1e-4 * max(abs(tot), 1e-12), \
                 (nm, tot, gc["coeff"][surv[0]])
     finally:
         ref.free()

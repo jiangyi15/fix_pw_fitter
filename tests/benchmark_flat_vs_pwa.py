@@ -102,14 +102,19 @@ def main():
                     help="resolution_size for the flat pwa_gen backends "
                          "(grouped log-sum; real use is 10..100).  The "
                          "plain-pwa baselines stay per-event.")
+    ap.add_argument("--template", default=FLAT_TEMPLATE,
+                    help="flat pwa_gen template to tile.  The default (_km) is "
+                         "a DENSE basis, so the contiguous-run win of "
+                         "cuda_flat_pwa_gen_1bw is 1.00x there by construction; "
+                         "tests/config_pwa_gen_cp.yml (n_wave 8, 20 basis rows, "
+                         "5-wide runs) is the shape where it shows.")
     args = ap.parse_args()
-
     flat_backends = ("cuda_flat_pwa_gen", "cuda_flat_cache_pwa_gen",
-                     "cuda_flat_pwa_gen2")
+                     "cuda_flat_pwa_gen2", "cuda_flat_pwa_gen_1bw")
     pwa_backends = ("cuda_v5_pwa_s0e", "cuda_v5_pwa_s0c", "cuda_v4_pwa_cache")
 
     # ── the flat case, forced to the plain-pwa model (n ≡ 1) ──────────
-    ff = Fitter(FLAT_TEMPLATE)
+    ff = Fitter(args.template)
     ff.apply_constrains()
     fkc = tile_flat(ff.kernel_config, args.n_comp, args.n_proj)
     fkc = dict(fkc)

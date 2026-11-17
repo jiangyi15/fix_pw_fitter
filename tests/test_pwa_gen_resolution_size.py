@@ -140,7 +140,11 @@ def test_numpy_flat_grouped_is_exact_not_approximate():
     b = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=4)
     Q, _g, P = b.compute(params, b.load_data(data), norm=1.3)
     Qref, _ = _group_sum(P, data["weight"], data["bkg"], 1.3, 4)
-    assert Q == Qref          # same expression, so bit-identical
+    # The same expression, but the kernel sums vectorised while _group_sum
+    # loops group by group, so the last bits can differ.  Bit-identity was
+    # never guaranteed by that difference in summation ORDER -- assert the
+    # value instead, at a tolerance far below any modelling effect.
+    assert Q == pytest.approx(Qref, rel=0, abs=1e-12)
     b.free()
 
 
