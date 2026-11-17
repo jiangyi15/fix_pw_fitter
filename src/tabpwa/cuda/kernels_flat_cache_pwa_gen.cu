@@ -252,10 +252,15 @@ __global__ void fc_tile_kernel(
        whole tile here and flushes once, instead of every (k,l,m) thread
        hammering the same handful of global counters */
     double* s_gc = s_pe + FC_TE;                        /* [4·n_basis] */
+    /* 1/|D|² — a REAL scalar (the basis is complex, so D is complex, but its
+       squared modulus is not).  Every `common = F/D` and every `dQ/dD` site
+       divides by this same value; caching the reciprocal turns
+       ne·n_wave·(n_proj+2) fp64 divisions per call into ne·n_wave. */
+    double* s_rd = s_gc + 4 * (size_t)n_basis;          /* [TE·n_wave] */
     /* dQ/ds_{e,k,l} for the tile (complex).  A SEPARATE buffer from s_s: the
        product Π_{l'≠l} s needs every s, so writing the result back into s_s
        would corrupt the reads of the later factors. */
-    double* s_pf = s_gc + 4 * (size_t)n_basis;          /* [TE·n_wave·n_res·2] */
+    double* s_pf = s_rd + (size_t)FC_TE * n_wave;       /* [TE·n_wave·n_res·2] */
 
     const int tid = threadIdx.x, nt = blockDim.x;
     for (int i = tid; i < 4 * n_basis; i += nt) s_gc[i] = 0.0;
@@ -287,6 +292,14 @@ __global__ void fc_tile_kernel(
         }
         s_D[idx * 2 + 0] = dr;
         s_D[idx * 2 + 1] = di;
+        /* The propagator D is complex (the basis is complex) but |D|² is a
+           REAL scalar, so the shared part of `F/D` and of `dQ/dD` is one
+           real reciprocal.  Phases 2, 4 and 5 each used to redo the fp64
+           complex DIVISION, i.e. ne·n_wave·(n_proj+2) divisions per call
+           (26 M at the benchmark shape); fp64 divide is ~1/64 rate and
+           unpipelined on a consumer GPU.  D itself stays in s_D — phase 5's
+           dQ/dD multiplies by it. */
+        s_rd[idx] = 1.0 / (dr * dr + di * di);
     }
     __syncthreads();
 
@@ -321,9 +334,9 @@ __global__ void fc_tile_kernel(
                 const double fr = (double)F.x, fi = (double)F.y;
                 const double dr = s_D[(e * n_wave + k) * 2 + 0];
                 const double di = s_D[(e * n_wave + k) * 2 + 1];
-                const double den = dr * dr + di * di;
-                const double crn = (fr * dr + fi * di) / den;
-                const double cin = (fi * dr - fr * di) / den;
+                const double rden = s_rd[e * n_wave + k];
+                const double crn = (fr * dr + fi * di) * rden;
+                const double cin = (fi * dr - fr * di) * rden;
                 const double tr = crn * (double)fa.x - cin * (double)fa.y;
                 const double ti = crn * (double)fa.y + cin * (double)fa.x;
                 ar += ck_r[k] * tr - ck_i[k] * ti;
@@ -394,9 +407,9 @@ __global__ void fc_tile_kernel(
             const double fr = (double)F.x, fi = (double)F.y;
             const double dr = s_D[(e * n_wave + k) * 2 + 0];
             const double di = s_D[(e * n_wave + k) * 2 + 1];
-            const double den = dr * dr + di * di;
-            const double crn = (fr * dr + fi * di) / den;
-            const double cin = (fi * dr - fr * di) / den;
+            const double rden = s_rd[e * n_wave + k];
+            const double crn = (fr * dr + fi * di) * rden;
+            const double cin = (fi * dr - fr * di) * rden;
             for (int p = 0; p < n_proj; p++) {
                 const float2 fa = fa_cache[(size_t)(e0 + e) * n_wave * n_proj
                                            + (size_t)k * n_proj + p];
@@ -454,14 +467,14 @@ __global__ void fc_tile_kernel(
             const double fr = (double)F.x, fi = (double)F.y;
             const double dr = s_D[(e * n_wave + k) * 2 + 0];
             const double di = s_D[(e * n_wave + k) * 2 + 1];
-            const double den = dr * dr + di * di;
-            const double crn = (fr * dr + fi * di) / den;
-            const double cin = (fi * dr - fr * di) / den;
+            const double rden = s_rd[e * n_wave + k];
+            const double crn = (fr * dr + fi * di) * rden;
+            const double cin = (fi * dr - fr * di) * rden;
             /* dQ/dD = -dQ/dcommon·common/D */
             const double qr = -(dcr * crn - dci * cin);
             const double qi = -(dcr * cin + dci * crn);
-            const double ddr = (qr * dr + qi * di) / den;
-            const double ddi = (qi * dr - qr * di) / den;
+            const double ddr = (qr * dr + qi * di) * rden;
+            const double ddi = (qi * dr - qr * di) * rden;
 
             const size_t base = (size_t)(e * n_wave + k) * n_res * 2;
             /* dQ/ds_{k,l} = dQ/dD · Π_{l'≠l} s_{k,l'}.  ``n_res`` is tiny (1
@@ -535,13 +548,13 @@ __global__ void fc_tile_kernel(
                     const double fr = (double)F.x, fi = (double)F.y;
                     const double dr = s_D[(e * n_wave + k) * 2 + 0];
                     const double di = s_D[(e * n_wave + k) * 2 + 1];
-                    const double den = dr * dr + di * di;
-                    const double crn = (fr * dr + fi * di) / den;
-                    const double cin = (fi * dr - fr * di) / den;
+                    const double rden = s_rd[e * n_wave + k];
+                    const double crn = (fr * dr + fi * di) * rden;
+                    const double cin = (fi * dr - fr * di) * rden;
                     const double qr = -(dcr * crn - dci * cin);
                     const double qi = -(dcr * cin + dci * crn);
-                    const double ddr = (qr * dr + qi * di) / den;
-                    const double ddi = (qi * dr - qr * di) / den;
+                    const double ddr = (qr * dr + qi * di) * rden;
+                    const double ddi = (qi * dr - qr * di) * rden;
                     double pr = 1.0, pi = 0.0;
                     for (int l2 = 0; l2 < n_res; l2++) {
                         if (l2 == l) continue;
@@ -723,7 +736,9 @@ void* cuda_create_context_flat_cache(
     double shd = (double)FC_TE * (n_ab + 2.0 * n_wave * n_res
                                   + 2.0 * n_wave + 2.0 * n_proj
                                   + 2.0 * n_proj + 1.0)
-                 + 4.0 * n_basis + 2.0 * FC_TE * n_wave * n_res;
+                 + 4.0 * n_basis
+                 + 1.0 * FC_TE * n_wave          /* s_rd: 1/|D|² (real) */
+                 + 2.0 * FC_TE * n_wave * n_res; /* s_pf: dQ/ds */
     c->smem_bytes = (int)(shd * sizeof(double));
     int optin = 0;
     cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
