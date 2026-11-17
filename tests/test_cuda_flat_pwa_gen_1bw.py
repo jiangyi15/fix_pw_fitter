@@ -534,7 +534,11 @@ def test_group_larger_than_a_tile_is_one_log():
     try:
         Qr, _gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
         Qg, _gg, _Pg = gpu.compute(params, gpu.load_data(data), norm=1.3)
-        assert _rel(Qg, Qr) <= 1e-6
+        # Fused cache (F·fa in ONE float2) rounds once where the split path
+        # rounded F and fa separately: the fp32 floor shifts by ~4e-7
+        # (measured fused-vs-split directly in `cuda_flat_pwa_gen2`), so use
+        # the shared bound — this backend agrees with gen2 to 0.0 here.
+        assert _rel(Qg, Qr) <= CACHE_FLOOR
     finally:
         ref.free()
         gpu.free()
@@ -569,6 +573,97 @@ def test_the_grouped_path_allocates_exactly_two_ne_nproj_doubles():
         if h is not None:
             h.free()
         k.free()
+
+
+# ── gate 11: the chunk rule and chunk independence ──────────────────
+#
+# The working scratch is the CONTEXT's, sized by `cap` at create (the sample's
+# `ne` is unknown there), and `compute` walks the sample in chunks of `cap`
+# events passing offset pointers + the chunk length as the kernel's `ne`.  The
+# rule has ONE definition, in C, and the wrapper ASKS for it.
+
+def _chunk_rule(batch_size, rsize):
+    """The documented rule, restated here so the C side is checked against it."""
+    cap = batch_size if batch_size > 0 else 50000
+    cap = min(cap, 1 << 20)
+    if rsize > 1:
+        a = (cap // rsize) * rsize
+        cap = a if a > 0 else rsize          # never zero, never unaligned
+    return cap
+
+
+@pytest.mark.parametrize("rsize", [1, 17])
+@pytest.mark.parametrize("batch_size", [1, 5, 1000, 50000, 10 ** 9])
+def test_the_chunk_rule_is_what_the_context_reports(batch_size, rsize):
+    """`cuda_cap_*` must be the rule above — never a Python re-derivation.
+
+    The two guards are the ones measurement forced: `batch_size = 1e9` must be
+    capped (a scratch of GBs for a small sample), and `batch_size < rsize` must
+    still hold a WHOLE group — an unaligned cap there let a group straddle two
+    chunks and made Q wrong by 49 %.
+    """
+    f = Fitter(CFG_KM)
+    f.apply_constrains()
+    k = CUDAKernelFlatPwaGen1BW(f.kernel_config, batch_size=batch_size,
+                                resolution_size=rsize)
+    try:
+        assert k.cap == _chunk_rule(batch_size, rsize)
+        assert k.cap > 0
+        if rsize > 1:
+            assert k.cap % rsize == 0, "a chunk must hold whole log-sum groups"
+        # the per-chunk saved-`A` scratch is sized by `cap`, not by the sample
+        if rsize == 1:
+            assert k.dA_bytes_cap == 0
+        else:
+            assert k.dA_bytes_cap == k.cap * k.n_proj * 2 * 8
+        # a handle reports only its SHARE of that shared scratch
+        h = k.load_data(_in_grid(f.kernel_config, 64))
+        try:
+            share = k.dA_bytes_cap * min(h.ne, k.cap) // k.cap
+            assert h.dA_bytes == share
+        finally:
+            h.free()
+    finally:
+        k.free()
+
+
+def test_a_multi_chunk_call_equals_a_single_chunk_call():
+    """Batching is an inner loop: the numbers must not know about it.
+
+    A sample much longer than `cap` has to give the same Q/P/gradients as the
+    same sample in one chunk — bit-for-bit up to fp summation order, which here
+    is exercised both with and without the grouped objective.
+    """
+    f = Fitter(CFG_KM)
+    f.apply_constrains()
+    kc = f.kernel_config
+    x = f.initial_values(seed=1)
+    params, _ = f.build_params(x)
+    data = _in_grid(kc, 500, seed=3)
+
+    def run(rs, bs):
+        be = CUDAKernelFlatPwaGen1BW(kc, resolution_size=rs, batch_size=bs)
+        try:
+            h = be.load_data(data)
+            Q, g, P = be.compute(params, h, norm=1.3)
+            h.free()
+            return Q, g["ck"], g["coeff"], float(g["norm"]), np.asarray(P)
+        finally:
+            be.free()
+
+    for rs in (1, 17):
+        base = run(rs, 10 ** 9)             # one chunk
+        for bs in (1000, 5000, 50000):      # many chunks
+            got = run(rs, bs)
+            for name, a, b in (("Q", got[0], base[0]),
+                               ("dck", got[1], base[1]),
+                               ("dcoeff", got[2], base[2]),
+                               ("dnorm", got[3], base[3]),
+                               ("P", got[4], base[4])):
+                a = np.asarray(a).ravel()
+                b = np.asarray(b).ravel()
+                rel = float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
+                assert rel <= 1e-14, f"rsize={rs} batch={bs}: {name} {rel:.2e}"
 
 
 # ── gate 8: shared memory ───────────────────────────────────────────

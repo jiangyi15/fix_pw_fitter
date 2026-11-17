@@ -70,6 +70,35 @@ What the specialisation buys
    not.  ``num_table`` needs no equivalent: its loop is over ``r`` in
    ``[0, n_res)`` — one iteration here — and it runs once per ``load_data``.
 
+4. **``fa`` is folded into the cache** (ported from ``cuda_flat_pwa_gen2``,
+   commit ``aba67a3``).  ``cache = F·fa`` per ``(e, k, p)`` and the whole
+   ``fa_cache`` is gone:
+
+       (F/D)·fa = (F·fa)·conj(D)·rden        rden = 1/|D|²  (already cached)
+
+   since ``1/D = conj(D)/|D|²`` and ``D`` is COMPLEX.  That is 4 multiplies
+   saved per ``(e,k)`` at any ``n_proj``, and — the reason it is not merely a
+   speed change — **18 % of the handle**: on the real 8.7M-event dataset
+   ``F 1.82 + fa 3.64 + basis 4.83 = 10.29 GB`` becomes
+   ``F·fa 3.64 + basis 4.83 = 8.47 GB`` (10.43 → 8.61 GB measured through the
+   wrapper), which is what makes this kernel load the real data at all.
+   ``dQ/dD`` needs **two** reciprocals because ``u'`` carries ``F`` (its chain
+   is ``F/D²``); ``dQ/dck`` is ``u'·conj(D)·rden``.
+
+5. **Working memory is bounded by ``batch_size``, not by the sample** (ported
+   from ``f75afc1``).  Every internal scratch array — P, the saved ``A``,
+   ``dqp``, the per-group sums — lives on the CONTEXT, allocated once at
+   ``create`` from a chunk length ``cap`` and reused by every chunk of every
+   call; ``ne`` (unknown at create) never enters the sizing.  Only the
+   per-EVENT data (``cache``, ``bas_cache``, ``weight``, ``bkg``) stays in the
+   handle.  ``compute`` walks the sample in chunks passing **offset pointers**
+   plus the chunk length as the kernel's ``ne``, so **no ``__global__`` body
+   changed for the batching** (verified: 0 of the changed body lines mention a
+   batching token).  ``oP`` is the CALLER's full-length buffer, written per
+   chunk and untouched when ``return_p=False``.  The chunk rule lives in C
+   (``create``) and is asked for via ``cuda_cap_*``; a chunk always holds WHOLE
+   log-sum groups, so the grouped pipeline runs inside one chunk.
+
 **The failure mode this optimisation invites, and what pins it.**  A list that
 dropped a NON-zero column would silently change the denominator — a wrong
 answer with no error anywhere.  :func:`index_runs` is the one implementation,
@@ -256,6 +285,7 @@ int cuda_get_device_count_flat_pwa_gen_1bw(void);
 long long cuda_tile_bytes_flat_pwa_gen_1bw(int,int,int,int,int);
 long long cuda_handle_dA_bytes_flat_pwa_gen_1bw(void*);
 int cuda_smem_bytes_flat_pwa_gen_1bw(void*);
+int cuda_cap_flat_pwa_gen_1bw(void*);
 void cuda_get_device_name_flat_pwa_gen_1bw(char*,int);
 """)
     lib_path = ensure("kernels_flat_pwa_gen_1bw.cu",
@@ -271,17 +301,24 @@ class FlatPwaGen1BWDataHandle:
     The fitter holds the phase-space handle and the data handle at the same
     time (``_compute_norm_batched`` integrates over one while ``get_nll_raw``
     evaluates the other), so each ``load_data`` owns its arrays.
+
+    The handle holds only per-EVENT data (``cache`` = F·fa, ``bas_cache``,
+    ``weight``, ``bkg``); the working scratch (P, saved A, dqp, group sums) is
+    the context's, sized by its chunk length.  ``dA_bytes`` therefore reports
+    this sample's SHARE of that shared scratch — ``min(ne, cap)`` events'
+    worth — rather than an allocation the handle owns.
     """
 
     __slots__ = ("ptr", "ne", "_lib", "_keep", "dA_bytes", "__weakref__")
 
-    def __init__(self, ptr, lib, ne):
+    def __init__(self, ptr, lib, ne, dA_bytes=0):
         self.ptr = ptr
         self._lib = lib
         self.ne = int(ne)
         self._keep = []
-        #: bytes of the saved-`A` buffer (0 unless the grouped objective is on)
-        self.dA_bytes = int(lib.cuda_handle_dA_bytes_flat_pwa_gen_1bw(ptr))
+        #: bytes of saved-`A` scratch this sample uses (0 unless the grouped
+        #: objective is on) — the per-chunk buffer capped at `ne`
+        self.dA_bytes = int(dA_bytes)
 
     def free(self):
         """Idempotent: the second call (and a NULL handle) is a no-op."""
@@ -440,6 +477,12 @@ class CUDAKernelFlatPwaGen1BW:
         # asking the context avoids a second copy drifting against it
         self.smem_bytes = int(
             _lib.cuda_smem_bytes_flat_pwa_gen_1bw(self._ctx))
+        #: events per chunk — the rule lives in C (`create`), asked for, never
+        #: re-derived here
+        self.cap = int(_lib.cuda_cap_flat_pwa_gen_1bw(self._ctx))
+        #: bytes of the shared saved-`A` scratch, per chunk
+        self.dA_bytes_cap = int(
+            _lib.cuda_handle_dA_bytes_flat_pwa_gen_1bw(self._ctx))
 
     # ── the run, for reporting/tests ────────────────────────────────
     @property
@@ -481,7 +524,11 @@ class CUDAKernelFlatPwaGen1BW:
         if not ptr:
             raise RuntimeError(
                 "cuda_flat_pwa_gen_1bw: load_data failed (device allocation)")
-        h = FlatPwaGen1BWDataHandle(ptr, self._lib, ne)
+        h = FlatPwaGen1BWDataHandle(
+            ptr, self._lib, ne,
+            # this sample's share of the context's per-chunk saved-`A` scratch
+            (self.dA_bytes_cap * min(ne, self.cap) // self.cap)
+            if (self.cap > 0 and self.dA_bytes_cap > 0) else 0)
         h._keep = keep          # keep the numpy buffers alive with the handle
         return h
 
