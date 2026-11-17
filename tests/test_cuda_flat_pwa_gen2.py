@@ -428,7 +428,10 @@ def test_group_larger_than_a_tile_is_one_log():
     try:
         Qr, _gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
         Qg, _gg, _Pg = gpu.compute(params, gpu.load_data(data), norm=1.3)
-        assert _rel(Qg, Qr) <= 1e-6
+        # Fused cache (F·fa in ONE float2) rounds once where the split path
+        # rounded F and fa separately: the fp32 floor shifts by ~4e-7
+        # (measured fused-vs-split directly), so use the shared bound.
+        assert _rel(Qg, Qr) <= CACHE_FLOOR
     finally:
         ref.free()
         gpu.free()

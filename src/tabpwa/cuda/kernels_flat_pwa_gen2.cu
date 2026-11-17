@@ -134,9 +134,13 @@ __global__ void gp2_fill_kernel(
     double m_min, double m_delta, int m_bins,
     double q_min, double q_delta, int q_bins,
     const double* __restrict__ mass, const double* __restrict__ mom,
-    int ne, int n_wave, int n_res, int n_decay,
+    const int* __restrict__ angle_index, const double* __restrict__ angle_k,
+    const double* __restrict__ angle_b,
+    const double* __restrict__ am_r, const double* __restrict__ am_i,
+    const double* __restrict__ ang, int n_ab, int n_comp, int n_angle_total,
+    int ne, int n_wave, int n_proj, int n_res, int n_decay,
     int n_mass, int n_momentum,
-    float2* __restrict__ cache)              /* [ne, n_wave] */
+    float2* __restrict__ cache)              /* [ne, n_wave, n_proj] F·fa */
 {
     const int gid = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = ne * n_wave;
@@ -161,43 +165,8 @@ __global__ void gp2_fill_kernel(
         ni = nr * vi + ni * vr;
         nr = t_r;
     }
-    cache[gid] = make_float2((float)(fl * nr), (float)(fl * ni));
-}
-
-/* ── load-time fill of the two coeff/ck-independent caches ─────────────
- *
- * ``basis_m(m_e)`` depends on (m, e) only and ``fa_{e,k,p}`` on (e, k, p)
- * only, so both are fixed for the whole fit.
- */
-__global__ void gp2_fill_static_kernel(
-    const double* __restrict__ bas_r, const double* __restrict__ bas_i,
-    const int* __restrict__ bas_m_index,
-    double m_min, double m_delta, int m_bins,
-    const int* __restrict__ angle_index, const double* __restrict__ angle_k,
-    const double* __restrict__ angle_b,
-    const double* __restrict__ am_r, const double* __restrict__ am_i,
-    const double* __restrict__ mass, const double* __restrict__ ang,
-    int ne, int n_basis, int n_wave, int n_proj, int n_ab, int n_comp,
-    int n_mass, int n_angle_total,
-    float2* __restrict__ bas_cache, float2* __restrict__ fa_cache)
-{
-    /* basis: one thread per (event, basis row) */
-    const int nb_total = ne * n_basis;
-    for (int g = blockIdx.x * blockDim.x + threadIdx.x; g < nb_total;
-         g += gridDim.x * blockDim.x) {
-        const int e = g / n_basis, m = g - e * n_basis;
-        const double mv = mass[(size_t)e * n_mass + bas_m_index[m]];
-        double vr, vi;
-        gp2_interp_c(bas_r, bas_i, m, mv, m_min, m_delta, m_bins, &vr, &vi);
-        bas_cache[g] = make_float2((float)vr, (float)vi);
-    }
-    /* fa: one thread per (event, wave, projection) */
-    const int fa_total = ne * n_wave * n_proj;
-    for (int g = blockIdx.x * blockDim.x + threadIdx.x; g < fa_total;
-         g += gridDim.x * blockDim.x) {
-        const int e = g / (n_wave * n_proj);
-        const int rest = g - e * (n_wave * n_proj);
-        const int k = rest / n_proj, p = rest - k * n_proj;
+    const double Fr = fl * nr, Fi = fl * ni;
+    for (int p = 0; p < n_proj; p++) {
         double far = 0.0, fai = 0.0;
         for (int a = 0; a < n_ab; a++) {
             const int col = angle_index[a];
@@ -212,7 +181,34 @@ __global__ void gp2_fill_static_kernel(
             far += prod * am_r[o];
             fai += prod * am_i[o];
         }
-        fa_cache[g] = make_float2((float)far, (float)fai);
+        cache[(size_t)gid * n_proj + p] =
+            make_float2((float)(Fr * far - Fi * fai),
+                        (float)(Fr * fai + Fi * far));
+    }
+}
+
+/* ── load-time fill of the two coeff/ck-independent caches ─────────────
+ *
+ * ``basis_m(m_e)`` depends on (m, e) only and ``fa_{e,k,p}`` on (e, k, p)
+ * only, so both are fixed for the whole fit.
+ */
+__global__ void gp2_fill_static_kernel(
+    const double* __restrict__ bas_r, const double* __restrict__ bas_i,
+    const int* __restrict__ bas_m_index,
+    double m_min, double m_delta, int m_bins,
+    const double* __restrict__ mass,
+    int ne, int n_basis, int n_mass,
+    float2* __restrict__ bas_cache)
+{
+    /* basis: one thread per (event, basis row) */
+    const int nb_total = ne * n_basis;
+    for (int g = blockIdx.x * blockDim.x + threadIdx.x; g < nb_total;
+         g += gridDim.x * blockDim.x) {
+        const int e = g / n_basis, m = g - e * n_basis;
+        const double mv = mass[(size_t)e * n_mass + bas_m_index[m]];
+        double vr, vi;
+        gp2_interp_c(bas_r, bas_i, m, mv, m_min, m_delta, m_bins, &vr, &vi);
+        bas_cache[g] = make_float2((float)vr, (float)vi);
     }
 }
 
@@ -284,9 +280,8 @@ __host__ __device__ __forceinline__ GPLayout gp2_layout(
  */
 template <int NR>                    /* NR = n_res, or 0 for the dynamic path */
 __global__ void gp2_tile_kernel(
-    const float2* __restrict__ cache,      /* [ne, n_wave]     F = fl·nu  */
+    const float2* __restrict__ cache,   /* [ne, n_wave, n_proj]  F·fa  */
     const float2* __restrict__ bas_cache,  /* [ne, n_basis]    basis_m(m) */
-    const float2* __restrict__ fa_cache,   /* [ne·n_wave·n_proj]  fa      */
     const double* __restrict__ gamma,      /* [n_wave, n_res, n_basis]    */
     const double* __restrict__ gamma_slot, /* [n_slot, n_res, n_basis]    */
     const int* __restrict__ slot_of_wave,  /* [n_wave]                    */
@@ -401,25 +396,20 @@ __global__ void gp2_tile_kernel(
                 double ar[GP_MAXPROJ], ai[GP_MAXPROJ];
                 for (int p = 0; p < P; p++) { ar[p] = 0.0; ai[p] = 0.0; }
                 for (int k = lane; k < W; k += nlane) {
-                    const float2 F = cache[(size_t)(e0 + e) * W + k];
-                    const double fr = (double)F.x, fi = (double)F.y;
+                    /* cache = F·fa; (F/D)·fa = cache/D  (one reciprocal) */
                     const double dr = s_D[(e * W + k) * 2 + 0];
                     const double di = s_D[(e * W + k) * 2 + 1];
                     const double rden = s_rd[e * W + k];
-                    const double crn = (fr * dr + fi * di) * rden;
-                    const double cin = (fi * dr - fr * di) * rden;
                     const double ckr = ck_r[k], cki = ck_i[k];
-                    const double wr = ckr * crn - cki * cin;
-                    const double wi = ckr * cin + cki * crn;
-                    const float2* fa = fa_cache
-                        + (size_t)(e0 + e) * W * P + (size_t)k * P;
+                    const float2* Ff =
+                        cache + ((size_t)(e0 + e) * W + k) * P;
                     for (int p = 0; p < P; p++) {
-                        const double tr = wr * (double)fa[p].x
-                                          - wi * (double)fa[p].y;
-                        const double ti = wr * (double)fa[p].y
-                                          + wi * (double)fa[p].x;
-                        ar[p] += tr;
-                        ai[p] += ti;
+                        const double tr = ((double)Ff[p].x * dr
+                                          + (double)Ff[p].y * di) * rden;
+                        const double ti = ((double)Ff[p].y * dr
+                                          - (double)Ff[p].x * di) * rden;
+                        ar[p] += ckr * tr - cki * ti;
+                        ai[p] += ckr * ti + cki * tr;
                     }
                 }
                 for (int p = 0; p < P; p++) {
@@ -442,17 +432,15 @@ __global__ void gp2_tile_kernel(
                 const int e = idx / P, p = idx - e * P;
                 double ar = 0.0, ai = 0.0;
                 for (int k = lane; k < W; k += nlane) {
-                    const float2 F = cache[(size_t)(e0 + e) * W + k];
-                    const float2 fa = fa_cache[(size_t)(e0 + e) * W * P
-                                               + (size_t)k * P + p];
-                    const double fr = (double)F.x, fi = (double)F.y;
+                    const float2 Ff =
+                        cache[((size_t)(e0 + e) * W + k) * P + p];
                     const double dr = s_D[(e * W + k) * 2 + 0];
                     const double di = s_D[(e * W + k) * 2 + 1];
                     const double rden = s_rd[e * W + k];
-                    const double crn = (fr * dr + fi * di) * rden;
-                    const double cin = (fi * dr - fr * di) * rden;
-                    const double tr = crn * (double)fa.x - cin * (double)fa.y;
-                    const double ti = crn * (double)fa.y + cin * (double)fa.x;
+                    const double tr = ((double)Ff.x * dr
+                                      + (double)Ff.y * di) * rden;
+                    const double ti = ((double)Ff.y * dr
+                                      - (double)Ff.x * di) * rden;
                     ar += ck_r[k] * tr - ck_i[k] * ti;
                     ai += ck_r[k] * ti + ck_i[k] * tr;
                 }
@@ -541,28 +529,30 @@ __global__ void gp2_tile_kernel(
         const int ge = e0 + e;
         double ur = 0.0, ui = 0.0;
         {
-            const float2* fa = fa_cache + (size_t)ge * W * P + (size_t)k * P;
+            const float2* Ff = cache + (size_t)ge * W * P + (size_t)k * P;
             for (int p = 0; p < P; p++) {
                 const double gar = s_dA[(e * P + p) * 2 + 0];
                 const double gai = s_dA[(e * P + p) * 2 + 1];
-                ur += gar * (double)fa[p].x - gai * (double)fa[p].y;
-                ui += gar * (double)fa[p].y + gai * (double)fa[p].x;
+                ur += gar * (double)Ff[p].x - gai * (double)Ff[p].y;
+                ui += gar * (double)Ff[p].y + gai * (double)Ff[p].x;
             }
         }
-        const float2 F = cache[(size_t)ge * W + k];
-        const double fr = (double)F.x, fi = (double)F.y;
         const double dr = s_D[idx * 2 + 0], di = s_D[idx * 2 + 1];
         const double rden = s_rd[idx];
-        const double crn = (fr * dr + fi * di) * rden;
-        const double cin = (fi * dr - fr * di) * rden;
-        /* dQ/dck_k = Σ_p dQ/dA·common·fa = common_k·u_k */
-        atomicAdd(&s_gck[2 * k + 0], crn * ur - cin * ui);
-        atomicAdd(&s_gck[2 * k + 1], crn * ui + cin * ur);
-        /* dQ/dD = -dQ/dcommon·common/D */
+        /* `ur,ui` above already carry F (the cache is F·fa), so this is
+           w = u'/D = (F/D)·u — the SAME quantity `common·u` the unfused
+           kernel built from F and 1/D separately.  dck is done. */
+        const double wr = (ur * dr + ui * di) * rden;
+        const double wi = (ui * dr - ur * di) * rden;
+        atomicAdd(&s_gck[2 * k + 0], wr);
+        atomicAdd(&s_gck[2 * k + 1], wi);
+        /* dQ/dD = -(ck·u')/D² — two reciprocals, since u' carries F and the
+           chain to dQ/dD is F/D².  Verified against numpy for random F AND
+           for F == 1 (where it must reduce to the unfused expression). */
         const double qr0 = ck_r[k] * ur - ck_i[k] * ui;
         const double qi0 = ck_r[k] * ui + ck_i[k] * ur;
-        const double qr = -(qr0 * crn - qi0 * cin);
-        const double qi = -(qr0 * cin + qi0 * crn);
+        const double qr = -(qr0 * dr + qi0 * di) * rden;
+        const double qi = -(qi0 * dr - qr0 * di) * rden;
         const double ddr = (qr * dr + qi * di) * rden;
         const double ddi = (qi * dr - qr * di) * rden;
         if (use_slots) {
@@ -710,26 +700,26 @@ __global__ void gp2_tile_kernel(
                     const int ge = e0 + e;
                     double dcr = 0.0, dci = 0.0;
                     for (int p = 0; p < P; p++) {
-                        const float2 fa =
-                            fa_cache[(size_t)ge * W * P + (size_t)k * P + p];
+                        const float2 Ff =
+                            cache[(size_t)ge * W * P + (size_t)k * P + p];
                         const double gar = s_dA[(e * P + p) * 2 + 0];
                         const double gai = s_dA[(e * P + p) * 2 + 1];
-                        const double tr = gar * (double)fa.x
-                                          - gai * (double)fa.y;
-                        const double ti = gar * (double)fa.y
-                                          + gai * (double)fa.x;
+                        const double tr = gar * (double)Ff.x
+                                          - gai * (double)Ff.y;
+                        const double ti = gar * (double)Ff.y
+                                          + gai * (double)Ff.x;
                         dcr += ck_r[k] * tr - ck_i[k] * ti;
                         dci += ck_r[k] * ti + ck_i[k] * tr;
                     }
-                    const float2 F = cache[(size_t)ge * W + k];
-                    const double fr = (double)F.x, fi = (double)F.y;
                     const double dr = s_D[(e * W + k) * 2 + 0];
                     const double di = s_D[(e * W + k) * 2 + 1];
                     const double rden = s_rd[e * W + k];
-                    const double crn = (fr * dr + fi * di) * rden;
-                    const double cin = (fi * dr - fr * di) * rden;
-                    const double qr = -(dcr * crn - dci * cin);
-                    const double qi = -(dcr * cin + dci * crn);
+                    /* dcr already carries F, so this chain needs F/D²:
+                       two reciprocals, exactly as in site B. */
+                    const double qr0 = -(dcr * dr + dci * di) * rden;
+                    const double qi0 = -(dci * dr - dcr * di) * rden;
+                    const double qr = (qr0 * dr + qi0 * di) * rden;
+                    const double qi = (qi0 * dr - qr0 * di) * rden;
                     const double ddr = (qr * dr + qi * di) * rden;
                     const double ddi = (qi * dr - qr * di) * rden;
                     double pr = 1.0, pi = 0.0;
@@ -827,7 +817,7 @@ typedef struct {
     double *weight, *bkg;
     float2 *cache;        /* F = fl·nu            [ne, n_wave]          */
     float2 *bas_cache;    /* basis_m(m_e)         [ne, n_basis]         */
-    float2 *fa_cache;     /* fa_{e,k,p}           [ne, n_wave, n_proj]  */
+    /* fa_cache retired: fa is folded into `cache` (F·fa) */
     double *P_dev, *h_P;
     int ne;
     /* grouped log-sum: the group partition is ``ge / rsize`` over the GLOBAL
@@ -869,7 +859,7 @@ static void gp2_launch(GPCtx* c, GPDataHandle* h, double norm, int use_norm,
     const double* dA_in = (mode == 2) ? h->dA_buf : NULL;
     if (c->n_res == 1) {
         gp2_tile_kernel<1><<<tiles, GP_BLOCK, sm, c->stream>>>(
-            h->cache, h->bas_cache, h->fa_cache, c->gamma, c->gamma_slot,
+            h->cache, h->bas_cache, c->gamma, c->gamma_slot,
             c->slot_of_wave, c->slot_rep, c->slot_ptr, c->slot_waves,
             c->use_slots, c->n_slot,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
@@ -879,7 +869,7 @@ static void gp2_launch(GPCtx* c, GPDataHandle* h, double norm, int use_norm,
             gS, gPb, gW, dA_out);
     } else {
         gp2_tile_kernel<0><<<tiles, GP_BLOCK, sm, c->stream>>>(
-            h->cache, h->bas_cache, h->fa_cache, c->gamma, c->gamma_slot,
+            h->cache, h->bas_cache, c->gamma, c->gamma_slot,
             c->slot_of_wave, c->slot_rep, c->slot_ptr, c->slot_waves,
             c->use_slots, c->n_slot,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
@@ -1032,12 +1022,11 @@ void* cuda_load_data_flat_pwa_gen2(void* vctx, const double* mass,
     h->bkg = _gp_up_d(bkg, ne);
     CUDA_CHECK(cudaMalloc(&h->P_dev, (size_t)ne * sizeof(double)));
     CUDA_CHECK(cudaMallocHost(&h->h_P, (size_t)ne * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->cache, (size_t)ne * c->n_wave * sizeof(float2)));
+    CUDA_CHECK(cudaMalloc(&h->cache,
+                          (size_t)ne * c->n_wave * c->n_proj
+                          * sizeof(float2)));   /* F·fa, per (e,k,p) */
     CUDA_CHECK(cudaMalloc(&h->bas_cache,
                           (size_t)ne * c->n_basis * sizeof(float2)));
-    CUDA_CHECK(cudaMalloc(&h->fa_cache,
-                          (size_t)ne * c->n_wave * c->n_proj
-                          * sizeof(float2)));
     /* grouped log-sum buffers, sized by the ACTUAL ne (unknown at create) */
     h->n_groups = (ne + h->rsize - 1) / h->rsize;
     CUDA_CHECK(cudaMalloc(&h->gS, (size_t)h->n_groups * sizeof(double)));
@@ -1063,7 +1052,10 @@ void* cuda_load_data_flat_pwa_gen2(void* vctx, const double* mass,
     gp2_fill_kernel<<<blocks, threads, 0, c->stream>>>(
         c->fl_table, c->fl_q_index, c->num_r, c->num_i, c->num_m_index,
         c->m_min, c->m_delta, c->m_bins, c->q_min, c->q_delta, c->q_bins,
-        t_mass, t_mom, ne, c->n_wave, c->n_res, c->n_decay,
+        t_mass, t_mom,
+        c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
+        t_ang, c->n_ab, c->n_comp, c->n_angle_total,
+        ne, c->n_wave, c->n_proj, c->n_res, c->n_decay,
         c->n_mass, c->n_momentum, h->cache);
 
     /* the two coeff/ck-independent caches: basis_m(m_e) and fa_{e,k,p} */
@@ -1071,10 +1063,7 @@ void* cuda_load_data_flat_pwa_gen2(void* vctx, const double* mass,
     const int st_blocks = (st_total + threads - 1) / threads;
     gp2_fill_static_kernel<<<st_blocks, threads, 0, c->stream>>>(
         c->bas_r, c->bas_i, c->bas_m_index, c->m_min, c->m_delta, c->m_bins,
-        c->angle_index, c->angle_k, c->angle_b, c->am_r, c->am_i,
-        t_mass, t_ang, ne, c->n_basis, c->n_wave, c->n_proj,
-        c->n_ab, c->n_comp, c->n_mass, c->n_angle_total,
-        h->bas_cache, h->fa_cache);
+        t_mass, ne, c->n_basis, c->n_mass, h->bas_cache);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaStreamSynchronize(c->stream));
 
@@ -1093,7 +1082,7 @@ void cuda_free_data_flat_pwa_gen2(void* vh) {
     if (h->P_dev) { cudaFree(h->P_dev); h->P_dev = NULL; }
     if (h->cache) { cudaFree(h->cache); h->cache = NULL; }
     if (h->bas_cache) { cudaFree(h->bas_cache); h->bas_cache = NULL; }
-    if (h->fa_cache) { cudaFree(h->fa_cache); h->fa_cache = NULL; }
+    /* fa_cache retired */
     if (h->gS) { cudaFree(h->gS); h->gS = NULL; }
     if (h->gPb) { cudaFree(h->gPb); h->gPb = NULL; }
     if (h->gW) { cudaFree(h->gW); h->gW = NULL; }
