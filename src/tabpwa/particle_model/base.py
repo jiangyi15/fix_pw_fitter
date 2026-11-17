@@ -286,7 +286,8 @@ class BaseModel:
           free/fixed status.  Reusing the name for a fixed ``−1`` conflated
           the two.
         """
-        return [f"{self.name}_s0", "one"] + list(self.get_gamma_name())
+        return ([f"{self.name}_s0", "one"]
+                + [f"{g}_t" for g in self.get_gamma_name()])
 
     # -- weight extraction -----------------------------------------
 
@@ -313,7 +314,6 @@ class BaseModel:
         m0 = float(params.get(f"{self.name}_mass",
                               self.kwargs.get("mass", 0.775)))
         names = list(self.get_den_name())
-        gamma_names = set(self.get_gamma_name())
         out = []
         for i, name in enumerate(names):
             if i == 0:
@@ -321,8 +321,13 @@ class BaseModel:
             elif name == "one":
                 # the m² coefficient: the row is ``-m²``, so this is +1
                 out.append(1.0)
-            elif name in gamma_names:
-                out.append(m0 * float(np.real(params.get(name, 0.0))))
+            elif name.endswith("_t"):
+                # a kernel-facing ``m0·g`` slot: the SOURCE name is the
+                # physical coupling (``{g}`` without the ``_t``), so this
+                # never collides with the fit parameter of the same base
+                # name — see get_den_name().
+                src = name[:-len("_t")]
+                out.append(m0 * float(np.real(params.get(src, 0.0))))
             else:
                 out.append(float(np.real(params.get(name, 0.0))))
         return out

@@ -90,9 +90,12 @@ def test_basis_default_matches_bw_bitwise():
     # the m² weight is the SHARED literal "one" (value -1), not "r_poly":
     # `poly` is kmatrix2's FITTED polynomial coefficient -(m1^2+m2^2), a
     # different quantity with a different free/fixed status.
-    assert basis.get_den_name() == ["r_s0", "one", "r_width"]
+    # the kernel-facing m0*g slot carries the ``_t`` suffix so it can never
+    # collide with the physical fit parameter of the same base name
+    assert basis.get_den_name() == ["r_s0", "one", "r_width_t"]
     assert np.array_equal(den[0], np.ones_like(m, dtype=complex))
-    assert np.array_equal(den[1], m ** 2 + 0j)
+    # the row is -m² so its weight ``"one"`` is +1 (name reads as its value)
+    assert np.array_equal(den[1], -(m ** 2) + 0j)
     assert np.array_equal(den[2], -1j * np.ones_like(m))
 
     # no basis transform: amplitude() == amplitude_raw()

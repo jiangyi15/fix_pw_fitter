@@ -261,12 +261,9 @@ class Fitter:
         den_names = (getattr(self, "kernel_config", None) or {}).get(
             "den_names") or []
         if "one" in den_names:
-            one_val = 1.0
-            for tr in transforms:
-                if "one" in getattr(tr, "output_names", ()):
-                    one_val = float(tr.forward({})["one"])
-                    break
-            self.cm.set_fixed({"one": one_val}, reset=False)
+            # the m² coefficient is the CONSTANT 1 (row ``-m²``); it is not a
+            # function of any parameter, so no transform produces it.
+            self.cm.set_fixed({"one": 1.0}, reset=False)
         # Never reset: on a SHARED cm a reset would wipe the other configs'
         # mass/width transforms; on the private cm there is nothing to wipe
         # on this single call.  Same-name collisions are handled per name

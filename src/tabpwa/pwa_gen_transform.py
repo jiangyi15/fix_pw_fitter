@@ -105,6 +105,7 @@ class PWAgenWeightsTransform(Transform):
             tr = rec["transform"]
             if tr is not None:
                 res = tr.apply_forward(dict(d))
+                res.setdefault("one", 1.0)   # a CONSTANT, not an output
                 vals = [float(np.real(res[n])) for n in names]
             elif isinstance(mdl, BasisModel):
                 vals = [float(np.real(v)) for v in mdl._den_weights(d)]
@@ -158,14 +159,23 @@ class DefaultBasisWeightsTransform(Transform):
         name = model.name
         self.gamma_names = list(model.get_gamma_name())
         self.input_names = [f"{name}_mass"] + list(self.gamma_names)
-        self.output_names = list(model.get_den_name())
+        # ``"one"`` is a CONSTANT (the m² coefficient, always +1) — it is not a
+        # function of the physical parameters, so it is not a transform output.
+        # The constraint layer pins it (`set_fixed`), the same mechanism that
+        # pins any other fixed parameter.
+        self.output_names = [n for n in model.get_den_name() if n != "one"]
 
     def forward(self, d):
         """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights."""
         d = d or {}
         m0 = float(d.get(f"{self.model.name}_mass",
                          self.model.kwargs.get("mass", 0.775)))
-        # the m² slot is the shared literal ``"one"``: row ``-m²``, weight +1
-        vals = [m0 * m0, 1.0]
+        # ``"one"`` is pinned by the constraint layer, not produced here.
+        vals = [m0 * m0]
+        # Each gamma row's weight is ``m0·g`` and is named ``{g}_t`` — the
+        # kernel-facing slot, DISTINCT from the physical fit parameter ``{g}``.
+        # Emitting the fit name here would make the transform overwrite its
+        # own input (`apply_forward` replaces `output_names` in the resolved
+        # dict), losing the physical coupling.
         vals += [m0 * float(d.get(g, 0.0)) for g in self.gamma_names]
         return dict(zip(self.output_names, vals))
