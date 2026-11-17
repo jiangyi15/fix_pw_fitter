@@ -264,3 +264,64 @@ def test_rejects_an_already_deduped_config():
     dd = dedup(build_from_groups(m, n_interp=200))
     with pytest.raises(ValueError, match="FULL"):
         CUDAKernelFlatCachePWAGen(dd)
+
+
+# ── gate: large n_wave must cross the shared-memory opt-in boundary ──
+#
+# The fixtures above use n_wave = 2, whose tile is ~20 KiB — far below the
+# 48 KiB DEFAULT dynamic shared-memory limit.  A kernel that merely checks
+# `smem_bytes <= device_optin` and never calls cudaFuncSetAttribute passes
+# every one of those tests and then fails AT LAUNCH for a real wave count:
+# the launch is rejected with "invalid argument", and because the macro only
+# PRINTS (it does not raise) and the post-launch check is never reached, the
+# call returns Q = 0 instead of erroring.  Measured on the pre-fix binary:
+# n_wave 56 -> 13515.78 (tile 25.5 KiB, no opt-in needed), n_wave 110 ->
+# 0.0 (tile 49.2 KiB, needs opt-in), silently and with exit status 0.
+#
+# The threshold on this shape is n_wave ~108 (an extra [FC_TE*n_wave]
+# double for s_rd), so 110 and 200 both exercise it.
+
+
+def _synthetic_wide(n_wave_target, n_events=2048):
+    """A config wide enough to need the shared-memory opt-in."""
+    from benchmark_flat_vs_pwa import FLAT_TEMPLATE, _events, tile_flat
+    f = Fitter(FLAT_TEMPLATE)
+    f.apply_constrains()
+    n_comp = max(1, int(n_wave_target))
+    kc = dict(tile_flat(f.kernel_config, n_comp, 2))
+    kc["num_table"] = np.ones_like(np.asarray(kc["num_table"]))
+    n_wave = int(np.asarray(kc["fl_table"]).shape[0])
+    n_basis = int(np.asarray(kc["basis_table"]).shape[0])
+    x = f.initial_values(seed=1)
+    params, _ = f.build_params(x)
+    ck0 = np.asarray(params["ck"])
+    params = {
+        "ck": np.tile(ck0, (n_wave + ck0.size - 1) // ck0.size)[:n_wave],
+        "coeff": np.random.default_rng(7).uniform(0.3, 1.2, n_basis),
+    }
+    return kc, params, _events(kc, n_events)
+
+
+@pytest.mark.parametrize("n_wave_target", [110, 200])
+def test_wide_config_crosses_the_shared_memory_optin(n_wave_target):
+    """A tile above 48 KiB must compute, not return 0."""
+    kc, params, data = _synthetic_wide(n_wave_target)
+    n_wave = int(np.asarray(kc["fl_table"]).shape[0])
+    assert n_wave >= 108, "fixture is not wide enough to need the opt-in"
+
+    be = create_backend("cuda_flat_cache_pwa_gen", kc, model="pwa_gen")
+    try:
+        Q, _g, P = be.compute(params, be.load_data(data), norm=1024.0)
+    finally:
+        be.free()
+    assert np.isfinite(Q) and Q > 0.0, (
+        f"n_wave={n_wave}: Q={Q!r} — the launch was rejected (shared-memory "
+        f"opt-in missing?) and the error was swallowed")
+    assert np.all(np.asarray(P) >= 0.0)
+
+
+def test_an_over_large_tile_is_refused_not_silently_empty():
+    """Past the DEVICE limit the create must fail loudly, not return 0."""
+    kc, _params, _data = _synthetic_wide(470)      # ~176 KiB/block
+    with pytest.raises((RuntimeError, ValueError)):
+        CUDAKernelFlatCachePWAGen(kc)
