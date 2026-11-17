@@ -101,24 +101,21 @@ class PWAgenWeightsTransform(Transform):
         out = {}
         for rec in self._bws:
             mdl = rec["model"]
-            names = rec["den_names"]
             tr = rec["transform"]
-            if tr is not None:
-                res = tr.apply_forward(dict(d))
-                res.setdefault("one", 1.0)   # a CONSTANT, not an output
-                vals = [float(np.real(res[n])) for n in names]
-            elif isinstance(mdl, BasisModel):
-                vals = [float(np.real(v)) for v in mdl._den_weights(d)]
-            else:
-                m0 = float(d[f"{rec['name']}_mass"])
-                # row 1 is ``-m²``, so its weight is the shared literal
-                # ``"one"`` = +1 (the sign lives in the row).  The gamma rows
-                # are ``-i·γ_l(m)`` and their weight is ``m0 · g0_l`` — the
-                # ``m0`` factor is part of the weight, not of the name.
-                vals = ([m0 * m0, 1.0]
-                        + [m0 * float(d[g]) for g in mdl.get_gamma_name()])
-            for n, v in zip(names, vals):
-                out[n] = v
+            if tr is None:
+                raise ValueError(
+                    f"pwa_gen: '{rec['name']}' has no basis transform — every "
+                    f"model provides one (BaseModel.make_basis_transform); "
+                    f"returning None opts a model OUT and it cannot be used "
+                    f"here")
+            res = tr.apply_forward(dict(d))
+            # ``"one"`` is the constant m² coefficient (the row is ``-m²``),
+            # so THIS transform supplies it directly rather than expecting the
+            # per-resonance transform to produce a parameter-independent value
+            # — the combined dict is what the kernel consumes, so the constant
+            # belongs here, not in a patch on the sub-transform's output.
+            for n in rec["den_names"]:
+                out[n] = 1.0 if n == "one" else float(np.real(res[n]))
 
         mag, phase = complex_tail()
         for mdl, tr in zip(self._num_models, self._num_transforms):
