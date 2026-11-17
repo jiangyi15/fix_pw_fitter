@@ -130,6 +130,7 @@ int cuda_get_device_count_flat_pwa_gen2(void);
 long long cuda_tile_bytes_flat_pwa_gen2(int,int,int,int,int,int);
 long long cuda_handle_dA_bytes_flat_pwa_gen2(void*);
 int cuda_smem_bytes_flat_pwa_gen2(void*);
+int cuda_cap_flat_pwa_gen2(void*);
 void cuda_get_device_name_flat_pwa_gen2(char*,int);
 """)
     lib_path = ensure("kernels_flat_pwa_gen2.cu",
@@ -145,17 +146,24 @@ class FlatPwaGen2DataHandle:
     The fitter holds the phase-space handle and the data handle at the same
     time (``_compute_norm_batched`` integrates over one while ``get_nll_raw``
     evaluates the other), so each ``load_data`` owns its arrays.
+
+    The handle holds only per-EVENT data (``cache``, ``bas_cache``, ``weight``,
+    ``bkg``); the working scratch (P, saved A, dqp, group sums) is the
+    context's, sized by its chunk length.  ``dA_bytes`` therefore reports this
+    sample's SHARE of that shared scratch — ``min(ne, cap)`` events' worth —
+    rather than an allocation the handle owns.
     """
 
     __slots__ = ("ptr", "ne", "_lib", "_keep", "dA_bytes", "__weakref__")
 
-    def __init__(self, ptr, lib, ne):
+    def __init__(self, ptr, lib, ne, dA_bytes=0):
         self.ptr = ptr
         self._lib = lib
         self.ne = int(ne)
         self._keep = []
-        #: bytes of the saved-`A` buffer (0 unless the grouped objective is on)
-        self.dA_bytes = int(lib.cuda_handle_dA_bytes_flat_pwa_gen2(ptr))
+        #: bytes of saved-`A` scratch this sample uses (0 unless the grouped
+        #: objective is on) — the per-chunk buffer capped at `ne`
+        self.dA_bytes = int(dA_bytes)
 
     def free(self):
         """Idempotent: the second call (and a NULL handle) is a no-op."""
@@ -293,6 +301,12 @@ class CUDAKernelFlatPwaGen2:
         # asking the context avoids a second copy drifting against it
         self.smem_bytes = int(
             _lib.cuda_smem_bytes_flat_pwa_gen2(self._ctx))
+        #: events per chunk — the rule lives in C (`create`), asked for, never
+        #: re-derived here
+        self.cap = int(_lib.cuda_cap_flat_pwa_gen2(self._ctx))
+        #: bytes of the shared saved-`A` scratch, per chunk
+        self.dA_bytes_cap = int(
+            _lib.cuda_handle_dA_bytes_flat_pwa_gen2(self._ctx))
 
     # ── data ────────────────────────────────────────────────────────
     def load_data(self, data):
@@ -324,7 +338,11 @@ class CUDAKernelFlatPwaGen2:
         if not ptr:
             raise RuntimeError(
                 "cuda_flat_pwa_gen2: load_data failed (device allocation)")
-        h = FlatPwaGen2DataHandle(ptr, self._lib, ne)
+        h = FlatPwaGen2DataHandle(
+            ptr, self._lib, ne,
+            # this sample's share of the context's per-chunk saved-`A` scratch
+            (self.dA_bytes_cap * min(ne, self.cap) // self.cap)
+            if (self.cap > 0 and self.dA_bytes_cap > 0) else 0)
         h._keep = keep          # keep the numpy buffers alive with the handle
         return h
 

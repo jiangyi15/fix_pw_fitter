@@ -55,12 +55,23 @@
  *    needs two launches (mode 1 = forward, group sums; mode 2 = backward with
  *    the finished `dQ/dP`).  Mode 2 used to re-run the whole forward just to
  *    rebuild `A`, which is the only forward output it consumes.  Mode 1 now
- *    stores `A` (`ne·n_proj` complex = 2 MiB at 65k events / 2 projections)
- *    and mode 2 reads it back, skipping phase 2 (the projection sum) and
- *    phase 3 entirely.  `common = F/D` would be `ne·n_wave` complex (100 MiB
- *    at the benchmark shape) and is deliberately NOT cached — mode 2 still
- *    recomputes `D` in phase 1, which it needs for `common` and `dQ/dD`
- *    anyway.
+ *    stores `A` (`cap·n_proj` complex, per CHUNK) and mode 2 reads it back,
+ *    skipping phase 2 (the projection sum) and phase 3 entirely.  `common =
+ *    F/D` would be `ne·n_wave` complex (100 MiB at the benchmark shape) and is
+ *    deliberately NOT cached — mode 2 still recomputes `D` in phase 1, which it
+ *    needs for `common` and `dQ/dD` anyway.
+ *
+ * WORKING MEMORY IS BOUNDED BY `batch_size`, NOT BY THE SAMPLE.  The per-EVENT
+ * data (`cache` = F·fa, `bas_cache`, `weight`, `bkg`) stays fully resident on
+ * the handle — that is the whole sample and it is irreducible.  Everything
+ * that is scratch (`P`, saved `A`, `dqp`, the per-group sums) is allocated ONCE
+ * on the CONTEXT, sized by `cap` = the chunk length, and reused for every chunk
+ * of every call.  `compute` then walks the sample in chunks and passes the
+ * per-event pointers OFFSET by the chunk start with the chunk length as the
+ * kernel's `ne`, so the kernels' own `e0 + e` / `ge` are already chunk-local
+ * and **no `__global__` body changed**.  A chunk always holds WHOLE log-sum
+ * groups (`cap` is `batch_size` rounded down to a multiple of `rsize`), so the
+ * entire grouped pipeline runs inside one chunk.
  */
 
 #include <cuda_runtime.h>
@@ -211,6 +222,16 @@ __global__ void gp2_fill_static_kernel(
         bas_cache[g] = make_float2((float)vr, (float)vi);
     }
 }
+
+/*: The largest chunk `create` will reserve scratch for.  `create` does not
+ *  know the sample length (`ne` arrives with `load_data`), so the scratch is
+ *  sized from `batch_size` — and an unbounded `batch_size` (a caller passing
+ *  10**9 to mean "one chunk", which is a legitimate and tested setting) would
+ *  then reserve tens of GB for a sample far smaller than that.  One million
+ *  events is ~58 MB of scratch at `n_proj = 2` and larger than any sample this
+ *  kernel is used on, so the ceiling costs nothing and makes `batch_size` a
+ *  *hint* above it rather than a memory demand. */
+#define GP_MAX_CAP (1 << 20)
 
 /* ── the tile's shared-memory layout, in doubles ───────────────────────
  *
@@ -809,26 +830,32 @@ typedef struct {
     double *g_ck_r, *g_ck_i, *g_coeff;
     cudaStream_t stream;
     int smem_bytes;
+    /* BATCH-SIZED WORKING SCRATCH.  Every internal array that used to be
+       `ne`-sized lives here instead, sized by `batch_size`, allocated ONCE
+       at create and reused for every chunk of every call — no per-call
+       malloc/free, and the fitter's `ne` (which it does not know at create)
+       no longer matters.  Only the per-EVENT DATA (cache, basis, weight,
+       bkg) stays in the handle. */
+    int cap;              /* events per chunk, aligned to rsize; 0 = no cap */
+    double *s_P, *h_sP;   /* per-chunk P (device + pinned host) */
+    double *s_dA;         /* per-chunk saved A   (rsize > 1) */
+    double *s_dqp;        /* per-chunk dQ/dP scale */
+    double *s_gS, *s_gPb, *s_gW, *s_gscale;   /* per-chunk group arrays */
+    int s_ngroups;        /* groups a chunk can hold */
 } GPCtx;
 
 /* ONE SAMPLE.  Everything sized by ``ne`` lives here, so two handles (the
    fitter's phase space and its data) never alias. */
 typedef struct {
-    double *weight, *bkg;
-    float2 *cache;        /* F = fl·nu            [ne, n_wave]          */
-    float2 *bas_cache;    /* basis_m(m_e)         [ne, n_basis]         */
-    /* fa_cache retired: fa is folded into `cache` (F·fa) */
-    double *P_dev, *h_P;
-    int ne;
-    /* grouped log-sum: the group partition is ``ge / rsize`` over the GLOBAL
-       event index, independent of the tile and of ``batch_size``. */
-    int rsize, n_groups;
-    double *gS, *gPb, *gW, *gscale, *dqp;
-    /* change 4: the saved forward `A` for the grouped backward launch, ONLY
-       when rsize > 1 (NULL otherwise, so a per-event fit never pays 2 MiB) */
-    double *dA_buf;
-    int dA_alloc;
-    int nproj_dA;         /* n_proj the buffer was sized for */
+    double *weight, *bkg;   /* per-EVENT data, full length ``ne`` */
+    float2 *cache;        /* F·fa                [ne, n_wave, n_proj]    */
+    float2 *bas_cache;    /* basis_m(m_e)        [ne, n_basis]           */
+    int ne;               /* events in THIS sample */
+    int rsize;
+    /* NOTHING else is ne-sized any more: P, dA, dqp and the group arrays are
+       batch-sized scratch on the CONTEXT (see GPCtx).  A chunk is a whole
+       number of log-sum groups, so the pipeline runs per chunk and only the
+       tiny global accumulators (acc / g_ck / g_coeff) span the whole sample. */
 } GPDataHandle;
 
 static int* _gp_up_i(const int* src, int n) {
@@ -849,32 +876,51 @@ static double* _gp_up_d(const double* src, int n) {
     return d;
 }
 
-/* the one launch, dispatched on the `NR` instantiation */
-static void gp2_launch(GPCtx* c, GPDataHandle* h, double norm, int use_norm,
+/* The one launch, dispatched on the `NR` instantiation.
+ *
+ * BATCHING NEEDS NO KERNEL CHANGE.  The chunk is expressed purely as POINTER
+ * OFFSETS into the per-event data plus a chunk length passed as the kernel's
+ * `ne`, so the kernel's own `e0 + e` / `ge` are chunk-local by construction:
+ *
+ *     cache     -> h->cache     + st·n_wave·n_proj
+ *     bas_cache -> h->bas_cache + st·n_basis
+ *     weight    -> h->weight + st        bkg -> h->bkg + st
+ *
+ * That is why `gp2_tile_kernel`, `gp2_grp_nll_kernel` and `gp2_scale_kernel`
+ * are byte-identical to the pre-batching kernel.  `st` is always a multiple of
+ * `rsize` (see the chunk rule in `create`), so the chunk-local group index
+ * `ge / rsize` is consistent within a chunk and a group never straddles one.
+ */
+static void gp2_launch(GPCtx* c, GPDataHandle* h, int st, int nb,
+                       double norm, int use_norm,
                        int mode, double* P_out, double* dA_out,
                        double* gS, double* gPb, double* gW)
 {
-    const int tiles = (h->ne + GP_TE - 1) / GP_TE;
+    const int tiles = (nb + GP_TE - 1) / GP_TE;
     const size_t sm = (size_t)c->smem_bytes;
-    const double* dA_in = (mode == 2) ? h->dA_buf : NULL;
+    const double* dA_in = (mode == 2) ? c->s_dA : NULL;
+    const float2* cache = h->cache + (size_t)st * c->n_wave * c->n_proj;
+    const float2* bas_cache = h->bas_cache + (size_t)st * c->n_basis;
+    const double* weight = h->weight + st;
+    const double* bkg = h->bkg + st;
     if (c->n_res == 1) {
         gp2_tile_kernel<1><<<tiles, GP_BLOCK, sm, c->stream>>>(
-            h->cache, h->bas_cache, c->gamma, c->gamma_slot,
+            cache, bas_cache, c->gamma, c->gamma_slot,
             c->slot_of_wave, c->slot_rep, c->slot_ptr, c->slot_waves,
             c->use_slots, c->n_slot,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
-            h->weight, h->bkg, h->dqp, dA_in, h->rsize, mode,
-            h->ne, c->n_wave, c->n_proj, c->n_res, c->n_basis,
+            weight, bkg, c->s_dqp, dA_in, h->rsize, mode,
+            nb, c->n_wave, c->n_proj, c->n_res, c->n_basis,
             P_out, c->g_ck_r, c->g_ck_i, c->g_coeff, c->acc,
             gS, gPb, gW, dA_out);
     } else {
         gp2_tile_kernel<0><<<tiles, GP_BLOCK, sm, c->stream>>>(
-            h->cache, h->bas_cache, c->gamma, c->gamma_slot,
+            cache, bas_cache, c->gamma, c->gamma_slot,
             c->slot_of_wave, c->slot_rep, c->slot_ptr, c->slot_waves,
             c->use_slots, c->n_slot,
             c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
-            h->weight, h->bkg, h->dqp, dA_in, h->rsize, mode,
-            h->ne, c->n_wave, c->n_proj, c->n_res, c->n_basis,
+            weight, bkg, c->s_dqp, dA_in, h->rsize, mode,
+            nb, c->n_wave, c->n_proj, c->n_res, c->n_basis,
             P_out, c->g_ck_r, c->g_ck_i, c->g_coeff, c->acc,
             gS, gPb, gW, dA_out);
     }
@@ -932,6 +978,32 @@ void* cuda_create_context_flat_pwa_gen2(
     c->n_comp = n_comp; c->n_mass = n_mass; c->n_momentum = n_momentum;
     c->n_angle_total = n_angle_total;
     c->batch_size = batch_size;
+    /* ── THE CHUNK RULE (copied from `cuda_v5_pwa_s0c`) ────────────────────
+     *
+     * A chunk must hold WHOLE log-sum groups, so the per-chunk stride is the
+     * batch rounded DOWN to a multiple of `rsize`: group `g` then lives
+     * entirely inside one chunk (`g = e // rsize` with `e` chunk-local), and
+     * the whole grouped pipeline (mode 1 -> grp_nll -> scale -> mode 2) runs
+     * inside the chunk — nothing per-group survives a chunk cut and the
+     * partition does not depend on `batch_size`.  `cap` is what the scratch
+     * below is sized by; `ne` (unknown at create) never enters it.
+     *
+     * Both inputs are guarded: a non-positive `batch_size` or `rsize` must not
+     * produce a zero-length scratch (a zero-event chunk would be an infinite
+     * loop in `compute`). */
+    c->cap = (c->batch_size > 0) ? c->batch_size : 50000;
+    if (c->cap > GP_MAX_CAP) c->cap = GP_MAX_CAP;
+    if (c->rsize > 1) {
+        const int a = (c->cap / c->rsize) * c->rsize;
+        /* `a == 0` means `batch_size < rsize`: a chunk could not hold even ONE
+         * whole group, so the alignment would silently leave the cap unaligned
+         * and a group would straddle two chunks — measured wrong (`rel` 0.49 vs
+         * numpy_flat at rsize 17, batch_size 5/10).  A chunk must hold whole
+         * groups, so the cap is raised to one group instead; that is the
+         * smallest legal chunk, not a fallback. */
+        c->cap = (a > 0) ? a : c->rsize;
+    }
+    c->s_ngroups = (c->cap + c->rsize - 1) / c->rsize;
     /* the collapse is a per-(k,l,m) -> per-(slot,l,m) reassociation; the
        fallback branch (n_res > GP_MAXRES) has no dsum buffer, so it is off
        there.  The host decides (see the wrapper's `gp2_use_slots`). */
@@ -996,6 +1068,25 @@ void* cuda_create_context_flat_pwa_gen2(
     CUDA_CHECK(cudaMallocHost(&c->h_coeff, (size_t)n_basis * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&c->acc, 2 * sizeof(double)));
     CUDA_CHECK(cudaMallocHost(&c->h_acc, 2 * sizeof(double)));
+    /* ── the batch-sized working scratch, allocated ONCE ───────────────────
+     * Sized by `cap` (events per chunk), never by the sample's `ne` — which is
+     * unknown here and is the whole point of the change.  Pinned host staging
+     * for `P` (it is copied out per chunk), plain device memory for the rest. */
+    CUDA_CHECK(cudaMalloc(&c->s_P, (size_t)c->cap * sizeof(double)));
+    CUDA_CHECK(cudaMallocHost(&c->h_sP, (size_t)c->cap * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&c->s_dqp, (size_t)c->cap * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&c->s_gS, (size_t)c->s_ngroups * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&c->s_gPb, (size_t)c->s_ngroups * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&c->s_gW, (size_t)c->s_ngroups * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&c->s_gscale,
+                          (size_t)c->s_ngroups * sizeof(double)));
+    /* change 4's saved `A`: only the grouped objective consumes it (mode 2),
+       so a per-event fit (rsize == 1) never runs that launch and allocates
+       nothing here. */
+    c->s_dA = NULL;
+    if (c->rsize > 1)
+        CUDA_CHECK(cudaMalloc(&c->s_dA,
+                              (size_t)c->cap * n_proj * 2 * sizeof(double)));
     return c;
 }
 
@@ -1020,30 +1111,14 @@ void* cuda_load_data_flat_pwa_gen2(void* vctx, const double* mass,
     double* t_ang = _gp_up_d(ang, ne * c->n_angle_total * c->n_comp);
     h->weight = _gp_up_d(weight, ne);
     h->bkg = _gp_up_d(bkg, ne);
-    CUDA_CHECK(cudaMalloc(&h->P_dev, (size_t)ne * sizeof(double)));
-    CUDA_CHECK(cudaMallocHost(&h->h_P, (size_t)ne * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&h->cache,
                           (size_t)ne * c->n_wave * c->n_proj
                           * sizeof(float2)));   /* F·fa, per (e,k,p) */
     CUDA_CHECK(cudaMalloc(&h->bas_cache,
                           (size_t)ne * c->n_basis * sizeof(float2)));
-    /* grouped log-sum buffers, sized by the ACTUAL ne (unknown at create) */
-    h->n_groups = (ne + h->rsize - 1) / h->rsize;
-    CUDA_CHECK(cudaMalloc(&h->gS, (size_t)h->n_groups * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->gPb, (size_t)h->n_groups * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->gW, (size_t)h->n_groups * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->gscale, (size_t)h->n_groups * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&h->dqp, (size_t)ne * sizeof(double)));
-    /* change 4: the saved `A`, only for the grouped objective.  A per-event
-       fit (rsize == 1) allocates nothing at all here. */
-    h->dA_alloc = 0;
-    h->dA_buf = NULL;
-    if (h->rsize > 1) {
-        CUDA_CHECK(cudaMalloc(&h->dA_buf,
-                              (size_t)ne * c->n_proj * 2 * sizeof(double)));
-        h->dA_alloc = 1;
-        h->nproj_dA = c->n_proj;
-    }
+    /* NOTHING else is per-sample: P, dA, dqp and the group arrays are the
+       CONTEXT's batch-sized scratch (see `create`), so this handle holds only
+       the per-EVENT data and its footprint is the whole point of the change. */
 
     /* F is independent of ck/coeff: fill it ONCE, here */
     const int total = ne * c->n_wave;
@@ -1073,23 +1148,15 @@ void* cuda_load_data_flat_pwa_gen2(void* vctx, const double* mass,
 }
 
 /* Takes the HANDLE (never the context), is safe on NULL and safe twice: every
-   pointer is NULLed after it is released. */
+   pointer is NULLed after it is released.  Only per-EVENT data lives here —
+   the batch-sized scratch is the CONTEXT's, freed by the function below. */
 void cuda_free_data_flat_pwa_gen2(void* vh) {
     GPDataHandle* h = (GPDataHandle*)vh;
     if (!h) return;
     if (h->weight) { cudaFree(h->weight); h->weight = NULL; }
     if (h->bkg) { cudaFree(h->bkg); h->bkg = NULL; }
-    if (h->P_dev) { cudaFree(h->P_dev); h->P_dev = NULL; }
     if (h->cache) { cudaFree(h->cache); h->cache = NULL; }
     if (h->bas_cache) { cudaFree(h->bas_cache); h->bas_cache = NULL; }
-    /* fa_cache retired */
-    if (h->gS) { cudaFree(h->gS); h->gS = NULL; }
-    if (h->gPb) { cudaFree(h->gPb); h->gPb = NULL; }
-    if (h->gW) { cudaFree(h->gW); h->gW = NULL; }
-    if (h->gscale) { cudaFree(h->gscale); h->gscale = NULL; }
-    if (h->dqp) { cudaFree(h->dqp); h->dqp = NULL; }
-    if (h->dA_buf) { cudaFree(h->dA_buf); h->dA_buf = NULL; h->dA_alloc = 0; }
-    if (h->h_P) { cudaFreeHost(h->h_P); h->h_P = NULL; }
     free(h);
 }
 
@@ -1106,6 +1173,9 @@ void cuda_free_context_flat_pwa_gen2(void* vctx) {
     F(p_ck_r); F(p_ck_i); F(p_coeff); F(acc);
     F(g_ck_r); F(g_ck_i); F(g_coeff);
     FH(h_ck_r); FH(h_ck_i); FH(h_coeff); FH(h_acc);
+    /* the batch-sized working scratch */
+    F(s_P); F(s_dA); F(s_dqp); F(s_gS); F(s_gPb); F(s_gW); F(s_gscale);
+    FH(h_sP);
     #undef F
     #undef FH
     if (c->stream) cudaStreamDestroy(c->stream);
@@ -1131,50 +1201,73 @@ void cuda_compute_flat_pwa_gen2(
                     cudaMemcpyHostToDevice, c->stream);
     cudaMemcpyAsync(c->p_coeff, c->h_coeff, (size_t)NB * sizeof(double),
                     cudaMemcpyHostToDevice, c->stream);
+    /* The accumulators span the WHOLE sample and live on the context, so they
+       are zeroed ONCE here and read back ONCE at the end — independent of how
+       many chunks the sample is split into. */
     cudaMemsetAsync(c->acc, 0, 2 * sizeof(double), c->stream);
     cudaMemsetAsync(c->g_ck_r, 0, (size_t)N * sizeof(double), c->stream);
     cudaMemsetAsync(c->g_ck_i, 0, (size_t)N * sizeof(double), c->stream);
     cudaMemsetAsync(c->g_coeff, 0, (size_t)NB * sizeof(double), c->stream);
 
-    if (h->ne > 0) {
+    /* ── the chunk loop ────────────────────────────────────────────────────
+     *
+     * `c->cap` events at a time (a whole number of log-sum groups, see
+     * `create`), with the per-event data addressed through OFFSET pointers so
+     * the kernels see a chunk-local event index.  Everything the pipeline
+     * needs per chunk — P, saved A, dqp, the group sums — is context scratch
+     * sized by `cap`; only `cache`/`bas_cache`/`weight`/`bkg` scale with `ne`,
+     * and they stay fully resident in the handle.
+     *
+     * `oP` is the CALLER's buffer (`h->ne` long) and is written at `oP + st`;
+     * nothing about P is chunk-sized on the caller's side. */
+    const int ne_total = h->ne;
+    int bs = c->cap;
+    if (bs <= 0) bs = 1;
+    if (ne_total < bs) bs = ne_total;
+    const int nbat = (ne_total > 0) ? (ne_total + bs - 1) / bs : 0;
+    for (int b = 0; b < nbat; b++) {
+        const int st = b * bs;
+        const int nb = (ne_total - st > bs) ? bs : (ne_total - st);
         /* The grouped log-sum needs the WHOLE group before it can scale
-           dQ/dP, and a group (10…100) spans several GP_TE tiles.  So:
-           (mode 1) tile -> per-group partial sums, A saved;
-           grp_nll -> Q/dnorm/scale;  scale -> dqp[ne];
-           (mode 2) tile with dqp and the saved A — no forward recompute.
-           rsize == 1 (and the phsp path) stay the single launch they were. */
-        const int grouped = (use_norm && h->rsize > 1 && h->n_groups > 0
-                             && h->dA_buf != NULL);
+           dQ/dP.  The chunk holds whole groups, so the entire sequence
+           (mode 1 -> grp_nll -> scale -> mode 2) runs inside the chunk. */
+        const int grouped = (use_norm && h->rsize > 1 && c->s_ngroups > 0
+                             && c->s_dA != NULL);
         if (grouped) {
-            cudaMemsetAsync(h->gS, 0, (size_t)h->n_groups * sizeof(double),
-                            c->stream);
-            cudaMemsetAsync(h->gPb, 0, (size_t)h->n_groups * sizeof(double),
-                            c->stream);
-            cudaMemsetAsync(h->gW, 0, (size_t)h->n_groups * sizeof(double),
-                            c->stream);
-            gp2_launch(c, h, norm, use_norm, 1, oP ? h->P_dev : NULL,
-                       h->dA_buf, h->gS, h->gPb, h->gW);
+            cudaMemsetAsync(c->s_gS, 0,
+                            (size_t)c->s_ngroups * sizeof(double), c->stream);
+            cudaMemsetAsync(c->s_gPb, 0,
+                            (size_t)c->s_ngroups * sizeof(double), c->stream);
+            cudaMemsetAsync(c->s_gW, 0,
+                            (size_t)c->s_ngroups * sizeof(double), c->stream);
+            gp2_launch(c, h, st, nb, norm, use_norm, 1,
+                       oP ? c->s_P : NULL,
+                       c->s_dA, c->s_gS, c->s_gPb, c->s_gW);
             CUDA_CHECK(cudaGetLastError());
+            const int ngroups = (nb + h->rsize - 1) / h->rsize;
             const int gblk = 256;
-            gp2_grp_nll_kernel<<<(h->n_groups + gblk - 1) / gblk, gblk, 0,
+            gp2_grp_nll_kernel<<<(ngroups + gblk - 1) / gblk, gblk, 0,
                                  c->stream>>>(
-                h->gS, h->gPb, h->gW, h->n_groups, norm, h->gscale, c->acc);
-            gp2_scale_kernel<<<(h->ne + gblk - 1) / gblk, gblk, 0,
-                               c->stream>>>(
-                h->gscale, h->weight, h->ne, h->rsize, norm, h->dqp);
+                c->s_gS, c->s_gPb, c->s_gW, ngroups, norm, c->s_gscale,
+                c->acc);
+            gp2_scale_kernel<<<(nb + gblk - 1) / gblk, gblk, 0, c->stream>>>(
+                c->s_gscale, h->weight + st, nb, h->rsize, norm, c->s_dqp);
             CUDA_CHECK(cudaGetLastError());
-            gp2_launch(c, h, norm, use_norm, 2, NULL, NULL,
+            gp2_launch(c, h, st, nb, norm, use_norm, 2, NULL, NULL,
                        NULL, NULL, NULL);
             CUDA_CHECK(cudaGetLastError());
         } else {
-            gp2_launch(c, h, norm, use_norm, 0, oP ? h->P_dev : NULL, NULL,
-                       NULL, NULL, NULL);
+            gp2_launch(c, h, st, nb, norm, use_norm, 0,
+                       oP ? c->s_P : NULL, NULL, NULL, NULL, NULL);
             CUDA_CHECK(cudaGetLastError());
         }
+        if (oP) {
+            cudaMemcpyAsync(c->h_sP, c->s_P, (size_t)nb * sizeof(double),
+                            cudaMemcpyDeviceToHost, c->stream);
+            CUDA_CHECK(cudaStreamSynchronize(c->stream));
+            memcpy(oP + st, c->h_sP, (size_t)nb * sizeof(double));
+        }
     }
-    if (oP)
-        cudaMemcpyAsync(h->h_P, h->P_dev, (size_t)h->ne * sizeof(double),
-                        cudaMemcpyDeviceToHost, c->stream);
     cudaMemcpyAsync(c->h_acc, c->acc, 2 * sizeof(double),
                     cudaMemcpyDeviceToHost, c->stream);
     cudaMemcpyAsync(og_ck_r, c->g_ck_r, (size_t)N * sizeof(double),
@@ -1186,17 +1279,22 @@ void cuda_compute_flat_pwa_gen2(
     CUDA_CHECK(cudaStreamSynchronize(c->stream));
     *oQ = c->h_acc[0];
     *oDn = c->h_acc[1];
-    if (oP) memcpy(oP, h->h_P, (size_t)h->ne * sizeof(double));
 }
 
-/* The saved-`A` footprint of one handle, in bytes (0 when `rsize == 1`, i.e.
- * when the grouped path — the only consumer — is not in play).  Lets a test
- * assert the allocation policy instead of guessing from free memory, which the
- * CUDA caching allocator makes unreadable. */
-long long cuda_handle_dA_bytes_flat_pwa_gen2(void* vh) {
-    GPDataHandle* h = (GPDataHandle*)vh;
-    if (!h || !h->dA_alloc || !h->dA_buf) return 0;
-    return (long long)h->ne * h->nproj_dA * 2 * (long long)sizeof(double);
+/* The saved-`A` footprint of the context's working scratch, in BYTES PER
+ * CHUNK (0 when `rsize == 1`, i.e. when the grouped path — the only consumer —
+ * is not in play).
+ *
+ * CHOSEN: the context, not the handle.  The `A` buffer is no longer handle-side
+ * (it is batch-sized scratch on the context, allocated once and `ne`-
+ * independent), so a handle has no `A` allocation to report.  The symbol name
+ * is kept — callers only ever used it to assert the allocation policy — and the
+ * wrapper turns this per-chunk figure into a per-sample one (`min(cap, ne)`),
+ * which is the sample's own share of the shared scratch. */
+long long cuda_handle_dA_bytes_flat_pwa_gen2(void* vctx) {
+    GPCtx* c = (GPCtx*)vctx;
+    if (!c || c->s_dA == NULL) return 0;
+    return (long long)c->cap * c->n_proj * 2 * (long long)sizeof(double);
 }
 
 /* The tile size `gp2_layout` gives for an arbitrary shape — the SAME function
@@ -1222,6 +1320,15 @@ int cuda_get_device_count_flat_pwa_gen2(void) {
 int cuda_smem_bytes_flat_pwa_gen2(void* vctx) {
     GPCtx* c = (GPCtx*)vctx;
     return c ? c->smem_bytes : 0;
+}
+
+/* Events per chunk.  Published for the same reason as `smem_bytes`: the chunk
+ * rule (batch rounded down to a whole number of `rsize` groups) must have ONE
+ * definition, and it lives in `create`.  The wrapper uses this to report a
+ * sample's share of the shared scratch, never to re-derive the rule. */
+int cuda_cap_flat_pwa_gen2(void* vctx) {
+    GPCtx* c = (GPCtx*)vctx;
+    return c ? c->cap : 0;
 }
 
 void cuda_get_device_name_flat_pwa_gen2(char* buf, int len) {
