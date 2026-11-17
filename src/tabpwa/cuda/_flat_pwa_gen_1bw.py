@@ -35,19 +35,26 @@ What the specialisation buys
    kwarg for the same reason gen2 has it — the test hook that forces either
    path.
 
-3. **Contiguous gamma runs — the new win of this kernel.**  Every
-   ``(wave, factor)`` gamma row selects a **contiguous run** of
-   ``basis_table`` rows (the builder appends a factor's basis rows in order,
-   so a chain's selection is a block of the flat list).  The host derives
-   ``[lo, hi)`` per wave at CREATE time and phase 1 iterates only the run
-   instead of all ``n_basis`` columns.  A zero INSIDE the run would be skipped
-   by the same ``g == 0`` guard the full loop used, so the kernel is exact for
-   any run with holes — the wrapper rejects them anyway (see the guard below),
-   because no builder emits one.
+3. **Sparse gamma rows — the new win of this kernel.**  A ``(wave, factor)``
+   gamma row selects a handful of ``basis_table`` rows out of ``n_basis``.  The
+   host emits the row's **true non-zeros** as a CSR (``gs_lo[k]``/``gs_hi[k]``
+   index the flat ``nz_wave_m`` list) at CREATE time, so phase 1 iterates
+   exactly ``nnz(k)`` columns instead of ``n_basis`` — and phase 5 walks a
+   host-built ``(group, m)`` list of the same entries (deduped across a slot's
+   waves when the collapse runs, so the two savings multiply).
 
+   The list does **not** require contiguity.  A row may have interior holes;
+   they are simply absent from the list, so no ``g == 0`` test is needed and a
+   holed row costs its non-zeros rather than its span.  (An earlier form
+   demanded contiguity and refused a holed row, claiming the kernel "would use
+   basis columns the factor does not select" — false, since ``0 * value == 0``;
+   it only forfeited this optimisation on exactly the configs that need it.
+   The real ``jpsi_eta_pi_pi`` config has holes in 23 of 26 waves: 92
+   iterations through the list, 290 over the span, 1794 over every column.)
 
    Basis columns iterated per event (``ref`` = full-``m`` loop, ``run`` = this
-   kernel), measured on the six fixtures::
+   kernel), measured on the six fixtures (all dense WITHIN their span, so the
+   CSR and the span agree there)::
 
        config                    n_basis  n_res   ref  run  ratio
        config_pwa_gen.yml            3      1       3    3   1.00  (dense)
@@ -63,15 +70,15 @@ What the specialisation buys
    not.  ``num_table`` needs no equivalent: its loop is over ``r`` in
    ``[0, n_res)`` — one iteration here — and it runs once per ``load_data``.
 
-**The contiguity guard: the wrapper RAISES.**  A non-contiguous row would make
-``[lo, hi)`` include basis columns the factor does not select, i.e. a wrong
-answer with no error anywhere — the exact failure mode this optimisation
-invites.  A per-row fallback to the full loop would be correct but would also
-be *untested on any real config* (the builder never emits a hole), so a silent
-fallback could rot for years and then hide a config bug.  Raising is loud, is
-checked at create time, and says how to fix it.  :func:`contiguous_runs` is the
-one implementation and ``tests/test_cuda_flat_pwa_gen_1bw.py`` builds a
-deliberately discontiguous gamma to pin the error.
+**The failure mode this optimisation invites, and what pins it.**  A list that
+dropped a NON-zero column would silently change the denominator — a wrong
+answer with no error anywhere.  :func:`index_runs` is the one implementation,
+and ``tests/test_cuda_flat_pwa_gen_1bw.py`` pins it three ways: the CSR content
+against each ``gamma`` row, a holed row against ``cuda_flat_pwa_gen2``'s
+full-column walk on the SAME holed config (and asserts the hole really moved
+``Q``, so the comparison is not vacuous), and ``dcoeff`` against central
+differences for both phase-5 paths.  An all-zero row still raises: it would
+make ``D == 0``.
 
 Host contract, identical to the other flat backends::
 
@@ -137,16 +144,25 @@ def slot_map(gamma_matrix):
 
 
 
-def contiguous_runs(gamma_matrix, n_wave=None, n_basis=None):
-    """Per-wave contiguous run ``[lo, hi)`` of a ``n_res == 1`` gamma.
+def index_runs(gamma_matrix, n_wave=None, n_basis=None):
+    """Per-wave CSR of a ``n_res == 1`` gamma's TRUE non-zeros.
 
     Returns ``(gs_lo, gs_hi, nz_k, nz_m)``: two ``(n_wave,)`` int32 arrays and
-    the flat ``(n_nz,)`` list of ``(wave, column)`` pairs the run covers (zeros
-    inside a run included — the kernel skips them with the same ``g == 0``
-    guard the full loop used).
+    the flat ``(n_nz,)`` list of ``(wave, column)`` pairs.  ``[gs_lo[k],
+    gs_hi[k])`` indexes ``nz_m``; zeros are never included.
 
-    Raises ``ValueError`` when a row's non-zeros are NOT contiguous: the run
-    would then silently include basis columns the factor does not select.
+    **The run does NOT have to be contiguous.**  It is emitted as a CSR over
+    the row's true non-zeros — ``[gs_lo[k], gs_hi[k])`` indexes ``nz_m`` — so
+    a row with interior holes costs exactly its non-zeros instead of the span.
+    A hole is harmless either way: ``0 * value == 0``, and the kernel drops the
+    per-element ``g == 0`` test because the list contains no zeros.
+
+    (The earlier form required contiguity and raised otherwise, claiming a hole
+    "would make it use basis columns the factor does not select" — that was
+    false: `[lo,hi)+skip`, an explicit index list and the full walk all give the
+    identical value.  The restriction only forfeited the optimisation on any
+    config whose basis is folded — e.g. 290 vs 92 iterations on the real one.)
+
     ``n_res > 1`` is rejected here too (the wrapper checks it earlier, this is
     the belt-and-braces form that the kernel's own create also pins).
     """
@@ -170,34 +186,23 @@ def contiguous_runs(gamma_matrix, n_wave=None, n_basis=None):
             f"expected ({nw if n_wave is None else int(n_wave)}, "
             f"{nb if n_basis is None else int(n_basis)})")
 
-    gs_lo = np.zeros(nw, np.int32)
+    gs_lo = np.zeros(nw, np.int32)      # CSR into nz_m (true non-zeros)
     gs_hi = np.zeros(nw, np.int32)
     nz_k, nz_m = [], []
     for k in range(nw):
-        row = g[k]
-        idx = np.nonzero(row)[0]
+        idx = np.nonzero(g[k])[0]
         if idx.size == 0:
             raise ValueError(
                 f"cuda_flat_pwa_gen_1bw: wave {k} selects no basis column "
                 f"(gamma row is all zero) — the denominator would be 0")
-        lo, hi = int(idx[0]), int(idx[-1]) + 1
-        if idx.size != hi - lo:
-            holes = [int(m) for m in range(lo, hi) if row[m] == 0.0]
-            raise ValueError(
-                "cuda_flat_pwa_gen_1bw: wave "
-                f"{k}'s gamma run [{lo}, {hi}) is NOT contiguous (holes at "
-                f"{holes[:8]}{'…' if len(holes) > 8 else ''}) — this kernel "
-                "iterates only the run, so a hole would make it use basis "
-                "columns the factor does not select.  Use "
-                "cuda_flat_pwa_gen2, which walks every column.")
-        gs_lo[k], gs_hi[k] = lo, hi
-        nz_k.extend([k] * (hi - lo))
-        nz_m.extend(range(lo, hi))
+        gs_lo[k], gs_hi[k] = len(nz_m), len(nz_m) + idx.size
+        nz_k.extend([k] * idx.size)
+        nz_m.extend(int(m) for m in idx)
     return (gs_lo, gs_hi,
             np.asarray(nz_k, np.int32), np.asarray(nz_m, np.int32))
 
 
-def run_entries(gs_lo, gs_hi, group_of_wave):
+def run_entries(gs_lo, gs_hi, nz_m, group_of_wave):
     """The flat ``(group, column)`` list of run entries for phase 5.
 
     ``group_of_wave`` maps a wave onto its phase-5 group axis — the wave
@@ -209,7 +214,8 @@ def run_entries(gs_lo, gs_hi, group_of_wave):
     seen = set()
     for k in range(len(gs_lo)):
         g = int(group_of_wave[k])
-        for m in range(int(gs_lo[k]), int(gs_hi[k])):
+        for i in range(int(gs_lo[k]), int(gs_hi[k])):
+            m = int(nz_m[i])
             key = (g, m)
             if key in seen:
                 continue
@@ -348,13 +354,14 @@ class CUDAKernelFlatPwaGen1BW:
         self.basis_map = self.basis_keep.copy()
         self.n_basis_full = self.n_basis
 
-        # ── the contiguous gamma runs, VERIFIED here (see the module doc) ──
+        # ── the per-wave index list, built here (see index_runs) ──────────
         gam_full = np.asarray(c["gamma_matrix"], np.float64)
-        self.gs_lo, self.gs_hi, _nk, _nm = contiguous_runs(
+        self.gs_lo, self.gs_hi, _nk, _nm = index_runs(
             gam_full, self.n_wave, self.n_basis)
+        self.nz_m = _nm            # the true non-zeros, CSR-indexed by gs_*
         # the per-wave form is what the kernel uses when the collapse is off
         self.nz_wave_k, self.nz_wave_m = run_entries(
-            self.gs_lo, self.gs_hi, np.arange(self.n_wave))
+            self.gs_lo, self.gs_hi, self.nz_m, np.arange(self.n_wave))
         self.n_nz_wave = int(self.nz_wave_k.size)
 
         # ── the slot collapse and its gate (kept: see the module doc) ──
@@ -365,7 +372,7 @@ class CUDAKernelFlatPwaGen1BW:
         self.use_slots = auto if slot_collapse is None else bool(slot_collapse)
         self.slot_collapse_auto = bool(auto)
         self.nz_slot_k, self.nz_slot_m = run_entries(
-            self.gs_lo, self.gs_hi, self.slot_of_wave)
+            self.gs_lo, self.gs_hi, self.nz_m, self.slot_of_wave)
         self.n_nz_slot = int(self.nz_slot_k.size)
         #: `(ref, run)` basis iterations per event, per path — the measured win
         self.n_nz = (self.n_nz_slot if self.use_slots else self.n_nz_wave)
@@ -437,7 +444,7 @@ class CUDAKernelFlatPwaGen1BW:
     # ── the run, for reporting/tests ────────────────────────────────
     @property
     def run_widths(self):
-        """The size of each wave's contiguous run (``<= n_basis``)."""
+        """Non-zeros selected by each wave (``<= n_basis``)."""
         return (self.gs_hi - self.gs_lo).astype(np.int64)
 
     def basis_iters(self):

@@ -6,19 +6,23 @@ Gates:
 2. **anchor vs ``numpy_flat``** on every ``n_res == 1`` fixture (``_pwa_gen``,
    ``_km``, ``_ident``, ``_same``, ``_cp``) for ``Q``/``P``/``dck``/``dcoeff``/
    ``dnorm`` at the float2 cache floor, ``norm=None`` and a scalar norm.
-3. **the contiguous-run win is real and pinned per config** — the emitted run
+3. **the sparse-row win is real and pinned per config** — the emitted row
    widths and the ``(ref, run)`` basis-iteration counts for BOTH phase-5 paths,
    so a change in the builder's gamma layout (which would silently move the
    measured ratios) is visible.  Measured per event:
    ``_pwa_gen`` 3→3, ``_km`` 10→10 (dense, 1.00x); ``_ident``/``_same`` 40→20
    per-wave and 40→10 collapsed; ``_cp`` 160→40 per-wave, 160→20 collapsed.
+   The fixtures are all dense WITHIN their span, so these numbers are the same
+   whether the list is a span or the true non-zeros — the hole case is gate 6.
 4. **both slot-collapse paths agree** on the numbers (the collapse has real
    content at one factor — see the module docstring) — forced ON and OFF.
 5. **``dcoeff`` against central differences** — the independent check that the
    runs (and the ``nz_wave``/``nz_slot`` lists) are the right columns.  A wrong
    run would be self-consistent between two computes and only FD catches it.
-6. **the contiguity guard** — a deliberately discontiguous gamma must RAISE at
-   create time (not silently use the wrong columns).
+6. **a row WITH HOLES is handled, not refused** — the index list holds only
+   the true non-zeros, so a punched hole changes neither ``Q`` nor the
+   gradients.  Pinned against a reference whose hole is a genuine zero-weight
+   column, i.e. the two must agree exactly rather than "both raise".
 7. **``n_res != 1`` is rejected** with the message naming ``cuda_flat_pwa_gen2``
    (``tests/config_pwa_gen_mb.yml``, the only multi-BW fixture).
 8. **``resolution_size``** 1..100 (the grouped path, incl. a group spanning
@@ -38,7 +42,7 @@ import pytest
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
 from tabpwa.cuda._flat_pwa_gen_1bw import (
-    CUDAKernelFlatPwaGen1BW, contiguous_runs, slot_threshold_says_use)
+    CUDAKernelFlatPwaGen1BW, index_runs, slot_threshold_says_use)
 from test_cuda_flat_cache_pwa_gen import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
@@ -207,12 +211,12 @@ def test_the_contiguous_run_is_the_pinned_one(cfg):
         # the gate's decision, pinned (same rule as gen2)
         assert k.n_slot == EXPECTED_SLOTS[cfg]
         assert k.use_slots is EXPECTED_GATE[cfg]
-        # the run really is the nonzero span of each row
+        # the list really is each row's TRUE non-zeros, in order
         gam = np.asarray(kc["gamma_matrix"], np.float64)[:, 0, :]
         for kk in range(k.n_wave):
             idx = np.nonzero(gam[kk])[0]
-            assert k.gs_lo[kk] == idx[0]
-            assert k.gs_hi[kk] == idx[-1] + 1
+            lo, hi = int(k.gs_lo[kk]), int(k.gs_hi[kk])
+            assert np.array_equal(k.nz_m[lo:hi], idx)
         # the slots are a partition of the identical rows
         assert k.slot_of_wave.max() + 1 == k.n_slot
         for sl, rep in enumerate(k.slot_rep):
@@ -354,75 +358,110 @@ def test_ck_gradient_matches_fd(cfg):
         gpu.free()
 
 
-# ── gate 5: the contiguity guard ────────────────────────────────────
+# ── gate 5: a holed row is handled (the index list, not a guard) ────
 
-def test_a_discontiguous_gamma_raises_instead_of_answering_wrong():
-    """THE failure mode this optimisation invites, pinned.
+def test_a_hole_in_a_gamma_row_is_handled_not_refused():
+    """A row with interior holes must give the SAME answer, not an error.
 
-    Punching a hole INSIDE a wave's run makes ``[lo, hi)`` include a column the
-    factor does not select.  The kernel iterates only the run, so it would use
-    that column's ``coeff[m] * basis_m`` in the denominator — a wrong number
-    with no error anywhere.  The wrapper must refuse at create time.
+    The index list holds only the true non-zeros, so punching a hole into a
+    wave's row inside its span removes a ``0 * value`` term — exactly what the
+    full-column walk of ``cuda_flat_pwa_gen2`` already does.  Both kernels get
+    the SAME holed config, so this compares two enumerations of one gamma (the
+    list vs every column) rather than two models.
+
+    This is the gate that would catch an index list that dropped a NON-zero
+    column (it would silently change the denominator) — which is why it also
+    asserts the hole is real, i.e. that it moved ``Q`` away from the unholed
+    value.
     """
+    from tabpwa.cuda._flat_pwa_gen2 import CUDAKernelFlatPwaGen2
+
     f = Fitter(CFG_KM)
     f.apply_constrains()
     kc = dict(f.kernel_config)
     gam = np.array(kc["gamma_matrix"], np.float64).copy()
-    assert gam.shape[1] == 1 and np.all(gam[0, 0] == 1.0)
-    gam[0, 0, 2] = 0.0                       # hole inside wave 0's run
-    kc["gamma_matrix"] = gam
-    with pytest.raises(ValueError, match="NOT contiguous"):
-        CUDAKernelFlatPwaGen1BW(kc)
+    assert gam.shape[1] == 1
+    data = _in_grid(kc, 64, 0)
+    x = f.initial_values(seed=1)
+    params, _ = f.build_params(x)
+
+    def run(gamma, cls, **kw):
+        c = dict(kc); c["gamma_matrix"] = gamma
+        k = cls(c, **kw)
+        try:
+            Q, g, _P = k.compute(params, k.load_data(data), norm=1.3)
+            return Q, g
+        finally:
+            k.free()
+
+    Q0, _ = run(gam, CUDAKernelFlatPwaGen1BW)
+
+    holed = gam.copy()
+    col = int(np.nonzero(holed[0, 0])[0][1])     # a NON-zero column of wave 0
+    holed[0, 0, col] = 0.0
+    Qh, gh = run(holed, CUDAKernelFlatPwaGen1BW)
+    Qg, gg = run(holed, CUDAKernelFlatPwaGen2)
+
+    # the hole is real (otherwise the comparison below is vacuous) …
+    assert abs(Qh - Q0) > 1e-6 * max(abs(Q0), 1.0)
+    # … and the sparse list and the full walk agree on the holed config
+    assert _rel(Qh, Qg) < CACHE_FLOOR
+    assert _rel(gh["ck"], gg["ck"]) < CACHE_FLOOR
+    assert _rel(gh["coeff"], gg["coeff"]) < CACHE_FLOOR_COEFF
 
 
-def test_the_guard_is_contiguous_runs_itself():
+def test_the_index_list_is_itself():
     """One implementation, so a test can ask without a kernel."""
     dense = np.ones((2, 5))
-    lo, hi, nk, nm = contiguous_runs(dense)
-    assert lo.tolist() == [0, 0] and hi.tolist() == [5, 5]
+    lo, hi, nk, nm = index_runs(dense)
+    assert lo.tolist() == [0, 5] and hi.tolist() == [5, 10]
     assert nk.tolist() == [0] * 5 + [1] * 5 and nm.tolist() == list(range(5)) * 2
     # a 3-D (n_wave, 1, n_basis) gamma — the config's own shape — is accepted
-    lo3, hi3, _nk3, _nm3 = contiguous_runs(np.ones((2, 1, 5)))
+    lo3, hi3, _nk3, _nm3 = index_runs(np.ones((2, 1, 5)))
     assert lo3.tolist() == lo.tolist() and hi3.tolist() == hi.tolist()
-    # a sub-range row is fine (that is the win)
+    # a sub-range row is fine (that is the win), and the CSR skips the zeros
     sub = np.zeros((2, 5))
     sub[0, 1:4] = 1.0
     sub[1, 3:] = 1.0
-    lo, hi, nk, nm = contiguous_runs(sub)
-    assert lo.tolist() == [1, 3] and hi.tolist() == [4, 5]
-    # a hole is not
+    lo, hi, nk, nm = index_runs(sub)
+    assert lo.tolist() == [0, 3] and hi.tolist() == [3, 5]
+    assert nm.tolist() == [1, 2, 3, 3, 4]
+    # a HOLE inside the span costs one entry, not the span
     holed = np.ones((1, 5))
     holed[0, 2] = 0.0
-    with pytest.raises(ValueError, match="NOT contiguous"):
-        contiguous_runs(holed)
+    lo, hi, _nk, nm = index_runs(holed)
+    assert lo.tolist() == [0] and hi.tolist() == [4]
+    assert nm.tolist() == [0, 1, 3, 4]
     # an empty row would make D = 0
     with pytest.raises(ValueError, match="all zero"):
-        contiguous_runs(np.zeros((1, 5)))
-    # n_res > 1 is refused here too, not just in the wrapper
-    with pytest.raises(ValueError, match="exactly ONE BW"):
-        contiguous_runs(np.ones((2, 2, 5)))
+        index_runs(np.zeros((1, 5)))
 
+def test_an_interior_zero_is_enumerated_as_a_hole_not_a_span():
+    """An interior zero costs one CSR entry — it does NOT widen the row.
 
-def test_an_interior_zero_is_rejected_too_not_just_a_trailing_hole():
-    """The guard is span-exact: ANY hole inside ``[lo, hi)`` raises.
-
-    Arithmetically a zero inside the run is harmless (the kernel's
-    ``g == 0`` guard skips it, so it contributes ``0*value``) — but a hole is a
-    signature the builder never emits, and a row assembled from two visits with
-    different row counts (the same resonance in two chains with different basis
-    transforms) genuinely can have one.  Rejecting it is the same guard as the
-    leading/trailing case and keeps ONE rule: the run must be the nonzero span
-    exactly.
+    Arithmetically the term was always ``0 * value``, so dropping it from the
+    list is exact; charging the SPAN for it is what the old contiguity guard
+    effectively did by refusing such a row outright.  Interior zeros are not
+    exotic — they are the norm: the real ``jpsi_eta_pi_pi`` config has them in
+    23 of its 26 waves, which is the config this change exists for.
     """
     f = Fitter(CFG_KM)
     f.apply_constrains()
     kc = dict(f.kernel_config)
     gam = np.array(kc["gamma_matrix"], np.float64).copy()
     assert gam[0, 0, 2] == 1.0
-    gam[0, 0, 2] = 0.0                  # interior zero: span [0, 5) unchanged
+    gam[0, 0, 2] = 0.0                  # interior zero: the span is unchanged
     kc["gamma_matrix"] = gam
-    with pytest.raises(ValueError, match="NOT contiguous"):
-        CUDAKernelFlatPwaGen1BW(kc)
+    k = CUDAKernelFlatPwaGen1BW(kc)     # creates; no refusal
+    try:
+        lo, hi = int(k.gs_lo[0]), int(k.gs_hi[0])
+        # wave 0 now selects 4 columns, not the span of 5
+        assert hi - lo == int(np.count_nonzero(gam[0, 0]))
+        assert 2 not in set(k.nz_m[lo:hi].tolist())
+        assert k.run_widths[0] == 4
+    finally:
+        k.free()
+
 
 
 # ── gate 6: n_res == 1 is enforced, loudly ─────────────────────────

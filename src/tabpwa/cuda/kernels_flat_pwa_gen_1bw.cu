@@ -36,19 +36,19 @@
  *    same bits.  The deep-factor (`n_res > MAXRES`) fallback is gone too: one
  *    factor can never reach it.
  *
- * 3. **Contiguous gamma runs — the new win of this kernel.**  `gamma[k, 0, :]`
- *    is not a scattered selector: every `(wave, factor)` row's non-zeros form
- *    a CONTIGUOUS run of `basis_table` rows (the builder appends a factor's
- *    basis rows in order, so a chain's row is a block of the flat list; a
- *    fully shared block is still one run).  The host derives `[lo, hi)` per
- *    wave at CREATE time (`gs_lo` / `gs_hi`) and VERIFIES contiguity there — a
- *    discontiguous row would make the run include basis columns the factor
- *    does not use, i.e. a silently wrong answer, so it raises (see the
- *    wrapper).  Phase 1 then iterates only the run, and phase 5 walks a
- *    host-built `(row, m)` list of exactly those run entries.  Zeros *inside*
- *    a run are skipped by the same `g == 0` guard the full loop used, so the
- *    kernel is exact for any run with holes; the wrapper still rejects one,
- *    because no builder emits it.
+ * 3. **Sparse gamma rows — the new win of this kernel.**  `gamma[k, 0, :]` is
+ *    not a dense selector: a factor selects a handful of `basis_table` rows
+ *    out of `n_basis`.  The host emits the row's **true non-zeros** as a CSR
+ *    (`gs_lo[k]`/`gs_hi[k]` index the flat `nz_wave_m` list) at CREATE time,
+ *    so phase 1 iterates exactly `nnz(k)` columns instead of `n_basis`, and
+ *    phase 5 walks a host-built `(row, m)` list of the same entries.
+ *
+ *    The run does NOT have to be contiguous, and the kernel has no `g == 0`
+ *    test in phase 1 for that reason: the list contains no zeros.  (An earlier
+ *    form required contiguity and refused a row with holes, claiming a hole
+ *    "would make it use basis columns the factor does not select" — false,
+ *    since `0 * value == 0`; it only forfeited the optimisation on any config
+ *    whose basis is folded: 290 vs 92 iterations on the real one.)
  *
  *    Measured per config (basis rows iterated per event, `ref` = full-`m`
  *    loop, `run` = this kernel — never a loss, `run <= n_basis` always):
@@ -294,20 +294,22 @@ __host__ __device__ __forceinline__ GP1BLayout gp1b_layout(
  * only after every tile has run, which is what ``gp1b_grp_nll_kernel`` +
  * ``gp1b_scale_kernel`` provide.
  *
- * ``gs_lo`` / ``gs_hi`` / ``nz_row`` / ``nz_m`` are the HOST-verified
- * contiguous runs: ``gamma`` is flat ``[n_wave·n_basis]`` (one factor in the
- * middle axis), and the non-zeros of row ``k`` are exactly
- * ``[gs_lo[k], gs_hi[k])``.  ``nz_row`` is the phase-5 GROUP axis — the wave
- * when the per-wave path runs, the SLOT when the collapse does (the wrapper
- * builds whichever the gate selected).
+ * ``gamma`` is flat ``[n_wave·n_basis]`` (one factor in the middle axis).
+ * Each row's true non-zeros are a CSR: ``[gs_lo[k], gs_hi[k])`` indexes the
+ * flat ``nz_wave_m`` list (phase 1).  ``nz_row``/``nz_m`` are the phase-5
+ * GROUP axis — the wave when the per-wave path runs, the SLOT when the
+ * collapse does (the wrapper builds whichever the gate selected, deduplicated
+ * per group).  A row may have interior holes; both lists hold only
+ * non-zeros, so neither loop needs a ``g == 0`` test to be exact.
  */
 __global__ void gp1b_tile_kernel(
     const float2* __restrict__ cache,      /* [ne, n_wave]     F = fl·nu  */
     const float2* __restrict__ bas_cache,  /* [ne, n_basis]    basis_m(m) */
     const float2* __restrict__ fa_cache,   /* [ne·n_wave·n_proj]  fa      */
     const double* __restrict__ gamma,      /* [n_wave, n_basis]  (n_res==1) */
-    const int* __restrict__ gs_lo,         /* [n_wave]  first nonzero col  */
-    const int* __restrict__ gs_hi,         /* [n_wave]  last nonzero col+1 */
+    const int* __restrict__ nz_wave_m,     /* [nnz] per-wave nonzero cols */
+    const int* __restrict__ gs_lo,         /* [n_wave]  CSR start into it  */
+    const int* __restrict__ gs_hi,         /* [n_wave]  CSR end            */
     const int* __restrict__ slot_rep,      /* [n_slot]  a wave of the slot */
     const int* __restrict__ slot_ptr,      /* [n_slot+1]  CSR              */
     const int* __restrict__ slot_waves,    /* [n_wave]    CSR              */
@@ -359,9 +361,10 @@ __global__ void gp1b_tile_kernel(
     /* ── phase 1: the denominator — a dot product over the CACHED basis ──
      *
      * Exactly one BW per chain, so `D` IS that factor, with no product
-     * bookkeeping and no `s_s` buffer.  The inner loop walks only the wave's
-     * contiguous run: `run <= n_basis` always, and the interior `g == 0`
-     * guard keeps a run with holes exact (it can only skip a `0*value`).
+     * bookkeeping and no `s_s` buffer.  The inner loop walks the wave's true
+     * non-zeros through the CSR (`nz_wave_m`), so a folded row costs its nnz
+     * and a row with holes costs its non-zeros, not its span.  No `g == 0`
+     * test: the list contains no zeros by construction.
      */
     for (int idx = tid; idx < evn * W; idx += nt) {
         const int e = idx / W, k = idx - e * W;
@@ -369,10 +372,9 @@ __global__ void gp1b_tile_kernel(
         const int gb = k * NB;
         const int lo = gs_lo[k], hi = gs_hi[k];
         double sr = 0.0, si = 0.0;
-        for (int m = lo; m < hi; m++) {
-            const double g = gamma[gb + m];
-            if (g == 0.0) continue;
-            const double w = g * coeff[m];
+        for (int i = lo; i < hi; i++) {
+            const int m = nz_wave_m[i];
+            const double w = gamma[gb + m] * coeff[m];
             sr += w * (double)bv[m].x;
             si += w * (double)bv[m].y;
         }
@@ -761,7 +763,7 @@ static void gp1b_launch(GP1BCtx* c, GP1BDataHandle* h, double norm,
     const int n_nz = c->use_slots ? c->n_nz_slot : c->n_nz_wave;
     gp1b_tile_kernel<<<tiles, GP1B_BLOCK, sm, c->stream>>>(
         h->cache, h->bas_cache, h->fa_cache, c->gamma,
-        c->gs_lo, c->gs_hi,
+        c->nz_wave_m, c->gs_lo, c->gs_hi,
         c->slot_rep, c->slot_ptr, c->slot_waves,
         nz_row, nz_m, c->use_slots, c->n_slot,
         c->p_ck_r, c->p_ck_i, c->p_coeff, norm, use_norm,
