@@ -45,6 +45,10 @@
  *  spread over the whole block).  16 covers every real config by a wide
  *  margin (the fixtures use 1-2). */
 #define FC_MAXRES 16
+/*: projections handled per thread in phase 2; past this the kernel keeps the
+ *  one-thread-per-(e,p) shape (a larger per-thread accumulator array would
+ *  spill to local memory). */
+#define FC_MAXPROJ 4
 
 #define CUDA_CHECK(call)                                                     \
     do {                                                                     \
@@ -304,26 +308,72 @@ __global__ void fc_tile_kernel(
     __syncthreads();
 
     /* ── phase 2: A_{e,p} = Σ_k ck_k · F/D · fa   (fa cached) ───────────
-       The reduction over ``k`` is spread across the whole block.  The
+       The reduction over ``k`` is spread across the block.  The
        single-thread-per-(e,p) shape used only ``evn·n_proj`` threads (16 at
        the benchmark shape) and each serialised ``n_wave`` complex DIVISIONS
        — measured as the dominant cost, growing linearly with the wave count.
-       Here every thread owns one (e,p) and a stride-``n_out`` slice of k, so
-       the block is busy and each output is closed with one shared atomic
-       instead of ``n_wave`` serial divisions. */
-    {
+
+       Threads are therefore indexed by ``(e, lane)``, NOT by ``(e, p, lane)``,
+       so one thread owns every projection of its ``k`` slice.  That is what
+       makes the reassociation pay: ``D`` depends on the EVENT (through
+       ``basis_m(m_e)``), so ``w_{e,k} = ck_k·(F_{e,k}/D_{e,k})`` is shared by
+       all ``n_proj`` projections — the old shape rebuilt ``common = F/D`` and
+       re-multiplied by ``ck`` once per projection, i.e. n_proj × (6 + 4) ops
+       per (e,k) where 10 suffice.  Per (e,k) at n_proj = 2 that is 28 → 18
+       multiplies. */
+    if (n_proj <= FC_MAXPROJ) {
+        const int n_out = evn;
+        for (int i = tid; i < n_out * n_proj; i += nt) {
+            s_A[i * 2 + 0] = 0.0;
+            s_A[i * 2 + 1] = 0.0;
+        }
+        __syncthreads();
+        const int nlane = (nt + n_out - 1) / n_out;
+        const int lane = tid / n_out;
+        const int e = tid - lane * n_out;
+        if (e < n_out) {
+            double ar[FC_MAXPROJ], ai[FC_MAXPROJ];
+            for (int p = 0; p < n_proj; p++) { ar[p] = 0.0; ai[p] = 0.0; }
+            for (int k = lane; k < n_wave; k += nlane) {
+                const float2 F = cache[(size_t)(e0 + e) * n_wave + k];
+                const double fr = (double)F.x, fi = (double)F.y;
+                const double dr = s_D[(e * n_wave + k) * 2 + 0];
+                const double di = s_D[(e * n_wave + k) * 2 + 1];
+                const double rden = s_rd[e * n_wave + k];
+                /* common = F/D, then fold ck in — both shared by every p */
+                const double crn = (fr * dr + fi * di) * rden;
+                const double cin = (fi * dr - fr * di) * rden;
+                const double ckr = ck_r[k], cki = ck_i[k];
+                const double wr = ckr * crn - cki * cin;
+                const double wi = ckr * cin + cki * crn;
+                const float2* fa = fa_cache
+                    + (size_t)(e0 + e) * n_wave * n_proj
+                    + (size_t)k * n_proj;
+                for (int p = 0; p < n_proj; p++) {
+                    const double tr = wr * (double)fa[p].x
+                                      - wi * (double)fa[p].y;
+                    const double ti = wr * (double)fa[p].y
+                                      + wi * (double)fa[p].x;
+                    ar[p] += tr;
+                    ai[p] += ti;
+                }
+            }
+            for (int p = 0; p < n_proj; p++) {
+                atomicAdd(&s_A[(e * n_proj + p) * 2 + 0], ar[p]);
+                atomicAdd(&s_A[(e * n_proj + p) * 2 + 1], ai[p]);
+            }
+        }
+    } else {
+        /* very many projections: one thread per (e,p), as before */
         const int n_out = evn * n_proj;
         for (int i = tid; i < n_out; i += nt) {
             s_A[i * 2 + 0] = 0.0;
             s_A[i * 2 + 1] = 0.0;
         }
         __syncthreads();
-        /* threads are split into ``nlane`` groups of ``n_out``; lane ``L`` owns
-           k ≡ L (mod nlane).  With n_out = 16 and nt = 256 that is 16 lanes,
-           so each output accumulates ~n_wave/16 terms instead of all of them. */
         const int nlane = (nt + n_out - 1) / n_out;
         const int lane = tid / n_out;
-        const int idx = tid - lane * n_out;      /* this thread's output */
+        const int idx = tid - lane * n_out;
         if (idx < n_out) {
             const int e = idx / n_proj, p = idx - e * n_proj;
             double ar = 0.0, ai = 0.0;
@@ -749,6 +799,25 @@ void* cuda_create_context_flat_cache(
                 c->smem_bytes, optin, n_wave, n_res);
         free(c);
         return NULL;
+    }
+    /* Past the 48 KiB default the launch needs the opt-in size on the
+       FUNCTION, not merely a ``smem_bytes <= optin`` check against the
+       device: without this the launch fails with "invalid argument" and the
+       post-launch CUDA_CHECK is never reached, so compute() silently
+       returned Q = 0 (measured 0.15 ms for a 6.5 ms kernel) instead of
+       erroring.  Setting the attribute is idempotent — once at create. */
+    {
+        cudaError_t e = cudaFuncSetAttribute(
+            (const void*)fc_tile_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, c->smem_bytes);
+        if (e != cudaSuccess) {
+            fprintf(stderr,
+                    "cuda_flat_cache_pwa_gen: cannot opt in to %d B shared "
+                    "memory (%s); n_wave %d, n_res %d\n",
+                    c->smem_bytes, cudaGetErrorString(e), n_wave, n_res);
+            free(c);
+            return NULL;
+        }
     }
     CUDA_CHECK(cudaStreamCreate(&c->stream));
     CUDA_CHECK(cudaMalloc(&c->p_ck_r, (size_t)n_wave * sizeof(double)));
