@@ -761,3 +761,36 @@ def test_plain_basis_transform_requires_its_declared_inputs():
         tr.apply_forward({k: v for k, v in phys.items() if k != "ro_mass"})
     with pytest.raises(KeyError):
         tr.apply_forward({k: v for k, v in phys.items() if k != "ro_width"})
+
+
+def test_kmatrix2_one_pole_is_the_standard_bw():
+    """One pole ⇒ ``f = (1 − iρ·bf²·K)^{-1}·P`` IS the plain Breit-Wigner.
+
+    With ``K = 1/(m0²−s)`` and ``P = β/(m0²−s)``::
+
+        f = β / (m0² − s − i·ρ·bf²)
+          = β / (m0² − s − i·m0·Γ0·γ(m))
+
+    provided ``bf² = m0·Γ0`` and ``ρ ≡ γ(m)``.  That identification is what
+    makes the K-matrix a generalisation of the BW rather than a different
+    lineshape, and it fixes the coupling normalisation: the K-matrix coupling
+    is ``m0·Γ0``, not ``Γ0``.
+    """
+    n = "k2"
+    m0, g1, beta = 0.80, 0.35, 0.9
+    km = build_particle(n, model="kmatrix2", mass=m0, width=0.3)
+    params = {f"{n}_m1": m0, f"{n}_m2": 1.35, f"{n}_g1": g1, f"{n}_g2": 0.0,
+              f"{n}_b1r": beta, f"{n}_b1i": 0.0,
+              f"{n}_b2r": 0.0, f"{n}_b2i": 0.0}
+
+    m = np.array([0.60, 0.80, 1.00])
+    s = m ** 2
+    rho = np.emath.sqrt(1.0 - (2.0 * km.m_pi) ** 2 / s).astype(complex)
+
+    gamma0 = g1 ** 2 / m0                       # bf² = m0·Γ0
+    bw = beta / (m0 ** 2 - s - 1j * m0 * gamma0 * rho)
+    assert np.allclose(km.amp(m, params), bw, rtol=1e-14, atol=0)
+
+    # ... and the second pole genuinely changes the shape (not vacuous)
+    two = dict(params, **{f"{n}_g2": 0.25, f"{n}_b2r": 0.4})
+    assert not np.allclose(km.amp(m, two), bw, rtol=1e-6, atol=0)
