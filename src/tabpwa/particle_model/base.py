@@ -566,16 +566,21 @@ class PlainBasisWeightsTransform(Transform):
     subclassing :class:`BasisModel` alone) supplies its own transform instead —
     ``BasisModel.make_basis_transform`` defaults to ``None``.
 
-    ``input_names`` are the PHYSICAL parameters.  When the model has its own
-    mass/width transform (``RhoOmegaGS``: it derives ``{p}_w0..{p}_w7`` from
-    ``mass/width/mass2/width2``) the gamma couplings do not exist in the raw
-    parameter dict at all — ``apply_forward`` hands a transform only the names
-    it declares — so this transform runs that stage INTERNALLY in
-    :meth:`forward` and declares ITS inputs.  The mass/width transform itself
-    remains a ``BaseModel``/pwa concern (it rewrites the kernel `m0`/`g0`);
-    using it here is an implementation detail of the basis mapping, not a
-    merging of the two interfaces.  Without it ``RhoOmegaGS`` resolved every
-    basis weight to 0.
+    ``input_names`` are the mass and the model's ``get_gamma_name()``
+    couplings — the names the model's OWN mass/width transform produces when
+    it has one (``RhoOmegaGSWeightsTransform``: ``mass/width/mass2/width2 →
+    {p}_w0..{p}_w7``; ``WidthTransform``: ``{p}_width → {p}_width_t``), and
+    plain parameters when it has none.
+
+    That split is the whole point: this transform is a *consumer*.  It never
+    calls ``make_mass_width_transform()`` itself — composing by hand would run
+    that stage a second time and hide the chain from the constraint manager,
+    which is what chains the gradients.  The producer is registered first by
+    :meth:`AmplitudeModel.particle_transforms` (every model's mass/width
+    transform, then the basis transforms), so the couplings are already in the
+    dict when this one runs.  A name it failed to declare would arrive as 0 —
+    which is exactly how ``RhoOmegaGS`` used to resolve every basis weight to
+    0 before the declaration was fixed.
 
     A model whose basis weights are NOT ``m0 · coupling`` must override this
     with its own basis transform — ``kmatrix2`` does.
@@ -595,18 +600,6 @@ class PlainBasisWeightsTransform(Transform):
     def __init__(self, model):
         self.model = model
         name = model.name
-        self.gamma_names = list(model.get_gamma_name())
-        # The model's own mass/width stage: it PRODUCES the gamma couplings,
-        # so this transform must run it to see them.  No ``hasattr`` guard:
-        # this class is only ever built by ``BaseModel.make_basis_transform``,
-        # so ``model`` is a ``BaseModel`` by construction — the method is part
-        # of THAT interface, which is exactly why a model needs a ``BaseModel``
-        # to get the default basis mapping at all.
-        self._mw = model.make_mass_width_transform()
-        if self._mw is not None:
-            self.input_names = list(self._mw.input_names)
-        else:
-            self.input_names = [f"{name}_mass"] + list(self.gamma_names)
         # ``"one"`` is EXCLUDED: it is a physical CONSTANT, not a function of
         # this model's parameters, and it is produced once for the whole fit by
         # a `FixedValueTransform` (see `AmplitudeModel.particle_transforms`).
@@ -614,37 +607,106 @@ class PlainBasisWeightsTransform(Transform):
         # unambiguous — two transforms declaring the same output would be
         # treated as alternatives and the later one would replace the earlier.
         self.output_names = [n for n in model.get_den_name() if n != "one"]
+        # INPUTS are exactly the quantities those outputs are built from:
+        # ``{name}_mass`` (for ``s0`` and the ``m0·g`` products) and, for each
+        # ``{g}_t`` weight, its ``{g}`` — the KERNEL-facing coupling name.
+        #
+        # That name is what the model's own mass/width transform produces when
+        # it has one (``RhoOmegaGSWeightsTransform``: ``w0..w7``;
+        # ``WidthTransform``: ``{name}_width_t``, whose basis slot is the
+        # doubly-suffixed ``{name}_width_t_t``); when the model has no such
+        # stage it is a plain parameter.
+        #
+        # Declaring them is what makes the chain work: `apply_forward` passes
+        # a transform ONLY the names it declares, and the producer is
+        # registered FIRST by `AmplitudeModel.particle_transforms` (every
+        # model's mass/width transform, then the basis transforms).  This
+        # transform never CALLS another transform — composing by hand would
+        # run that stage twice and hide the chain from the constraint manager,
+        # which is what chains the gradients (and the hand-rolled call used to
+        # drop the FITTED mass: a transform's ``forward`` returns only its
+        # outputs, so ``m0`` fell back to the config value).
+        #
+        # A basis with no gamma rows (``OneModel``: a single constant row)
+        # therefore declares neither the couplings nor an unused mass.
+        #
+        # The slots are CLASSIFIED here once; ``forward`` and ``backward``
+        # both walk these three groups, so a new basis layout cannot
+        # desynchronise a value from its derivative.
+        self.mass_name = f"{name}_mass"
+        self._s0_slots = [n for n in self.output_names if n.endswith("_s0")]
+        self._t_slots = [(n, n[:-len("_t")])
+                         for n in self.output_names if n.endswith("_t")]
+        self._pass_slots = [n for n in self.output_names
+                            if not n.endswith(("_s0", "_t"))]
+        uses_mass = bool(self._s0_slots or self._t_slots)
+        self.input_names = (([self.mass_name] if uses_mass else [])
+                            + [src for _o, src in self._t_slots]
+                            + self._pass_slots)
+
+    def _m0(self, d):
+        """The fitted mass — the ONE place ``forward`` and ``backward`` read it.
+
+        Falls back to the config value only when the chain supplied none (a
+        basis whose slots need no mass), so value and derivative can never
+        disagree about which mass they used.
+        """
+        return float(d.get(self.mass_name,
+                           self.model.kwargs.get("mass", 0.775)))
 
     def forward(self, d):
-        """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights.
+        """``m0²`` and ``m0·g_j`` — the uniform basis weights.
 
-        Resolves the model's mass/width stage first when it has one, so the
-        gamma couplings are present regardless of what the caller supplied.
+        Reads only what it declares: the mass and the couplings, which an
+        earlier stage of the same chain produced.
         """
         d = d or {}
-        if self._mw is not None:
-            d = self._mw.forward(dict(d))
-        m0 = float(d.get(f"{self.model.name}_mass",
-                         self.model.kwargs.get("mass", 0.775)))
-        # Build BY NAME, not by zipping against ``output_names``: that list now
-        # carries the constant ``"one"`` in its positional slot, so a zip would
-        # shift every weight by one (the width would land on ``one`` and the
-        # last slot would go missing).
+        m0 = self._m0(d)
         # Emit exactly the slots THIS basis declares — no more.  A model may
         # have a gamma row for the plain-pwa path (``one`` does) while its
         # BASIS is a single constant row, so iterating ``gamma_names`` blindly
         # would invent a slot the model's basis does not have.
         out = {}
-        for slot in self.output_names:
-            if slot.endswith("_s0"):
-                out[slot] = m0 * m0
-            elif slot.endswith("_t"):
-                # ``m0·g`` for the physical coupling ``g`` (the ``_t`` name is
-                # the KERNEL-facing slot, distinct from the fit parameter)
-                out[slot] = m0 * float(d.get(slot[:-2], 0.0))
-            else:                                   # pragma: no cover
-                out[slot] = float(np.real(d.get(slot, 0.0)))
+        for slot in self._s0_slots:
+            out[slot] = m0 * m0
+        for slot, src in self._t_slots:
+            # ``m0·g`` for the coupling ``g`` (the ``_t`` name is the
+            # KERNEL-facing slot, distinct from the fit parameter)
+            out[slot] = m0 * float(d.get(src, 0.0))
+        for slot in self._pass_slots:               # pragma: no cover
+            out[slot] = float(np.real(d.get(slot, 0.0)))
         return out
+
+    def backward(self, grad_out, d_in=None):
+        """Exact VJP of ``s0 = m0²`` and ``{g}_t = m0·g``.
+
+        Both maps are trivial: ``s0`` is quadratic in the mass and linear in
+        nothing else, each weight is linear in its own coupling and in the
+        mass.  So the derivative is written down, not measured — the inherited
+        ``fd_backward`` would spend ``2·len(input_names)`` forwards per call
+        (18 on ``RhoOmegaGS``) and inject its own finite-difference noise into
+        a chain the fitter differentiates every iteration.
+
+        ``d_in`` is the declared-input dict (``Transform.apply_backward``
+        passes the ``_last_input`` saved by ``apply_forward``), so this reads
+        exactly the values :meth:`forward` used.
+        """
+        d = d_in or {}
+        m0 = self._m0(d)
+        grad = {name: 0.0 for name in self.input_names}
+        for slot in self._s0_slots:
+            g = float(grad_out.get(slot, 0.0))
+            if g:
+                grad[self.mass_name] = grad.get(self.mass_name, 0.0) + 2.0 * m0 * g
+        for slot, src in self._t_slots:
+            g = float(grad_out.get(slot, 0.0))
+            if g:
+                grad[self.mass_name] = (grad.get(self.mass_name, 0.0)
+                                        + g * float(d.get(src, 0.0)))
+                grad[src] = grad.get(src, 0.0) + g * m0
+        for slot in self._pass_slots:               # pragma: no cover
+            grad[slot] = grad.get(slot, 0.0) + float(grad_out.get(slot, 0.0))
+        return grad
 # ═══════════════════════════════════════════════════════════════════
 # Rational lineshapes: ratio of two fixed bases
 # ═══════════════════════════════════════════════════════════════════

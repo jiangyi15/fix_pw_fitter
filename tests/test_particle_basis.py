@@ -596,14 +596,21 @@ def test_amp_is_a_real_method_not_a_stale_alias():
         "amp did not follow the amp_raw override — it is a stale alias")
 
 
-def test_rho_omega_gs_basis_transform_resolves_standalone():
-    """The default basis transform must run the model's mass/width stage.
+def test_rho_omega_gs_basis_transform_consumes_the_chain():
+    """The basis transform is a CONSUMER: the chain supplies its couplings.
 
     ``RhoOmegaGS`` derives its 8 couplings ``w0..w7`` from four physical
-    parameters, so they are absent from the raw parameter dict and
-    ``apply_forward`` (which passes only declared inputs) would hand the
-    transform nothing — every weight resolved to 0 and the denominator
-    collapsed to ``m0² − m²``.
+    parameters, so they are absent from the raw dict and ``apply_forward``
+    (which passes only declared inputs) hands a transform nothing it did not
+    declare.  The basis transform therefore DECLARES them; the model's own
+    mass/width transform, registered first by
+    ``AmplitudeModel.particle_transforms``, produces them one step earlier.
+
+    It must not run that stage itself.  The hand-rolled call was not merely
+    redundant — a transform's ``forward`` returns ONLY its outputs, so the
+    merged dict lost ``{name}_mass`` and ``m0`` fell back to the config value:
+    the fitted mass silently stopped entering ``s0`` and the ``m0·g`` weights
+    (measured dQ/dm = -6.9e4 against a true -77.6).
     """
     d = {"ro_mass": 0.775, "ro_width": 0.149,
          "ro_mass2": 0.78266, "ro_width2": 0.00868}
@@ -611,11 +618,22 @@ def test_rho_omega_gs_basis_transform_resolves_standalone():
                          mass=d["ro_mass"], width=d["ro_width"],
                          mass2=d["ro_mass2"], width2=d["ro_width2"])
     tr = mdl.make_basis_transform()
-    assert list(tr.input_names) == list(d), (
-        "the basis transform must declare the PHYSICAL inputs, not w0..w7")
-    out = tr.apply_forward(dict(d))
+    mw = mdl.make_mass_width_transform()
+    assert list(tr.input_names) == ["ro_mass"] + mdl.get_gamma_name(), (
+        "the basis transform must declare the mass and the couplings it reads")
+
+    # the chain, in registration order: producer → consumer
+    phys = mw.apply_forward(dict(d))
+    out = tr.apply_forward(phys)
     w = [float(out[f"ro_w{k}_t"]) for k in range(8)]
     assert any(abs(x) > 1e-12 for x in w), "every basis weight resolved to 0"
+
+    # ... and the FITTED mass really enters: moving it moves s0 and the weights
+    moved = {**phys, "ro_mass": d["ro_mass"] * 1.01}
+    out2 = tr.apply_forward(moved)
+    assert out2["ro_s0"] != out["ro_s0"]
+    assert [out2[f"ro_w{k}_t"] for k in range(8)] != [
+        out[f"ro_w{k}_t"] for k in range(8)]
 
 
 def test_rho_omega_gs_pwa_and_basis_paths_agree():
@@ -630,3 +648,47 @@ def test_rho_omega_gs_pwa_and_basis_paths_agree():
     a_bas = np.asarray(mdl.amp(m, dict(d)), dtype=complex)
     assert np.allclose(a_pwa, a_bas, rtol=1e-12, atol=1e-14), (
         f"pwa and basis paths disagree: {a_pwa} vs {a_bas}")
+
+
+def test_plain_basis_transform_backward_is_analytic_and_exact():
+    """The default basis transform carries its own VJP, and it is exact.
+
+    ``s0 = m0²`` and ``{g}_t = m0·g`` are trivial to differentiate, so the
+    derivative is written down.  Inheriting ``fd_backward`` would cost
+    ``2·len(input_names)`` forwards per call (18 on ``RhoOmegaGS``) and inject
+    finite-difference noise into a chain the fitter differentiates every
+    iteration — which is also why an exact VJP can be checked here against
+    central differences at 1e-9 rather than at FD accuracy.
+    """
+    from tabpwa.param_constraint import Transform
+
+    d = {"ro_mass": 0.775, "ro_width": 0.149,
+         "ro_mass2": 0.78266, "ro_width2": 0.00868}
+    mdl = build_particle("ro", model="RhoOmegaGS",
+                         mass=d["ro_mass"], width=d["ro_width"],
+                         mass2=d["ro_mass2"], width2=d["ro_width2"])
+    tr = mdl.make_basis_transform()
+    assert type(tr).backward is not Transform.backward, (
+        "the default basis transform still uses the finite-difference VJP")
+
+    phys = mdl.make_mass_width_transform().apply_forward(dict(d))
+    d_in = {k: float(phys[k]) for k in tr.input_names}
+    rng = np.random.default_rng(3)
+    cot = {n: float(rng.normal()) for n in tr.output_names}
+    vjp = tr.backward(cot, d_in=d_in)
+    assert set(vjp) == set(tr.input_names)
+
+    def scalar(dd):
+        o = tr.forward(dd)
+        return sum(cot[n] * o[n] for n in tr.output_names)
+
+    for name in tr.input_names:
+        h = 1e-7 * max(1.0, abs(d_in[name]))
+        fd = (scalar({**d_in, name: d_in[name] + h})
+              - scalar({**d_in, name: d_in[name] - h})) / (2.0 * h)
+        assert abs(vjp[name] - fd) <= 1e-7 * max(abs(fd), 1.0), (
+            name, vjp[name], fd)
+
+    # both groups contribute to the mass: s0's 2·m0 and every m0·g weight
+    assert vjp["ro_mass"] != 0.0
+    assert all(vjp[f"ro_w{k}"] != 0.0 for k in range(8))

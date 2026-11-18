@@ -559,3 +559,33 @@ def test_a_model_without_a_basis_transform_fits_its_weights_directly():
     xm[i] -= 1e-6
     fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / 2e-6
     assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (grad[i], fd)
+
+
+def test_the_fitted_mass_enters_the_basis_weights():
+    """A basis transform CONSUMES its couplings; it must not re-derive them.
+
+    ``RhoOmegaGS``'s weights are ``m0²`` and ``m0·w_k``, with ``w_k`` produced
+    by the model's own mass/width stage.  The basis transform declares the mass
+    and ``w0..w7`` as inputs; the chain supplies them.  Composing that stage by
+    hand instead lost the fitted mass — a transform's ``forward`` returns only
+    its OUTPUTS, so the merged dict had no ``{name}_mass`` and ``m0`` fell back
+    to the config value (measured dQ/dm = -6.9e4 against a true -77.6).
+    """
+    d = _cfg(CFG_BASIS)
+    d["particle"]["k2"].update({"model": "RhoOmegaGS",
+                                "mass2": 0.78266, "width2": 0.00868})
+    f = _loaded(d, n_phsp=120, n_data=60)
+    names = f.free_param_names()
+    # the four physical parameters, NOT the eight couplings they produce
+    assert set(names) == {"k2_mass", "k2_width", "k2_mass2", "k2_width2"}
+    x = f.initial_values(seed=1)
+    nll, grad = f.get_nll(x)
+    assert np.isfinite(nll)
+    h = 1e-6
+    for nm in names:
+        i = names.index(nm)
+        xp, xm = x.copy(), x.copy()
+        xp[i] += h
+        xm[i] -= h
+        fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * h)
+        assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (nm, grad[i], fd)
