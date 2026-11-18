@@ -294,16 +294,12 @@ class PWAGen(PWA):
         if self._pg_kc is not None:
             return self._pg_kc
         with self._default_context():
-            # The per-BW index lists (`unique_bw`, `unique_gamma`, ...) are
-            # filled by `build_single_index`, which is the ONLY writer.  The
-            # `pwa` path reaches it through `_build_base_kernel_config`, but
-            # `PWAGen` builds from `_pg_host_records` instead and so never
-            # called it — leaving `unique_bw` EMPTY and silently collapsing
-            # every resonance into the non-generic path.  Call it first: it is
-            # idempotent (it appends only unseen ids), and without it the loop
-            # over `self.unique_bw` in `_pg_host_records` iterates nothing, so
-            # no per-BW basis/transform is ever resolved.
-            self.build_single_index()
+            # `build_single_index` is the PLAIN-PWA index builder: it emits
+            # `g0_index` / `g0_mass_index` / `gamma_table` for a kernel whose
+            # denominator is `s0 - m^2 - i*mult*gamma(m)`.  This path has no
+            # gamma table -- it reads each resonance's BASIS rows -- so it does
+            # not call it.  `_pg_host_records` derives its BW list straight
+            # from the decay tree.
             exp, mult, C, P, n_base = self._pg_host_records(
                 n_blocks=self.decay_tree.n_perm * self.decay_tree.n_cp)
             from tabpwa.pwa_gen_config import build_from_groups
@@ -319,18 +315,13 @@ class PWAGen(PWA):
         # ``ck_map`` is deliberately NOT emitted: it is derived from the same
         # expansion and ``get_ck_map()`` computes it on demand.  Including it
         # here would recurse (``get_ck_map`` -> ``build_kernel_config``).
-        m0, g0 = [], []
-        for _, ch in self.full_decay.get_partial_waves():
-            for idx, d in enumerate(ch.decays):
-                if idx != 0:
-                    nm = d.core.name + "_mass"
-                    if nm not in m0:
-                        m0.append(nm)
-                    for gn in d.core._model.get_gamma_name():
-                        if gn not in g0:
-                            g0.append(gn)
-        kc["m0_names"] = m0
-        kc["g0_names"] = g0
+        # No ``m0_names`` / ``g0_names`` here: they are the PLAIN-PWA width
+        # index, read by the pwa kernel path and its tests.  A basis path has
+        # no gamma table, and a basis-only model (``kmatrix2``) has no running
+        # width at all — asking it for ``get_gamma_name()`` was a category
+        # error (and nothing on this path reads the key).  ``kernel_params``
+        # takes the m0/g0 names from ``model.g0_phys_name``, which is empty
+        # for a pure basis config.
         try:
             from tabpwa.helicity_angle import (decay_chain_to_tree,
                                                tree_vertices, canonical_variables,
@@ -497,7 +488,7 @@ class PWAGen(PWA):
         # ``num_basis``/``den_basis``), so there is exactly one place that
         # decides the rows — the model itself.  Duplicating the default here
         # is what previously let the builder's ``-m²`` drift out of sync with
-        # ``_den_weights``' ``-1`` and silently flip every m² term.
+        # ``den_weights``' ``-1`` and silently flip every m² term.
         rows = [np.asarray(r, dtype=complex) for r in model.den_basis(grid)]
         if tr is not None:
             names = list(model.get_den_name())
@@ -558,6 +549,13 @@ class PWAGen(PWA):
         from tabpwa.particle_model.base import BasisModel
 
         models = self._pg_particle_models()
+        # the resonance of every BW factor, chain order, first occurrence —
+        # derived from the TREE, not from `unique_bw`
+        bw_names = []
+        for ch in self.full_decay.chains:
+            for dec in ch.decays[1:]:
+                if dec.core.name not in bw_names:
+                    bw_names.append(dec.core.name)
         waves = list(self.full_decay.get_partial_waves())
         n_base = len(waves)
         C = int(n_blocks or 1)
@@ -565,9 +563,18 @@ class PWAGen(PWA):
         grid, _n_min, _n_delta = self._pg_grid()
 
         # ── denominator basis per (base) unique BW ───────────────────
+        #
+        # The list is the TREE's BW factors (``decays[1:]``), in chain order —
+        # NOT ``unique_bw``.  ``unique_bw`` is a plain-pwa index keyed on
+        # ``(m_name, mass_column)``: it exists so the pwa kernel can scatter
+        # ``m0``/``g0`` onto its BW slots, and it carries a mass column this
+        # path discards.  Walking the tree directly is the same list (verified
+        # identical in order and content on the real config) without borrowing
+        # an index structure that a basis-only model cannot even populate —
+        # that is why ``build_single_index`` had to tolerate an empty gamma
+        # list just for this traversal.
         den_names, bws, any_transform = [], [], False
-        for key in self.unique_bw:
-            name = key[0][:-len("_mass")]
+        for name in bw_names:
             mdl = models[name]
             mk = getattr(mdl, "make_basis_transform", None)
             tr = mk() if mk is not None else None

@@ -13,7 +13,8 @@ import pytest
 from tabpwa.build_defaults import scope
 from tabpwa.param_constraint import CKProduct, complex_tail
 from tabpwa.particle_model import ALL_MODELS, build_particle
-from tabpwa.particle_model.base import BaseModel, BasisModel
+from tabpwa.particle_model.base import (
+    BaseModel, BasisModel, DefaultBasisModel)
 from tabpwa.particle_model.kmatrix2_model import (
     KMatrix2Model, KMatrix2WeightsTransform, M_PI as KM_PI,
 )
@@ -77,10 +78,10 @@ def test_basis_default_matches_bw_bitwise():
     params = {"r_mass": 0.775, "r_width": 0.149}
 
     bw = build_particle("r", model="BW", mass=0.775, width=0.149)
-    basis = BasisModel("r", mass=0.775, width=0.149)
+    basis = DefaultBasisModel("r", mass=0.775, width=0.149)
 
     ref = bw.amplitude_raw(m, params)
-    got = basis.amplitude_raw(m, params)
+    got = basis.amp_raw(m, params)
     assert np.array_equal(ref.view(np.float64), got.view(np.float64))
 
     # the basis decomposition is the kernel's coeff basis:
@@ -100,7 +101,7 @@ def test_basis_default_matches_bw_bitwise():
 
     # no basis transform: amplitude() == amplitude_raw()
     assert np.array_equal(
-        basis.amplitude(m, params), basis.amplitude_raw(m, params))
+        basis.amp(m, params), basis.amp_raw(m, params))
 
     # build_particle("BW", ...) is untouched and still works
     bw2 = build_particle("r", model="BW", mass=0.700, width=0.100)
@@ -111,9 +112,9 @@ def test_basis_default_matches_bw_bitwise():
 
 def test_missing_weights_use_documented_defaults():
     """Default weights: s0 = mass², poly = −1, gamma rows = mass·g0 = 0."""
-    mdl = BasisModel("r", mass=0.775, width=0.149)
+    mdl = DefaultBasisModel("r", mass=0.775, width=0.149)
     m = np.array([0.5, 0.9])
-    got = mdl.amplitude_raw(m, {})
+    got = mdl.amp_raw(m, {})
     ref = 1.0 / (0.775 ** 2 - m ** 2)
     assert np.allclose(got, ref, rtol=0, atol=0)
 
@@ -121,14 +122,14 @@ def test_missing_weights_use_documented_defaults():
 def test_denominator_weights_real_rows_complex():
     """Denominator weights are real; all i factors live in the basis rows."""
     # -- default BasisModel: kernel coeff weights [m0², −1, m0·g0] --
-    mdl = BasisModel("r", mass=0.775, width=0.149)
+    mdl = DefaultBasisModel("r", mass=0.775, width=0.149)
     m = np.linspace(0.30, 1.20, 23)
     rows = mdl.den_basis(m)
     assert all(np.iscomplexobj(r) for r in rows)
     assert any(np.any(np.imag(r) != 0) for r in rows)
-    g = mdl._den_weights({"r_mass": 0.775, "r_width": 0.149})
+    g = mdl.den_weights({"r_mass": 0.775, "r_width": 0.149})
     assert np.all(np.imag(g) == 0)
-    assert np.all(np.imag(mdl._num_weights({})) == 0)
+    assert np.all(np.imag(mdl.num_weights({})) == 0)
 
     # -- KMatrix2 at several random magnitude/phase points --
     km = _km2_model()
@@ -181,13 +182,13 @@ def test_phases_flow_through_numerator_path():
     assert np.all(np.imag([out[name] for name in mdl.get_den_name()]) == 0)
 
     # reassembled complex numerator weights
-    nw = mdl._num_weights(params)
+    nw = mdl.num_weights(params)
     assert nw[0] == pytest.approx(n0, rel=1e-14, abs=1e-15)
     assert nw[1] == pytest.approx(n1, rel=1e-14, abs=1e-15)
 
     ref = _direct_km2(m, case, m_pi=mdl.m_pi)
-    assert np.allclose(mdl.amplitude(m, params), ref, rtol=1e-12, atol=1e-14)
-    assert np.allclose(mdl.amplitude_raw(m, params), ref,
+    assert np.allclose(mdl.amp(m, params), ref, rtol=1e-12, atol=1e-14)
+    assert np.allclose(mdl.amp_raw(m, params), ref,
                        rtol=1e-12, atol=1e-14)
 
 
@@ -230,7 +231,7 @@ def test_transform_outputs_feed_ckproduct():
 
     ref = _direct_km2(m, case, m_pi=mdl.m_pi)
     assert np.allclose(amp, ref, rtol=1e-12, atol=1e-14)
-    assert np.allclose(mdl.amplitude(m, params), amp, rtol=1e-12, atol=1e-14)
+    assert np.allclose(mdl.amp(m, params), amp, rtol=1e-12, atol=1e-14)
 
 
 def test_bare_head_real_numerator_weight():
@@ -239,7 +240,7 @@ def test_bare_head_real_numerator_weight():
     m = _mass_grid(0.8, 1.35)
     params = {"k2_n0": 2.5, "k2_n1": -0.7}
 
-    nw = mdl._num_weights(params)
+    nw = mdl.num_weights(params)
     assert nw[0] == pytest.approx(2.5, rel=0, abs=0)
     assert nw[1] == pytest.approx(-0.7, rel=0, abs=0)
 
@@ -250,7 +251,7 @@ def test_bare_head_real_numerator_weight():
         den = den + resolved[name] * row
     num_rows = mdl.num_basis(m)
     amp = (2.5 * num_rows[0] - 0.7 * num_rows[1]) / den
-    assert np.allclose(mdl.amplitude_raw(m, params), amp, rtol=0, atol=0)
+    assert np.allclose(mdl.amp_raw(m, params), amp, rtol=0, atol=0)
 
 
 # ── 2. kmatrix2 amplitude == the direct formula ──────────────────────
@@ -261,7 +262,7 @@ def test_kmatrix2_matches_direct_formula(case):
     m = _mass_grid(case["m1"], case["m2"])
     params = _phys_params("k2", **case)
 
-    got = mdl.amplitude(m, params)
+    got = mdl.amp(m, params)
     ref = _direct_km2(m, case, m_pi=mdl.m_pi)
     assert np.allclose(got, ref, rtol=1e-12, atol=1e-14)
 
@@ -293,23 +294,23 @@ def test_basis_route_equals_raw_amplitude():
     assert np.all(np.imag([resolved[n] for n in mdl.get_den_name()]) == 0)
 
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(mdl._num_weights(resolved), num_rows):
+    for weight, row in zip(mdl.num_weights(resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
         den = den + resolved[name] * row
     route = num / den
 
-    raw = mdl.amplitude_raw(m, resolved)
+    raw = mdl.amp_raw(m, resolved)
     assert np.allclose(route, raw, rtol=1e-12, atol=1e-14)
-    assert np.allclose(mdl.amplitude(m, params), raw, rtol=1e-12, atol=1e-14)
+    assert np.allclose(mdl.amp(m, params), raw, rtol=1e-12, atol=1e-14)
 
 
 def test_amplitude_uses_transform_defaults_for_empty_params():
     mdl = _km2_model()
     m = _mass_grid(0.8, 0.88)
     params = {f"k2_{k}": v for k, v in mdl._phys().items()}
-    assert np.allclose(mdl.amplitude(m, {}), mdl.amplitude(m, params),
+    assert np.allclose(mdl.amp(m, {}), mdl.amp(m, params),
                        rtol=1e-14, atol=0)
 
 
@@ -407,7 +408,7 @@ def test_amplitude_gradient_chain_with_real_cotangents():
     num_rows = mdl.num_basis(m)
     den_rows = mdl.den_basis(m)
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(mdl._num_weights(resolved), num_rows):
+    for weight, row in zip(mdl.num_weights(resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
@@ -436,7 +437,7 @@ def test_amplitude_gradient_chain_with_real_cotangents():
     vjp = tr.backward(cot, d_in=dict(params))
 
     def q(x):
-        return float(np.real(np.sum(c * mdl.amplitude(m, x))))
+        return float(np.real(np.sum(c * mdl.amp(m, x))))
 
     for name in tr.input_names:
         x = float(params[name])
@@ -514,11 +515,11 @@ def test_complex_tail_scope_renames_coupling_slots():
             assert name in defaults
         params = _phys_params("k2", **case)     # follows complex_tail()
         assert "k2_b1rho" in params and "k2_b1phi" in params
-        got = mdl.amplitude(m, params)
+        got = mdl.amp(m, params)
 
     # same physical b, default-named slots → same amplitude
     ref_mdl = _km2_model()
-    ref = ref_mdl.amplitude(m, _phys_params("k2", **case))
+    ref = ref_mdl.amp(m, _phys_params("k2", **case))
     assert np.allclose(got, ref, rtol=1e-13, atol=1e-15)
 
 
@@ -535,8 +536,8 @@ def test_common_phase_is_degenerate_with_wave_coupling():
 
     mdl = _km2_model()
     m = _mass_grid(case["m1"], case["m2"])
-    a1 = mdl.amplitude(m, _phys_params("k2", **case))
-    a2 = mdl.amplitude(m, _phys_params("k2", **shifted))
+    a1 = mdl.amp(m, _phys_params("k2", **case))
+    a2 = mdl.amp(m, _phys_params("k2", **shifted))
     assert np.allclose(np.abs(a1), np.abs(a2), rtol=1e-12, atol=1e-14)
     # the shifted amplitude is the original times the common phase
     assert np.allclose(a2, np.exp(1j * alpha) * a1,

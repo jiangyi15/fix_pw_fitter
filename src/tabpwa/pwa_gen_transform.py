@@ -103,12 +103,21 @@ class PWAgenWeightsTransform(Transform):
             mdl = rec["model"]
             tr = rec["transform"]
             if tr is None:
-                raise ValueError(
-                    f"pwa_gen: '{rec['name']}' has no basis transform — every "
-                    f"model provides one (BaseModel.make_basis_transform); "
-                    f"returning None opts a model OUT and it cannot be used "
-                    f"here")
-            res = tr.apply_forward(dict(d))
+                # ``None`` is the INTERFACE default (``BasisModel``): the basis
+                # weights ARE the raw parameters, so there is nothing to
+                # derive.  That is only valid when every weight is a constant
+                # the constraint layer pins (``"one"``); a real free weight
+                # needs a transform, and THAT is an error.
+                free = [n for n in rec["den_names"] if n != "one"]
+                if free:
+                    raise ValueError(
+                        f"pwa_gen: '{rec['name']}' declares free denominator "
+                        f"weights {free} but returns no basis transform — a "
+                        f"model whose weights are parameters must provide one "
+                        f"(make_basis_transform)")
+                res = {}
+            else:
+                res = tr.apply_forward(dict(d))
             # ``"one"`` is the constant m² coefficient (the row is ``-m²``),
             # so THIS transform supplies it directly rather than expecting the
             # per-resonance transform to produce a parameter-independent value
@@ -124,55 +133,9 @@ class PWAgenWeightsTransform(Transform):
                 for n in mdl.num_slot_names():
                     out[n] = float(np.real(res[n]))
             else:                                   # pragma: no cover
-                for head, w in zip(mdl.get_num_name(), mdl._num_weights(d)):
+                for head, w in zip(mdl.get_num_name(), mdl.num_weights(d)):
                     out[f"{head}{mag}"] = float(abs(w))
                     out[f"{head}{phase}"] = float(np.angle(w))
         return out
 
 
-class DefaultBasisWeightsTransform(Transform):
-    """Physical parameters → the basis weights of ANY resonance model.
-
-    Every model is a ratio of two fixed bases (``BaseModel.num_basis`` /
-    ``den_basis``), so its weights are a function of the physical parameters
-    and can be published as transform OUTPUTS.  That is what makes
-    ``pwa_gen`` fit *physics* instead of one free weight per basis row.
-
-    ``input_names`` are the physical ``{name}_mass`` plus the gamma couplings;
-    ``output_names`` are exactly :meth:`get_den_name` (the kernel ``coeff``
-    names), so the names always match the rows the builder emitted.
-
-    The default basis is ``[1, m², -i·γ_j(m)]`` with weights
-    ``[m0², -1, m0·g_j]`` — the plain BW denominator.  A model that overrides
-    ``den_basis`` **must** override this too (``kmatrix2`` and
-    ``RhoOmegaGS`` do); the base class cannot derive an arbitrary basis'
-    weights from ``m0``/``g``.
-    """
-
-    _has_inverse = False
-
-    def __init__(self, model):
-        self.model = model
-        name = model.name
-        self.gamma_names = list(model.get_gamma_name())
-        self.input_names = [f"{name}_mass"] + list(self.gamma_names)
-        # ``"one"`` is a CONSTANT (the m² coefficient, always +1) — it is not a
-        # function of the physical parameters, so it is not a transform output.
-        # The constraint layer pins it (`set_fixed`), the same mechanism that
-        # pins any other fixed parameter.
-        self.output_names = [n for n in model.get_den_name() if n != "one"]
-
-    def forward(self, d):
-        """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights."""
-        d = d or {}
-        m0 = float(d.get(f"{self.model.name}_mass",
-                         self.model.kwargs.get("mass", 0.775)))
-        # ``"one"`` is pinned by the constraint layer, not produced here.
-        vals = [m0 * m0]
-        # Each gamma row's weight is ``m0·g`` and is named ``{g}_t`` — the
-        # kernel-facing slot, DISTINCT from the physical fit parameter ``{g}``.
-        # Emitting the fit name here would make the transform overwrite its
-        # own input (`apply_forward` replaces `output_names` in the resolved
-        # dict), losing the physical coupling.
-        vals += [m0 * float(d.get(g, 0.0)) for g in self.gamma_names]
-        return dict(zip(self.output_names, vals))

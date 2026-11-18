@@ -81,7 +81,7 @@ real slots:
   fixed.  A *real* numerator weight may be supplied as one parameter
   named exactly the head (no exponential applied).
 
-:meth:`KMatrix2Model._num_weights` reassembles
+:meth:`KMatrix2Model.num_weights` reassembles
 ``n_i = mag·exp(i·phase)`` from the real slots (or uses a bare head
 directly); only the amplitude is complex.
 
@@ -330,12 +330,12 @@ class KMatrix2Model(BasisModel):
         resolved.update({n: params[n] for n in names if n in params})
         return resolved
 
-    def _den_weights(self, params):
+    def den_weights(self, params):
         """Denominator weights — real (unitarity); coerced to float."""
         r = self._resolved(params)
         return [float(np.real(r[n])) for n in self.get_den_name()]
 
-    def _num_weights(self, params):
+    def num_weights(self, params):
         """Reassemble the complex numerator weights from the real slots.
 
         Each head ``h`` is read as the expanded pair

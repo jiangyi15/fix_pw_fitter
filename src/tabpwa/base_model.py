@@ -232,7 +232,16 @@ class BaseModel:
         m, m0, dm = self.gamma_grid(n_interp)
         for chain in self.full_decay.chains:
             for decay in chain.decays[1:]:
-                g0 = decay.core._model.get_gamma_name()
+                # Guarded once, up front, in ``_build_base_kernel_config``
+                # (which refuses a basis-only model BEFORE reaching this point,
+                # with a message naming ``amp_model: pwa_gen``).  A direct
+                # caller of this method can still hit an empty list; the
+                # ``getattr`` keeps that a clean ``IndexError``-free skip
+                # rather than a second, divergent error message.
+                gn = getattr(decay.core._model, "get_gamma_name", None)
+                g0 = gn() if gn is not None else []
+                if not g0:
+                    continue
                 if g0[0] not in gamma_table:
                     gamma = decay.core._model.gamma(m)
                     for i,j in zip(g0, gamma):
@@ -611,8 +620,14 @@ class BaseModel:
         for key in self.unique_gamma:
             g0_index.append(self.g0_phys_name.index(key[0]))
             g0_mass_index.append(key[1])
-        ret["g0_mass_index"] = np.stack(g0_mass_index)
-        ret["g0_index"] = np.stack(g0_index)
+        # Both lists are empty together (they are filled from the same
+        # ``unique_gamma``), so tolerating only one was incoherent.  The
+        # plain-pwa format's requirement is enforced up front in
+        # ``_build_base_kernel_config``, which refuses a basis-only model with
+        # a message naming ``amp_model: pwa_gen``.
+        empty_g = np.zeros(0, np.int32)
+        ret["g0_mass_index"] = np.stack(g0_mass_index) if g0_mass_index else empty_g
+        ret["g0_index"] = np.stack(g0_index) if g0_index else empty_g
         # one table row per unique barrier variant (get_id), indexed by fl_type
         unique_forms = []
         for key in self.unique_fl:
@@ -668,6 +683,21 @@ class BaseModel:
         n_perm, n_cp, C = row_block_factors(self.dic)
         # loop and shift based on block (single generic base; blocks only
         # for declared identical/CP partners; pure PWA -> C == 1).
+        # The plain-pwa kernel format is `s0 - m^2 - i*mult*gamma(m)` with the
+        # m^2 coefficient FIXED, so every resonance must supply a running
+        # width.  A basis-only model has none by design and states its
+        # denominator as a BASIS — it belongs to `amp_model: pwa_gen`.  Refuse
+        # it here, before `build_single_index` trips over the empty gamma list.
+        no_width = sorted({dec.core.name for ch in self.full_decay.chains
+                           for dec in ch.decays[1:]
+                           if not getattr(dec.core._model, "get_gamma_name",
+                                          lambda: [])()})
+        if no_width:
+            raise ValueError(
+                f"the plain-pwa kernel format requires a running width for "
+                f"every resonance, but {no_width} declare none (basis-only "
+                f"models).  Use `amp_model: pwa_gen`, which reads their "
+                f"denominator basis instead.")
         base = self.build_single_index()
         ck = self.full_decay.get_partial_waves_params()
         P = base.get("n_proj_base", 1) or 1

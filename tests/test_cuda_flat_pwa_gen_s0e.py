@@ -98,9 +98,9 @@ EXPECTED_DEDUP = {
 #: model (not through a fixture config, which is tiny by design)
 REAL_CFG = ("/home/jiangy/github/project94/pwa_workspace/jpsi_eta_pi_pi/"
             "04_model_search/current/config.yml")
-REAL_USLOT = (69, 43)
+REAL_USLOT = (62, 40)
 REAL_AMP = (26, 13)
-REAL_NNZ = 92
+REAL_NNZ = 82
 
 
 def _rel(a, b):

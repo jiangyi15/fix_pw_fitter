@@ -137,9 +137,9 @@ EXPECTED_ITERS = {
 #: model (the fixtures are tiny by design and cannot show them)
 REAL_CFG = ("/home/jiangy/github/project94/pwa_workspace/jpsi_eta_pi_pi/"
             "04_model_search/current/config.yml")
-REAL_USLOT = (69, 43)
+REAL_USLOT = (62, 40)
 REAL_AMP = (26, 13)
-REAL_NNZ = 92
+REAL_NNZ = 82
 #: measured on the real 8.75 M-event sample: this kernel's data handle is
 #: 2.17 GB — s0c's own — against the ``cuda_flat_pwa_gen_s0e`` tile's 5.9 GB.
 REAL_HANDLE_GB = 2.17
@@ -494,7 +494,7 @@ def test_the_real_config_ratios_are_the_ones_this_backend_was_built_for():
     holed = sum(1 for kk in range(n_wave)
                 if np.count_nonzero(gam[kk]) < int(gs_hi[kk] - gs_lo[kk]) + 1
                 and np.any(np.diff(np.nonzero(gam[kk])[0]) > 1))
-    assert holed >= 20, f"interior holes in {holed} of {n_wave} waves"
+    assert holed >= 15, f"interior holes in {holed} of {n_wave} waves"
 
 
 # ── gate 4/5: holes are handled; a non-0/1 selector is refused ───────

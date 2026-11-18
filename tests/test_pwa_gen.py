@@ -130,9 +130,35 @@ def test_shapes_agree():
         assert len(kc["den_names"]) == n_basis
 
 
+def test_a_basis_only_model_is_refused_by_the_plain_pwa_path():
+    """``kmatrix2`` cannot be expressed in the plain-``pwa`` kernel format.
+
+    That format's denominator is ``s0 − m² − i·mult·γ(m)`` with the ``m²``
+    coefficient FIXED, so a resonance with no running width has no
+    representation.  Before the basis split it silently inherited
+    ``gamma() = [1]`` and computed a Breit-Wigner instead of its K-matrix
+    shape — a wrong answer with no error anywhere.  It must now be refused,
+    and the message must name the path that CAN express it.
+    """
+    with pytest.raises(ValueError, match="basis-only"):
+        Fitter(_cfg(CFG_KM, amp_model="pwa"))
+    # ... and the same config is fine on the basis path
+    f = Fitter(_cfg(CFG_KM, amp_model="pwa_gen"))
+    assert "basis_table" in f.kernel_config
+
+
 def test_plain_pwa_has_no_flat_keys():
-    """A plain ``pwa`` config is untouched by the pwa_gen vocabulary."""
-    kc = Fitter(_cfg(CFG_KM, amp_model="pwa")).kernel_config
+    """A plain ``pwa`` config is untouched by the pwa_gen vocabulary.
+
+    Uses ``CFG_BASIS`` (a plain ``model: basis`` resonance, which HAS a
+    running width).  ``CFG_KM`` would be wrong here: its ``kmatrix2`` is a
+    BASIS-ONLY model, and the plain-``pwa`` kernel format — whose denominator
+    is ``s0 − m² − i·mult·γ(m)`` with the ``m²`` coefficient fixed — cannot
+    express a denominator stated as a basis.  That combination is refused
+    up front (see ``test_a_basis_only_model_is_refused_by_the_plain_pwa_path``)
+    rather than silently given ``gamma()=[1]``.
+    """
+    kc = Fitter(_cfg(CFG_BASIS, amp_model="pwa")).kernel_config
     # the flat-only vocabulary is absent; the plain ``pwa`` kernel keeps its
     # own ``fl_table`` (a single (n_forms, n_interp) table) and
     # ``matrix_angle``, which is a different key with a different shape.

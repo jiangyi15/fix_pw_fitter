@@ -247,7 +247,11 @@ class Fitter:
                 if mid in seen:
                     continue
                 seen.add(mid)
-                tfm = model.make_mass_width_transform()
+                # A basis-only model (``BasisModel`` without ``BaseModel``)
+                # has no mass/width concept, so it does not define this at
+                # all — the same "no transform" outcome as returning None.
+                mwt = getattr(model, "make_mass_width_transform", None)
+                tfm = mwt() if mwt is not None else None
                 if tfm is not None:
                     transforms.append(tfm)
         extra = getattr(self.model, "extra_transforms", None)

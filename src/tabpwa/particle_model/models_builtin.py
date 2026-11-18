@@ -141,19 +141,86 @@ class LinearShapeModel(FixedShapeModel):
 
 @register_model("one")
 class OneModel(BaseModel):
-    """Constant ``K``-matrix like parametrisation.
+    """Constant amplitude, described to BOTH kernel families.
 
-    Returns the Gamma value that makes
-    ``1 = 1/(m0**2 - m**2 - i m0 g0 Gamma)``
+    The amplitude is exactly ``1`` — a ``K``-matrix-like reference channel
+    with no mass dependence.  A model describes its lineshape through two
+    **parallel** interfaces, and the two backends read different ones:
 
-    Mass and width are both fixed (``_FixMassWidthTransform``),
-    so no physical defaults needed.
+    * ``gamma()`` / ``get_gamma_name()`` — the legacy running-width form,
+      read by the plain ``pwa`` family (``build_single_index`` →
+      ``g0_index`` / ``g0_mass_index`` / ``gamma_table``).  Its denominator
+      format is ``m0² − m² − i·m0·g0·γ(m)`` with the ``m²`` coefficient
+      fixed at ``−1``, so a constant denominator is only expressible by
+      choosing ``γ(m) = i(1 − m0² + m²)/(m0·g0)`` to cancel the other two
+      terms.
+    * ``den_basis()`` / ``get_den_name()`` — the basis form, read by
+      ``pwa_gen``.  Here a constant is stated directly as ONE row::
+
+          den_basis = [ 1 ]          weight = "one" = +1
+
+      so ``A = n / D = 1 / (1·1) = 1`` in a single term, with no
+      cancellation and no divide.
+
+    Neither interface replaces the other: they are two descriptions of the
+    same lineshape for two consumers, and both are required.  ``gamma``
+    cannot be dropped (the ``pwa`` path allocates one gamma row per
+    resonance and ``np.stack`` raises on a wave with none — ten waves of
+    ``tests/config_pwa.yml`` use this model), and ``den_basis`` cannot be
+    left at the inherited default (that would give ``D = m0² − m²``, i.e. a
+    Breit-Wigner instead of a constant).
+
+    Mass and width are fixed by ``_FixMassWidthTransform`` so a config that
+    names them keeps working; they only enter via ``gamma``.
     """
 
     def get_defaults(self):
         return {}
 
+    # -- the basis -------------------------------------------------
+
+    def den_basis(self, m):
+        """The single constant row ``[1]`` — the ``pwa_gen`` description.
+
+        The inherited default would compose ``[1, −m², −i·γ…]`` from
+        :meth:`gamma`, giving ``D = m0² − m²`` (a Breit-Wigner).  A constant
+        needs no rows beyond ``1``, so it is stated directly.
+
+        ``"one"`` is the shared, fixed (+1) weight — the same literal every
+        other model uses for its constant row, so the builder folds this row
+        into the SAME coefficient slot rather than creating one per
+        resonance.
+        """
+        m_arr = np.asarray(m, dtype=float)
+        return [np.ones_like(m_arr, dtype=complex)]
+
+    def get_den_name(self):
+        """One weight, the shared ``"one"``."""
+        return ["one"]
+
+    def den_weights(self, params):
+        """``D = 1`` exactly — the constant row's weight is +1."""
+        return [1.0]
+
     def gamma(self, m):
+        """The running-width row for the **plain ``pwa``** path.
+
+        ``gamma(m) = i·(1 − m0² + m²)/(m0·g0)``, the row that makes that
+        format's denominator ``m0² − m² − i·m0·g0·γ`` equal exactly 1.
+
+        The plain-``pwa`` kernel format fixes the ``m²`` coefficient at
+        ``−1``, so a constant amplitude is reachable ONLY through a gamma row
+        that cancels the ``m0² − m²`` part; there is no "no running width"
+        spelling (the path allocates one gamma row per resonance and
+        ``np.stack`` raises on a wave with none).  This is a parallel
+        description to :meth:`den_basis`, not a leftover: ``pwa_gen`` reads
+        the basis and ignores this, ``pwa`` reads this and never calls
+        ``den_basis``.
+
+        ``get_bw_params()`` reports a meaningless peak for this model because
+        the denominator has no zero on the real axis — a property of the
+        model, not of either interface.
+        """
         m0 = self.kwargs["mass"]
         g0 = self.kwargs.get("width", 1.0)
         return [1j * (1 - m0**2 + m**2) / m0 / g0]
@@ -164,6 +231,13 @@ class OneModel(BaseModel):
             mass_default=self.kwargs.get("mass", 0.775),
             width_default=self.kwargs.get("width", 1.0),
         )
+
+    # ``make_basis_transform`` is NOT overridden.  The inherited
+    # ``PlainBasisWeightsTransform`` derives its outputs from
+    # ``get_den_name()`` minus ``"one"`` — which is empty here — so it already
+    # declares this model to have no free basis weights.  ``pwa_gen``'s
+    # combined transform supplies the constant ``"one"`` itself, so nothing is
+    # missing.  (Returning ``None`` would instead OPT THE MODEL OUT.)
 
 
 # ── Coupled-channel Flatté ───────────────────────────────────────
