@@ -258,11 +258,8 @@ def build_from_groups(model, n_interp=None):
                 # sign of the m² row therefore lives in the ROW, not in a
                 # consumer-side flip: `den_basis` decides it and the weight
                 # for that row is the shared literal ``"one"`` (fixed to 1).
-                # The old encoding overrode row 1 with ``-m²`` and
-                # `FlatKernelParams._m2_rows()` then negated its weight by
-                # SNIFFING the row value — two compensations that had to stay
-                # in sync, and a `+m²` row from a model silently got the
-                # wrong sign.
+                # Flipping one side without the other silently reverses every
+                # m² term.
                 kind = j
                 val = np.asarray(g, complex)
                 key = (str(names[j]), int(kind), col)

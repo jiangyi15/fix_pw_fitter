@@ -9,8 +9,18 @@ ALL_MODELS = {}
 
 
 def register_model(name):
-    """Decorator: register a particle model class under `name`."""
+    """Decorator: register a particle model class under `name`.
+
+    The class must subclass :class:`BasisModel`: every consumer (the
+    amplitude models, the builders, the backends) assumes the basis protocol
+    is available, so a model outside the interface would fail later and
+    further away.  `BaseModel` is the interface's default implementation.
+    """
     def _f(cls):
+        if not issubclass(cls, BasisModel):
+            raise TypeError(
+                f"particle model {cls.__name__} must subclass BasisModel "
+                f"(or BaseModel, its default implementation)")
         ALL_MODELS[name] = cls
         return cls
     return _f
@@ -309,6 +319,15 @@ class BaseModel(BasisModel):
     def get_gamma_name(self):
         return [f"{self.name}_width"]
 
+    def get_bw_param_names(self):
+        """Candidate parameter names for :meth:`get_bw_params`.
+
+        The physical mass plus the running-width slots.  A model with a width
+        parameter that is not one of ``get_gamma_name()`` overrides this
+        (``ck_matrix_v2`` adds its standalone width).
+        """
+        return [f"{self.name}_mass"] + list(self.get_gamma_name())
+
     def register_parent(self, particle):
         """Store the Particle that owns this model (for decay tree access)."""
         self._parent = particle
@@ -342,12 +361,13 @@ class BaseModel(BasisModel):
 
         Default: the kernel's uniform coefficient basis::
 
-            [ 1 , m² , −i·γ_1(m) , … , −i·γ_k(m) ]
+            [ 1 , −m² , −i·γ_1(m) , … , −i·γ_k(m) ]
 
         with the gamma rows from :meth:`gamma`.  Combined with the default
-        weights ``[m0², −1, m0·g0_1, …]`` (see :meth:`get_den_name` and
+        weights ``[m0², +1, m0·g0_1, …]`` (see :meth:`get_den_name` and
         :meth:`den_weights`) the sum is exactly the kernel denominator
-        ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.
+        ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.  The minus sign lives in the ROW,
+        so the shared ``"one"`` weight is ``+1``.
         """
         m_arr = np.asarray(m, dtype=float)
         # ``-m²`` here, so its weight is exactly the SHARED ``"one"`` = +1 and
@@ -580,8 +600,8 @@ class PlainBasisWeightsTransform(Transform):
     A model whose basis weights are NOT ``m0 · coupling`` must override this
     with its own basis transform — ``kmatrix2`` does.
 
-    The default basis is ``[1, m², -i·γ_j(m)]`` with weights
-    ``[m0², -1, m0·g_j]`` — the plain BW denominator.  A model that overrides
+    The default basis is ``[1, −m², −i·γ_j(m)]`` with weights
+    ``[m0², +1, m0·g_j]`` — the plain BW denominator.  A model that overrides
     ``den_basis`` **must** override this too.  ``kmatrix2`` does.  The base
     class cannot derive an arbitrary basis' weights from ``m0``/``g``.
 
@@ -628,6 +648,14 @@ class PlainBasisWeightsTransform(Transform):
         # by a registration change.  Calling the stage here also means the
         # inputs are always the PHYSICAL ones, which is what
         # ``make_basis_transform()`` promises.
+        if not isinstance(model, BaseModel):
+            # Cross-interface test of the allowed kind: this class is
+            # ``BaseModel``'s default mapping and calls its running-width
+            # stage.  A ``BasisModel`` must supply its own mapping (or None).
+            raise TypeError(
+                f"PlainBasisWeightsTransform is BaseModel's default basis "
+                f"transform; {type(model).__name__} subclasses BasisModel and "
+                f"must return its own from make_basis_transform()")
         stage = model.make_mass_width_transform()
         produced = set(stage.output_names) if stage is not None else set()
         self._derived = [c for c in couplings if c in produced]

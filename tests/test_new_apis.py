@@ -1023,3 +1023,40 @@ def test_discover_groups_merge_preserves_labels():
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+def test_fitter_bw_params_delegates_to_the_amplitude_model():
+    """The Fitter holds no particle protocol (Class policy rule 5).
+
+    The amplitude model supplies both halves — the parameter names the pole
+    depends on and the pole itself — so a model whose width slot is not a
+    gamma name (``ck_matrix_v2``) needs an override, not a branch in the
+    Fitter.
+    """
+    from types import SimpleNamespace
+
+    f = Fitter("tests/config_pwa_gen.yml")
+    f.apply_constrains()
+    x = f.initial_values(seed=1)
+    res = SimpleNamespace(x=x, hess_inv=np.eye(x.size))
+
+    name = "k2"
+    bw = f.get_bw_params(name, res)
+    assert set(bw) == {"mass_bw", "width_bw", "mass_bw_err",
+                       "width_bw_err", "mass_width_cov"}
+    assert bw["width_bw"] > 0 and bw["mass_bw_err"] >= 0
+
+    # ... and it is the MODEL's answer, not a second implementation here
+    mdl = f.model.particle_model(name)
+    ref = mdl.get_bw_params(f.build_params(x)[1])
+    assert bw["mass_bw"] == pytest.approx(ref["mass_bw"], rel=1e-12)
+    assert bw["width_bw"] == pytest.approx(ref["width_bw"], rel=1e-12)
+    assert mdl.get_bw_param_names()[0] == f"{name}_mass"
+
+
+def test_fitter_bw_params_refuses_a_basis_only_model():
+    """No running width ⇒ no pole: say so, don't AttributeError."""
+    f = Fitter("tests/config_pwa_gen_km.yml")
+    f.apply_constrains()
+    with pytest.raises(ValueError, match="no Breit-Wigner pole"):
+        f.model.particle_bw_params("k2", {})

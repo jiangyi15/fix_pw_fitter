@@ -2342,8 +2342,9 @@ class Fitter:
     def get_bw_params(self, particle_name, fit_result):
         """BW peak mass and width for a single resonance from fit result.
 
-        Calls ``model.get_bw_params()`` with the best-fit mass and width
-        values for the given particle.  Computes 1σ uncertainties via
+        The AMPLITUDE MODEL supplies both halves — which parameters the pole
+        depends on and the pole itself (``particle_bw_params``) — so this
+        method holds no particle protocol.  Computes 1σ uncertainties via
         :meth:`cal_uncertainties`.
 
         Args:
@@ -2357,29 +2358,14 @@ class Fitter:
         """
         import numpy as np
 
-        # --- 1. Find the particle model ---
-        model = self.get_particle_model(particle_name)
-
-        # --- 2. Collect parameter names and build fit dict ---
+        # --- 1. The AMPLITUDE MODEL owns the particle protocol ---
         _, resolved = self.build_params(fit_result.x)
-        param_names = []
-        mass_name = f"{particle_name}_mass"
-        if mass_name in resolved:
-            param_names.append(mass_name)
-        for gname in model.get_gamma_name():
-            if gname in resolved:
-                param_names.append(gname)
-        # Also collect standalone width param (ck_matrix_v2 — not in gamma names)
-        width_name = f"{particle_name}_width"
-        if width_name in resolved and width_name not in param_names:
-            param_names.append(width_name)
+        bw_fun, param_names = self.model.particle_bw_params(
+            particle_name, resolved)
         if not param_names:
             raise ValueError(f"No fitted parameters found for '{particle_name}'")
 
-        # --- 3. BW params and covariance via cal_uncertainties_multi ---
-        def bw_fun(d):
-            bw = model.get_bw_params(d)
-            return [bw["mass_bw"], bw["width_bw"]]
+        # --- 2. BW params and covariance via cal_uncertainties_multi ---
         vals, cov = self.cal_uncertainties_multi(bw_fun, param_names, fit_result)
 
         return {"mass_bw": vals[0], "width_bw": vals[1],

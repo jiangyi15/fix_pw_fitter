@@ -396,6 +396,14 @@ class CKMatrixModelV2(BaseModel):
     def get_gamma_name(self):
         return list(self._g_names)
 
+    def get_bw_param_names(self):
+        """``mass`` + channel couplings + the standalone width slot.
+
+        ``get_gamma_name()`` names the reduced channels here, so the width
+        parameter the pole depends on is not among them.
+        """
+        return super().get_bw_param_names() + [f"{self.name}_width"]
+
     def gamma(self, m):
         """Gamma functions: M_ab(m)/M_00(m₀) for each reduced channel."""
         return _gamma_functions(m, self.x_table, self.M_table,

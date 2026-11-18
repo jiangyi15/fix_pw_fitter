@@ -230,16 +230,18 @@ class BaseModel:
     def build_gamma_table(self, n_interp=None):
         gamma_table = {}
         m, m0, dm = self.gamma_grid(n_interp)
+        from .particle_model.base import BaseModel as ParticleBaseModel
         for chain in self.full_decay.chains:
             for decay in chain.decays[1:]:
-                # Guarded once, up front, in ``_build_base_kernel_config``
-                # (which refuses a basis-only model BEFORE reaching this point,
-                # with a message naming ``amp_model: pwa_gen``).  A direct
-                # caller of this method can still hit an empty list; the
-                # ``getattr`` keeps that a clean ``IndexError``-free skip
-                # rather than a second, divergent error message.
-                gn = getattr(decay.core._model, "get_gamma_name", None)
-                g0 = gn() if gn is not None else []
+                # Only a ``BaseModel`` has a running width; a basis-only model
+                # (``kmatrix2``) legitimately has none, and that is a property
+                # of the INTERFACE it implements — not something to probe for.
+                # The refusal happens once, up front, in
+                # ``_build_base_kernel_config``.
+                mdl = decay.core._model
+                if not isinstance(mdl, ParticleBaseModel):
+                    continue
+                g0 = mdl.get_gamma_name()
                 if not g0:
                     continue
                 if g0[0] not in gamma_table:
@@ -688,10 +690,11 @@ class BaseModel:
         # width.  A basis-only model has none by design and states its
         # denominator as a BASIS — it belongs to `amp_model: pwa_gen`.  Refuse
         # it here, before `build_single_index` trips over the empty gamma list.
+        from .particle_model.base import BaseModel as ParticleBaseModel
         no_width = sorted({dec.core.name for ch in self.full_decay.chains
                            for dec in ch.decays[1:]
-                           if not getattr(dec.core._model, "get_gamma_name",
-                                          lambda: [])()})
+                           if not isinstance(dec.core._model, ParticleBaseModel)
+                           or not dec.core._model.get_gamma_name()})
         if no_width:
             raise ValueError(
                 f"the plain-pwa kernel format requires a running width for "

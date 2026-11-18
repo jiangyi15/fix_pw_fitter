@@ -178,12 +178,10 @@ class AmplitudeModel(BaseModel):
         """Resolved ↔ kernel parameter transform for this model.
 
         The model owns the transform's constructor input, so callers only
-        see the returned object.  A transform that also needs the built
-        kernel config (the flat ``pwa_gen`` one) sets
-        ``params_transform_wants_config = True``.
+        see the returned object.  A transform that also needs the built kernel
+        config writes its own override (``PWAGen``) instead of setting a flag
+        the base would have to know about.
         """
-        if getattr(self, "params_transform_wants_config", False):
-            return self.params_transform_cls(self, self.build_kernel_config())
         return self.params_transform_cls(self)
 
     def particle_model(self, name):
@@ -197,6 +195,34 @@ class AmplitudeModel(BaseModel):
                 if decay.core.name == name:
                     return decay.core._model
         raise ValueError(f"Particle '{name}' not found in config")
+
+    def particle_bw_params(self, name, resolved):
+        """``(bw_fun, param_names)`` for a Breit-Wigner pole report.
+
+        The ``Fitter`` reports a pole and its error but must not know a
+        particle model's protocol: the model says which parameters enter the
+        report (:meth:`~tabpwa.particle_model.base.BaseModel.get_bw_param_names`)
+        and computes the pole itself (``get_bw_params``).  Names absent from
+        *resolved* are dropped HERE, once, so no model has to remember the
+        filter or its own width-name convention.
+        """
+        from tabpwa.particle_model.base import BaseModel as ParticleBaseModel
+        mdl = self.particle_model(name)
+        if not isinstance(mdl, ParticleBaseModel):
+            raise ValueError(
+                f"'{name}' has no Breit-Wigner pole: "
+                f"{type(mdl).__name__} states its denominator as a basis and "
+                f"has no running width to solve")
+        names = [n for n in mdl.get_bw_param_names() if n in resolved]
+
+        def bw_fun(d, mdl=mdl):
+            # the FITTER differentiates a real 2-vector; the model answers
+            # with a dict, so the pair is unpacked here — the protocol stays
+            # on this side of the boundary
+            bw = mdl.get_bw_params(d)
+            return [bw["mass_bw"], bw["width_bw"]]
+
+        return bw_fun, names
 
     def particle_defaults(self):
         """``{param: default}`` from every particle model, deduplicated.
@@ -330,13 +356,15 @@ class PWAGen(PWA):
     # ``FlatKernelParams`` needs the built config (it reads basis_table /
     # den_names to shape the flat coeff vector)
     params_transform_cls = FlatKernelParams
-    params_transform_wants_config = True
+
+    def build_params_transform(self):
+        """``FlatKernelParams`` reads the built config (basis_table / den_names)."""
+        return self.params_transform_cls(self, self.build_kernel_config())
 
     def __init__(self, config):
         super().__init__(config)
         self._pg_kc = None            # cached kernel config
         self._pg_combs = None         # expanded ck combinations (pre-block)
-        self._pg_den_names = []       # per base BW: denominator weight names
         self._pg_bws = []             # per base BW: {name, model, transform, …}
 
     # ── kernel config ────────────────────────────────────────────────
@@ -361,8 +389,9 @@ class PWAGen(PWA):
             # gamma table -- it reads each resonance's BASIS rows -- so it does
             # not call it.  `_pg_host_records` derives its BW list straight
             # from the decay tree.
-            exp, mult, C, P, n_base = self._pg_host_records(
+            comb_exp, C, P = self._pg_host_records(
                 n_blocks=self.decay_tree.n_perm * self.decay_tree.n_cp)
+            self._pg_combs = comb_exp
             from tabpwa.pwa_gen_config import build_from_groups
             kc = build_from_groups(self)
         # ── host metadata (names / counts, no kernel arrays) ────────
@@ -511,71 +540,32 @@ class PWAGen(PWA):
         that factor; a factor without a free numerator basis contributes
         ``heads=()`` and a single constant row.
         """
-        from tabpwa.particle_model.base import BasisModel
-
-        # factor order along the chain == bw_order order (decays[1:])
+        # factor order along the chain == bw_order order (decays[1:]).
+        # Every registered particle model is a ``BasisModel`` — `register_model`
+        # enforces it — so the numerator protocol is always available; there is
+        # no "is it a basis model" test to make here.
         out = []
         for slot, decay in enumerate(chain.decays[1:]):
             mdl = decay.core._model
-            heads, rows = [], [None]
-            if isinstance(mdl, BasisModel):
-                heads = list(mdl.get_num_name())
-                if heads:
-                    if mdl.make_basis_transform() is None:
-                        raise ValueError(
-                            f"pwa_gen: particle model '{mdl.name}' declares "
-                            f"numerator weights {heads} but no basis "
-                            f"transform — the weights would never be resolved")
-                    n_rows = len(mdl.num_basis(np.zeros(1)))
-                    if n_rows != len(heads):
-                        raise ValueError(
-                            f"pwa_gen: '{mdl.name}' has {len(heads)} numerator "
-                            f"weight names but {n_rows} num_basis rows")
-                    rows = [lambda m, mdl=mdl, i=i: np.asarray(
-                        mdl.num_basis(m)[i], dtype=complex)
-                        for i in range(len(heads))]
+            heads = list(mdl.get_num_name())
+            rows = [None]
+            if heads:
+                if mdl.make_basis_transform() is None:
+                    raise ValueError(
+                        f"pwa_gen: particle model '{mdl.name}' declares "
+                        f"numerator weights {heads} but no basis "
+                        f"transform — the weights would never be resolved")
+                n_rows = len(mdl.num_basis(np.zeros(1)))
+                if n_rows != len(heads):
+                    raise ValueError(
+                        f"pwa_gen: '{mdl.name}' has {len(heads)} numerator "
+                        f"weight names but {n_rows} num_basis rows")
+                rows = [lambda m, mdl=mdl, i=i: np.asarray(
+                    mdl.num_basis(m)[i], dtype=complex)
+                    for i in range(len(heads))]
             out.append({"slot": slot, "name": decay.core.name,
                         "heads": heads, "rows": rows})
         return out
-
-    def _pg_chain_rows(self, chain):
-        """Numerator-row combinations of a chain (count = its wave expansion).
-
-        Compatibility view over :meth:`_pg_chain_factors`: the kernel lays the
-        numerator out per (wave, factor) like ``bw_order``, but a chain still
-        expands into the product of its factors' free rows, and that product
-        is what this returns (one entry per combination).
-        """
-        import itertools
-
-        facs = [f for f in self._pg_chain_factors(chain)
-                if f["heads"] and f["rows"]]
-        if not facs:
-            return []
-        out = []
-        for combo in itertools.product(*[[rf for rf in f["rows"]] for f in facs]):
-            heads = tuple(h for f, rf in zip(facs, combo)
-                          for h in [f["heads"][f["rows"].index(rf)]])
-            out.append((heads, combo))
-        return out
-
-    def _pg_factor_mass_column(self, chain, slot):
-        """Mass column of one BW factor of *chain* (its own resonance).
-
-        ``slot`` indexes the factor in ``bw_order`` order (``decays[1:]``).
-        Unlike a chain-wide column, this lets two numerator-bearing
-        resonances on one chain read two different masses.
-        """
-        decay = chain.decays[1 + slot]
-        name = decay.core.name
-        m_name = f"{name}_mass"
-        for b, key in enumerate(self.unique_bw):
-            if key[0] == m_name:
-                return int(self._pg_base_mass_index[b])
-        # no BW slot for this factor (a constant/contact term): its own mass
-        # column is still the right argument, taken from the base table
-        raise ValueError(
-            f"pwa_gen: numerator factor '{name}' has no Breit-Wigner slot")
 
     def _pg_den_basis(self, name, model, grid):
         """``(weight names, finished rows G_j)`` of a resonance denominator.
@@ -622,8 +612,8 @@ class PWAGen(PWA):
         A ``pwa_gen`` model needs, independently of which arrays a kernel
         reads:
 
-        * ``_pg_den_names`` / ``_pg_bws`` — the per-resonance denominator
-          basis: its weight names and the rows/transform they come from.
+        * ``_pg_bws`` — the per-resonance denominator basis: its weight
+          names and the rows/transform they come from.
           Each resonance's OWN basis transform publishes its weight names as
           outputs (``extra_transforms`` hands exactly those to the constraint
           manager), so the pipeline resolves them without a combined wrapper.
@@ -672,7 +662,6 @@ class PWAGen(PWA):
             den_names.append(names)
             bws.append({"name": name, "model": mdl, "transform": tr,
                         "den_names": names, "rows": rows})
-        self._pg_den_names = den_names
         self._pg_bws = bws
 
         # ── expanded ck combinations ────────────────────────────────
@@ -705,9 +694,7 @@ class PWAGen(PWA):
                               for h in [f["heads"][f["rows"].index(rf)]])
                 exp.append((k, combo))
                 comb_exp.append(tuple(base_combs[k]) + heads)
-        self._pg_combs = comb_exp
-        self._pg_mult = mult
-        return exp, mult, C, P, n_base
+        return comb_exp, C, P
 
 @register_amplitude_model("polarised_pwa")
 class PolarisedPWA(PWA):

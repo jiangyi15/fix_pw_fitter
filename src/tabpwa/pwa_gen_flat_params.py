@@ -56,10 +56,6 @@ class FlatKernelParams(BuildKernelParams):
                 f"FlatKernelParams: den_names has {len(names)} entries but "
                 f"basis_table has {self._n_basis} rows")
         self._den_names = names
-        # ``basis_m_index`` is the event mass column each row reads; the
-        # kernel uses it directly, so nothing here needs it — kept for
-        # introspection only.
-        self._does_not_use_m0_g0 = True
 
     # -- parameter surface ---------------------------------------------
     def param_names(self):
@@ -87,32 +83,15 @@ class FlatKernelParams(BuildKernelParams):
         coeff = np.zeros(self._n_basis, np.float64)
         for m, name in enumerate(self._den_names):
             coeff[m] = float(np.real(resolved[name]))
-        # No sign correction here.  The model's `den_basis` rows are used
+        # No sign correction here: the model's `den_basis` rows are used
         # verbatim and the shared m² row carries the literal ``"one"`` weight
         # (fixed to 1), so the kernel sees exactly the expression the model
-        # wrote.  `_m2_rows()` used to SNIFF for a row equal to -m² and negate
-        # its weight to compensate for a builder-side override; both are gone.
+        # wrote.
         out["coeff"] = coeff
         # this parameterisation is ck + coeff only
         out.pop("m0", None)
         out.pop("g0", None)
         return out
-
-    def _m2_rows(self):
-        """Indices of the basis rows that encode ``F = −m²``.
-
-        They are identified by value on the mass grid (the row equals
-        ``−m²``), so this does not depend on a positional convention.
-        """
-        bas = np.asarray(self.config["basis_table"])
-        m_min = float(self.config["m_min"])
-        m_delta = float(self.config["m_delta"])
-        grid = m_min + m_delta * np.arange(bas.shape[1])
-        target = -(grid ** 2)
-        rows = [m for m in range(bas.shape[0])
-                if np.allclose(bas[m].real, target, atol=1e-9)
-                and np.allclose(bas[m].imag, 0.0, atol=1e-12)]
-        return rows
 
     # -- backward -------------------------------------------------------
     def backward(self, total_grads, resolved):
