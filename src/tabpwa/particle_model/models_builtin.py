@@ -198,10 +198,6 @@ class OneModel(BaseModel):
         """One weight, the shared ``"one"``."""
         return ["one"]
 
-    def den_weights(self, params):
-        """``D = 1`` exactly — the constant row's weight is +1."""
-        return [1.0]
-
     def gamma(self, m):
         """The running-width row for the **plain ``pwa``** path.
 

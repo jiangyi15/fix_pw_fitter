@@ -105,6 +105,26 @@ def warn_exp_non_pure(model, g0, pure):
         f"the default in the next version.", UserWarning)
 
 
+def _numerator_weights(names, params):
+    """Numerator weights read from *params* by name.
+
+    A head may be given directly (``params[head]``, real or complex) or as the
+    ``ck`` pair ``head{mag}`` / ``head{phase}`` (``complex_tail()``) — what the
+    model's transform writes.  No heads ⇒ the constant ``1``.
+    """
+    if not names:
+        return [1.0]
+    mag, phase = complex_tail()
+    out = []
+    for h in names:
+        if h in params:
+            out.append(params[h])
+        else:
+            out.append(float(params.get(f"{h}{mag}", 0.0))
+                       * np.exp(1j * float(params.get(f"{h}{phase}", 0.0))))
+    return out
+
+
 class BasisModel:
     """Particle amplitude as a ratio of two *fixed* bases — THE INTERFACE.
 
@@ -138,7 +158,7 @@ class BasisModel:
     ``den_basis(m)``      denominator rows ``G_j(m)``.
     ``get_num_name()``    numerator names; default ``[]`` (``n = [1]``).
     ``get_den_name()``    denominator weight names.
-    ``num_weights(params)`` / ``den_weights(params)``
+    ``_numerator_weights(names, params)`` / the denominator weights read by
                           the weight vectors for a parameter dict.
     ``make_basis_transform()``
                           physical parameters → those names; default ``None``
@@ -150,7 +170,7 @@ class BasisModel:
 
     def __init__(self, name, **kwargs):
         # ``name``/``kwargs`` ARE basis inputs: ``get_den_name`` and
-        # ``den_weights`` build weight names from ``name`` and read config
+        # the weight names are built from ``name`` and read config
         # defaults out of ``kwargs``.
         self.name = name
         self.kwargs = kwargs
@@ -212,14 +232,6 @@ class BasisModel:
         """
         return complex_slot_names(self.get_num_name())
 
-    def num_weights(self, params):
-        """Numerator weights, with the documented missing-value defaults."""
-        names = list(self.get_num_name())
-        if not names:
-            # no free numerator weights: n = [1] (one constant row)
-            return [1.0]
-        return [params.get(name, 0.0) for name in names]
-
     def den_basis(self, m):
         """Denominator rows ``G_j(m)`` — REQUIRED (no generic default).
 
@@ -237,39 +249,40 @@ class BasisModel:
         raise NotImplementedError(
             f"{type(self).__name__}.get_den_name: one name per den_basis row")
 
-    def den_weights(self, params):
-        """Denominator weight vector ``g_j`` for a parameter dict — REQUIRED."""
-        raise NotImplementedError(
-            f"{type(self).__name__}.den_weights: physical parameters -> g_j")
-
     def amp_raw(self, m, params=None):
-        """``A(m)`` from the basis alone — rows × weights, NO transform.
+        """The basis ratio ``Σ n_i N_i / Σ g_j G_j`` at *params* as given.
 
-        The basis-side evaluation entry point (``pwa_gen``, lineshape code).
-        Separate from ``BaseModel.amplitude_raw`` so a basis-only model, which
-        has no running width to resolve, is fully usable.
+        No transform and no defaults: the weights are read from *params* by
+        name.  :meth:`amp` is this composed with
+        :meth:`make_basis_transform`.
         """
         m_arr = np.asarray(m, dtype=float)
-        params = {} if params is None else params
+        params = params or {}
         num = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self.num_weights(params), self.num_basis(m_arr)):
+        for val, row in zip(_numerator_weights(self.get_num_name(), params),
+                            self.num_basis(m_arr)):
             num = num + val * np.asarray(row, dtype=complex)
+        # the denominator weights ARE the dict: the model's transform put
+        # them there under their names (``one`` reads as its own value)
+        weights = [float(np.real(params.get(n, 1.0 if n == "one" else 0.0)))
+                   for n in self.get_den_name()]
         den = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self.den_weights(params), self.den_basis(m_arr)):
+        for val, row in zip(weights, self.den_basis(m_arr)):
             den = den + val * np.asarray(row, dtype=complex)
         return num / den
 
     def amp(self, m, params=None):
-        """The basis entry point — ``amp_raw`` for a basis.
+        """``amp_raw`` composed with the BASIS transform.
 
-        A basis has no mass/width transform to apply, so this IS ``amp_raw``.
-        Written as a real method, NOT ``amp = amp_raw``: a class-level alias
-        binds the FUNCTION, so a subclass overriding ``amp_raw`` (the natural
-        thing for a new basis) would keep the stale base implementation and
-        silently return the wrong amplitude.  ``BaseModel`` overrides this with
-        the transform-applying version.
+        The model's own ``make_basis_transform()`` turns the physical
+        parameters (defaults filled first) into the basis weights; the ratio
+        is then :meth:`amp_raw`, so the two entries never share a body.
         """
-        return self.amp_raw(m, params)
+        d = {**self.get_defaults(), **(params or {})}
+        tr = self.make_basis_transform()
+        if tr is not None:
+            d = tr.apply_forward(d)
+        return self.amp_raw(m, d)
 
 class BaseModel(BasisModel):
     """Default implementation of :class:`BasisModel` + the ``pwa`` interface.
@@ -322,9 +335,8 @@ class BaseModel(BasisModel):
     def get_mass_name(self):
         """Name of the mass parameter this model's weights are built from.
 
-        The interface's ONE declaration of it: :meth:`den_weights`,
-        :meth:`get_bw_params`, :meth:`get_bw_param_names` and the basis
-        transform all read this instead of each rebuilding
+        The interface's ONE declaration of it: :meth:`get_bw_params`,
+        :meth:`get_bw_param_names` and ``PlainBasisWeightsTransform`` all read this instead of each rebuilding
         ``f"{self.name}_mass"`` — a model that names its mass differently
         overrides it in one place.
         """
@@ -374,9 +386,9 @@ class BaseModel(BasisModel):
 
             [ 1 , −m² , −i·γ_1(m) , … , −i·γ_k(m) ]
 
-        with the gamma rows from :meth:`gamma`.  Combined with the default
-        weights ``[m0², +1, m0·g0_1, …]`` (see :meth:`get_den_name` and
-        :meth:`den_weights`) the sum is exactly the kernel denominator
+        with the gamma rows from :meth:`gamma`.  Combined with the model's
+        weights ``[m0², +1, m0·g0_1, …]`` (its basis transform's outputs, see
+        :meth:`get_den_name`) the sum is exactly the kernel denominator
         ``m0² − m² − i·m0·Σ_l g0_l·γ_l(m)``.  The minus sign lives in the ROW,
         so the shared ``"one"`` weight is ``+1``.
         """
@@ -395,8 +407,8 @@ class BaseModel(BasisModel):
         ``[f"{name}_s0", "one"] + [f"{g}_t" for g in get_gamma_name()]`` —
         the ``m0²`` slot, the shared m² coefficient, then one ``m0·g`` weight
         per coupling.  The names ARE the layout: ``s0`` is ``m0²`` and each
-        ``{g}_t`` is ``m0·params[g]`` (see :meth:`den_weights`), so a consumer
-        that knows the model does not need them classified.
+        ``{g}_t`` is ``m0·g`` (``PlainBasisWeightsTransform`` produces both),
+        so a consumer that knows the model does not need them classified.
 
         The m² weight is the SHARED literal ``"one"``, not ``{name}_poly``:
         its value is the same ``+1`` for every resonance (the row is ``−m²``),
@@ -407,93 +419,39 @@ class BaseModel(BasisModel):
         return ([f"{self.name}_s0", "one"]
                 + [f"{g}_t" for g in self.get_gamma_name()])
 
-    def den_weights(self, params):
-        """Denominator weight values, in :meth:`get_den_name` order.
-
-        ``s0``  → ``params[s0]`` if given, else ``m0²``;
-        ``one`` → ``1`` (the row is ``−m²``);
-        ``t``   → ``m0 · params[source]`` (the kernel ``mult_l``).
-        """
-        m0 = float(params.get(self.get_mass_name(),
-                              self.kwargs.get("mass", 0.775)))
-        out = []
-        for i, name in enumerate(self.get_den_name()):
-            if i == 0:                      # {name}_s0
-                out.append(float(np.real(params.get(name, m0 ** 2))))
-            elif name == "one":
-                out.append(1.0)
-            else:                           # {g}_t
-                src = name[:-len("_t")]
-                out.append(m0 * float(np.real(params.get(src, 0.0))))
-        return out
-
-    def amp(self, m, params=None):
-        """The basis entry point, via THIS class's amplitude.
-
-        ``BasisModel.amp`` is the no-transform evaluation; a model that
-        has a mass/width transform must resolve the physical parameters
-        first, so this routes through :meth:`amplitude`.
-        """
-        return self.amplitude(m, params)
-
     def amplitude_raw(self, m, params):
-        """Raw amplitude ``Σ n_i N_i / Σ g_j G_j`` (no transform applied).
+        """A(m) from the GAMMA names, parameters as given.
 
-        This is ONE implementation for every model: each resonance is a ratio
-        of two fixed bases (:meth:`num_basis` / :meth:`den_basis`), and the
-        weights are read by :meth:`num_weights` / :meth:`den_weights`.
-        With the default basis that is exactly the BW denominator::
-
-            A(m) = (Σ_i n_i·N_i(m)) / (m₀² - m² - i·m₀·Σ_j g_j·γ_j(m))
-
-        so a plain model, a ``BasisModel`` and ``pwa_gen``'s kernel all share
-        the same algebra instead of three copies that can drift.
-
-        Args:
-            m: mass array.
-            params: dict of parameter names → values.
-
-        Returns:
-            Complex amplitude ``A(m)``.
+        The denominator is ``m0² − m² − i·m0·Σ_l g_l·γ_l(m)``; no transform is
+        applied and no defaults are filled — :meth:`amplitude` is this
+        composed with :meth:`make_mass_width_transform`.
         """
         m_arr = np.asarray(m, dtype=float)
-        params = {} if params is None else params
-
+        params = params or {}
+        m0 = float(params.get(self.get_mass_name(),
+                              self.kwargs.get("mass", 0.775)))
+        den = (m0 ** 2 - m_arr ** 2).astype(complex)
+        for gname, grow in zip(self.get_gamma_name(), self.gamma(m_arr)):
+            den = den - 1j * m0 * float(params.get(gname, 0.0)) * np.asarray(
+                grow, dtype=complex)
         num = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self.num_weights(params), self.num_basis(m_arr)):
+        for val, row in zip(_numerator_weights(self.get_num_name(), params),
+                            self.num_basis(m_arr)):
             num = num + val * np.asarray(row, dtype=complex)
-
-        den = np.zeros_like(m_arr, dtype=complex)
-        for val, row in zip(self.den_weights(params), self.den_basis(m_arr)):
-            den = den + val * np.asarray(row, dtype=complex)
-
         return num / den
 
     def amplitude(self, m, params=None):
-        """Full amplitude A(m) with transform applied.
+        """``amplitude_raw`` composed with the MASS/WIDTH transform.
 
-        Applies :meth:`make_mass_width_transform` to *params* first,
-        so fixed values are filled in automatically.  ``amplitude(m, {})``
-        works for models with transforms.
-
-        For models without a transform, ``amplitude(m, params)`` is
-        equivalent to ``amplitude_raw(m, params)``.
-
-        Args:
-            m: mass array.
-            params: optional dict (``None`` / ``{}`` for defaults).
-
-        Returns:
-            Complex amplitude A(m).
+        The model's own stage produces the kernel-facing ``m0`` and the
+        couplings from the physical parameters (defaults filled first), and
+        the denominator is then stated through the gamma names.
         """
-        if params is None:
-            params = {}
+        d = {**self.get_defaults(), **(params or {})}
         tr = self.make_mass_width_transform()
         if tr is not None:
-            resolved = tr.apply_forward(dict(params))
-        else:
-            resolved = dict(params)
-        return self.amplitude_raw(m, resolved)
+            d = tr.apply_forward(d)
+        return self.amplitude_raw(m, d)
 
     def make_basis_transform(self):
         """Physical parameters → the PLAIN-BW basis weights.
@@ -588,9 +546,8 @@ class PlainBasisWeightsTransform(Transform):
     width).  A model whose couplings ARE its parameters (the default plain BW)
     declares them directly.
 
-    The VALUES are the model's own ``den_weights`` — this class selects the
-    slots it publishes and writes the VJP of that same conversion; it does not
-    restate the formula.
+    This class IS the conversion for the fit: it computes the values and their
+    VJP, so the fit never depends on a number-only accessor.
 
     The stage is held HERE (``self._mw``), so the transform is self-contained:
     it is the model's one answer to "physical parameters → basis weights", and
@@ -703,19 +660,25 @@ class PlainBasisWeightsTransform(Transform):
         """The model's own basis weights, selected to this transform's slots.
 
         This class is built BY the model (``BaseModel.make_basis_transform``),
-        so it does not re-implement the conversion: it asks the model for the
-        weights (``den_weights``) and keeps the ones it publishes — every
-        ``get_den_name()`` entry except the shared ``"one"``, which a
-        ``FixedValueTransform`` produces once for the whole fit.
+        so it knows the model's conversion and writes it once, with a VJP: the
+        weights are ``s0 = m0²`` and ``{g}_t = m0·g``, i.e. every
+        ``get_den_name()`` slot except the shared ``"one"`` (a
+        ``FixedValueTransform`` produces that once for the whole fit).
 
         Physical inputs in: the model's own stage is applied first when the
         couplings it reads are derived (see :meth:`_resolved`).
         """
-        resolved = self._resolved(d)
-        weights = self.model.den_weights(resolved)
-        return {slot: float(np.real(w))
-                for slot, w in zip(self.model.get_den_name(), weights)
-                if slot != "one"}
+        d = self._resolved(d)
+        m0 = self._m0(d)
+        # the model's conversion, written once: ``s0 = m0²`` and each
+        # ``{g}_t = m0·g`` (``get_den_name`` says which name is which)
+        out = {}
+        for slot in self.output_names:
+            if slot == f"{self.model.name}_s0":
+                out[slot] = m0 * m0
+            else:                       # ``{g}_t`` → coupling ``g``
+                out[slot] = m0 * float(d[slot[:-len("_t")]])
+        return out
 
     def backward(self, grad_out, d_in=None):
         """Exact VJP of ``s0 = m0²`` and ``{g}_t = m0·g``.
@@ -736,7 +699,7 @@ class PlainBasisWeightsTransform(Transform):
         if self.output_names:
             m0 = self._m0(d)
             # the model's exact names: ``{name}_s0`` carries ``m0²`` and each
-            # ``{g}_t`` carries ``m0·g`` (``den_weights``)
+            # ``{g}_t`` carries ``m0·g`` (this transform's conversion)
             g = float(grad_out.get(f"{self.model.name}_s0", 0.0))
             if g:
                 grad[self.mass_name] = grad.get(self.mass_name, 0.0) + 2.0 * m0 * g

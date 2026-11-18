@@ -532,9 +532,6 @@ def test_a_model_without_a_basis_transform_fits_its_weights_directly():
         def get_den_name(self):
             return [f"{self.name}_s0", "one"]
 
-        def den_weights(self, params):
-            return [float(params.get(n, 0.0)) for n in self.get_den_name()]
-
     d = _cfg(CFG_BASIS)
     d["particle"]["k2"]["model"] = "direct_weights"
     f = _loaded(d)

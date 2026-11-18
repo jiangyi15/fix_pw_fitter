@@ -81,7 +81,7 @@ real slots:
   fixed.  A *real* numerator weight may be supplied as one parameter
   named exactly the head (no exponential applied).
 
-:meth:`KMatrix2Model.num_weights` reassembles
+The numerator weights are reassembled
 ``n_i = mag·exp(i·phase)`` from the real slots (or uses a bare head
 directly); only the amplitude is complex.
 
@@ -329,39 +329,6 @@ class KMatrix2Model(BasisModel):
         resolved = self.make_basis_transform().apply_forward(d)
         resolved.update({n: params[n] for n in names if n in params})
         return resolved
-
-    def den_weights(self, params):
-        """Denominator weights — real (unitarity); coerced to float."""
-        r = self._resolved(params)
-        return [float(np.real(r[n])) for n in self.get_den_name()]
-
-    def num_weights(self, params):
-        """Reassemble the complex numerator weights from the real slots.
-
-        Each head ``h`` is read as the expanded pair
-        ``h{mag}`` / ``h{phase}`` → ``mag·exp(i·phase)``.  If the expanded
-        slots are absent but the bare head ``h`` is present, its value is
-        used directly (a *real* numerator weight, no exponential).
-        """
-        params = {} if params is None else params
-        mag, phase = self.tail
-        resolved = None
-        out = []
-        for head in self.get_num_name():
-            mn, pn = f"{head}{mag}", f"{head}{phase}"
-            if mn in params or pn in params:
-                m = float(np.real(params.get(mn, 0.0)))
-                p = float(np.real(params.get(pn, 0.0)))
-                out.append(m * np.exp(1j * p))
-            elif head in params:
-                out.append(params[head])          # bare real weight
-            else:
-                if resolved is None:
-                    resolved = self._resolved(params)
-                m = float(np.real(resolved[mn]))
-                p = float(np.real(resolved[pn]))
-                out.append(m * np.exp(1j * p))
-        return out
 
     # -- transform --------------------------------------------------
 

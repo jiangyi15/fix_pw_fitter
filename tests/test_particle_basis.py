@@ -48,6 +48,20 @@ def _phys_params(name, m1, m2, g1, g2, b1, b2, tail=None):
     }
 
 
+def _num_w(mdl, params):
+    """Complex numerator weights from the transform's (mag, phase) slots."""
+    from tabpwa.param_constraint import complex_tail
+    mag, ph = complex_tail()
+    out = []
+    for h in mdl.get_num_name():
+        if h in params:
+            out.append(params[h])
+        else:
+            out.append(float(params[f"{h}{mag}"])
+                       * np.exp(1j * float(params[f"{h}{ph}"])))
+    return out or [1.0]
+
+
 def _mass_grid(p1, p2, n=241, lo=0.25, hi=1.75):
     """Grid spanning below threshold and both poles (poles excluded)."""
     m = np.linspace(lo, hi, n)
@@ -81,7 +95,7 @@ def test_basis_default_matches_bw_bitwise():
     basis = DefaultBasisModel("r", mass=0.775, width=0.149)
 
     ref = bw.amplitude_raw(m, params)
-    got = basis.amp_raw(m, params)
+    got = basis.amp(m, params)
     assert np.array_equal(ref.view(np.float64), got.view(np.float64))
 
     # the basis decomposition is the kernel's coeff basis:
@@ -99,9 +113,10 @@ def test_basis_default_matches_bw_bitwise():
     assert np.array_equal(den[1], -(m ** 2) + 0j)
     assert np.array_equal(den[2], -1j * np.ones_like(m))
 
-    # no basis transform: amplitude() == amplitude_raw()
-    assert np.array_equal(
-        basis.amp(m, params), basis.amp_raw(m, params))
+    # the two interfaces agree: basis route (amp, its transform) and
+    # running-width route (amplitude, its mass/width transform)
+    assert np.allclose(basis.amp(m, params), basis.amplitude(m, params),
+                       rtol=0, atol=0)
 
     # build_particle("BW", ...) is untouched and still works
     bw2 = build_particle("r", model="BW", mass=0.700, width=0.100)
@@ -110,13 +125,37 @@ def test_basis_default_matches_bw_bitwise():
     assert bw2.name == "r"
 
 
-def test_missing_weights_use_documented_defaults():
-    """Default weights: s0 = mass², poly = −1, gamma rows = mass·g0 = 0."""
+def test_missing_weights_use_the_model_defaults():
+    """``amp(m, {})`` is the model at its configured defaults.
+
+    The denominator names come from the model's own transform, which fills
+    the configured mass/width; an explicitly supplied input still wins.
+    """
     mdl = DefaultBasisModel("r", mass=0.775, width=0.149)
     m = np.array([0.5, 0.9])
-    got = mdl.amp_raw(m, {})
-    ref = 1.0 / (0.775 ** 2 - m ** 2)
+    got = mdl.amp(m, {})
+    ref = 1.0 / (0.775 ** 2 - m ** 2 - 1j * 0.775 * 0.149)
     assert np.allclose(got, ref, rtol=0, atol=0)
+
+    # an explicit input overrides the default (here: a zero width)
+    got0 = mdl.amp(m, {"r_width": 0.0})
+    assert np.allclose(got0, 1.0 / (0.775 ** 2 - m ** 2), rtol=0, atol=0)
+
+
+def test_amplitude_uses_the_gamma_names_not_the_basis():
+    """``amplitude`` states the denominator with ``gamma()``.
+
+    Same value as the basis route, but computed from ``get_gamma_name()`` /
+    ``gamma()`` — the interface ``BaseModel`` owns — so the two entries do not
+    share an implementation that could drift.
+    """
+    mdl = DefaultBasisModel("r", mass=0.775, width=0.149)
+    m = np.array([0.5, 0.9])
+    params = {"r_mass": 0.775, "r_width": 0.149}
+    ref = 1.0 / (0.775 ** 2 - m ** 2 - 1j * 0.775 * 0.149)   # gamma(m) = 1
+    assert np.allclose(mdl.amplitude(m, params), ref, rtol=0, atol=0)
+    assert np.allclose(mdl.amplitude(m, params), mdl.amplitude_raw(m, params),
+                       rtol=0, atol=0)
 
 
 def test_denominator_weights_real_rows_complex():
@@ -127,9 +166,9 @@ def test_denominator_weights_real_rows_complex():
     rows = mdl.den_basis(m)
     assert all(np.iscomplexobj(r) for r in rows)
     assert any(np.any(np.imag(r) != 0) for r in rows)
-    g = mdl.den_weights({"r_mass": 0.775, "r_width": 0.149})
-    assert np.all(np.imag(g) == 0)
-    assert np.all(np.imag(mdl.num_weights({})) == 0)
+    g = mdl.make_basis_transform().forward({"r_mass": 0.775, "r_width": 0.149})
+    assert all(np.isrealobj(v) for v in g.values())
+    assert np.all(np.imag(_num_w(mdl, {})) == 0)
 
     # -- KMatrix2 at several random magnitude/phase points --
     km = _km2_model()
@@ -181,14 +220,15 @@ def test_phases_flow_through_numerator_path():
     # denominator weights stay real
     assert np.all(np.imag([out[name] for name in mdl.get_den_name()]) == 0)
 
-    # reassembled complex numerator weights
-    nw = mdl.num_weights(params)
+    # the complex numerator weights, read from the transform's slots
+    nw = _num_w(mdl, out)
     assert nw[0] == pytest.approx(n0, rel=1e-14, abs=1e-15)
     assert nw[1] == pytest.approx(n1, rel=1e-14, abs=1e-15)
 
     ref = _direct_km2(m, case, m_pi=mdl.m_pi)
     assert np.allclose(mdl.amp(m, params), ref, rtol=1e-12, atol=1e-14)
-    assert np.allclose(mdl.amp_raw(m, params), ref,
+    # amp_raw takes the weights as given, i.e. the transform's output
+    assert np.allclose(mdl.amp_raw(m, out), ref,
                        rtol=1e-12, atol=1e-14)
 
 
@@ -240,7 +280,7 @@ def test_bare_head_real_numerator_weight():
     m = _mass_grid(0.8, 1.35)
     params = {"k2_n0": 2.5, "k2_n1": -0.7}
 
-    nw = mdl.num_weights(params)
+    nw = _num_w(mdl, params)
     assert nw[0] == pytest.approx(2.5, rel=0, abs=0)
     assert nw[1] == pytest.approx(-0.7, rel=0, abs=0)
 
@@ -251,7 +291,13 @@ def test_bare_head_real_numerator_weight():
         den = den + resolved[name] * row
     num_rows = mdl.num_basis(m)
     amp = (2.5 * num_rows[0] - 0.7 * num_rows[1]) / den
-    assert np.allclose(mdl.amp_raw(m, params), amp, rtol=0, atol=0)
+    # amp_raw reads the weights as given: keep the bare head, drop the
+    # expanded pair the transform would produce
+    given = mdl._resolved(params)
+    for n in mdl.num_slot_names():
+        given.pop(n, None)
+    given.update(params)                 # keep the caller's bare heads
+    assert np.allclose(mdl.amp_raw(m, given), amp, rtol=0, atol=0)
 
 
 # ── 2. kmatrix2 amplitude == the direct formula ──────────────────────
@@ -294,7 +340,7 @@ def test_basis_route_equals_raw_amplitude():
     assert np.all(np.imag([resolved[n] for n in mdl.get_den_name()]) == 0)
 
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(mdl.num_weights(resolved), num_rows):
+    for weight, row in zip(_num_w(mdl, resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
@@ -408,7 +454,7 @@ def test_amplitude_gradient_chain_with_real_cotangents():
     num_rows = mdl.num_basis(m)
     den_rows = mdl.den_basis(m)
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(mdl.num_weights(resolved), num_rows):
+    for weight, row in zip(_num_w(mdl, resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
@@ -582,9 +628,6 @@ def test_amp_is_a_real_method_not_a_stale_alias():
 
         def get_den_name(self):
             return ["one"]
-
-        def den_weights(self, params):
-            return [1.0]
 
         def amp_raw(self, m, params=None):
             return np.full(np.asarray(m, float).shape, 42.0 + 0j)

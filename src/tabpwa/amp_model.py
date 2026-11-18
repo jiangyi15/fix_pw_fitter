@@ -586,7 +586,7 @@ class PWAGen(PWA):
         # ``num_basis``/``den_basis``), so there is exactly one place that
         # decides the rows — the model itself.  Duplicating the default here
         # is what previously let the builder's ``-m²`` drift out of sync with
-        # ``den_weights``' ``-1`` and silently flip every m² term.
+        # the basis weights and silently flip every m² term.
         rows = [np.asarray(r, dtype=complex) for r in model.den_basis(grid)]
         names = list(model.get_den_name())
         if len(names) != len(rows):
