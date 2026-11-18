@@ -109,6 +109,7 @@ import numpy as np
 from tabpwa.param_constraint import Transform, complex_tail
 
 from .base import BasisModel, complex_slot_names, register_model
+from .bwr_model import BWRSModel
 
 #: Default pion mass entering the two-body phase space ρ(s).
 M_PI = 0.13957039
@@ -338,3 +339,45 @@ class KMatrix2Model(BasisModel):
         return KMatrix2WeightsTransform(
             self.name, self.get_den_name(), self.get_num_name(),
             defaults, tail=self.tail)
+
+@register_model("kmatrix2_bf")
+class KMatrix2BFModel(KMatrix2Model, BWRSModel):
+    """Two-pole K-matrix whose phase-space shape IS the BWRS running width.
+
+    ``ρ(s)`` is the particle's own :meth:`~bwr_model.BWRModel.gamma`, the same
+    ``(q/q0)^{2L+1}·(m0/m)·B'²`` the ``BWRS`` kernel uses — no ad-hoc
+    ``sqrt(1 − (2m_π)²/s)`` and no extra constant: the shape is dimensionless
+    and the couplings carry the dimensions.
+
+    With ONE pole (``g2 = b2 = 0``) the amplitude is exactly ``BWRS``::
+
+        f = β / (m0² − s − i·ρ·bf²) = β / (m0² − s − i·m0·Γ0·γ(m))
+
+    for ``bf² = m0·Γ0`` — i.e. the K-matrix coupling is ``m0·Γ0`` and ``ρ`` is
+    ``γ(m)``.  The second pole turns it into the K-matrix generalisation.
+
+    ``get_gamma_name()`` is empty on purpose: there is no single running width
+    to give the plain-``pwa`` kernel, so that path REFUSES this model (naming
+    ``amp_model: pwa_gen``) instead of silently plotting a Breit-Wigner.
+    """
+
+    def den_basis(self, m):
+        """``[1, m², m⁴, −i·γ(m), +i·s·γ(m)]`` — ``γ`` from the BWRS table."""
+        m_arr = np.asarray(m, dtype=float)
+        s = m_arr ** 2
+        rho = np.asarray(self.gamma(m_arr)[0], dtype=complex)
+        return [
+            np.ones_like(s, dtype=complex),
+            s.astype(complex),
+            (s ** 2).astype(complex),
+            -1j * rho,
+            1j * s * rho,
+        ]
+
+    def get_gamma_name(self):
+        """Empty: no plain-``pwa`` width exists for a two-pole K-matrix."""
+        return []
+
+    def make_mass_width_transform(self):
+        """None: this model's mapping is its BASIS transform (K-matrix weights)."""
+        return None

@@ -794,3 +794,51 @@ def test_kmatrix2_one_pole_is_the_standard_bw():
     # ... and the second pole genuinely changes the shape (not vacuous)
     two = dict(params, **{f"{n}_g2": 0.25, f"{n}_b2r": 0.4})
     assert not np.allclose(km.amp(m, two), bw, rtol=1e-6, atol=0)
+
+
+class _Out:
+    mass = 0.13957039
+
+
+class _Dec:
+    outs = [_Out(), _Out()]
+
+
+class _Parent:
+    """Minimal decay-tree stub: the two pions the running width needs."""
+
+    _decays = [_Dec()]
+
+
+def test_kmatrix2_bf_one_pole_is_bwrs_exactly():
+    """``kmatrix2_bf``'s ρ IS the particle's BWRS running width.
+
+    With one pole the K-matrix ``f = (1 − iρ·bf²·K)^{-1}·P`` is the BWRS
+    amplitude exactly, for ``bf² = m0·Γ0`` and ``ρ = γ(m)`` — same table, no
+    ad-hoc shape and no extra constant.  The model is basis-only: it reports
+    no running width, so the plain ``pwa`` path refuses it rather than
+    plotting a Breit-Wigner.
+    """
+    n, mass, width, L = "rho", 0.775, 0.149, 1
+    bw = build_particle(n, model="BWRS", mass=mass, width=width, L=L)
+    kmb = build_particle(n, model="kmatrix2_bf", mass=mass, width=width, L=L)
+    for mdl in (bw, kmb):
+        mdl.register_parent(_Parent())
+
+    m = np.array([0.60, 0.775, 1.00])
+    a_bw = bw.amplitude(m, {f"{n}_mass": mass, f"{n}_width": width})
+    a_km = kmb.amp(m, {f"{n}_m1": mass, f"{n}_m2": 2.0,
+                       f"{n}_g1": np.sqrt(mass * width), f"{n}_g2": 0.0,
+                       f"{n}_b1r": 1.0, f"{n}_b1i": 0.0,
+                       f"{n}_b2r": 0.0, f"{n}_b2i": 0.0})
+    assert np.allclose(a_km, a_bw, rtol=1e-12, atol=1e-14)
+
+    # the second pole genuinely changes the shape
+    two = {f"{n}_m1": mass, f"{n}_m2": 1.45,
+           f"{n}_g1": np.sqrt(mass * width), f"{n}_g2": 0.40,
+           f"{n}_b1r": 1.0, f"{n}_b1i": 0.0, f"{n}_b2r": 0.6, f"{n}_b2i": 0.0}
+    assert not np.allclose(kmb.amp(m, two), a_bw, rtol=1e-4, atol=0)
+
+    # basis-only: no single running width for the plain-pwa kernel
+    assert kmb.get_gamma_name() == []
+    assert kmb.make_mass_width_transform() is None
