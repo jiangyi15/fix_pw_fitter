@@ -390,57 +390,41 @@ class BaseModel(BasisModel):
         return rows
 
     def get_den_name(self):
-        """Weight names for the denominator rows ``g_j``.
+        """Weight names for the denominator rows ``g_j``, in basis order.
 
-        ``[f"{name}_s0", "one"] + get_gamma_name()`` — the kernel ``coeff``
-        layout: the ``m0²`` slot, the m² coefficient, and the per-gamma
-        ``mult_j`` weights.
+        ``[f"{name}_s0", "one"] + [f"{g}_t" for g in get_gamma_name()]`` —
+        the ``m0²`` slot, the shared m² coefficient, then one ``m0·g`` weight
+        per coupling.  The names ARE the layout: ``s0`` is ``m0²`` and each
+        ``{g}_t`` is ``m0·params[g]`` (see :meth:`den_weights`), so a consumer
+        that knows the model does not need them classified.
 
-        The m² weight is the SHARED literal ``"one"``, not ``{name}_poly``.
-        Two reasons:
-
-        * its value is the constant ``−1`` (the row is ``+m²``), identical for
-          every resonance — naming it per resonance would make one physical
-          constant look like N free parameters;
-        * ``poly`` is ``kmatrix2``'s word for a *fitted* polynomial
-          coefficient ``−(m1²+m2²)``, a different quantity with a different
-          free/fixed status.  Reusing the name for a fixed ``−1`` conflated
-          the two.
+        The m² weight is the SHARED literal ``"one"``, not ``{name}_poly``:
+        its value is the same ``+1`` for every resonance (the row is ``−m²``),
+        and ``poly`` is ``kmatrix2``'s word for a *fitted* coefficient
+        ``−(m1²+m2²)`` — a different quantity with a different free/fixed
+        status.
         """
         return ([f"{self.name}_s0", "one"]
                 + [f"{g}_t" for g in self.get_gamma_name()])
 
     def den_weights(self, params):
-        """Denominator weights, derived as the kernel ``coeff`` vector.
+        """Denominator weight values, in :meth:`get_den_name` order.
 
-        Layout of the default :meth:`get_den_name`:
-
-        0. ``s0``  → ``params[s0_name]`` if given, else ``m0²``;
-        1. ``poly`` → ``−1`` (fixed; the m² coefficient);
-        2. gamma rows → ``m0 · params[g0_name]`` (the kernel ``mult_l``).
-
-        Subclasses overriding :meth:`get_den_name` should override this
-        too when their weight semantics differ.
+        ``s0``  → ``params[s0]`` if given, else ``m0²``;
+        ``one`` → ``1`` (the row is ``−m²``);
+        ``t``   → ``m0 · params[source]`` (the kernel ``mult_l``).
         """
         m0 = float(params.get(self.get_mass_name(),
                               self.kwargs.get("mass", 0.775)))
-        names = list(self.get_den_name())
         out = []
-        for i, name in enumerate(names):
-            if i == 0:
+        for i, name in enumerate(self.get_den_name()):
+            if i == 0:                      # {name}_s0
                 out.append(float(np.real(params.get(name, m0 ** 2))))
             elif name == "one":
-                # the m² coefficient: the row is ``-m²``, so this is +1
                 out.append(1.0)
-            elif name.endswith("_t"):
-                # a kernel-facing ``m0·g`` slot: the SOURCE name is the
-                # physical coupling (``{g}`` without the ``_t``), so this
-                # never collides with the fit parameter of the same base
-                # name — see get_den_name().
+            else:                           # {g}_t
                 src = name[:-len("_t")]
                 out.append(m0 * float(np.real(params.get(src, 0.0))))
-            else:
-                out.append(float(np.real(params.get(name, 0.0))))
         return out
 
     def amp(self, m, params=None):
@@ -604,6 +588,10 @@ class PlainBasisWeightsTransform(Transform):
     width).  A model whose couplings ARE its parameters (the default plain BW)
     declares them directly.
 
+    The VALUES are the model's own ``den_weights`` — this class selects the
+    slots it publishes and writes the VJP of that same conversion; it does not
+    restate the formula.
+
     The stage is held HERE (``self._mw``), so the transform is self-contained:
     it is the model's one answer to "physical parameters → basis weights", and
     no other transform has to be registered before it for it to be correct.
@@ -639,30 +627,14 @@ class PlainBasisWeightsTransform(Transform):
         # Leaving it out here keeps "which model's transform defines this name"
         # unambiguous — two transforms declaring the same output would be
         # treated as alternatives and the later one would replace the earlier.
+        # Everything comes from the model's own declarations: the names from
+        # `get_den_name()` / `get_gamma_name()`, the mass from
+        # `get_mass_name()`.  The names ARE the layout, so nothing is
+        # classified: `forward` asks the model for the values and `backward`
+        # states the derivative of that same conversion.
         self.output_names = [n for n in model.get_den_name() if n != "one"]
-        # The slots are read off the model's OWN declarations — the mass from
-        # `get_mass_name()`, the weights from `get_den_name()` paired with
-        # `get_gamma_name()` — never rebuilt from string suffixes here.  The
-        # interface's layout is `[s0] + [{g}_t for g in get_gamma_name()]`;
-        # a model that states another layout supplies its own transform.
-        # ``forward`` and ``backward`` both walk these groups, so a value and
-        # its derivative cannot desynchronise.
         self.mass_name = model.get_mass_name()
-        den = list(self.output_names)
-        gammas = list(model.get_gamma_name())
-        if not den:                     # constant basis (``OneModel``)
-            self._s0_slots, self._t_slots = [], []
-        elif len(den) == 1 + len(gammas):
-            self._s0_slots = den[:1]
-            self._t_slots = list(zip(den[1:], gammas))
-        else:
-            raise ValueError(
-                f"{type(self).__name__}: '{model.name}' declares "
-                f"{len(den)} denominator weights but {len(gammas)} gamma "
-                f"names — the layout must be [s0] + one slot per gamma name; "
-                f"a different basis supplies its own transform")
-        self._pass_slots = []
-        couplings = [src for _slot, src in self._t_slots]
+        couplings = list(model.get_gamma_name())
 
         # SELF-HELD: this transform maps PHYSICAL parameters to the basis
         # weights for EVERY model, so it carries the model's own stage when
@@ -679,8 +651,7 @@ class PlainBasisWeightsTransform(Transform):
         # ``make_basis_transform()`` promises.
         stage = model.make_mass_width_transform()
         produced = set(stage.output_names) if stage is not None else set()
-        self._derived = [c for c in couplings if c in produced]
-        self._mw = stage if self._derived else None
+        self._mw = stage if any(c in produced for c in couplings) else None
 
         inputs = []
 
@@ -696,10 +667,10 @@ class PlainBasisWeightsTransform(Transform):
         # ``{name}_mass`` alongside the couplings; declaring it as an input
         # too would put it on the fitted surface (a direction the stage then
         # overwrites) instead of leaving it, as in ``pwa``, a produced value.
-        if (self._s0_slots or self._t_slots) and self.mass_name not in produced:
+        # A basis with no weight at all (``OneModel``) reads nothing.
+        if self.output_names and self.mass_name not in produced:
             _add([self.mass_name])
         _add([c for c in couplings if c not in produced])
-        _add(self._pass_slots)
         self.input_names = inputs
 
     def _resolved(self, d):
@@ -729,24 +700,22 @@ class PlainBasisWeightsTransform(Transform):
         return float(d[self.mass_name])
 
     def forward(self, d):
-        """``m0²`` and ``m0·g_j`` — the uniform basis weights.
+        """The model's own basis weights, selected to this transform's slots.
 
-        Physical inputs in, basis weights out: the model's own stage is
-        applied here when its couplings are derived (see :meth:`_resolved`).
+        This class is built BY the model (``BaseModel.make_basis_transform``),
+        so it does not re-implement the conversion: it asks the model for the
+        weights (``den_weights``) and keeps the ones it publishes — every
+        ``get_den_name()`` entry except the shared ``"one"``, which a
+        ``FixedValueTransform`` produces once for the whole fit.
+
+        Physical inputs in: the model's own stage is applied first when the
+        couplings it reads are derived (see :meth:`_resolved`).
         """
-        d = self._resolved(d)
-        out = {}
-        if self._s0_slots or self._t_slots:
-            m0 = self._m0(d)
-        for slot in self._s0_slots:
-            out[slot] = m0 * m0
-        for slot, src in self._t_slots:
-            # ``m0·g`` for the coupling ``g`` (the ``_t`` name is the
-            # KERNEL-facing slot, distinct from the fit parameter)
-            out[slot] = m0 * float(d[src])
-        for slot in self._pass_slots:               # pragma: no cover
-            out[slot] = float(np.real(d[slot]))
-        return out
+        resolved = self._resolved(d)
+        weights = self.model.den_weights(resolved)
+        return {slot: float(np.real(w))
+                for slot, w in zip(self.model.get_den_name(), weights)
+                if slot != "one"}
 
     def backward(self, grad_out, d_in=None):
         """Exact VJP of ``s0 = m0²`` and ``{g}_t = m0·g``.
@@ -763,18 +732,20 @@ class PlainBasisWeightsTransform(Transform):
         d = self._resolved(d_in)
         grad = {name: 0.0 for name in self.input_names}
         coupling_grad = {}
-        if self._s0_slots or self._t_slots:
+        # The model's own names, used exactly as it declares them.
+        if self.output_names:
             m0 = self._m0(d)
-        for slot in self._s0_slots:
-            g = float(grad_out.get(slot, 0.0))
+            # the model's exact names: ``{name}_s0`` carries ``m0²`` and each
+            # ``{g}_t`` carries ``m0·g`` (``den_weights``)
+            g = float(grad_out.get(f"{self.model.name}_s0", 0.0))
             if g:
                 grad[self.mass_name] = grad.get(self.mass_name, 0.0) + 2.0 * m0 * g
-        for slot, src in self._t_slots:
-            g = float(grad_out.get(slot, 0.0))
-            if g:
-                grad[self.mass_name] = (grad.get(self.mass_name, 0.0)
-                                        + g * float(d[src]))
-                coupling_grad[src] = coupling_grad.get(src, 0.0) + g * m0
+            for src in self.model.get_gamma_name():
+                g = float(grad_out.get(f"{src}_t", 0.0))
+                if g:
+                    grad[self.mass_name] = (grad.get(self.mass_name, 0.0)
+                                            + g * float(d[src]))
+                    coupling_grad[src] = coupling_grad.get(src, 0.0) + g * m0
         if self._mw is not None:
             # route the derived couplings through the model's own VJP; what
             # it does not produce is a plain input and is copied below
@@ -784,8 +755,6 @@ class PlainBasisWeightsTransform(Transform):
                 grad[n] = grad.get(n, 0.0) + v
         for src, v in coupling_grad.items():
             grad[src] = grad.get(src, 0.0) + v
-        for slot in self._pass_slots:               # pragma: no cover
-            grad[slot] = grad.get(slot, 0.0) + float(grad_out.get(slot, 0.0))
         return grad
 
 # ═══════════════════════════════════════════════════════════════════
