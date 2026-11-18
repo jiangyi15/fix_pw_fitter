@@ -542,3 +542,91 @@ def test_common_phase_is_degenerate_with_wave_coupling():
     # the shifted amplitude is the original times the common phase
     assert np.allclose(a2, np.exp(1j * alpha) * a1,
                        rtol=1e-12, atol=1e-14)
+
+
+# ── the interface split, pinned ─────────────────────────────────────
+
+def test_basis_model_is_the_interface_and_knows_no_mass_or_width():
+    """``BasisModel`` must not carry the pwa protocol.
+
+    The two interfaces are parallel: ``gamma`` / ``get_gamma_name`` /
+    ``get_gamma_count`` / ``get_bw_params`` / ``make_mass_width_transform``
+    belong to ``BaseModel``, which also supplies the default basis.  A
+    basis-only model (``kmatrix2``) therefore has none of them.
+    """
+    PWA = ("gamma", "get_gamma_name", "get_gamma_count", "get_bw_params",
+           "make_mass_width_transform")
+    for name in PWA:
+        assert not hasattr(BasisModel, name), (
+            f"BasisModel must not define {name!r} — that is the pwa interface")
+    # ... and kmatrix2, the basis-only model, lacks them too
+    km = build_particle("k2", model="kmatrix2", mass=0.775, width=0.15)
+    assert isinstance(km, BasisModel) and not isinstance(km, BaseModel)
+    for name in PWA:
+        assert not hasattr(km, name), f"kmatrix2 must not have {name!r}"
+
+
+def test_amp_is_a_real_method_not_a_stale_alias():
+    """Overriding ``amp_raw`` must change ``amp``.
+
+    ``amp = amp_raw`` at class level binds the FUNCTION, so a subclass
+    override would leave ``amp`` returning the base body — a silent
+    wrong-physics answer rather than an error.
+    """
+    class Override(BasisModel):
+        def num_basis(self, m):
+            return [np.ones_like(np.asarray(m, float), dtype=complex)]
+
+        def den_basis(self, m):
+            return [np.ones_like(np.asarray(m, float), dtype=complex)]
+
+        def get_den_name(self):
+            return ["one"]
+
+        def den_weights(self, params):
+            return [1.0]
+
+        def amp_raw(self, m, params=None):
+            return np.full(np.asarray(m, float).shape, 42.0 + 0j)
+
+    m = np.array([0.5, 0.9])
+    got = Override("S")
+    assert np.allclose(np.asarray(got.amp_raw(m)), 42.0)
+    assert np.allclose(np.asarray(got.amp(m)), 42.0), (
+        "amp did not follow the amp_raw override — it is a stale alias")
+
+
+def test_rho_omega_gs_basis_transform_resolves_standalone():
+    """The default basis transform must run the model's mass/width stage.
+
+    ``RhoOmegaGS`` derives its 8 couplings ``w0..w7`` from four physical
+    parameters, so they are absent from the raw parameter dict and
+    ``apply_forward`` (which passes only declared inputs) would hand the
+    transform nothing — every weight resolved to 0 and the denominator
+    collapsed to ``m0² − m²``.
+    """
+    d = {"ro_mass": 0.775, "ro_width": 0.149,
+         "ro_mass2": 0.78266, "ro_width2": 0.00868}
+    mdl = build_particle("ro", model="RhoOmegaGS",
+                         mass=d["ro_mass"], width=d["ro_width"],
+                         mass2=d["ro_mass2"], width2=d["ro_width2"])
+    tr = mdl.make_basis_transform()
+    assert list(tr.input_names) == list(d), (
+        "the basis transform must declare the PHYSICAL inputs, not w0..w7")
+    out = tr.apply_forward(dict(d))
+    w = [float(out[f"ro_w{k}_t"]) for k in range(8)]
+    assert any(abs(x) > 1e-12 for x in w), "every basis weight resolved to 0"
+
+
+def test_rho_omega_gs_pwa_and_basis_paths_agree():
+    """Same physics, two interfaces: the lineshapes must be identical."""
+    d = {"ro_mass": 0.775, "ro_width": 0.149,
+         "ro_mass2": 0.78266, "ro_width2": 0.00868}
+    mdl = build_particle("ro", model="RhoOmegaGS",
+                         mass=d["ro_mass"], width=d["ro_width"],
+                         mass2=d["ro_mass2"], width2=d["ro_width2"])
+    m = np.array([0.60, 0.775, 1.00, 1.40])
+    a_pwa = np.asarray(mdl.amplitude(m, dict(d)), dtype=complex)
+    a_bas = np.asarray(mdl.amp(m, dict(d)), dtype=complex)
+    assert np.allclose(a_pwa, a_bas, rtol=1e-12, atol=1e-14), (
+        f"pwa and basis paths disagree: {a_pwa} vs {a_bas}")

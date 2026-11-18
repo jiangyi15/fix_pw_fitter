@@ -186,12 +186,66 @@ class AmplitudeModel(BaseModel):
             return self.params_transform_cls(self, self.build_kernel_config())
         return self.params_transform_cls(self)
 
-    def extra_transforms(self):
-        """Model-level transforms for the constraint pipeline.
+    def particle_model(self, name):
+        """The particle-model instance called *name* (a BW factor of a chain).
 
-        Registered by :meth:`tabpwa.fitter.Fitter.setup_mass_width_transforms`
-        right after the particle models' mass/width transforms (same
-        contract: physical parameters → derived slots).  The default is
+        Owned here because this class owns the decay tree; the ``Fitter`` is a
+        composition root and must not walk chains itself.
+        """
+        for chain in self.full_decay.chains:
+            for decay in chain.decays[1:]:
+                if decay.core.name == name:
+                    return decay.core._model
+        raise ValueError(f"Particle '{name}' not found in config")
+
+    def particle_defaults(self):
+        """``{param: default}`` from every particle model, deduplicated.
+
+        Lives here, not in the ``Fitter``: the fitter must not walk the decay
+        tree or know that a particle model has ``get_defaults()``.
+        """
+        out, seen = {}, set()
+        for chain in self.full_decay.chains:
+            for decay in chain.decays[1:]:
+                mdl = decay.core._model
+                if id(mdl) in seen:
+                    continue
+                seen.add(id(mdl))
+                for k, v in mdl.get_defaults().items():
+                    out[k] = float(v)
+        return out
+
+    def particle_transforms(self):
+        """All constraint transforms this amplitude model needs, IN ORDER.
+
+        The FITTER must not walk the decay tree or know a particle model's
+        interface — the amplitude model owns that knowledge.  Returns the
+        particle models' own mass/width transforms first (deduplicated by
+        instance, since one particle can appear in several chains), then
+        :meth:`extra_transforms`.  Order matters: a later transform may consume
+        an earlier one's outputs (``pwa_gen``'s basis weights are built from
+        the couplings a mass/width transform produces).
+        """
+        out, seen = [], set()
+        for chain in self.full_decay.chains:
+            for decay in chain.decays[1:]:
+                mdl = decay.core._model
+                if id(mdl) in seen:
+                    continue
+                seen.add(id(mdl))
+                # A basis-only model has no mass/width concept at all; that is
+                # the same outcome as returning None.
+                mk = getattr(mdl, "make_mass_width_transform", None)
+                tr = mk() if mk is not None else None
+                if tr is not None:
+                    out.append(tr)
+        out.extend(self.extra_transforms())
+        return out
+
+    def extra_transforms(self):
+        """Model-level transforms, appended after the particle ones.
+
+        Same contract (physical parameters → derived slots).  The default is
         empty; ``pwa_gen`` adds its physical → basis-weight transform.
         """
         return []

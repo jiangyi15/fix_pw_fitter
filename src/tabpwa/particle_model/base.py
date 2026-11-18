@@ -555,23 +555,28 @@ class PlainBasisWeightsTransform(Transform):
     subclassing :class:`BasisModel` alone) supplies its own transform instead —
     ``BasisModel.make_basis_transform`` defaults to ``None``.
 
-    ``input_names`` are the physical ``{name}_mass`` plus the gamma couplings;
-    ``output_names`` are exactly :meth:`get_den_name` (the kernel ``coeff``
-    names), so the names always match the rows the builder emitted.
+    ``input_names`` are the PHYSICAL parameters.  When the model has its own
+    mass/width transform (``RhoOmegaGS``: it derives ``{p}_w0..{p}_w7`` from
+    ``mass/width/mass2/width2``) the gamma couplings do not exist in the raw
+    parameter dict at all — ``apply_forward`` hands a transform only the names
+    it declares — so this transform runs that stage INTERNALLY in
+    :meth:`forward` and declares ITS inputs.  The mass/width transform itself
+    remains a ``BaseModel``/pwa concern (it rewrites the kernel `m0`/`g0`);
+    using it here is an implementation detail of the basis mapping, not a
+    merging of the two interfaces.  Without it ``RhoOmegaGS`` resolved every
+    basis weight to 0.
+
+    A model whose basis weights are NOT ``m0 · coupling`` must override this
+    with its own basis transform — ``kmatrix2`` does.
 
     The default basis is ``[1, m², -i·γ_j(m)]`` with weights
     ``[m0², -1, m0·g_j]`` — the plain BW denominator.  A model that overrides
     ``den_basis`` **must** override this too.  ``kmatrix2`` does.  The base
     class cannot derive an arbitrary basis' weights from ``m0``/``g``.
 
-    KNOWN GAP (pre-existing, not introduced by the basis split):
-    ``RhoOmegaGS`` has 10 basis rows but does NOT override this, so it inherits
-    the 3-row mapping — ``ro_w0..ro_w7`` are read as transform INPUTS while the
-    real physical parameters are ``ro_mass/width/mass2/width2``, and every
-    weight resolves to 0 (denominator ``m0²−m²`` only).  A ``RhoOmegaGS`` +
-    ``pwa_gen`` config is therefore wrong on this path today; it needs its own
-    transform built on ``RhoOmegaGSWeightsTransform``.  Fixing that is separate
-    work from this refactor.
+    It maps the weight names positionally (``m0²`` then ``m0·{g}``), which is
+    the ``[1, −m², −i·γ_j]`` layout.  A model with a DIFFERENT basis must
+    override it — ``kmatrix2`` does (``KMatrix2WeightsTransform``).
     """
 
     _has_inverse = False
@@ -580,7 +585,14 @@ class PlainBasisWeightsTransform(Transform):
         self.model = model
         name = model.name
         self.gamma_names = list(model.get_gamma_name())
-        self.input_names = [f"{name}_mass"] + list(self.gamma_names)
+        # The model's own mass/width stage, if it has one: it PRODUCES the
+        # gamma couplings, so this transform must run it to see them.
+        self._mw = (model.make_mass_width_transform()
+                    if hasattr(model, "make_mass_width_transform") else None)
+        if self._mw is not None:
+            self.input_names = list(self._mw.input_names)
+        else:
+            self.input_names = [f"{name}_mass"] + list(self.gamma_names)
         # ``"one"`` is a CONSTANT (the m² coefficient, always +1) — it is not a
         # function of the physical parameters, so it is not a transform output.
         # The constraint layer pins it (`set_fixed`), the same mechanism that
@@ -588,8 +600,14 @@ class PlainBasisWeightsTransform(Transform):
         self.output_names = [n for n in model.get_den_name() if n != "one"]
 
     def forward(self, d):
-        """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights."""
+        """``m0²``, ``-1``, ``m0·g_j`` — the uniform basis weights.
+
+        Resolves the model's mass/width stage first when it has one, so the
+        gamma couplings are present regardless of what the caller supplied.
+        """
         d = d or {}
+        if self._mw is not None:
+            d = self._mw.forward(dict(d))
         m0 = float(d.get(f"{self.model.name}_mass",
                          self.model.kwargs.get("mass", 0.775)))
         # ``"one"`` is pinned by the constraint layer, not produced here.

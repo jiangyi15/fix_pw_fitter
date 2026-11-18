@@ -229,34 +229,14 @@ class Fitter:
     def setup_mass_width_transforms(self):
         """Collect mass/width transforms from all particle models and register them.
 
-        Iterates over all decay chains, calls ``make_mass_width_transform()``
-        on each model, and adds non-``None`` results to the constraint pipeline.
-        Duplicate model instances (same particle appearing in multiple chains)
-        are registered only once.
-
-        The amplitude model may add its own transforms (``extra_transforms``)
-        — e.g. ``pwa_gen``'s physical-parameters → basis-weights transform,
-        which has the same contract as a mass/width transform.
+        The AMPLITUDE MODEL decides which transforms exist and in what order
+        (``AmplitudeModel.particle_transforms``): the particle models' own
+        mass/width transforms, then the amplitude model's extras such as
+        ``pwa_gen``'s physical-parameters → basis-weights mapping.  The fitter
+        only registers the list — it must not walk the decay tree or know a
+        particle model's interface.
         """
-        transforms = []
-        seen = set()
-        for chain in self.model.full_decay.chains:
-            for decay in chain.decays[1:]:
-                model = decay.core._model
-                mid = id(model)
-                if mid in seen:
-                    continue
-                seen.add(mid)
-                # A basis-only model (``BasisModel`` without ``BaseModel``)
-                # has no mass/width concept, so it does not define this at
-                # all — the same "no transform" outcome as returning None.
-                mwt = getattr(model, "make_mass_width_transform", None)
-                tfm = mwt() if mwt is not None else None
-                if tfm is not None:
-                    transforms.append(tfm)
-        extra = getattr(self.model, "extra_transforms", None)
-        if extra is not None:
-            transforms.extend(extra())
+        transforms = list(self.model.particle_transforms())
         # ``pwa_gen``'s m² basis row carries the SHARED literal weight
         # ``"one"`` — one physical constant, not one per resonance.  Pin it to
         # the value the transform actually produces (don't hardcode it: the
@@ -806,17 +786,10 @@ class Fitter:
 
     def _build_defaults(self):
         """Build default physical params from particle models and sync to cm."""
-        d = {}
-        seen = set()
-        for chain in self.model.full_decay.chains:
-            for decay in chain.decays[1:]:
-                model = decay.core._model
-                mid = id(model)
-                if mid in seen:
-                    continue
-                seen.add(mid)
-                for k, v in model.get_defaults().items():
-                    d[k] = float(v)
+        # The amplitude model owns the particle-model sweep (see
+        # ``AmplitudeModel.particle_defaults``): the fitter must not walk the
+        # decay tree or depend on a particle model's interface.
+        d = dict(self.model.particle_defaults())
         # Model-declared parameter defaults (generic; e.g. legacy scalars).
         for name, val in self._kernel_builder.param_defaults().items():
             d.setdefault(name, float(val))
@@ -2375,11 +2348,7 @@ class Fitter:
         Raises:
             ValueError: if *particle_name* is not found.
         """
-        for chain in self.model.full_decay.chains:
-            for decay in chain.decays[1:]:
-                if decay.core.name == particle_name:
-                    return decay.core._model
-        raise ValueError(f"Particle '{particle_name}' not found in config")
+        return self.model.particle_model(particle_name)
 
     def get_bw_params(self, particle_name, fit_result):
         """BW peak mass and width for a single resonance from fit result.
