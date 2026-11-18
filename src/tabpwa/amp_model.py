@@ -107,14 +107,6 @@ class AmplitudeModel(BaseModel):
     ``build_kernel_config`` override seam.
     """
 
-    #: Whether this amplitude model consumes the particle models' OWN
-    #: transforms (``make_mass_width_transform``).  The plain ``pwa`` kernel
-    #: does: it reads the couplings they produce, and its ``g0`` block IS
-    #: those outputs.  ``pwa_gen`` does not — its coefficients are the basis
-    #: weights, and each resonance's basis transform is SELF-CONTAINED, so no
-    #: transform has to be registered before it for it to be correct.
-    needs_particle_transforms = True
-
     name = "pwa"
     default_scalar_names = ()
     default_scalar_defaults = None
@@ -253,55 +245,19 @@ class AmplitudeModel(BaseModel):
         return out
 
     def particle_transforms(self):
-        """All constraint transforms this amplitude model needs, IN ORDER.
+        """The particle models' own transforms — the ``pwa`` family's list.
 
         The FITTER must not walk the decay tree or know a particle model's
-        interface — the amplitude model owns that knowledge.  Returns the
-        particle models' own mass/width transforms first (deduplicated by
-        instance, since one particle can appear in several chains), then
-        :meth:`extra_transforms`, then one :class:`FixedValueTransform` for the
-        model's physical CONSTANTS (:meth:`constant_weight_values`).  Order
-        matters: a later transform may consume an earlier one's outputs
-        (``pwa_gen``'s basis weights are built from the couplings a mass/width
-        transform produces), and a constant has no inputs at all, so it goes
-        last.
+        interface, so the amplitude model owns that knowledge and this is the
+        ONE copy of the walk.  The ``pwa`` kernel reads the couplings these
+        transforms produce (its ``g0`` block IS those outputs), so they are the
+        whole list.
+
+        A model that needs a different list writes its own: `PWAGen` overrides
+        this method outright rather than asking the base for a switch (see
+        "Class policy" in AGENTS.md).
         """
-        extras = self.extra_transforms()
-        out = self._particle_mw_transforms() if self.needs_particle_transforms \
-            else []
-        out.extend(extras)
-        # Constants LAST: they consume nothing and produce a fixed value, so
-        # nothing downstream should have to recompute them.  Declaring them in
-        # one place keeps "who defines this name" unambiguous — a per-model
-        # transform that also emitted ``"one"`` would be an alternative
-        # producer, and the constraint layer would silently keep only one.
-        fixed = self.constant_weight_values()
-        if fixed:
-            from tabpwa.param_constraint import FixedValueTransform
-            out.append(FixedValueTransform(fixed))
-        return out
-
-    def constant_weight_values(self):
-        """Weight names that are physical CONSTANTS, with their values.
-
-        A constant is not a function of any parameter, so no per-model
-        transform can produce it and its name would otherwise be an undeclared
-        passthrough — overwritten by whatever the caller happened to pass.
-        Registered as one :class:`~tabpwa.param_constraint.FixedValueTransform`
-        so the declaration lives in a single place.
-
-        Default ``{}``.  ``pwa_gen`` supplies ``"one"``: the m² coefficient,
-        +1 because the basis row is ``-m²``.
-        """
-        return {}
-
-    def extra_transforms(self):
-        """Model-level transforms, appended after the particle ones.
-
-        Same contract (physical parameters → derived slots).  The default is
-        empty; ``pwa_gen`` adds its physical → basis-weight transform.
-        """
-        return []
+        return self._particle_mw_transforms()
 
 @register_amplitude_model("pwa")
 class PWA(AmplitudeModel):
@@ -441,6 +397,27 @@ class PWAGen(PWA):
         self._pg_kc = kc
         return kc
 
+    def particle_transforms(self):
+        """pwa_gen's OWN list: basis transforms and constants — no particle ones.
+
+        This model fits basis weights, not ``m0``/``g0``.  Each resonance's
+        basis transform is SELF-CONTAINED (it holds the model stage that
+        derives its couplings), so nothing here consumes the output of
+        ``make_mass_width_transform()``.  Registering one anyway would run it
+        on every ``resolve``/``chain_gradient`` for values no kernel receives,
+        and would strike the names it produces off the fitted surface
+        (``OneModel``'s pinned mass/width is the measured case).
+
+        Written out rather than inherited behind a switch: the two families
+        answer a different question, and a flag would hide that in a branch.
+        """
+        out = list(self.extra_transforms())
+        fixed = self.constant_weight_values()
+        if fixed:
+            from tabpwa.param_constraint import FixedValueTransform
+            out.append(FixedValueTransform(fixed))
+        return out
+
     def extra_transforms(self):
         """Each resonance's OWN basis transform — no combined wrapper.
 
@@ -470,13 +447,6 @@ class PWAGen(PWA):
                 out.append(tr)
         return out
 
-    #: ``pwa_gen`` fits basis weights, not ``m0``/``g0``: its coefficients ARE
-    #: the weights, and each resonance's basis transform is self-contained
-    #: (it holds the model stage that derives its couplings).  So it registers
-    #: NO particle transform — there is nothing for one to feed, and a
-    #: transform whose outputs nothing reads would run every iteration for
-    #: values no kernel receives (``OneModel``'s pinned mass/width).
-    needs_particle_transforms = False
 
     def constant_weight_values(self):
         """``"one"`` — the m² coefficient, +1 because the row is ``-m²``.

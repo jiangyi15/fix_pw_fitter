@@ -237,17 +237,6 @@ class Fitter:
         particle model's interface.
         """
         transforms = list(self.model.particle_transforms())
-        # ``pwa_gen``'s m² basis row carries the SHARED literal weight
-        # ``"one"`` — one physical constant, not one per resonance.  Pin it to
-        # the value the transform actually produces (don't hardcode it: the
-        # row is ``+m²``, so the weight is -1, and a mismatch here would let
-        # the constraint layer override the transform with the wrong sign).
-        den_names = (getattr(self, "kernel_config", None) or {}).get(
-            "den_names") or []
-        if "one" in den_names:
-            # the m² coefficient is the CONSTANT 1 (row ``-m²``); it is not a
-            # function of any parameter, so no transform produces it.
-            self.cm.set_fixed({"one": 1.0}, reset=False)
         # Never reset: on a SHARED cm a reset would wipe the other configs'
         # mass/width transforms; on the private cm there is nothing to wipe
         # on this single call.  Same-name collisions are handled per name
