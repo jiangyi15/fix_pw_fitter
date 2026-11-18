@@ -319,6 +319,17 @@ class BaseModel(BasisModel):
     def get_gamma_name(self):
         return [f"{self.name}_width"]
 
+    def get_mass_name(self):
+        """Name of the mass parameter this model's weights are built from.
+
+        The interface's ONE declaration of it: :meth:`den_weights`,
+        :meth:`get_bw_params`, :meth:`get_bw_param_names` and the basis
+        transform all read this instead of each rebuilding
+        ``f"{self.name}_mass"`` — a model that names its mass differently
+        overrides it in one place.
+        """
+        return f"{self.name}_mass"
+
     def get_bw_param_names(self):
         """Candidate parameter names for :meth:`get_bw_params`.
 
@@ -326,7 +337,7 @@ class BaseModel(BasisModel):
         parameter that is not one of ``get_gamma_name()`` overrides this
         (``ck_matrix_v2`` adds its standalone width).
         """
-        return [f"{self.name}_mass"] + list(self.get_gamma_name())
+        return [self.get_mass_name()] + list(self.get_gamma_name())
 
     def register_parent(self, particle):
         """Store the Particle that owns this model (for decay tree access)."""
@@ -411,7 +422,7 @@ class BaseModel(BasisModel):
         Subclasses overriding :meth:`get_den_name` should override this
         too when their weight semantics differ.
         """
-        m0 = float(params.get(f"{self.name}_mass",
+        m0 = float(params.get(self.get_mass_name(),
                               self.kwargs.get("mass", 0.775)))
         names = list(self.get_den_name())
         out = []
@@ -555,7 +566,7 @@ class BaseModel(BasisModel):
                 return float(self.kwargs[bare])
             return fallback
 
-        m0 = _p(f"{self.name}_mass", 0.775)
+        m0 = _p(self.get_mass_name(), 0.775)
         defaults = self.get_defaults()
         gamma_names = self.get_gamma_name()
         g0_vals = [_p(n, float(defaults.get(n, 0.0))) for n in gamma_names]
@@ -613,8 +624,15 @@ class PlainBasisWeightsTransform(Transform):
     _has_inverse = False
 
     def __init__(self, model):
+        if not isinstance(model, BaseModel):
+            # Cross-interface test of the allowed kind: this class is
+            # ``BaseModel``'s default mapping and calls its running-width
+            # stage.  A ``BasisModel`` must supply its own mapping (or None).
+            raise TypeError(
+                f"PlainBasisWeightsTransform is BaseModel's default basis "
+                f"transform; {type(model).__name__} subclasses BasisModel and "
+                f"must return its own from make_basis_transform()")
         self.model = model
-        name = model.name
         # ``"one"`` is EXCLUDED: it is a physical CONSTANT, not a function of
         # this model's parameters, and it is produced once for the whole fit by
         # a `FixedValueTransform` (see `AmplitudeModel.particle_transforms`).
@@ -622,17 +640,28 @@ class PlainBasisWeightsTransform(Transform):
         # unambiguous — two transforms declaring the same output would be
         # treated as alternatives and the later one would replace the earlier.
         self.output_names = [n for n in model.get_den_name() if n != "one"]
-        # Emit exactly the slots THIS basis declares — a model may have a
-        # gamma row for the plain-pwa path (``one`` does) while its BASIS is a
-        # single constant row.  The slots are classified once; ``forward`` and
-        # ``backward`` both walk these groups, so a value and its derivative
-        # cannot desynchronise.
-        self.mass_name = f"{name}_mass"
-        self._s0_slots = [n for n in self.output_names if n.endswith("_s0")]
-        self._t_slots = [(n, n[:-len("_t")])
-                         for n in self.output_names if n.endswith("_t")]
-        self._pass_slots = [n for n in self.output_names
-                            if not n.endswith(("_s0", "_t"))]
+        # The slots are read off the model's OWN declarations — the mass from
+        # `get_mass_name()`, the weights from `get_den_name()` paired with
+        # `get_gamma_name()` — never rebuilt from string suffixes here.  The
+        # interface's layout is `[s0] + [{g}_t for g in get_gamma_name()]`;
+        # a model that states another layout supplies its own transform.
+        # ``forward`` and ``backward`` both walk these groups, so a value and
+        # its derivative cannot desynchronise.
+        self.mass_name = model.get_mass_name()
+        den = list(self.output_names)
+        gammas = list(model.get_gamma_name())
+        if not den:                     # constant basis (``OneModel``)
+            self._s0_slots, self._t_slots = [], []
+        elif len(den) == 1 + len(gammas):
+            self._s0_slots = den[:1]
+            self._t_slots = list(zip(den[1:], gammas))
+        else:
+            raise ValueError(
+                f"{type(self).__name__}: '{model.name}' declares "
+                f"{len(den)} denominator weights but {len(gammas)} gamma "
+                f"names — the layout must be [s0] + one slot per gamma name; "
+                f"a different basis supplies its own transform")
+        self._pass_slots = []
         couplings = [src for _slot, src in self._t_slots]
 
         # SELF-HELD: this transform maps PHYSICAL parameters to the basis
@@ -648,14 +677,6 @@ class PlainBasisWeightsTransform(Transform):
         # by a registration change.  Calling the stage here also means the
         # inputs are always the PHYSICAL ones, which is what
         # ``make_basis_transform()`` promises.
-        if not isinstance(model, BaseModel):
-            # Cross-interface test of the allowed kind: this class is
-            # ``BaseModel``'s default mapping and calls its running-width
-            # stage.  A ``BasisModel`` must supply its own mapping (or None).
-            raise TypeError(
-                f"PlainBasisWeightsTransform is BaseModel's default basis "
-                f"transform; {type(model).__name__} subclasses BasisModel and "
-                f"must return its own from make_basis_transform()")
         stage = model.make_mass_width_transform()
         produced = set(stage.output_names) if stage is not None else set()
         self._derived = [c for c in couplings if c in produced]
@@ -670,7 +691,12 @@ class PlainBasisWeightsTransform(Transform):
 
         if self._mw is not None:
             _add(self._mw.input_names)
-        if self._s0_slots or self._t_slots:
+        # The mass is an input of THIS transform only when the model stage
+        # does not produce it.  ``KToSVDWeightsTransform`` returns
+        # ``{name}_mass`` alongside the couplings; declaring it as an input
+        # too would put it on the fitted surface (a direction the stage then
+        # overwrites) instead of leaving it, as in ``pwa``, a produced value.
+        if (self._s0_slots or self._t_slots) and self.mass_name not in produced:
             _add([self.mass_name])
         _add([c for c in couplings if c not in produced])
         _add(self._pass_slots)
