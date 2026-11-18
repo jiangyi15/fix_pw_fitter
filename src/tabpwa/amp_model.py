@@ -107,6 +107,14 @@ class AmplitudeModel(BaseModel):
     ``build_kernel_config`` override seam.
     """
 
+    #: Whether this amplitude model consumes the particle models' OWN
+    #: transforms (``make_mass_width_transform``).  The plain ``pwa`` kernel
+    #: does: it reads the couplings they produce, and its ``g0`` block IS
+    #: those outputs.  ``pwa_gen`` does not — its coefficients are the basis
+    #: weights, and each resonance's basis transform is SELF-CONTAINED, so no
+    #: transform has to be registered before it for it to be correct.
+    needs_particle_transforms = True
+
     name = "pwa"
     default_scalar_names = ()
     default_scalar_defaults = None
@@ -215,6 +223,35 @@ class AmplitudeModel(BaseModel):
                     out[k] = float(v)
         return out
 
+    def _particle_mw_transforms(self):
+        """Each particle model's own mass/width transform — the tree walk.
+
+        The FITTER must not walk the decay tree or know a particle model's
+        interface, so the amplitude model owns that knowledge and there is
+        exactly ONE copy of this walk (a second one drifts).
+
+        The two particle interfaces are SEPARATE: only a ``BaseModel`` has a
+        mass/width stage, and ``BasisModel`` deliberately does not declare one
+        (a basis-only model such as ``kmatrix2`` has no concept of it).  So
+        the walk — which crosses both kinds — asks which interface the model
+        implements and skips the basis-only ones.  Deduplicated by instance:
+        one particle can appear in several chains.
+        """
+        from tabpwa.particle_model.base import BaseModel as ParticleBaseModel
+        out, seen = [], set()
+        for chain in self.full_decay.chains:
+            for decay in chain.decays[1:]:
+                mdl = decay.core._model
+                if id(mdl) in seen:
+                    continue
+                seen.add(id(mdl))
+                if not isinstance(mdl, ParticleBaseModel):
+                    continue
+                tr = mdl.make_mass_width_transform()
+                if tr is not None:
+                    out.append(tr)
+        return out
+
     def particle_transforms(self):
         """All constraint transforms this amplitude model needs, IN ORDER.
 
@@ -229,25 +266,10 @@ class AmplitudeModel(BaseModel):
         transform produces), and a constant has no inputs at all, so it goes
         last.
         """
-        # The two particle interfaces are SEPARATE: only a ``BaseModel`` has
-        # a mass/width stage, and ``BasisModel`` deliberately does not declare
-        # one (a basis-only model such as ``kmatrix2`` has no concept of it).
-        # So this sweep — which crosses both kinds — asks which interface the
-        # model implements, and skips the basis-only ones.
-        from tabpwa.particle_model.base import BaseModel as ParticleBaseModel
-        out, seen = [], set()
-        for chain in self.full_decay.chains:
-            for decay in chain.decays[1:]:
-                mdl = decay.core._model
-                if id(mdl) in seen:
-                    continue
-                seen.add(id(mdl))
-                if not isinstance(mdl, ParticleBaseModel):
-                    continue
-                tr = mdl.make_mass_width_transform()
-                if tr is not None:
-                    out.append(tr)
-        out.extend(self.extra_transforms())
+        extras = self.extra_transforms()
+        out = self._particle_mw_transforms() if self.needs_particle_transforms \
+            else []
+        out.extend(extras)
         # Constants LAST: they consume nothing and produce a fixed value, so
         # nothing downstream should have to recompute them.  Declaring them in
         # one place keeps "who defines this name" unambiguous — a per-model
@@ -437,8 +459,24 @@ class PWAGen(PWA):
         keeps them because no transform claims to produce them.
         """
         self.build_kernel_config()
-        return [rec["transform"] for rec in self._pg_bws
-                if rec["transform"] is not None]
+        out = []
+        for rec in self._pg_bws:
+            tr = rec["transform"]
+            # A transform that declares neither inputs nor outputs cannot
+            # change anything (``OneModel``: a single constant basis row, so
+            # the default transform has no weights to produce).  Registering
+            # it would only add a no-op to every resolve/backward pass.
+            if tr is not None and (tr.output_names or tr.input_names):
+                out.append(tr)
+        return out
+
+    #: ``pwa_gen`` fits basis weights, not ``m0``/``g0``: its coefficients ARE
+    #: the weights, and each resonance's basis transform is self-contained
+    #: (it holds the model stage that derives its couplings).  So it registers
+    #: NO particle transform — there is nothing for one to feed, and a
+    #: transform whose outputs nothing reads would run every iteration for
+    #: values no kernel receives (``OneModel``'s pinned mass/width).
+    needs_particle_transforms = False
 
     def constant_weight_values(self):
         """``"one"`` — the m² coefficient, +1 because the row is ``-m²``.

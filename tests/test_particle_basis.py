@@ -596,21 +596,21 @@ def test_amp_is_a_real_method_not_a_stale_alias():
         "amp did not follow the amp_raw override — it is a stale alias")
 
 
-def test_rho_omega_gs_basis_transform_consumes_the_chain():
-    """The basis transform is a CONSUMER: the chain supplies its couplings.
+def test_rho_omega_gs_basis_transform_is_self_contained():
+    """Physical parameters → basis weights, for EVERY model.
 
     ``RhoOmegaGS`` derives its 8 couplings ``w0..w7`` from four physical
-    parameters, so they are absent from the raw dict and ``apply_forward``
-    (which passes only declared inputs) hands a transform nothing it did not
-    declare.  The basis transform therefore DECLARES them; the model's own
-    mass/width transform, registered first by
-    ``AmplitudeModel.particle_transforms``, produces them one step earlier.
+    parameters, and the basis weights are ``m0·w_k``.  The basis transform
+    holds that stage itself (``self._mw``) and declares the PHYSICAL inputs,
+    so no second transform has to be registered before it — the mapping is
+    complete on its own, which is what ``make_basis_transform()`` promises.
 
-    It must not run that stage itself.  The hand-rolled call was not merely
-    redundant — a transform's ``forward`` returns ONLY its outputs, so the
-    merged dict lost ``{name}_mass`` and ``m0`` fell back to the config value:
-    the fitted mass silently stopped entering ``s0`` and the ``m0·g`` weights
-    (measured dQ/dm = -6.9e4 against a true -77.6).
+    Two failures this pins, both measured:
+    * declaring the couplings as inputs instead (the stage's OUTPUTS) made the
+      transform correct only if the producer happened to be registered first;
+    * replacing ``d`` with the stage's return value dropped ``{name}_mass``
+      (a transform returns only its outputs), so ``m0`` fell back to the
+      config value — dQ/dm = -6.9e4 against a true -77.6.
     """
     d = {"ro_mass": 0.775, "ro_width": 0.149,
          "ro_mass2": 0.78266, "ro_width2": 0.00868}
@@ -618,18 +618,15 @@ def test_rho_omega_gs_basis_transform_consumes_the_chain():
                          mass=d["ro_mass"], width=d["ro_width"],
                          mass2=d["ro_mass2"], width2=d["ro_width2"])
     tr = mdl.make_basis_transform()
-    mw = mdl.make_mass_width_transform()
-    assert list(tr.input_names) == ["ro_mass"] + mdl.get_gamma_name(), (
-        "the basis transform must declare the mass and the couplings it reads")
+    assert list(tr.input_names) == list(d), (
+        "the basis transform must declare the PHYSICAL inputs")
 
-    # the chain, in registration order: producer → consumer
-    phys = mw.apply_forward(dict(d))
-    out = tr.apply_forward(phys)
+    out = tr.apply_forward(dict(d))
     w = [float(out[f"ro_w{k}_t"]) for k in range(8)]
     assert any(abs(x) > 1e-12 for x in w), "every basis weight resolved to 0"
 
-    # ... and the FITTED mass really enters: moving it moves s0 and the weights
-    moved = {**phys, "ro_mass": d["ro_mass"] * 1.01}
+    # the FITTED mass enters s0 and the m0·g products
+    moved = {**d, "ro_mass": d["ro_mass"] * 1.01}
     out2 = tr.apply_forward(moved)
     assert out2["ro_s0"] != out["ro_s0"]
     assert [out2[f"ro_w{k}_t"] for k in range(8)] != [
@@ -689,6 +686,35 @@ def test_plain_basis_transform_backward_is_analytic_and_exact():
         assert abs(vjp[name] - fd) <= 1e-7 * max(abs(fd), 1.0), (
             name, vjp[name], fd)
 
-    # both groups contribute to the mass: s0's 2·m0 and every m0·g weight
+    # the couplings are NOT inputs: their gradient is routed through the
+    # model's own stage, so it lands on the physical parameters
+    assert not (set(vjp) & {f"ro_w{k}" for k in range(8)})
     assert vjp["ro_mass"] != 0.0
-    assert all(vjp[f"ro_w{k}"] != 0.0 for k in range(8))
+    assert any(vjp[n] != 0.0 for n in ("ro_width", "ro_mass2", "ro_width2"))
+
+
+def test_plain_basis_transform_requires_its_declared_inputs():
+    """A missing declared input is an ERROR, never a zero weight.
+
+    Defaulting a coupling to 0 is how ``RhoOmegaGS``'s basis once collapsed to
+    ``m0² − m²`` — up to 1.8x off, with nothing raised anywhere.  The transform
+    declares what it reads, so an absent name is a wiring error: ``apply_forward``
+    passes only declared inputs, which makes the KeyError name the culprit.
+    """
+    d = {"ro_mass": 0.775, "ro_width": 0.149,
+         "ro_mass2": 0.78266, "ro_width2": 0.00868}
+    mdl = build_particle("ro", model="RhoOmegaGS",
+                         mass=d["ro_mass"], width=d["ro_width"],
+                         mass2=d["ro_mass2"], width2=d["ro_width2"])
+    tr = mdl.make_basis_transform()
+    phys = dict(d)                      # physical parameters ARE the inputs
+
+    # every declared input present -> the weights exist
+    out = tr.apply_forward(dict(phys))
+    assert any(abs(out[f"ro_w{k}_t"]) > 1e-12 for k in range(8))
+
+    # a missing PHYSICAL input is an error, not a silently-zero weight
+    with pytest.raises(KeyError):
+        tr.apply_forward({k: v for k, v in phys.items() if k != "ro_mass"})
+    with pytest.raises(KeyError):
+        tr.apply_forward({k: v for k, v in phys.items() if k != "ro_width"})

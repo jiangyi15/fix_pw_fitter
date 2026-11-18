@@ -578,6 +578,12 @@ def test_the_fitted_mass_enters_the_basis_weights():
     names = f.free_param_names()
     # the four physical parameters, NOT the eight couplings they produce
     assert set(names) == {"k2_mass", "k2_width", "k2_mass2", "k2_width2"}
+    # ... and pwa_gen registers no PARTICLE transform: the basis transform
+    # holds the stage itself, so nothing outside produces (or pins) m0/width.
+    registered = f.cm.mass_width_transforms
+    for tr in registered:
+        assert not ({"k2_mass", "k2_width"} & set(tr.output_names)), type(tr).__name__
+    assert any(tr.output_names for tr in registered), "basis transform missing"
     x = f.initial_values(seed=1)
     nll, grad = f.get_nll(x)
     assert np.isfinite(nll)
@@ -589,3 +595,34 @@ def test_the_fitted_mass_enters_the_basis_weights():
         xm[i] -= h
         fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * h)
         assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (nm, grad[i], fd)
+
+
+def test_a_constant_basis_registers_no_mass_width_transform():
+    """``OneModel`` in pwa_gen: its basis is the constant row ``1``.
+
+    ``_FixMassWidthTransform`` exists to fill the plain kernel's ``m0``/``g0``
+    slots — and to pin those names out of the fitted surface.  pwa_gen has no
+    such slots and the constant basis reads neither, so registering it there
+    would run a transform every iteration for two values nothing consumes.
+    Registration is therefore demand-driven: a particle transform is kept only
+    when a basis transform reads one of its outputs.  The no-op basis
+    transform is dropped for the same reason.
+    """
+    d = _cfg(CFG_BASIS)
+    d["particle"]["k2"]["model"] = "one"
+    f = _loaded(d, n_phsp=60, n_data=40)
+
+    # Assert the PROPERTY, not a class list: nothing registered may produce
+    # (or consume) a mass/width name, because this basis has no such slot and
+    # the kernel receives none.
+    registered = f.cm.mass_width_transforms
+    mass_width = {"k2_mass", "k2_width"}
+    for tr in registered:
+        assert not (mass_width & set(tr.output_names)), type(tr).__name__
+        assert not (mass_width & set(tr.input_names)), type(tr).__name__
+    # ... and the constant the basis DOES need is still produced
+    assert any("one" in tr.output_names for tr in registered)
+    assert f.model.extra_transforms() == []
+    assert f.kernel_config["den_names"] == ["one"]
+    x = f.initial_values(seed=1)
+    assert np.isfinite(f.get_nll(x)[0])

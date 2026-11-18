@@ -566,21 +566,16 @@ class PlainBasisWeightsTransform(Transform):
     subclassing :class:`BasisModel` alone) supplies its own transform instead —
     ``BasisModel.make_basis_transform`` defaults to ``None``.
 
-    ``input_names`` are the mass and the model's ``get_gamma_name()``
-    couplings — the names the model's OWN mass/width transform produces when
-    it has one (``RhoOmegaGSWeightsTransform``: ``mass/width/mass2/width2 →
-    {p}_w0..{p}_w7``; ``WidthTransform``: ``{p}_width → {p}_width_t``), and
-    plain parameters when it has none.
+    ``input_names`` are the model's PHYSICAL parameters, for every model: the
+    mass, plus — when a coupling the basis reads is derived rather than fitted
+    — the inputs of the stage that derives it (``RhoOmegaGS``: ``w0..w7`` from
+    ``mass/width/mass2/width2``; ``BWRS``: ``{p}_width_t`` from mass and
+    width).  A model whose couplings ARE its parameters (the default plain BW)
+    declares them directly.
 
-    That split is the whole point: this transform is a *consumer*.  It never
-    calls ``make_mass_width_transform()`` itself — composing by hand would run
-    that stage a second time and hide the chain from the constraint manager,
-    which is what chains the gradients.  The producer is registered first by
-    :meth:`AmplitudeModel.particle_transforms` (every model's mass/width
-    transform, then the basis transforms), so the couplings are already in the
-    dict when this one runs.  A name it failed to declare would arrive as 0 —
-    which is exactly how ``RhoOmegaGS`` used to resolve every basis weight to
-    0 before the declaration was fixed.
+    The stage is held HERE (``self._mw``), so the transform is self-contained:
+    it is the model's one answer to "physical parameters → basis weights", and
+    no other transform has to be registered before it for it to be correct.
 
     A model whose basis weights are NOT ``m0 · coupling`` must override this
     with its own basis transform — ``kmatrix2`` does.
@@ -607,93 +602,115 @@ class PlainBasisWeightsTransform(Transform):
         # unambiguous — two transforms declaring the same output would be
         # treated as alternatives and the later one would replace the earlier.
         self.output_names = [n for n in model.get_den_name() if n != "one"]
-        # INPUTS are exactly the quantities those outputs are built from:
-        # ``{name}_mass`` (for ``s0`` and the ``m0·g`` products) and, for each
-        # ``{g}_t`` weight, its ``{g}`` — the KERNEL-facing coupling name.
-        #
-        # That name is what the model's own mass/width transform produces when
-        # it has one (``RhoOmegaGSWeightsTransform``: ``w0..w7``;
-        # ``WidthTransform``: ``{name}_width_t``, whose basis slot is the
-        # doubly-suffixed ``{name}_width_t_t``); when the model has no such
-        # stage it is a plain parameter.
-        #
-        # Declaring them is what makes the chain work: `apply_forward` passes
-        # a transform ONLY the names it declares, and the producer is
-        # registered FIRST by `AmplitudeModel.particle_transforms` (every
-        # model's mass/width transform, then the basis transforms).  This
-        # transform never CALLS another transform — composing by hand would
-        # run that stage twice and hide the chain from the constraint manager,
-        # which is what chains the gradients (and the hand-rolled call used to
-        # drop the FITTED mass: a transform's ``forward`` returns only its
-        # outputs, so ``m0`` fell back to the config value).
-        #
-        # A basis with no gamma rows (``OneModel``: a single constant row)
-        # therefore declares neither the couplings nor an unused mass.
-        #
-        # The slots are CLASSIFIED here once; ``forward`` and ``backward``
-        # both walk these three groups, so a new basis layout cannot
-        # desynchronise a value from its derivative.
+        # Emit exactly the slots THIS basis declares — a model may have a
+        # gamma row for the plain-pwa path (``one`` does) while its BASIS is a
+        # single constant row.  The slots are classified once; ``forward`` and
+        # ``backward`` both walk these groups, so a value and its derivative
+        # cannot desynchronise.
         self.mass_name = f"{name}_mass"
         self._s0_slots = [n for n in self.output_names if n.endswith("_s0")]
         self._t_slots = [(n, n[:-len("_t")])
                          for n in self.output_names if n.endswith("_t")]
         self._pass_slots = [n for n in self.output_names
                             if not n.endswith(("_s0", "_t"))]
-        uses_mass = bool(self._s0_slots or self._t_slots)
-        self.input_names = (([self.mass_name] if uses_mass else [])
-                            + [src for _o, src in self._t_slots]
-                            + self._pass_slots)
+        couplings = [src for _slot, src in self._t_slots]
+
+        # SELF-HELD: this transform maps PHYSICAL parameters to the basis
+        # weights for EVERY model, so it carries the model's own stage when
+        # one of the couplings the basis reads is derived rather than fitted
+        # (``RhoOmegaGS``: ``w0..w7`` from mass/width/mass2/width2;
+        # ``BWRS``: ``{p}_width_t`` from mass and width).  A model without
+        # such a stage (the default plain BW) declares those couplings as
+        # plain parameters instead — same mapping, one less object.
+        #
+        # Nothing is registered "before" this transform to feed it: that
+        # ordering contract lived outside the transform and could be broken
+        # by a registration change.  Calling the stage here also means the
+        # inputs are always the PHYSICAL ones, which is what
+        # ``make_basis_transform()`` promises.
+        stage = model.make_mass_width_transform()
+        produced = set(stage.output_names) if stage is not None else set()
+        self._derived = [c for c in couplings if c in produced]
+        self._mw = stage if self._derived else None
+
+        inputs = []
+
+        def _add(names):
+            for n in names:
+                if n not in inputs:
+                    inputs.append(n)
+
+        if self._mw is not None:
+            _add(self._mw.input_names)
+        if self._s0_slots or self._t_slots:
+            _add([self.mass_name])
+        _add([c for c in couplings if c not in produced])
+        _add(self._pass_slots)
+        self.input_names = inputs
+
+    def _resolved(self, d):
+        """The transform's inputs, with the model's own stage applied.
+
+        A transform's ``forward`` returns ONLY its outputs, so the result is
+        MERGED into ``d`` rather than replacing it — the mass is an input of
+        this transform and must survive the stage (replacing ``d`` with the
+        stage's output is how the fitted mass once fell back to the config
+        value).
+        """
+        d = d or {}
+        if self._mw is None:
+            return d
+        return {**d, **self._mw.forward(dict(d))}
 
     def _m0(self, d):
         """The fitted mass — the ONE place ``forward`` and ``backward`` read it.
 
-        Falls back to the config value only when the chain supplied none (a
-        basis whose slots need no mass), so value and derivative can never
-        disagree about which mass they used.
+        REQUIRED, with no fallback: the mass is a declared input, so a chain
+        that failed to supply it has a wiring error.  Defaulting to the config
+        value is not a rescue — it silently built ``s0`` and every ``m0·g``
+        from a mass the fit was not using (measured ``dQ/dm = −6.9e4`` against
+        a true ``−77.6``).  The same rule applies to every declared input:
+        absent means raise, never zero.
         """
-        return float(d.get(self.mass_name,
-                           self.model.kwargs.get("mass", 0.775)))
+        return float(d[self.mass_name])
 
     def forward(self, d):
         """``m0²`` and ``m0·g_j`` — the uniform basis weights.
 
-        Reads only what it declares: the mass and the couplings, which an
-        earlier stage of the same chain produced.
+        Physical inputs in, basis weights out: the model's own stage is
+        applied here when its couplings are derived (see :meth:`_resolved`).
         """
-        d = d or {}
-        m0 = self._m0(d)
-        # Emit exactly the slots THIS basis declares — no more.  A model may
-        # have a gamma row for the plain-pwa path (``one`` does) while its
-        # BASIS is a single constant row, so iterating ``gamma_names`` blindly
-        # would invent a slot the model's basis does not have.
+        d = self._resolved(d)
         out = {}
+        if self._s0_slots or self._t_slots:
+            m0 = self._m0(d)
         for slot in self._s0_slots:
             out[slot] = m0 * m0
         for slot, src in self._t_slots:
             # ``m0·g`` for the coupling ``g`` (the ``_t`` name is the
             # KERNEL-facing slot, distinct from the fit parameter)
-            out[slot] = m0 * float(d.get(src, 0.0))
+            out[slot] = m0 * float(d[src])
         for slot in self._pass_slots:               # pragma: no cover
-            out[slot] = float(np.real(d.get(slot, 0.0)))
+            out[slot] = float(np.real(d[slot]))
         return out
 
     def backward(self, grad_out, d_in=None):
         """Exact VJP of ``s0 = m0²`` and ``{g}_t = m0·g``.
 
-        Both maps are trivial: ``s0`` is quadratic in the mass and linear in
-        nothing else, each weight is linear in its own coupling and in the
-        mass.  So the derivative is written down, not measured — the inherited
-        ``fd_backward`` would spend ``2·len(input_names)`` forwards per call
-        (18 on ``RhoOmegaGS``) and inject its own finite-difference noise into
-        a chain the fitter differentiates every iteration.
+        Both maps are trivial, so the derivative is written down, not measured
+        — the inherited ``fd_backward`` would spend ``2·len(input_names)``
+        forwards per call and inject finite-difference noise into a chain the
+        fitter differentiates every iteration.
 
-        ``d_in`` is the declared-input dict (``Transform.apply_backward``
-        passes the ``_last_input`` saved by ``apply_forward``), so this reads
-        exactly the values :meth:`forward` used.
+        A DERIVED coupling is chained through the model's own stage
+        (:meth:`~Transform.backward` of it), so the result is w.r.t. the
+        physical parameters, exactly like :meth:`forward`.
         """
-        d = d_in or {}
-        m0 = self._m0(d)
+        d = self._resolved(d_in)
         grad = {name: 0.0 for name in self.input_names}
+        coupling_grad = {}
+        if self._s0_slots or self._t_slots:
+            m0 = self._m0(d)
         for slot in self._s0_slots:
             g = float(grad_out.get(slot, 0.0))
             if g:
@@ -702,11 +719,21 @@ class PlainBasisWeightsTransform(Transform):
             g = float(grad_out.get(slot, 0.0))
             if g:
                 grad[self.mass_name] = (grad.get(self.mass_name, 0.0)
-                                        + g * float(d.get(src, 0.0)))
-                grad[src] = grad.get(src, 0.0) + g * m0
+                                        + g * float(d[src]))
+                coupling_grad[src] = coupling_grad.get(src, 0.0) + g * m0
+        if self._mw is not None:
+            # route the derived couplings through the model's own VJP; what
+            # it does not produce is a plain input and is copied below
+            seeded = {n: coupling_grad.pop(n, 0.0)
+                      for n in self._mw.output_names}
+            for n, v in self._mw.backward(seeded, d_in=d).items():
+                grad[n] = grad.get(n, 0.0) + v
+        for src, v in coupling_grad.items():
+            grad[src] = grad.get(src, 0.0) + v
         for slot in self._pass_slots:               # pragma: no cover
             grad[slot] = grad.get(slot, 0.0) + float(grad_out.get(slot, 0.0))
         return grad
+
 # ═══════════════════════════════════════════════════════════════════
 # Rational lineshapes: ratio of two fixed bases
 # ═══════════════════════════════════════════════════════════════════
