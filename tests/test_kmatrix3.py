@@ -142,3 +142,45 @@ def test_kmatrix3_is_basis_only_and_pwa_gen_builds():
         assert "basis-only" in str(exc)
     else:                                   # pragma: no cover
         raise AssertionError("the plain-pwa path accepted a basis-only model")
+
+
+def test_kmatrix3_gs_one_pole_is_gs_rho():
+    """``kmatrix3_gs``'s ρ is the COMPLEX GS unit: one pole ⇒ ``GS_rho``.
+
+    ``−i·ρ·bf² = g0·fs − i·m0·Γ`` for ``bf² = m0·Γ0``, i.e. the GS propagator
+    ``m0² − s + g0·fs − i·m0·Γ`` exactly (a dispersive, not just absorptive,
+    phase space).
+    """
+    n, mass, width, L = "rho", 0.775, 0.149, 1
+    gs = build_particle(n, model="GS_rho", mass=mass, width=width, L=L)
+    k3 = build_particle(n, model="kmatrix3_gs", mass=mass, width=width, L=L)
+    for mdl in (gs, k3):
+        mdl.register_parent(_Parent())
+
+    grid = np.array([0.60, 0.775, 1.00])
+    a_gs = gs.amplitude(grid, {f"{n}_mass": mass, f"{n}_width": width})
+    p = _phys(n, [mass, 2.0, 2.5], [np.sqrt(mass * width), 0.0, 0.0],
+              [1.0 + 0.0j, 0.0j, 0.0j])
+    assert np.allclose(k3.amp(grid, p), a_gs, rtol=1e-12, atol=1e-14)
+
+    # extra poles change the shape
+    p2 = _phys(n, [mass, 1.45, 1.90], [np.sqrt(mass * width), 0.40, 0.30],
+               [1.0 + 0.0j, 0.50 + 0.0j, 0.30 + 0.0j])
+    assert not np.allclose(k3.amp(grid, p2), a_gs, rtol=1e-4, atol=0)
+
+    for name in ("gamma", "get_gamma_name", "make_mass_width_transform"):
+        assert not hasattr(k3, name), name
+
+
+def test_kmatrix3_gs_builds_in_pwa_gen():
+    """The GS variant is a 7-row basis like the others."""
+    from tabpwa import Fitter
+    from tabpwa.config_loader import RawConfig
+
+    d = RawConfig("tests/config_pwa_gen.yml").to_dict()
+    d["particle"]["k2"].update({"model": "kmatrix3_gs", "L": 1})
+    d["backend"] = {"name": "numpy_flat", "resolution_size": 1}
+    f = Fitter(d)
+    f.apply_constrains()
+    assert f.kernel_config["den_names"] == [
+        "k2_s0", "k2_poly", "k2_m4", "k2_m6", "k2_rho", "k2_srho", "k2_s2rho"]

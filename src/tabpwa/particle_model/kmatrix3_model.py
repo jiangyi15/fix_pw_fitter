@@ -34,6 +34,7 @@ import numpy as np
 
 from .base import BasisModel, complex_slot_names, register_model
 from .bwr_model import running_width
+from .gs_rho_model import gs_unit
 from tabpwa.param_constraint import Transform, complex_tail
 
 N_POLE = 3
@@ -215,3 +216,35 @@ class KMatrix3Model(_KMatrix3Base):
             float(kw.get("d", 3.0)),
             float(parent._decays[0].outs[0].mass),
             float(parent._decays[0].outs[1].mass))
+
+
+@register_model("kmatrix3_gs")
+class KMatrix3GSModel(_KMatrix3Base):
+    """Three-pole K-matrix whose ``ρ`` is the COMPLEX GS unit.
+
+    ``ρ(m) = Γ(m)/g0 + i·fs(m²)/m0`` (:func:`~tabpwa.particle_model.
+    gs_rho_model.gs_unit`) — the same complex shape ``GS_rho`` uses, so the
+    denominator is dispersive: with ONE pole and ``bf² = m0·Γ0``::
+
+        d = −i·ρ·bf² = g0·fs − i·m0·Γ   ⇒   f = β / (m0² − s + g0·fs − i·m0·Γ)
+
+    i.e. exactly the GS propagator.  The extra poles are the K-matrix
+    generalisation with the same dispersive phase space.
+
+    A pure ``BasisModel``: no ``gamma`` / ``get_gamma_name`` /
+    ``make_mass_width_transform``.  Daughters come from the decay tree when
+    attached, else ``daug2Mass`` / ``daug3Mass`` (defaults π±, π0).
+    """
+
+    def _rho(self, m):
+        kw = self.kwargs
+        parent = self._parent
+        if parent is not None and getattr(parent, "_decays", None):
+            d2 = float(parent._decays[0].outs[0].mass)
+            d3 = float(parent._decays[0].outs[1].mass)
+        else:
+            d2 = float(kw.get("daug2Mass", 0.13957039))
+            d3 = float(kw.get("daug3Mass", 0.1349768))
+        return gs_unit(np.asarray(m, dtype=float),
+                       float(kw.get("mass", 0.775)), int(kw.get("L", 1)),
+                       float(kw.get("d", 3.0)), d2, d3)

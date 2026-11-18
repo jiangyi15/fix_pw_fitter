@@ -136,6 +136,24 @@ def _bprime(L, q, q0, d):
 # the decay tree (when attached by then), then cached on the model.
 # The shape functions never read the config at call time.
 
+def gs_unit(m, M, L=1, d=3.0, d2=None, d3=None):
+    """The GS complex unit ``Γ(m)/g0 + i·fs(m²)/M``.
+
+    ``D_GS(s) = M² − s − i·M·g0·gs_unit(m) = M² − s + g0·fs − i·M·Γ``.
+    Complex and DIMENSIONLESS in the width: the coupling supplies ``g0``.
+    Shared by ``GS_rho``'s ``gamma()`` and by the K-matrix GS variants, whose
+    phase space IS this unit (one pole ⇒ GS exactly, ``bf² = M·Γ0``).
+    """
+    d2 = 0.13957039 if d2 is None else float(d2)
+    d3 = 0.1349768 if d3 is None else float(d3)
+    m_arr = np.asarray(m, dtype=float)
+    q = _two_body_cm_mom(m_arr, d2, d3)
+    q0 = _two_body_cm_mom(float(M), d2, d3)
+    gamma_run = _gamma_run(m_arr, 1.0, q, q0, int(L), float(M), float(d))
+    fs_val = _fs_fun(m_arr ** 2, float(M) ** 2, 1.0, d2, d3)
+    return gamma_run + 1j * fs_val / float(M)
+
+
 class GSModelBase(BaseModel):
     """Shared GS-family base: one-time shape-parameter preparation.
 
@@ -226,21 +244,4 @@ class GSRhoModel(GSModelBase):
         m2 = self._dm2
         m3 = self._dm3
 
-        # Breakup momenta — the same daughters the fs term uses (prepared
-        # once; decay-tree masses when the tree is attached)
-        q  = _two_body_cm_mom(m, m2, m3)
-        q0 = _two_body_cm_mom(M, m2, m3)
-
-        # Running width (without the g0 factor)
-        gamma_run = _gamma_run(m, 1.0, q, q0, L, M, d)
-
-        # Mass-shift term — same daughter masses as the running width
-        fs_val = _fs_fun(m ** 2, M ** 2, 1.0, m2, m3)
-
-        # gamma(m) = Gamma(m)/g0 + i * fs(m²) / m0
-        # _fs_fun(gam=1) returns fs_without_g0 coupling.
-        # TFPWA's bw_dom = M² - m² + g0*fs - i*M*Γ.
-        # The kernel computes: g = g0*gamma, bw_dom = M² - m² - i*M*g.
-        # We need: -i*M*g = g0*fs - i*M*Γ → gamma = Γ/g0 + i*fs/M.
-        gamma_m = gamma_run + 1j * fs_val / M
-        return [gamma_m]
+        return [gs_unit(m, M, L, d, m2, m3)]
