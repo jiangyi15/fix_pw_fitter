@@ -839,6 +839,7 @@ def test_kmatrix2_bf_one_pole_is_bwrs_exactly():
            f"{n}_b1r": 1.0, f"{n}_b1i": 0.0, f"{n}_b2r": 0.6, f"{n}_b2i": 0.0}
     assert not np.allclose(kmb.amp(m, two), a_bw, rtol=1e-4, atol=0)
 
-    # basis-only: no single running width for the plain-pwa kernel
-    assert kmb.get_gamma_name() == []
-    assert kmb.make_mass_width_transform() is None
+    # a pure BasisModel: it has NONE of the running-width interface, so the
+    # plain-pwa path refuses it by interface rather than by an empty list
+    for name in ("gamma", "get_gamma_name", "make_mass_width_transform"):
+        assert not hasattr(kmb, name), name

@@ -57,6 +57,22 @@ def _bprime_poly(L, z):
     return val
 
 
+def running_width(m, M, L=0, d=3.0, d1=None, d2=None):
+    """The BW running-width SHAPE ``(q/q0)^{2L+1}·(M/m)·B'_L(q,q0,d)²``.
+
+    Dimensionless: no ``m0``/``g0``, no normalisation constant — the caller's
+    coupling carries those (``Γ(m) = Γ0·shape(m)``, ``Γ(M) = Γ0``).  Shared by
+    the ``BW``/``BWRS`` models and by ``kmatrix2_bf``, whose phase space IS
+    this shape.
+    """
+    q = _two_body_cm_mom(m, d1, d2)
+    q0 = _two_body_cm_mom(M, d1, d2)
+    qq0 = (q / q0) ** (2 * L + 1)
+    mm0 = M / m
+    bp2 = _bprime_poly(L, (q0 * d) ** 2) / _bprime_poly(L, (q * d) ** 2)
+    return qq0 * mm0 * bp2
+
+
 def _bprime_poly_deriv(L, z):
     """d/dz of the Blatt-Weisskopf barrier polynomial at order *L*."""
     c = _BP_COEFF.get(L, [1.0])
@@ -269,18 +285,10 @@ class BWRModel(BaseModel):
         if self._parent and self._parent._decays:
             d1 = float(self._parent._decays[0].outs[0].mass)
             d2 = float(self._parent._decays[0].outs[1].mass)
-            q  = _two_body_cm_mom(m, d1, d2)
-            q0 = _two_body_cm_mom(M, d1, d2)
         else:
             raise ValueError(f"BWR model '{self.name}': no decay tree available for q0")
 
-        # Running width factor: (q/q₀)^{2L+1} · (m₀/m) · B'_L(q,q₀,d)²
-        qq0 = (q / q0) ** (2 * L + 1)
-        mm0 = M / m
-        bp2 = _bprime_poly(L, (q0 * d) ** 2) / _bprime_poly(L, (q * d) ** 2)
-
-        gamma_m = qq0 * mm0 * bp2
-        return [gamma_m]
+        return [running_width(m, M, L, d, d1, d2)]
 
 
 # ── width-transform model variant ────────────────────────────────────

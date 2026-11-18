@@ -109,7 +109,7 @@ import numpy as np
 from tabpwa.param_constraint import Transform, complex_tail
 
 from .base import BasisModel, complex_slot_names, register_model
-from .bwr_model import BWRSModel
+from .bwr_model import running_width
 
 #: Default pion mass entering the two-body phase space ρ(s).
 M_PI = 0.13957039
@@ -341,31 +341,45 @@ class KMatrix2Model(BasisModel):
             defaults, tail=self.tail)
 
 @register_model("kmatrix2_bf")
-class KMatrix2BFModel(KMatrix2Model, BWRSModel):
-    """Two-pole K-matrix whose phase-space shape IS the BWRS running width.
+class KMatrix2BFModel(KMatrix2Model):
+    """Two-pole K-matrix whose phase-space shape IS the BW running width.
 
-    ``ρ(s)`` is the particle's own :meth:`~bwr_model.BWRModel.gamma`, the same
-    ``(q/q0)^{2L+1}·(m0/m)·B'²`` the ``BWRS`` kernel uses — no ad-hoc
-    ``sqrt(1 − (2m_π)²/s)`` and no extra constant: the shape is dimensionless
-    and the couplings carry the dimensions.
+    ``ρ(m)`` is :func:`~bwr_model.running_width` — the same dimensionless
+    ``(q/q0)^{2L+1}·(M/m)·B'²`` the ``BW``/``BWRS`` kernels use, read from the
+    particle's own daughters.  No ad-hoc ``sqrt(1 − (2m_π)²/s)``, and no
+    ``m0``/``g0`` constant inside the shape: the couplings carry those.
 
     With ONE pole (``g2 = b2 = 0``) the amplitude is exactly ``BWRS``::
 
         f = β / (m0² − s − i·ρ·bf²) = β / (m0² − s − i·m0·Γ0·γ(m))
 
-    for ``bf² = m0·Γ0`` — i.e. the K-matrix coupling is ``m0·Γ0`` and ``ρ`` is
-    ``γ(m)``.  The second pole turns it into the K-matrix generalisation.
+    for ``bf² = m0·Γ0``.  The second pole is the K-matrix generalisation.
 
-    ``get_gamma_name()`` is empty on purpose: there is no single running width
-    to give the plain-``pwa`` kernel, so that path REFUSES this model (naming
-    ``amp_model: pwa_gen``) instead of silently plotting a Breit-Wigner.
+    A pure ``BasisModel``: it borrows the width FORMULA, not the
+    ``BaseModel`` interface, so it has no ``gamma()`` / ``get_gamma_name()`` /
+    ``make_mass_width_transform`` at all and the plain-``pwa`` path refuses it
+    by interface (naming ``amp_model: pwa_gen``).
     """
 
+    def _rho(self, m):
+        kw = self.kwargs
+        parent = self._parent
+        if parent is None or not getattr(parent, "_decays", None):
+            raise ValueError(
+                f"kmatrix2_bf '{self.name}': needs the decay tree (daughters) "
+                f"to evaluate the running-width shape")
+        return running_width(
+            np.asarray(m, dtype=float),
+            float(kw.get("mass", 0.775)), int(kw.get("L", 0)),
+            float(kw.get("d", 3.0)),
+            float(parent._decays[0].outs[0].mass),
+            float(parent._decays[0].outs[1].mass))
+
     def den_basis(self, m):
-        """``[1, m², m⁴, −i·γ(m), +i·s·γ(m)]`` — ``γ`` from the BWRS table."""
+        """``[1, m², m⁴, −i·γ(m), +i·s·γ(m)]`` — ``γ`` the BW shape."""
         m_arr = np.asarray(m, dtype=float)
         s = m_arr ** 2
-        rho = np.asarray(self.gamma(m_arr)[0], dtype=complex)
+        rho = np.asarray(self._rho(m_arr), dtype=complex)
         return [
             np.ones_like(s, dtype=complex),
             s.astype(complex),
@@ -374,10 +388,4 @@ class KMatrix2BFModel(KMatrix2Model, BWRSModel):
             1j * s * rho,
         ]
 
-    def get_gamma_name(self):
-        """Empty: no plain-``pwa`` width exists for a two-pole K-matrix."""
-        return []
 
-    def make_mass_width_transform(self):
-        """None: this model's mapping is its BASIS transform (K-matrix weights)."""
-        return None
