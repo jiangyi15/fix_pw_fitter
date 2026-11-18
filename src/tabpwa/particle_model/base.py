@@ -160,6 +160,17 @@ class BasisModel:
         """
         return None
 
+    def get_defaults(self):
+        """Physical defaults for this model's parameters — ``{}`` by default.
+
+        A basis model need not have physical parameters at all: when its basis
+        weights ARE the parameters (``make_basis_transform() -> None``), any
+        default would be an arbitrary starting point, and the fitter's
+        ``initial_values`` starts un-defaulted names randomly instead.
+        ``BaseModel`` overrides this with the mass/width defaults the plain
+        ``pwa`` family reads.
+        """
+        return {}
 
     def num_basis(self, m):
         """Numerator basis rows ``N_i(m)`` (complex, parameter-free).
@@ -585,18 +596,23 @@ class PlainBasisWeightsTransform(Transform):
         self.model = model
         name = model.name
         self.gamma_names = list(model.get_gamma_name())
-        # The model's own mass/width stage, if it has one: it PRODUCES the
-        # gamma couplings, so this transform must run it to see them.
-        self._mw = (model.make_mass_width_transform()
-                    if hasattr(model, "make_mass_width_transform") else None)
+        # The model's own mass/width stage: it PRODUCES the gamma couplings,
+        # so this transform must run it to see them.  No ``hasattr`` guard:
+        # this class is only ever built by ``BaseModel.make_basis_transform``,
+        # so ``model`` is a ``BaseModel`` by construction — the method is part
+        # of THAT interface, which is exactly why a model needs a ``BaseModel``
+        # to get the default basis mapping at all.
+        self._mw = model.make_mass_width_transform()
         if self._mw is not None:
             self.input_names = list(self._mw.input_names)
         else:
             self.input_names = [f"{name}_mass"] + list(self.gamma_names)
-        # ``"one"`` is a CONSTANT (the m² coefficient, always +1) — it is not a
-        # function of the physical parameters, so it is not a transform output.
-        # The constraint layer pins it (`set_fixed`), the same mechanism that
-        # pins any other fixed parameter.
+        # ``"one"`` is EXCLUDED: it is a physical CONSTANT, not a function of
+        # this model's parameters, and it is produced once for the whole fit by
+        # a `FixedValueTransform` (see `AmplitudeModel.particle_transforms`).
+        # Leaving it out here keeps "which model's transform defines this name"
+        # unambiguous — two transforms declaring the same output would be
+        # treated as alternatives and the later one would replace the earlier.
         self.output_names = [n for n in model.get_den_name() if n != "one"]
 
     def forward(self, d):
@@ -610,15 +626,25 @@ class PlainBasisWeightsTransform(Transform):
             d = self._mw.forward(dict(d))
         m0 = float(d.get(f"{self.model.name}_mass",
                          self.model.kwargs.get("mass", 0.775)))
-        # ``"one"`` is pinned by the constraint layer, not produced here.
-        vals = [m0 * m0]
-        # Each gamma row's weight is ``m0·g`` and is named ``{g}_t`` — the
-        # kernel-facing slot, DISTINCT from the physical fit parameter ``{g}``.
-        # Emitting the fit name here would make the transform overwrite its
-        # own input (`apply_forward` replaces `output_names` in the resolved
-        # dict), losing the physical coupling.
-        vals += [m0 * float(d.get(g, 0.0)) for g in self.gamma_names]
-        return dict(zip(self.output_names, vals))
+        # Build BY NAME, not by zipping against ``output_names``: that list now
+        # carries the constant ``"one"`` in its positional slot, so a zip would
+        # shift every weight by one (the width would land on ``one`` and the
+        # last slot would go missing).
+        # Emit exactly the slots THIS basis declares — no more.  A model may
+        # have a gamma row for the plain-pwa path (``one`` does) while its
+        # BASIS is a single constant row, so iterating ``gamma_names`` blindly
+        # would invent a slot the model's basis does not have.
+        out = {}
+        for slot in self.output_names:
+            if slot.endswith("_s0"):
+                out[slot] = m0 * m0
+            elif slot.endswith("_t"):
+                # ``m0·g`` for the physical coupling ``g`` (the ``_t`` name is
+                # the KERNEL-facing slot, distinct from the fit parameter)
+                out[slot] = m0 * float(d.get(slot[:-2], 0.0))
+            else:                                   # pragma: no cover
+                out[slot] = float(np.real(d.get(slot, 0.0)))
+        return out
 # ═══════════════════════════════════════════════════════════════════
 # Rational lineshapes: ratio of two fixed bases
 # ═══════════════════════════════════════════════════════════════════

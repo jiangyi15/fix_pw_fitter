@@ -222,10 +222,19 @@ class AmplitudeModel(BaseModel):
         interface — the amplitude model owns that knowledge.  Returns the
         particle models' own mass/width transforms first (deduplicated by
         instance, since one particle can appear in several chains), then
-        :meth:`extra_transforms`.  Order matters: a later transform may consume
-        an earlier one's outputs (``pwa_gen``'s basis weights are built from
-        the couplings a mass/width transform produces).
+        :meth:`extra_transforms`, then one :class:`FixedValueTransform` for the
+        model's physical CONSTANTS (:meth:`constant_weight_values`).  Order
+        matters: a later transform may consume an earlier one's outputs
+        (``pwa_gen``'s basis weights are built from the couplings a mass/width
+        transform produces), and a constant has no inputs at all, so it goes
+        last.
         """
+        # The two particle interfaces are SEPARATE: only a ``BaseModel`` has
+        # a mass/width stage, and ``BasisModel`` deliberately does not declare
+        # one (a basis-only model such as ``kmatrix2`` has no concept of it).
+        # So this sweep — which crosses both kinds — asks which interface the
+        # model implements, and skips the basis-only ones.
+        from tabpwa.particle_model.base import BaseModel as ParticleBaseModel
         out, seen = [], set()
         for chain in self.full_decay.chains:
             for decay in chain.decays[1:]:
@@ -233,14 +242,36 @@ class AmplitudeModel(BaseModel):
                 if id(mdl) in seen:
                     continue
                 seen.add(id(mdl))
-                # A basis-only model has no mass/width concept at all; that is
-                # the same outcome as returning None.
-                mk = getattr(mdl, "make_mass_width_transform", None)
-                tr = mk() if mk is not None else None
+                if not isinstance(mdl, ParticleBaseModel):
+                    continue
+                tr = mdl.make_mass_width_transform()
                 if tr is not None:
                     out.append(tr)
         out.extend(self.extra_transforms())
+        # Constants LAST: they consume nothing and produce a fixed value, so
+        # nothing downstream should have to recompute them.  Declaring them in
+        # one place keeps "who defines this name" unambiguous — a per-model
+        # transform that also emitted ``"one"`` would be an alternative
+        # producer, and the constraint layer would silently keep only one.
+        fixed = self.constant_weight_values()
+        if fixed:
+            from tabpwa.param_constraint import FixedValueTransform
+            out.append(FixedValueTransform(fixed))
         return out
+
+    def constant_weight_values(self):
+        """Weight names that are physical CONSTANTS, with their values.
+
+        A constant is not a function of any parameter, so no per-model
+        transform can produce it and its name would otherwise be an undeclared
+        passthrough — overwritten by whatever the caller happened to pass.
+        Registered as one :class:`~tabpwa.param_constraint.FixedValueTransform`
+        so the declaration lives in a single place.
+
+        Default ``{}``.  ``pwa_gen`` supplies ``"one"``: the m² coefficient,
+        +1 because the basis row is ``-m²``.
+        """
+        return {}
 
     def extra_transforms(self):
         """Model-level transforms, appended after the particle ones.
@@ -327,10 +358,8 @@ class PWAGen(PWA):
         super().__init__(config)
         self._pg_kc = None            # cached kernel config
         self._pg_combs = None         # expanded ck combinations (pre-block)
-        self._pg_generic = False      # explicit coefficient basis in use
         self._pg_den_names = []       # per base BW: denominator weight names
         self._pg_bws = []             # per base BW: {name, model, transform, …}
-        self._pg_coef_transform = None   # combined physical → weights transform
 
     # ── kernel config ────────────────────────────────────────────────
     def build_kernel_config(self):
@@ -391,24 +420,35 @@ class PWAGen(PWA):
         return kc
 
     def extra_transforms(self):
-        """The physical → basis-weight transform (empty for the plain path).
+        """Each resonance's OWN basis transform — no combined wrapper.
 
-        Registered into the constraint pipeline by
-        :meth:`tabpwa.fitter.Fitter.setup_mass_width_transforms`, so the
-        basis weights are resolved from the physical parameters (and their
-        gradients chained back) exactly like a mass/width transform.
+        The constraint manager already unions a list of transforms: it appends
+        every ``input_names`` to the parameter surface, removes every
+        ``output_names`` (produced, therefore not fitted), chains them in
+        registration order and de-duplicates identical ones.  A combined
+        wrapper would have to re-derive all of that by hand — and did: it
+        walked the tree for the numerator models and re-listed
+        ``num_slot_names()``, both of which the per-model transform already
+        declares.
+
+        A model with NO transform is legitimate and contributes nothing: its
+        basis weights ARE its parameters (``BasisModel.make_basis_transform``
+        returns ``None`` for exactly that reason), and the constraint layer
+        keeps them because no transform claims to produce them.
         """
         self.build_kernel_config()
-        if not self._pg_generic:
-            return []
-        return [self._coef_transform()]
+        return [rec["transform"] for rec in self._pg_bws
+                if rec["transform"] is not None]
 
-    def _coef_transform(self):
-        """(cached) combined particle-model → basis-weight transform."""
-        if self._pg_coef_transform is None:
-            from tabpwa.pwa_gen_transform import PWAgenWeightsTransform
-            self._pg_coef_transform = PWAgenWeightsTransform(self)
-        return self._pg_coef_transform
+    def constant_weight_values(self):
+        """``"one"`` — the m² coefficient, +1 because the row is ``-m²``.
+
+        A shared constant: every resonance's m² term carries exactly 1, so
+        there is one name for the whole fit, not one per model.  Emitted only
+        when the basis actually uses it.
+        """
+        den_names = (self._pg_kc or {}).get("den_names") or []
+        return {"one": 1.0} if "one" in den_names else {}
 
     # ── ck map (chain → LS waves → numerator index) ──────────────────
     def get_ck_map(self):
@@ -529,41 +569,28 @@ class PWAGen(PWA):
         raise ValueError(
             f"pwa_gen: numerator factor '{name}' has no Breit-Wigner slot")
 
-    def _pg_den_basis(self, name, model, grid, tr):
+    def _pg_den_basis(self, name, model, grid):
         """``(weight names, finished rows G_j)`` of a resonance denominator.
 
-        ``weight names`` are the model's own ``get_den_name()`` entries when
-        it carries a basis transform (its ``output_names``, reused as the
-        coefficient names); otherwise they are internal names — the plain
-        preset's ``[s0, poly, m0·g0]`` semantics read back positionally, and
-        ``{name}_width`` would collide with the physical width input.
+        The ROWS come from the model's own ``den_basis`` and the NAMES from
+        its own ``get_den_name()`` — one rule, independent of whether a
+        transform exists:
+
+        * a transform declares the names as OUTPUTS, so the constraint layer
+          resolves them from the physical parameters instead of fitting them;
+        * with no transform (``make_basis_transform() -> None``) the names ARE
+          the parameters: nothing claims to produce them, so the constraint
+          layer keeps them.  That is a legitimate model, not a gap — which is
+          why nothing here asks the model for a transform, and why a
+          basis-only model need not implement ``get_gamma_name()``.
         """
-        # EVERY model is a basis model now (``BaseModel`` owns
+        # EVERY model is a basis model (``BaseModel`` owns
         # ``num_basis``/``den_basis``), so there is exactly one place that
         # decides the rows — the model itself.  Duplicating the default here
         # is what previously let the builder's ``-m²`` drift out of sync with
         # ``den_weights``' ``-1`` and silently flip every m² term.
         rows = [np.asarray(r, dtype=complex) for r in model.den_basis(grid)]
-        if tr is not None:
-            names = list(model.get_den_name())
-        else:
-            n_plain = 2 + len(model.get_gamma_name())
-            if len(rows) != n_plain:
-                raise ValueError(
-                    f"pwa_gen: '{name}' has {len(rows)} denominator basis "
-                    f"rows but no basis transform (the plain preset has "
-                    f"{n_plain}) — an extended denominator basis needs "
-                    f"make_basis_transform()")
-            # Row 0 is the constant ``1`` (weight ``m0²``); row 1 is the
-            # model's own ``m²`` row, whose weight is the SHARED, FIXED
-            # literal ``"one"`` — every resonance's ``m²`` term carries
-            # coefficient exactly 1, so the name must not be particle-scoped
-            # (that would make one physical constant look like N free
-            # parameters).  The sign lives in the ROW the model returns, not
-            # in the weight, so no consumer has to flip anything.
-            names = [f"pwa_gen::{name}::den0", "one"]
-            names += [f"pwa_gen::{name}::den{j}"
-                      for j in range(2, len(rows))]
+        names = list(model.get_den_name())
         if len(names) != len(rows):
             raise ValueError(
                 f"pwa_gen: '{name}' declares {len(names)} denominator weight "
@@ -589,10 +616,9 @@ class PWAGen(PWA):
 
         * ``_pg_den_names`` / ``_pg_bws`` — the per-resonance denominator
           basis: its weight names and the rows/transform they come from.
-          ``PWAgenWeightsTransform`` publishes those names as transform
-          outputs, so the constraint pipeline can resolve them.
-        * ``_pg_generic`` — whether an explicit coefficient basis is in use
-          (it decides whether the weight transform is registered at all).
+          Each resonance's OWN basis transform publishes its weight names as
+          outputs (``extra_transforms`` hands exactly those to the constraint
+          manager), so the pipeline resolves them without a combined wrapper.
         * ``_pg_combs`` — the expanded ck combinations (``ck_w = g_ls·n_i``),
           which ``get_ck_map`` turns into the parameter slots.
 
@@ -627,20 +653,19 @@ class PWAGen(PWA):
         # an index structure that a basis-only model cannot even populate —
         # that is why ``build_single_index`` had to tolerate an empty gamma
         # list just for this traversal.
-        den_names, bws, any_transform = [], [], False
+        den_names, bws = [], []
         for name in bw_names:
             mdl = models[name]
-            mk = getattr(mdl, "make_basis_transform", None)
-            tr = mk() if mk is not None else None
-            if tr is not None:
-                any_transform = True
-            names, rows = self._pg_den_basis(name, mdl, grid, tr)
+            # ``make_basis_transform`` is declared ON THE INTERFACE (default
+            # ``None`` = "the weights are the parameters"), so every model can
+            # answer it — no probe, no "does it have one" branch.
+            tr = mdl.make_basis_transform()
+            names, rows = self._pg_den_basis(name, mdl, grid)
             den_names.append(names)
             bws.append({"name": name, "model": mdl, "transform": tr,
                         "den_names": names, "rows": rows})
         self._pg_den_names = den_names
         self._pg_bws = bws
-        self._pg_generic = bool(any_transform)
 
         # ── expanded ck combinations ────────────────────────────────
         # One ck slot per (chain, numerator-row combination); the heads of a

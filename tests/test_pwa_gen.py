@@ -430,8 +430,20 @@ def test_same_particle_two_topologies_one_name_two_mass_columns():
     assert not (free & weights), (
         f"basis weights must be transform outputs, not free: "
         f"{sorted(free & weights)}")
-    assert f.model._pg_generic, "a basis transform must be registered"
-    assert f.model.extra_transforms(), "PWAgenWeightsTransform missing"
+    # Each resonance's OWN transform is registered — the constraint manager
+    # unions a list, so a combined wrapper would only re-derive that union by
+    # hand.  A model with no transform is legitimate (its weights ARE the
+    # parameters) and contributes nothing.
+    trs = f.model.extra_transforms()
+    assert trs == [rec["transform"] for rec in f.model._pg_bws
+                   if rec["transform"] is not None]
+    assert trs, "no basis transform registered"
+    registered = {n for t in f.cm.mass_width_transforms
+                  for n in t.output_names}
+    for tr in trs:
+        assert set(tr.output_names) <= registered, (
+            f"{type(tr).__name__} outputs missing from the cm: "
+            f"{sorted(set(tr.output_names) - registered)}")
 
 
 def test_same_particle_dedup_keeps_the_two_mass_columns():
@@ -494,3 +506,56 @@ def test_same_particle_gradients_match_fd():
         fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / (2 * h)
         assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (
             nm, grad[i], fd)
+
+
+# ── a model whose weights ARE its parameters needs no transform ──────
+
+def test_a_model_without_a_basis_transform_fits_its_weights_directly():
+    """``make_basis_transform() -> None`` is a legitimate model, not a gap.
+
+    Such a model states no mapping because there is nothing to derive: its
+    basis weights ARE the parameters, so no transform claims to produce them
+    and the constraint layer keeps them free.  `pwa_gen` must accept that —
+    an earlier version raised "a model whose weights are parameters must
+    provide a transform", which rejected the simplest possible basis.
+    """
+    from tabpwa.particle_model.base import BasisModel, register_model
+
+    @register_model("direct_weights")
+    class _DirectWeights(BasisModel):
+        """Denominator ``[1, −m²]`` with the weights as raw parameters."""
+
+        def den_basis(self, m):
+            m = np.asarray(m, dtype=float)
+            return [np.ones_like(m, dtype=complex), -(m * m).astype(complex)]
+
+        def get_den_name(self):
+            return [f"{self.name}_s0", "one"]
+
+        def den_weights(self, params):
+            return [float(params.get(n, 0.0)) for n in self.get_den_name()]
+
+    d = _cfg(CFG_BASIS)
+    d["particle"]["k2"]["model"] = "direct_weights"
+    f = _loaded(d)
+
+    # nothing was invented to fill the gap ...
+    assert f.model.extra_transforms() == []
+    # ... the weight is a PARAMETER (nothing produces it) ...
+    free = set(f.free_param_names())
+    assert "k2_s0" in free, sorted(free)
+    # ... while the shared constant is still pinned, not fitted
+    assert "one" not in free
+    # ... and the model evaluates
+    x = f.initial_values(seed=1)
+    params, _res = f.build_params(x)
+    assert np.asarray(params["coeff"]).shape == (2,)
+    nll, grad = f.get_nll(x)
+    assert np.isfinite(nll) and np.all(np.isfinite(grad))
+    # the weight really is a direction the likelihood depends on
+    i = f.free_param_names().index("k2_s0")
+    xp, xm = x.copy(), x.copy()
+    xp[i] += 1e-6
+    xm[i] -= 1e-6
+    fd = (f.get_nll(xp)[0] - f.get_nll(xm)[0]) / 2e-6
+    assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (grad[i], fd)

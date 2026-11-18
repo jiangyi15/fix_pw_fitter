@@ -246,9 +246,11 @@ def build_from_groups(model, n_interp=None):
         for r, _fac in enumerate(per_wave_factors[base]):
             name = chain.decays[r + 1].core.name
             mdl = models[name]
-            mk = getattr(mdl, "make_basis_transform", None)
-            tr = mk() if mk is not None else None
-            names, rows = model._pg_den_basis(name, mdl, mass_grid, tr)
+            # No transform is needed to STATE the basis: the rows come from
+            # the model and the names from ``get_den_name()``.  Whether a
+            # transform produces those names is a constraint-layer question,
+            # answered by `PWAGen.extra_transforms()`.
+            names, rows = model._pg_den_basis(name, mdl, mass_grid)
             col = int(num_m_index[k, r])
             slots = []
             for j, g in enumerate(rows):

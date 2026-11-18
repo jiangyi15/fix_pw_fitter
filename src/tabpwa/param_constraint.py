@@ -821,6 +821,42 @@ ScaleTransform = LinearTransform
 # UnBlindTransform — seed-derived blinding of parameter values
 # ================================================================
 
+class FixedValueTransform(Transform):
+    """Injects CONSTANT values as transform outputs — no inputs, no gradients.
+
+    A parameter that is a physical constant rather than a fitted quantity
+    (``"one"`` — the m² coefficient, always +1) still has to be PRODUCED
+    somewhere, because ``apply_forward`` only guarantees the keys a transform
+    declares as outputs: an undeclared constant is silently overwritten by
+    whatever the caller happens to pass.
+
+    Declaring it here, once, is the single place that answers "what fixes this
+    name, and to what value".  The fitted-parameter machinery then ignores it:
+    ``output_names`` with no matching ``input_names`` makes it a constant, and
+    the constraint layer's own ``set_fixed`` pins the value.
+
+    Same shape as ``models_builtin._FixMassWidthTransform`` — a pass-through
+    that overrides a handful of names.
+    """
+
+    _has_inverse = True
+
+    def __init__(self, fixed):
+        self.input_names = []
+        self.output_names = list(fixed)
+        self._fixed = {k: float(v) for k, v in fixed.items()}
+
+    def forward(self, d):
+        return {**(d or {}), **self._fixed}
+
+    def backward(self, grad_out, d_in=None):
+        """A constant has no parameter gradient."""
+        return {}
+
+    def inverse(self, d):
+        return dict(d)
+
+
 @_register_transform
 class UnBlindTransform(Transform):
     """Seed-derived blinding of parameter values.
