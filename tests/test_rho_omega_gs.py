@@ -121,6 +121,42 @@ def _packed_d_rho(m, m0, g1, gam, fs, m_ref=M0):
     return m0 ** 2 - u - 1j * m0 * g1 * (gam + 1j * fs / m_ref)
 
 
+def test_h_is_the_analytic_arccosh_form_for_equal_daughters():
+    """The GS unit's Re/Im pair IS the dispersion one (equal daughters).
+
+    For ``m1 == m2 == m`` the h function has the closed analytic form
+
+        h(s) = (2/pi) * (q/sqrt(s)) * arccosh(sqrt(s)/(2m)),  q = sqrt(s-4m^2)/2
+
+    i.e. a single-valued function on the s-plane cut along ``[0, 4m^2]`` —
+    which is exactly what makes its real part the dispersion integral of its
+    imaginary part on that cut.  The implementation is the log form
+    ``(2/pi)(q/sqrt(s))·ln((sqrt(s)+2q)/sm)``; the two agree to round-off
+    here, and that is the gate: the unit is the dispersive object it claims
+    to be.
+
+    NOT covered: UNEQUAL daughters.  ``sm = m1 + m2`` in that log is the
+    equal-mass formula, not the general unequal-mass loop (the difference is
+    nearly degenerate with using the mean mass — ratios 1.00…1.05 over
+    ``|m2-m1| = 0.02…0.20`` — but it is an approximation).  Production
+    ``kmatrix_n`` channels decay to equal-mass pairs (pipi, KKbar).
+    """
+    from tabpwa.particle_model.gs_rho_model import _h_fun
+
+    PI, MK = 0.13957039, 0.493677
+    grid = np.concatenate([
+        np.linspace(0.02, 0.077, 40) + 1e-4j,     # on the cut
+        np.linspace(0.02, 0.077, 40) - 1e-4j,
+        np.linspace(0.08, 4.0, 60) + 0.03j,       # above threshold
+        np.array([0.1 + 0.05j, 0.3 - 0.02j, 0.6 + 0.1j, 1.5 - 0.3j]),
+    ])
+    for md in (PI, MK):
+        got = _h_fun(grid, md, md)
+        z = np.sqrt(grid) / (2 * md)
+        want = (2 / np.pi) * 0.5 * np.sqrt(1 - 4 * md ** 2 / grid) * np.arccosh(z)
+        assert np.max(np.abs(got - want)) < 1e-14 * max(1.0, np.max(np.abs(want)))
+
+
 def test_transform_closed_form_parity():
     """``m0^2-u-i.m0.sum(w.gamma) == D_rho.D_omega`` over a grid."""
     model = _model()
