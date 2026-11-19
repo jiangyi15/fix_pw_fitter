@@ -8,7 +8,7 @@ refuses it, ``pwa_gen`` builds a 7-row basis).
 import numpy as np
 
 from tabpwa.particle_model import build_particle
-from tabpwa.particle_model.bwr_model import running_width
+from tabpwa.particle_model.bwr_model import phase_space
 from tabpwa.particle_model.kmatrix3_model import kmatrix3_weights
 
 
@@ -49,7 +49,7 @@ def test_weights_are_the_elementary_symmetric_polynomials():
 
     grid = np.array([0.60, 0.80, 1.00])
     s = grid ** 2
-    rho = np.asarray(running_width(grid, mass, L, 3.0, _Out.mass, _Out.mass),
+    rho = np.asarray(phase_space(grid, L, 3.0, _Out.mass, _Out.mass),
                      dtype=complex)
     roots = [x * x for x in m]
 
@@ -73,10 +73,11 @@ def test_weights_are_the_elementary_symmetric_polynomials():
     for h, row in zip(mdl.get_num_name(), mdl.num_basis(grid)):
         num = num + out[f"{h}r"] * np.exp(1j * out[f"{h}i"]) * row
 
-    assert np.allclose(den_basis, den_direct, rtol=1e-14, atol=0)
-    assert np.allclose(num, num_direct, rtol=1e-14, atol=0)
+    assert np.allclose(den_basis, den_direct, rtol=1e-14, atol=1e-14)
+    assert np.allclose(num, num_direct, rtol=1e-14, atol=1e-14)
+    # the ratio agrees to the round-off of D (a grid point sits near Re D = 0)
     assert np.allclose(num / den_basis, num_direct / den_direct,
-                       rtol=1e-14, atol=0)
+                       rtol=1e-12, atol=1e-12)
 
 
 def test_three_poles_reduce_to_two():
@@ -106,12 +107,15 @@ def test_one_pole_is_bwrs():
 
     grid = np.array([0.60, 0.775, 1.00])
     a_bw = bw.amplitude(grid, {f"{n}_mass": mass, f"{n}_width": width})
-    p = _phys(n, [mass, 2.0, 2.5], [np.sqrt(mass * width), 0.0, 0.0],
+    rho_m0 = phase_space(np.array([mass]), L, 3.0, _Out.mass, _Out.mass)[0]
+    p = _phys(n, [mass, 2.0, 2.5],
+              [np.sqrt(mass * width / rho_m0), 0.0, 0.0],
               [1.0 + 0.0j, 0.0j, 0.0j])
     assert np.allclose(k3.amp(grid, p), a_bw, rtol=1e-12, atol=1e-14)
 
     # ... and the extra poles genuinely change the shape
-    p2 = _phys(n, [mass, 1.45, 1.90], [np.sqrt(mass * width), 0.40, 0.30],
+    p2 = _phys(n, [mass, 1.45, 1.90],
+               [np.sqrt(mass * width / rho_m0), 0.40, 0.30],
                [1.0 + 0.0j, 0.50 + 0.0j, 0.30 + 0.0j])
     assert not np.allclose(k3.amp(grid, p2), a_bw, rtol=1e-4, atol=0)
 

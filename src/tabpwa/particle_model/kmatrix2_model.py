@@ -109,7 +109,7 @@ import numpy as np
 from tabpwa.param_constraint import Transform, complex_tail
 
 from .base import BasisModel, complex_slot_names, register_model
-from .bwr_model import running_width
+from .bwr_model import phase_space
 
 #: Default pion mass entering the two-body phase space ρ(s).
 M_PI = 0.13957039
@@ -344,16 +344,17 @@ class KMatrix2Model(BasisModel):
 class KMatrix2BFModel(KMatrix2Model):
     """Two-pole K-matrix whose phase-space shape IS the BW running width.
 
-    ``ρ(m)`` is :func:`~bwr_model.running_width` — the same dimensionless
-    ``(q/q0)^{2L+1}·(M/m)·B'²`` the ``BW``/``BWRS`` kernels use, read from the
-    particle's own daughters.  No ad-hoc ``sqrt(1 − (2m_π)²/s)``, and no
-    ``m0``/``g0`` constant inside the shape: the couplings carry those.
+    ``ρ(m)`` is :func:`~bwr_model.phase_space` — ``(q/m)·q^{2L}·B'²``, the
+    phase space the ``BW``/``BWRS`` kernels use, read from the particle's own
+    daughters.  It has NO reference mass in it (``ρ(m)/ρ(m0)`` is the running
+    width), no ad-hoc ``sqrt(1 − (2m_π)²/s)``, and no ``m0``/``g0`` constant:
+    the coupling carries the scale, ``bf² = m0·Γ0/ρ(m0)``.
 
     With ONE pole (``g2 = b2 = 0``) the amplitude is exactly ``BWRS``::
 
         f = β / (m0² − s − i·ρ·bf²) = β / (m0² − s − i·m0·Γ0·γ(m))
 
-    for ``bf² = m0·Γ0``.  The second pole is the K-matrix generalisation.
+    for ``bf² = m0·Γ0/ρ(m0)``.  The second pole is the K-matrix generalisation.
 
     A pure ``BasisModel``: it borrows the width FORMULA, not the
     ``BaseModel`` interface, so it has no ``gamma()`` / ``get_gamma_name()`` /
@@ -367,10 +368,9 @@ class KMatrix2BFModel(KMatrix2Model):
         if parent is None or not getattr(parent, "_decays", None):
             raise ValueError(
                 f"kmatrix2_bf '{self.name}': needs the decay tree (daughters) "
-                f"to evaluate the running-width shape")
-        return running_width(
-            np.asarray(m, dtype=float),
-            float(kw.get("mass", 0.775)), int(kw.get("L", 0)),
+                f"to evaluate the phase space")
+        return phase_space(
+            np.asarray(m, dtype=float), int(kw.get("L", 0)),
             float(kw.get("d", 3.0)),
             float(parent._decays[0].outs[0].mass),
             float(parent._decays[0].outs[1].mass))

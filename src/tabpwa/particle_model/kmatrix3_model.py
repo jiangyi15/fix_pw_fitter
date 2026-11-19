@@ -21,10 +21,10 @@ squared, and ``D = Π(m_i²−s) − iρ·Σ g_i² Π_{j≠i}(m_j²−s)`` exact
 two-pole model is the ``g3 = b3 = 0`` special case (the ``(m3² − s)`` factor
 cancels) and one pole is the plain Breit-Wigner — both are gated.
 
-``ρ(m)`` is :func:`~tabpwa.particle_model.bwr_model.running_width` — the
-``BW``/``BWRS`` shape — so the one-pole limit is ``BWRS`` exactly with
-``bf² = m0·Γ0`` and ``ρ ≡ γ(m)`` (no ``m0``/``g0`` constant inside the shape,
-no ad-hoc threshold function).
+``ρ(m)`` is :func:`~tabpwa.particle_model.bwr_model.phase_space` —
+``(q/m)·q^{2L}·B'²``, M-FREE — so the one-pole limit is ``BWRS`` exactly with
+``bf² = m0·Γ0/ρ(m0)`` (the coupling carries the scale; no reference mass and
+no ad-hoc threshold function anywhere).
 
 It is a PURE :class:`~tabpwa.particle_model.base.BasisModel` instance: no
 ``gamma`` / ``get_gamma_name`` / ``make_mass_width_transform``, so the plain
@@ -33,7 +33,7 @@ It is a PURE :class:`~tabpwa.particle_model.base.BasisModel` instance: no
 import numpy as np
 
 from .base import BasisModel, complex_slot_names, register_model
-from .bwr_model import running_width
+from .bwr_model import phase_space
 from .gs_rho_model import gs_unit
 from tabpwa.param_constraint import Transform, complex_tail
 
@@ -199,8 +199,9 @@ class KMatrix3Model(_KMatrix3Base):
     """Three-pole K-matrix whose ``ρ`` is the BW running width (``BWRS``).
 
     One pole ⇒ ``BWRS`` exactly (``bf² = m0·Γ0``, ``ρ ≡ γ(m)``); the shape is
-    :func:`~tabpwa.particle_model.bwr_model.running_width`, i.e. the
-    particle's own daughters, and carries no ``m0``/``g0`` constant.
+    :func:`~tabpwa.particle_model.bwr_model.phase_space`, i.e. the particle's
+    own daughters, and carries no ``m0``/``g0`` constant (no reference mass at
+    all): ``bf² = m0·Γ0/ρ(m0)``.
     """
 
     def _rho(self, m):
@@ -210,9 +211,8 @@ class KMatrix3Model(_KMatrix3Base):
             raise ValueError(
                 f"kmatrix3 '{self.name}': needs the decay tree (daughters) "
                 f"to evaluate the running-width shape")
-        return running_width(
-            np.asarray(m, dtype=float),
-            float(kw.get("mass", 0.775)), int(kw.get("L", 0)),
+        return phase_space(
+            np.asarray(m, dtype=float), int(kw.get("L", 0)),
             float(kw.get("d", 3.0)),
             float(parent._decays[0].outs[0].mass),
             float(parent._decays[0].outs[1].mass))

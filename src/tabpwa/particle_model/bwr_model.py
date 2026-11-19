@@ -57,6 +57,22 @@ def _bprime_poly(L, z):
     return val
 
 
+def phase_space(m, L=0, d=3.0, d1=None, d2=None):
+    """The M-FREE phase space ``(q/m)·q^{2L}·B'_L(q d)²``.
+
+    No reference mass anywhere: ``Γ(m) = g² · phase_space(m)`` and the
+    coupling ``g²`` carries the scale.  ``B'² = 1/_bprime_poly`` here (that
+    polynomial is the barrier's reciprocal, which is why ``running_width``
+    divides by it).
+
+    ``phase_space(m) / phase_space(M) == running_width(m, M)`` exactly, so a
+    K-matrix whose ``ρ`` is this function reproduces the BW/GS propagator at
+    one pole with ``bf² = m0·Γ0 / ρ(m0)``.
+    """
+    q = _two_body_cm_mom(m, d1, d2)
+    return (q / m) * q ** (2 * L) / _bprime_poly(L, (q * d) ** 2)
+
+
 def running_width(m, M, L=0, d=3.0, d1=None, d2=None):
     """The BW running-width SHAPE ``(q/q0)^{2L+1}·(M/m)·B'_L(q,q0,d)²``.
 

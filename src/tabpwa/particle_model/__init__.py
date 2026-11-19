@@ -44,6 +44,7 @@ from . import spline_gamma_model  # noqa: F401 — register BSpline model
 from . import kmatrix_model       # noqa: F401 — register pipi_swave model
 from . import kmatrix2_model      # noqa: F401 — register kmatrix2 model
 from . import kmatrix3_model      # noqa: F401 — register kmatrix3 models
+from . import kmatrix_n_model      # noqa: F401 — register kmatrix_n model
 __all__ = [
     "BaseModel", "BasisModel", "ALL_MODELS", "register_model", "build_particle",
 ]

@@ -819,6 +819,8 @@ def test_kmatrix2_bf_one_pole_is_bwrs_exactly():
     no running width, so the plain ``pwa`` path refuses it rather than
     plotting a Breit-Wigner.
     """
+    from tabpwa.particle_model.bwr_model import phase_space
+
     n, mass, width, L = "rho", 0.775, 0.149, 1
     bw = build_particle(n, model="BWRS", mass=mass, width=width, L=L)
     kmb = build_particle(n, model="kmatrix2_bf", mass=mass, width=width, L=L)
@@ -827,8 +829,10 @@ def test_kmatrix2_bf_one_pole_is_bwrs_exactly():
 
     m = np.array([0.60, 0.775, 1.00])
     a_bw = bw.amplitude(m, {f"{n}_mass": mass, f"{n}_width": width})
+    # bf² = m0·Γ0/ρ(m0): ρ is M-FREE, so the coupling carries the scale
+    rho_m0 = phase_space(np.array([mass]), L, 3.0, _Out.mass, _Out.mass)[0]
     a_km = kmb.amp(m, {f"{n}_m1": mass, f"{n}_m2": 2.0,
-                       f"{n}_g1": np.sqrt(mass * width), f"{n}_g2": 0.0,
+                       f"{n}_g1": np.sqrt(mass * width / rho_m0), f"{n}_g2": 0.0,
                        f"{n}_b1r": 1.0, f"{n}_b1i": 0.0,
                        f"{n}_b2r": 0.0, f"{n}_b2i": 0.0})
     assert np.allclose(a_km, a_bw, rtol=1e-12, atol=1e-14)
