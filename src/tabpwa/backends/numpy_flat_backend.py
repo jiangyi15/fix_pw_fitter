@@ -30,8 +30,8 @@ import numpy as np
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("numpy_flat", model="pwa_gen")
-@register_backend("default", model="pwa_gen")
+@register_backend("numpy_flat", model="pwa_gen", tags=('reference',))
+@register_backend("default", model="pwa_gen", tags=('reference',))
 class NumpyFlatBackend(ComputeBackend):
     """Flat-loop reference over the emitted ``pwa_gen`` config.
 

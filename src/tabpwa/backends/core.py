@@ -12,6 +12,9 @@ UNIVERSAL_BACKENDS = {}
 MODEL_BACKENDS = {}
 # Names registered for more than one model under different classes.
 _AMBIGUOUS = set()
+#: ``(model_name, name) -> frozenset(tags)`` — capability metadata declared at
+#: registration (a universal registration uses ``(None, name)``).
+_TAGS = {}
 
 
 def per_event_dnorm(norm, P, weight, bkg=None):
@@ -35,7 +38,7 @@ def per_event_dnorm(norm, P, weight, bkg=None):
     return float(np.sum(w * P / (norm * (P + b * norm))))
 
 
-def register_backend(name, model=None):
+def register_backend(name, model=None, *, tags=()):
     """Decorator: register a backend class under a single *name*.
 
     *model* is the amplitude-model **name** (a plain string — never a
@@ -48,8 +51,14 @@ def register_backend(name, model=None):
         class CUDABackendV3(...): ...
 
     The same class may be registered as many names and for many models.
+
+    *tags* is METADATA, not behaviour: a capability the caller can select on
+    (``reference``, ``delegate``, ``n_res1`` — see :func:`backend_tags`).  It
+    is stored per ``(model, name)``, so the same name registered for two
+    models keeps each model's own tags.
     """
     def _f(cls):
+        _TAGS[(model, name)] = frozenset(tags)
         if model is None:
             UNIVERSAL_BACKENDS[name] = cls
         else:
@@ -64,15 +73,37 @@ def register_backend(name, model=None):
     return _f
 
 
-def backends_for_model(model_name):
+def backend_tags(name, model=None):
+    """The frozenset of tags declared for ``(model, name)`` (empty if none).
+
+    A model-scoped lookup falls back to the universal registration's tags, so
+    a model-independent backend carries its tags into every model's set.
+    """
+    if model is not None:
+        tags = _TAGS.get((model, name))
+        if tags is not None:
+            return tags
+    return _TAGS.get((None, name), frozenset())
+
+
+def backends_for_model(model_name, tag=None):
     """Names registered for *model_name* plus the model-independent names.
 
     *model_name* is used verbatim as the registry key (callers pass the
     canonical ``model.name``); the registry imports nothing from tabpwa.
+
+    *tag* filters by declared capability: a single tag string, or a
+    collection of tags which must ALL be present (all-of, so the result
+    narrows as the filter grows).  ``None`` returns the whole set, exactly as
+    before.
     """
     names = set(UNIVERSAL_BACKENDS)
     names.update(MODEL_BACKENDS.get(model_name, {}))
-    return frozenset(names)
+    if tag is None:
+        return frozenset(names)
+    wanted = frozenset([tag]) if isinstance(tag, str) else frozenset(tag)
+    return frozenset(n for n in names
+                     if wanted <= backend_tags(n, model_name))
 
 
 def backend_class(name, model=None):

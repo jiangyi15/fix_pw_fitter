@@ -185,7 +185,7 @@ class ShardDataHandle:
         self.data_id = -1
 
 
-@register_backend("shard")
+@register_backend("shard", tags=('delegate',))
 class ShardBackend(ComputeBackend):
     """Multi-process backend — shards data across worker backends.
 

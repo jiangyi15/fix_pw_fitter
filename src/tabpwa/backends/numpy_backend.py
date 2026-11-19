@@ -3,7 +3,7 @@ import numpy as np
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("numpy", model="flavour_tag_mix")
+@register_backend("numpy", model="flavour_tag_mix", tags=('reference',))
 class NumpyBackend(ComputeBackend):
     """Pure NumPy computation (f64, CPU) with optional batching.
 

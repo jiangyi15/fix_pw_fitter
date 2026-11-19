@@ -8,6 +8,6 @@ from .core import register_backend
 from tabpwa.cuda import _flat_pwa_gen_1bw as _k
 
 
-@register_backend("cuda_flat_pwa_gen_1bw", model="pwa_gen")
+@register_backend("cuda_flat_pwa_gen_1bw", model="pwa_gen", tags=('n_res1',))
 class CUDAFlatPwaGen1BWBackend(_k.CUDAFlatPwaGen1BWBackend):
     """Registered alias of the wrapper in ``tabpwa.cuda._flat_pwa_gen_1bw``."""

@@ -142,7 +142,7 @@ class CUDABackendV4PWA(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_1bw", model="pwa")
+@register_backend("cuda_v4_pwa_1bw", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWA1BW(_CUDABackend):
     """CUDA v4 PWA, ONE BW PER CHAIN specialisation.
 
@@ -157,7 +157,7 @@ class CUDABackendV4PWA1BW(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_1bws", model="pwa")
+@register_backend("cuda_v4_pwa_1bws", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWA1BWS(_CUDABackend):
     """CUDA v4 PWA — one BW per chain + mass-sorted ``ck_order``.
 
@@ -174,7 +174,7 @@ class CUDABackendV4PWA1BWS(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_s0", model="pwa")
+@register_backend("cuda_v4_pwa_s0", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWAS0(_CUDABackend):
     """CUDA v4 PWA — one BW per chain + direct pole parameters.
 
@@ -231,7 +231,7 @@ class CUDABackendV5PWA(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda_v4_pwa_s0b", model="pwa")
+@register_backend("cuda_v4_pwa_s0b", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWAS0B(_CUDABackend):
     """CUDA v4 PWA s0b — s0 with device-side output accumulation.
 
@@ -247,7 +247,7 @@ class CUDABackendV4PWAS0B(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_s0c", model="pwa")
+@register_backend("cuda_v4_pwa_s0c", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWAS0C(_CUDABackend):
     """CUDA v4 PWA s0c — s0b with the uniform-coefficient format.
 
@@ -263,7 +263,7 @@ class CUDABackendV4PWAS0C(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_s0d", model="pwa")
+@register_backend("cuda_v4_pwa_s0d", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWAS0D(_CUDABackend):
     """CUDA v4 PWA s0d — s0c with the interp reading the mass column
     straight from the read-only global input.
@@ -282,7 +282,7 @@ class CUDABackendV4PWAS0D(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v4_pwa_s0e", model="pwa")
+@register_backend("cuda_v4_pwa_s0e", model="pwa", tags=('n_res1',))
 class CUDABackendV4PWAS0E(_CUDABackend):
     """CUDA v4 PWA s0e — the FUSED single-kernel tile variant of s0d.
 
@@ -301,7 +301,7 @@ class CUDABackendV4PWAS0E(_CUDABackend):
         return K(kc, batch_size=bs)
 
 
-@register_backend("cuda_v5_pwa_s0", model="pwa")
+@register_backend("cuda_v5_pwa_s0", model="pwa", tags=('n_res1',))
 class CUDABackendV5PWAS0(_CUDABackend):
     """CUDA v5 PWA s0 — one BW per chain + direct pole parameters +
     log-sum data NLL.
@@ -340,7 +340,7 @@ class CUDABackendV5PWAS0(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda_v5_pwa_s0c", model="pwa")
+@register_backend("cuda_v5_pwa_s0c", model="pwa", tags=('n_res1',))
 class CUDABackendV5PWAS0C(_CUDABackend):
     """CUDA v5 PWA s0c — the uniform-coefficient s0c kernel + log-sum NLL.
 
@@ -377,7 +377,7 @@ class CUDABackendV5PWAS0C(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda_v5_pwa_s0d", model="pwa")
+@register_backend("cuda_v5_pwa_s0d", model="pwa", tags=('n_res1',))
 class CUDABackendV5PWAS0D(_CUDABackend):
     """CUDA v5 PWA s0d — the v5 s0c kernel with the iteration-invariant
     u-cache (sibling of ``cuda_v4_pwa_s0d``).
@@ -495,7 +495,7 @@ class CUDAPolarisedBackend(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda_v5_pwa_s0e", model="pwa")
+@register_backend("cuda_v5_pwa_s0e", model="pwa", tags=('n_res1',))
 class CUDABackendV5PWAS0E(_CUDABackend):
     """CUDA v5 PWA s0e — the FUSED single-kernel tile of ``cuda_v4_pwa_s0e``
     with the v5 grouped log-sum data NLL.
@@ -533,7 +533,7 @@ class CUDABackendV5PWAS0E(_CUDABackend):
         return Q, grads, P
 
 
-@register_backend("cuda_v5_pwa_s0cw", model="pwa")
+@register_backend("cuda_v5_pwa_s0cw", model="pwa", tags=('n_res1',))
 class CUDAKernelV5PWAS0CWBackend(_CUDABackend):
     """CUDA v5 PWA s0cw — the s0c kernel with the GROUP-WEIGHTED log NLL.
 

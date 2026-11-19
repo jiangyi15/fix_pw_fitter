@@ -37,6 +37,15 @@ Gates:
 Test data stays INSIDE both interpolation grids (outside, the tables clamp and
 CPU/GPU diverge — see ``test_cuda_flat_cache_pwa_gen._in_grid``).
 """
+
+# The compute-function suite — Q/P/grads vs numpy_flat (both norms,
+# rsize 1 and 17), the grouped objective, FD gradients, chunk
+# invariance, handle independence / freed handle, and the input errors —
+# lives in `_flat_compute.py` and is collected by `test_flat_compute.py`
+# for EVERY registered pwa_gen backend.  This file keeps only this
+# kernel's own gates (tile/smem, path A/B, launch counts, the parent
+# A/B, dedup/index pins).
+
 import numpy as np
 import pytest
 
@@ -368,119 +377,14 @@ def test_the_real_config_ratios_are_pinned():
 
 # ── gate 5: the anchor, every qualifying fixture ────────────────────────
 
-@pytest.mark.parametrize("cfg", QUALIFYING)
-@pytest.mark.parametrize("norm", [None, 1.3])
-def test_anchor_matches_numpy_flat(cfg, norm):
-    f, ref, gpu, params, data, kc = _pair(cfg)
-    try:
-        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=norm)
-        Qg, gg, Pg = gpu.compute(params, gpu.load_data(data), norm=norm)
-        assert _rel(Pg, Pr) < CACHE_FLOOR_P, "P"
-        assert _rel(Qg, Qr) < CACHE_FLOOR, "Q"
-        assert _rel(gg["ck"], gr["ck"]) < CACHE_FLOOR, "dck"
-        assert _rel(gg["coeff"], gr["coeff"]) < CACHE_FLOOR_COEFF, "dcoeff"
-        if norm is not None:
-            assert _rel(gpu.kernel._last_dnorm, ref._last_dnorm) < CACHE_FLOOR
-    finally:
-        ref.free()
-        gpu.free()
 
 
-@pytest.mark.parametrize("cfg", QUALIFYING)
-def test_anchor_at_resolution_size_17(cfg):
-    """The objective the real fit uses — one log per 17 events."""
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    rs = 17
-    data = _replicate(_in_grid(kc, 17, seed=5), rs)
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
-    gpu = create_backend("cuda_flat_pwa_gen_s0e", kc, model="pwa_gen",
-                         resolution_size=rs)
-    try:
-        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
-        Qg, gg, Pg = gpu.compute(params, gpu.load_data(data), norm=1.3)
-        assert _rel(Pg, Pr) < CACHE_FLOOR_P, "P"
-        assert _floor_ok(Qg, Qr), f"Q: {Qg!r} vs {Qr!r}"
-        assert _rel(gg["ck"], gr["ck"]) < CACHE_FLOOR, "dck"
-        assert _rel(gg["coeff"], gr["coeff"]) < CACHE_FLOOR_COEFF, "dcoeff"
-        assert _floor_ok(gpu.kernel._last_dnorm, ref._last_dnorm, 2e-5, 1e-5)
-    finally:
-        ref.free()
-        gpu.free()
 
 
 # ── gate 6/7: finite differences, the independent check ─────────────────
 
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_IDENT, CFG_CP])
-@pytest.mark.parametrize("rs", [1, 17])
-def test_coeff_gradient_matches_central_differences(cfg, rs):
-    """``dcoeff`` must be ∂Q/∂coeff of THIS kernel's Q, per basis row.
-
-    This is the gate that catches a WRONG dedup map: a uslot/amp slot that
-    pointed at the wrong column would still be repeatable (both computes wrong
-    the same way), so only an independent derivative catches it.
-    """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    data = _in_grid(kc, 48)
-    if rs > 1:
-        data = _replicate(data, rs)
-    gpu = CUDAKernelFlatPwaGenS0E(kc, resolution_size=rs)
-    h = gpu.load_data(data)
-    try:
-        _Q0, g0, _ = gpu.compute(params, h, norm=1.3)
-        coeff = np.asarray(params["coeff"], np.float64).copy()
-        for i in range(coeff.size):
-            up, dn = coeff.copy(), coeff.copy()
-            up[i] += NH
-            dn[i] -= NH
-            pu, pn = dict(params), dict(params)
-            pu["coeff"], pn["coeff"] = up, dn
-            fd = (gpu.compute(pu, h, norm=1.3)[0]
-                  - gpu.compute(pn, h, norm=1.3)[0]) / (2 * NH)
-            assert np.isclose(g0["coeff"][i], fd, rtol=1e-4, atol=1e-8), (
-                f"{cfg} rs={rs} row {i}: kernel {g0['coeff'][i]!r} vs "
-                f"FD {fd!r}")
-    finally:
-        gpu.free()
 
 
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_CP])
-def test_ck_gradient_matches_fd(cfg):
-    """``dck`` after the u-merge — the same independent check."""
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    data = _in_grid(kc, 48)
-    gpu = CUDAKernelFlatPwaGenS0E(kc)
-    h = gpu.load_data(data)
-    try:
-        ck = np.asarray(params["ck"], np.complex128).copy()
-        _Q0, g0, _ = gpu.compute(params, h, norm=None)
-        for i in range(ck.size):
-            for part in (0, 1):
-                d = np.zeros_like(ck)
-                d[i] = NH if part == 0 else 1j * NH
-                pu, pn = dict(params), dict(params)
-                pu["ck"], pn["ck"] = ck + d, ck - d
-                fd = (gpu.compute(pu, h, norm=None)[0]
-                      - gpu.compute(pn, h, norm=None)[0]) / (2 * NH)
-                # the kernel's dck is the raw Wirtinger half; downstream is
-                # 2·Re / -2·Im
-                dres = (2.0 * np.real(g0["ck"][i]) if part == 0
-                        else -2.0 * np.imag(g0["ck"][i]))
-                assert np.isclose(dres, fd, rtol=1e-4, atol=1e-8), (
-                    f"ck[{i}] part {part}: {dres!r} vs {fd!r}")
-    finally:
-        gpu.free()
 
 
 # ── gate 8/9: the chunk rule and chunk independence ─────────────────────
@@ -519,43 +423,6 @@ def test_the_chunk_rule_is_what_the_context_reports(batch_size, rsize):
         k.free()
 
 
-def test_a_multi_chunk_call_equals_a_single_chunk_call():
-    """Batching is an inner loop: the numbers must not know about it.
-
-    A sample much longer than ``cap`` has to give the same Q/P/gradients as
-    the same sample in one chunk, with and without the grouped objective.
-    """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    data = _in_grid(kc, 500, seed=3)
-
-    def run(rs, bs):
-        be = CUDAKernelFlatPwaGenS0E(kc, resolution_size=rs, batch_size=bs)
-        try:
-            h = be.load_data(data)
-            Q, g, P = be.compute(params, h, norm=1.3)
-            h.free()
-            return Q, g["ck"], g["coeff"], float(g["norm"]), np.asarray(P)
-        finally:
-            be.free()
-
-    for rs in (1, 17):
-        base = run(rs, 10 ** 9)             # one chunk
-        for bs in (1000, 5000, 50000):      # many chunks
-            got = run(rs, bs)
-            for name, a, b in (("Q", got[0], base[0]),
-                               ("dck", got[1], base[1]),
-                               ("dcoeff", got[2], base[2]),
-                               ("dnorm", got[3], base[3]),
-                               ("P", got[4], base[4])):
-                a = np.asarray(a).ravel()
-                b = np.asarray(b).ravel()
-                rel = float(np.abs(a - b).max()
-                            / max(np.abs(b).max(), 1e-300))
-                assert rel <= 1e-14, f"rsize={rs} batch={bs}: {name} {rel:.2e}"
 
 
 def test_a_group_never_straddles_a_tile_or_a_chunk():
@@ -820,57 +687,12 @@ def test_a_tile_hint_cannot_split_a_group():
 
 # ── contract ────────────────────────────────────────────────────────────
 
-def test_rejects_an_already_deduped_config():
-    from tabpwa.pwa_gen_config import build_from_groups, dedup
-    m = Fitter(CFG_KM).model
-    dd = dedup(build_from_groups(m, n_interp=200))
-    with pytest.raises(ValueError, match="FULL"):
-        CUDAKernelFlatPwaGenS0E(dd)
 
 
-def test_resolution_size_below_one_is_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    with pytest.raises(ValueError, match="resolution_size"):
-        CUDAKernelFlatPwaGenS0E(f.kernel_config, resolution_size=0)
 
 
-def test_wrong_parameter_lengths_are_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0E(kc)
-    h = k.load_data(_in_grid(kc, 8))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        bad = dict(params)
-        bad["ck"] = np.zeros(k.n_wave + 1, complex)
-        with pytest.raises(ValueError, match="n_wave"):
-            k.compute(bad, h, norm=None)
-        bad = dict(params)
-        bad["coeff"] = np.zeros(k.n_basis + 1)
-        with pytest.raises(ValueError, match="n_basis"):
-            k.compute(bad, h, norm=None)
-    finally:
-        k.free()
 
 
-def test_a_freed_handle_is_reported_not_crashed():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0E(kc)
-    h = k.load_data(_in_grid(kc, 8))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        h.free()
-        h.free()                              # idempotent
-        with pytest.raises(RuntimeError, match="already freed"):
-            k.compute(params, h, norm=None)
-    finally:
-        k.free()
 
 
 def test_an_empty_sample_is_the_identity_not_a_failure():
@@ -913,27 +735,3 @@ def test_return_p_false_does_not_change_the_objective():
         h.free()
         k.free()
 
-
-def test_two_handles_stay_independent():
-    """The fitter holds the phase-space and data handles at once."""
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0E(kc)
-    a = k.load_data(_in_grid(kc, 16, seed=1))
-    b = k.load_data(_in_grid(kc, 24, seed=2))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        assert a.ptr != b.ptr
-        Qa, _ga, Pa = k.compute(params, a, norm=1.3)
-        Qb, _gb, Pb = k.compute(params, b, norm=1.3)
-        assert np.asarray(Pa).size == 16
-        assert np.asarray(Pb).size == 24
-        Qa2, _ga2, _Pa2 = k.compute(params, a, norm=1.3)
-        assert Qa2 == pytest.approx(Qa, rel=1e-14), (
-            "the second handle's load clobbered the first")
-    finally:
-        a.free()
-        b.free()
-        k.free()

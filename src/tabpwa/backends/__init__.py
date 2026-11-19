@@ -19,6 +19,7 @@ specs unchanged and resolve them with :func:`create_backend` themselves.
 """
 from .core import ALL_BACKENDS, UNIVERSAL_BACKENDS, MODEL_BACKENDS, \
     register_backend, backends_for_model, backend_class, \
+    backend_tags, \
     resolve_backend_spec, create_backend, DataHandle, ComputeBackend
 
 from . import numpy_backend        # noqa: F401 — register NumpyBackend
@@ -49,5 +50,6 @@ from . import auto_backend  # noqa: F401 — register auto
 __all__ = [
     "ALL_BACKENDS", "UNIVERSAL_BACKENDS", "MODEL_BACKENDS",
     "register_backend", "backends_for_model", "backend_class",
+    "backend_tags",
     "resolve_backend_spec", "create_backend", "DataHandle", "ComputeBackend",
 ]

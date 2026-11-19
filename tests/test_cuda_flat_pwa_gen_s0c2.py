@@ -1,140 +1,21 @@
-"""``cuda_flat_pwa_gen_s0c2`` — s0c with the three per-chunk feature reductions
-fused into ONE launch.
+"""``cuda_flat_pwa_gen_s0c2`` — s0c's internals plus the FUSION's own gates.
 
-This file is ``tests/test_cuda_flat_pwa_gen_s0c.py`` repointed, PLUS the two
-gates the fusion itself needs (marked **s0c2** below).  Every gate s0c passes,
-this kernel must pass unchanged — the fusion is a launch-structure change and
-nothing else.
-
-Gates:
-0. **s0c2: bitwise vs s0c** — Q / P / dck / dcoeff / dnorm are ``np.array_equal``
-   to ``cuda_flat_pwa_gen_s0c`` on ``config_pwa_gen.yml`` and
-   ``config_pwa_gen_km.yml``, ``resolution_size`` 1 and 17, ``norm`` None and
-   1.3.  The fusion must not move a single bit, and this gate is what says so.
-   *Scope, measured:* s0c's own cross-block ``atomicAdd`` (the Q reduce and
-   ``grad_ck``'s per-block ``gck_*_p`` accumulation) already makes it
-   non-reproducible on a large sample — **s0c against ITSELF differs** at
-   ne 4000 on the km fixture (Q/dck) and on the production shape, while
-   ``dcoeff`` happens to stay stable.  The gate therefore sits at the
-   reproducible shape (64 events: one chunk, one gradient block), where s0c
-   vs s0c is EXACT — and s0c2 equals it bit for bit in all 8 combinations.
-   That is the strongest gate the arithmetic admits; it is not a loosened one,
-   and the fused launch adds no nondeterminism of its own (its three slices
-   never share a destination address).
-0b. **s0c2: the fused launch == the three separate ones, directly** — the C
-   helper runs both paths on the same device data and bit-compares, and the
-   launch counter pins 1 per chunk (3 on the ``n_features > 32`` fallback).
-1. **registration** — ``pwa_gen`` scope only, and a case-1 copy (own module, own
-   source, own ``.so``, own symbols; every protected kernel and wrapper
-   untouched).  The machinery s0c carries that a flat backend does not need is
-   shown absent: this kernel has no ``m0``/``g0`` gradient blocks at all.
-2. **the algebra, proved in numpy BEFORE the kernel is trusted** — the rotated
-   ``Z = i·basis`` recovers every basis row; the denominator assembled from the
-   deduped rotated slot table equals the direct per-row evaluation; the u-merge
-   and the **m-major** coefficient reduction reproduce ``numpy_flat``'s
-   ``dcoeff``/``dck``.  Done with no kernel involved, so a matching wrong kernel
-   cannot mask a wrong derivation.
-3. **both dedups and the CSR are exact and pinned per config** — the uslot and
-   amp representatives are byte-identical to every member, the wave CSR is each
-   row's TRUE non-zeros, the m-major CSR is the same ``(wave, column)`` set
-   grouped by basis row, and the ``(ref, run)`` iteration counts are pinned so a
-   builder change that moves the ratios is visible.
-4. **a holed gamma row is handled, not refused** — a hole is simply absent from
-   the CSR, so punching one changes neither ``Q`` nor the gradients.
-5. **a non-0/1 gamma is rejected** — the m-major reduction factors the basis row
-   out of the wave sum, which is exact only for a 0/1 selector.
-6. **anchor vs ``numpy_flat``** on every ``n_res == 1`` fixture for
-   ``Q``/``P``/``dck``/``dcoeff``/``dnorm``, ``norm=None`` and a scalar norm, at
-   ``resolution_size`` 1 and 17.
-7. **``dcoeff`` and ``dck`` against central differences** — the independent check
-   that the CSR and the m-major transposition are the right columns.  A wrong map
-   is self-consistent between two computes and only FD catches it.
-8. **chunk independence** — ``rsize`` 1/17 × ``batch_size``
-   1/5/1000/5000/50000/1e9, all five quantities agree to <=1e-14.
-9. **the chunk rule is what the context reports** (never re-derived in Python),
-   including both guards: the ``1<<20`` cap and "a chunk below one group is
-   raised to one whole group".
-10. **``n_res != 1`` is rejected** with ``cuda_flat_pwa_gen2`` named.
-11. **the memory design is the one this backend exists for** — the handle holds
-    NO interpolation cache (the basis interp is recomputed per iteration into
-    shared memory), so its size is the numerator cache + weight/bkg/mass only.
-    Measured on the real sample: 2.17 GB, i.e. s0c's 2.17 GB rather than the
-    ``cuda_flat_pwa_gen_s0e`` tile's 5.9 GB.
-
-Test data stays INSIDE both interpolation grids (outside, the tables clamp and
-CPU/GPU diverge — see ``test_cuda_flat_cache_pwa_gen._in_grid``).
+The function-level behaviour is :mod:`_flat_compute`.  Here: the internals
+s0c and s0c2 share (dedups, CSRs, chunk rule, memory design, own
+module/`.so`/symbols, the ``n_res == 1`` guard) and the three gates only the
+fusion needs — bitwise equality with s0c, one launch per chunk, the C-level
+fused-vs-three A/B — plus the pinned helper copies.
 """
 import numpy as np
 import pytest
 
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
-from tabpwa.cuda._flat_pwa_gen_s0c2 import (
-    CUDAKernelFlatPwaGenS0C2, _basis_csr, index_runs)
-from tabpwa.cuda._flat_pwa_gen_s0e import amp_slot_map, uslot_map
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_compute import (
+    CFG_ONE, CFG_KM, CFG_MB, CFG_IDENT, CFG_SAME, CFG_CP, QUALIFYING,
+    NH, _in_grid)
 
-CFG_ONE = "tests/config_pwa_gen.yml"
-CFG_KM = "tests/config_pwa_gen_km.yml"
-CFG_MB = "tests/config_pwa_gen_mb.yml"
-CFG_IDENT = "tests/config_pwa_gen_ident.yml"
-CFG_SAME = "tests/config_pwa_gen_same.yml"
-CFG_CP = "tests/config_pwa_gen_cp.yml"
-#: every fixture with exactly one BW per chain (a `_mb` chain has two)
-QUALIFYING = [CFG_ONE, CFG_KM, CFG_IDENT, CFG_SAME, CFG_CP]
-
-# ── the fp32 cache floor ────────────────────────────────────────────────
-# The one load-time cache is the numerator `amp = fa·fl·num` as float2, so
-# agreement with the fp64 `numpy_flat` reference is limited by fp32, not by the
-# algebra.  These are the SAME constants the sibling flat fixtures use, with the
-# same reason: the error tracks P's DYNAMIC RANGE, not n_basis (`_ident` spans
-# 7.5e-4 .. 7.2e2, so `_rel` = worst absolute / global max is set by the
-# near-zero events).
-# MEASURED for this kernel against fp64 `numpy_flat` — `(ne=64, seed 0)` at
-# `rsize` 1 and 17, `norm` None and 1.3, worst of the 4 combinations, with
-# `cuda_flat_pwa_gen_1bw` on the SAME events beside it so the shared-cache
-# attribution is visible:
-#
-#   cfg      dQ      dck     dcoef     |  1bw:  dQ      dck     dcoef
-#   _pwa_gen 2.7e-07 3.0e-07 6.3e-07   |        2.7e-07 2.9e-07 6.2e-07
-#   _km      4.8e-08 5.2e-08 5.3e-08   |        7.6e-08 9.9e-08 3.5e-07
-#   _same    5.1e-08 4.5e-08 1.4e-07   |        1.6e-07 2.5e-07 4.7e-07
-#   _ident   9.1e-06 1.5e-05 1.5e-04   |        1.9e-05 1.3e-05 1.4e-04
-#   _cp      1.6e-07 1.3e-05 9.8e-05   |        4.0e-08 1.2e-05 8.4e-05
-#
-# i.e. this kernel tracks its closest sibling to within a factor ~2 on every
-# quantity, and the whole gap is the `float2` numerator cache both share.
-# `_ident`'s `dcoef` reaches 1.5e-04 (1bw: 1.4e-04) — it spans the widest
-# P dynamic range of the five fixtures, and `dcoeff` accumulates one rounding
-# per `(e, basis row)`.
-CACHE_FLOOR = 2e-5          # Q, dck, dnorm
-CACHE_FLOOR_P = 4e-5        # per-event P (measured worst 3.2e-05)
-CACHE_FLOOR_COEFF = 2e-4    # dcoeff (measured worst 1.5e-04, 1bw 1.4e-04)
-#: The fp32 cache floor is an ABSOLUTE error, but ``_rel`` divides by the value
-#: being compared — so a near-zero Q turns the same absolute gap into a large
-#: relative one.  MEASURED on ``config_pwa_gen_ident.yml`` at ``rsize = 1``,
-#: seed 0, 32 events: the reference Q is **0.008628** (a cancellation), so a
-#: 2.09e-05 absolute gap reads as 2.4e-03 relative — while
-#: ``cuda_flat_pwa_gen_1bw`` has 2.12e-05 absolute on the same events, i.e. the
-#: entire gap is the shared float2 cache and not this kernel's algebra.  The
-#: gates therefore accept either bound, which is the honest form for an
-#: absolute error floor.
-CACHE_FLOOR_ABS = 1e-4
-NH = 1e-6
-
-
-def _floor_ok(a, b, rel_bound=CACHE_FLOOR, abs_bound=CACHE_FLOOR_ABS):
-    """The fp32 floor is ABSOLUTE; ``_rel`` divides by the value.
-
-    Accepting either bound keeps the gate meaningful for a near-zero Q without
-    loosening it for the ordinary ones (the absolute bound IS the measured
-    shared-cache gap).
-    """
-    a = np.asarray(a).ravel()
-    b = np.asarray(b).ravel()
-    worst = float(np.abs(a - b).max())
-    return worst / max(np.abs(b).max(), 1e-300) < rel_bound or worst < abs_bound
-
+# ── this kernel's own measured facts (not part of the compute suite) ───
 #: measured `(n_basis, n_uslot)` and `(n_wave, n_uniq)` and the CSR sizes,
 #: pinned PER CONFIG (an average over the fixtures would hide that the dense
 #: ones collapse nothing).
@@ -167,33 +48,9 @@ REAL_NNZ = 82
 #: 2.17 GB — s0c's own — against the ``cuda_flat_pwa_gen_s0e`` tile's 5.9 GB.
 REAL_HANDLE_GB = 2.17
 
-
-def _rel(a, b):
-    a = np.asarray(a).ravel()
-    b = np.asarray(b).ravel()
-    return float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
-
-
-def _replicate(data, rs):
-    out = {k: np.repeat(np.asarray(v), rs, axis=0) for k, v in data.items()}
-    out["weight"] = np.full(len(np.asarray(data["weight"])) * rs, 1.0 / rs)
-    return out
-
-
-def _pair(cfg, ne=64, seed=0, **kw):
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    data = _in_grid(kc, ne, seed)
-    x = f.initial_values(seed=1)
-    params, _resolved = f.build_params(x)
-    ref = create_backend("numpy_flat", kc, model="pwa_gen",
-                         resolution_size=kw.get("resolution_size", 1))
-    gpu = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen", **kw)
-    return f, ref, gpu, params, data, kc
-
-
-# ── gate 1: registration and the case-1 copy ────────────────────────────
+from tabpwa.cuda._flat_pwa_gen_s0c2 import (
+    CUDAKernelFlatPwaGenS0C2, _basis_csr, index_runs)
+from tabpwa.cuda._flat_pwa_gen_s0e import amp_slot_map, uslot_map
 
 def test_registration():
     reg = set(backends_for_model("pwa_gen"))
@@ -207,41 +64,6 @@ def test_registration():
     b = create_backend("cuda_flat_pwa_gen_s0c2", f.kernel_config,
                        model="pwa_gen")
     b.free()
-
-
-def test_the_helpers_are_identical_copies():
-    """The inlined helpers must equal their origins ARRAY-FOR-ARRAY.
-
-    A case-1 copy carries its own ``uslot_map`` / ``amp_slot_map`` /
-    ``index_runs`` (it imports no other backend's module), so the copies are
-    pinned against the originals on two real configs: every returned array is
-    compared with ``np.array_equal``.
-    """
-    import tabpwa.cuda._flat_pwa_gen_s0c2 as c2
-    from tabpwa.cuda._flat_pwa_gen_1bw import index_runs as orig_index_runs
-
-    for cfg in (CFG_ONE, CFG_KM):
-        kc = Fitter(cfg, backend="numpy_flat").kernel_config
-        n_wave = int(np.asarray(kc["fl_table"]).shape[0])
-        n_basis = int(np.asarray(kc["basis_table"]).shape[0])
-        n_proj = max(1, int(np.asarray(kc["matrix_angle"]).shape[1])
-                     // n_wave)
-        gamma = np.asarray(kc["gamma_matrix"], np.float64)
-        cases = (
-            (c2.uslot_map, uslot_map,
-             (kc["basis_table"], kc["basis_m_index"])),
-            (c2.amp_slot_map, amp_slot_map,
-             (kc["matrix_angle"], kc["fl_table"], kc["fl_q_index"],
-              kc["num_table"], kc["num_m_index"], n_wave, n_proj)),
-            (c2.index_runs, orig_index_runs, (gamma, n_wave, n_basis)),
-        )
-        for copy, origin, args in cases:
-            got, want = copy(*args), origin(*args)
-            assert len(got) == len(want), (cfg, origin.__name__)
-            for i, (a, b) in enumerate(zip(got, want)):
-                assert np.array_equal(np.asarray(a), np.asarray(b)), (
-                    f"{cfg}: {origin.__name__} output {i} differs from the "
-                    f"origin")
 
 
 def test_the_other_kernels_are_not_reused():
@@ -279,123 +101,6 @@ def test_the_other_kernels_are_not_reused():
         for k in (a, p, b, c, d):
             k.free()
 
-
-# ── gates 0/0b: THE FUSION (the only reason this backend exists) ────────
-
-@pytest.mark.parametrize("cfg", [CFG_ONE, CFG_KM])
-@pytest.mark.parametrize("rs", [1, 17])
-@pytest.mark.parametrize("norm", [None, 1.3])
-def test_bitwise_vs_s0c(cfg, norm, rs):
-    """The fusion is a LAUNCH-STRUCTURE change: not one bit may move.
-
-    Both kernels run the same tree body (same block shape, chunk, shared
-    layout, fold order, one ``atomicAdd`` per feature) into three disjoint
-    output ranges, so exact equality is the only acceptable answer.  Every
-    quantity the API exposes is compared with ``np.array_equal``.
-
-    The 64-event shape is the REPRODUCIBLE one (one chunk, one gradient block),
-    which is what makes a bitwise gate possible at all: s0c's own cross-block
-    atomics make it differ from ITSELF at ne 4000 (measured — see the module
-    docstring), so a larger sample could not be gated by any kernel.
-    """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    data = _in_grid(kc, 64, 0)
-    params, _ = f.build_params(f.initial_values(seed=1))
-    ref = create_backend("cuda_flat_pwa_gen_s0c", kc, model="pwa_gen",
-                         resolution_size=rs)
-    new = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen",
-                         resolution_size=rs)
-    try:
-        hr = ref.load_data(data)
-        hn = new.load_data(data)
-        Qr, gr, Pr = ref.compute(params, hr, norm=norm)
-        Qn, gn, Pn = new.compute(params, hn, norm=norm)
-        assert Qr == Qn, f"{cfg} rs={rs} norm={norm}: Q {Qr!r} != {Qn!r}"
-        assert np.array_equal(Pr, Pn), "P"
-        assert np.array_equal(gr["ck"], gn["ck"]), "dck"
-        assert np.array_equal(gr["coeff"], gn["coeff"]), "dcoeff"
-        if norm is not None:
-            assert ref.kernel._last_dnorm == new.kernel._last_dnorm, "dnorm"
-        else:
-            assert (ref.kernel._last_dnorm is None
-                    and new.kernel._last_dnorm is None)
-        # the A/B is only meaningful if it ran through the fused path
-        assert new.kernel.feature_launch_count() >= 1
-    finally:
-        ref.free()
-        new.free()
-
-
-def test_the_fusion_is_one_launch_per_chunk():
-    """3 launches -> 1 is the entire change; pin the count, not the intent."""
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
-    # 2048 events with the default 50k cap is ONE chunk: s0c issues 3 feature
-    # launches per chunk, s0c2 exactly 1
-    data = _in_grid(kc, 2048, 3)
-    k = CUDAKernelFlatPwaGenS0C2(kc)
-    h = k.load_data(data)
-    try:
-        assert k.cap >= 2048            # one chunk on this shape
-        k.reset_feature_launch_count()
-        k.compute(params, h, norm=None)
-        assert k.feature_launch_count() == 1
-        k.reset_feature_launch_count()
-        k.compute(params, h, norm=1.3)  # the normed path issues it too
-        assert k.feature_launch_count() == 1
-        # a 3-chunk call issues 3 fused launches (s0c would issue 9): the
-        # fusion is per CHUNK, so nothing here depends on the sample size
-        k2 = CUDAKernelFlatPwaGenS0C2(kc, batch_size=1024)
-        h2 = k2.load_data(data)
-        try:
-            k2.reset_feature_launch_count()
-            k2.compute(params, h2, norm=None)
-            assert k2.feature_launch_count() == 2      # 2048 / 1024
-        finally:
-            h2.free()
-            k2.free()
-    finally:
-        h.free()
-        k.free()
-
-
-def test_fused_reduction_matches_the_three_separate_ones():
-    """The C-level A/B: the fused launch vs s0c's three tree launches.
-
-    ``cuda_check_fused_reduce_flat_pwa_gen_s0c2`` runs BOTH paths on the same
-    device data and ``memcmp``s every output, so this is independent of
-    ``compute`` (a matching pair of wrong kernels cannot hide here, because
-    the separate path IS s0c's launch).  The buffer shapes are the KM
-    fixture's own (n_wave 2, n_basis 5) plus a third, and 40 events is not a
-    multiple of the 1024 chunk — the short chunk is covered too.
-    """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    k = CUDAKernelFlatPwaGenS0C2(f.kernel_config)
-    try:
-        ne = 40
-        assert (k.n_wave, k.n_basis) == (2, 5)
-        rng = np.random.default_rng(7)
-        a = rng.uniform(-1.0, 1.0, (ne, k.n_wave))    # gck_r
-        b = rng.uniform(-1.0, 1.0, (ne, k.n_wave))    # gck_i
-        c = rng.uniform(-1.0, 1.0, (ne, k.n_basis))   # gco
-        equal, count = k.check_fused_reduce(a, b, c)
-        assert equal, "the fused feature reduction is not bit-identical"
-        assert count == k.n_wave + k.n_wave + k.n_basis
-        # a wider-than-32 buffer takes the acc fallback (three launches, the
-        # same condition s0c applies) and is still bit-identical
-        wide = rng.uniform(-1.0, 1.0, (ne, 40))
-        equal, count = k.check_fused_reduce(a, wide, c)
-        assert equal and count == k.n_wave + 40 + k.n_basis
-    finally:
-        k.free()
-
-
-# ── gate 2: the algebra, proved in numpy first ─────────────────────────
 
 def _real_config():
     import os
@@ -572,8 +277,6 @@ def test_the_m_major_coefficient_reduction_is_numpy_flats():
     assert np.abs(gck - ref_k).max() < 1e-9 * max(np.abs(ref_k).max(), 1.0)
 
 
-# ── gate 3: the dedups and both CSRs, exact and pinned ────────────────
-
 @pytest.mark.parametrize("cfg", QUALIFYING)
 def test_the_dedups_and_csrs_are_exact_and_pinned(cfg):
     f = Fitter(cfg)
@@ -685,8 +388,6 @@ def test_the_real_config_ratios_are_the_ones_this_backend_was_built_for():
     assert holed >= 15, f"interior holes in {holed} of {n_wave} waves"
 
 
-# ── gate 4/5: holes are handled; a non-0/1 selector is refused ───────
-
 def test_a_hole_in_a_gamma_row_is_handled_not_refused():
     """A hole is simply absent from the CSR, so it changes nothing."""
     f = Fitter(CFG_KM)
@@ -769,156 +470,6 @@ def test_the_index_list_is_itself():
     assert len(_order) == 4
 
 
-# ── gate 6: the anchor, every qualifying fixture ──────────────────────
-
-@pytest.mark.parametrize("cfg", QUALIFYING)
-@pytest.mark.parametrize("norm", [None, 1.3])
-@pytest.mark.parametrize("rs", [1, 17])
-def test_anchor_matches_numpy_flat(cfg, norm, rs):
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    # the sibling fixtures' anchor shape (64 events, seed 0), so the floors
-    # below are the same measurements they were calibrated on
-    base = _in_grid(kc, 64, 0)
-    data = _replicate(base, rs) if rs > 1 else base
-    params, _ = f.build_params(f.initial_values(seed=1))
-    ref = create_backend("numpy_flat", kc, model="pwa_gen",
-                         resolution_size=rs)
-    gpu = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen",
-                         resolution_size=rs)
-    try:
-        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=norm)
-        Qg, gg, Pg = gpu.compute(params, gpu.load_data(data), norm=norm)
-        assert _floor_ok(Pg, Pr, CACHE_FLOOR_P), "P"
-        assert _floor_ok(Qg, Qr), "Q"
-        assert _floor_ok(gg["ck"], gr["ck"]), "dck"
-        assert _floor_ok(gg["coeff"], gr["coeff"], CACHE_FLOOR_COEFF), "dcoeff"
-        if norm is not None:
-            assert _floor_ok(gpu.kernel._last_dnorm, ref._last_dnorm)
-    finally:
-        ref.free()
-        gpu.free()
-
-
-@pytest.mark.parametrize("cfg", QUALIFYING)
-def test_one_group_per_event_reduces_to_the_per_event_nll(cfg):
-    """``rsize = 1`` is the per-event log, so it must match ``rsize = None``.
-
-    Also pins that the GROUPED objective is the flat family's group-TOTAL
-    weight form (`-W_g·log(S_g/W_g)`, `numpy_flat`'s), not s0c's plain
-    `-log(Pb/norm + Bb)` — the two differ by ``W_g`` whenever a group's weights
-    do not sum to 1.  Un-normalised weights make that difference visible.
-    """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    data = _in_grid(kc, 34, 5)              # 34 events: a short final group
-    params, _ = f.build_params(f.initial_values(seed=1))
-    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=17)
-    gpu = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen",
-                         resolution_size=17)
-    try:
-        Qr, _gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
-        Qg, _gg, Pg = gpu.compute(params, gpu.load_data(data), norm=1.3)
-        assert _floor_ok(Pg, Pr, CACHE_FLOOR_P)
-        assert _floor_ok(Qg, Qr)
-    finally:
-        ref.free()
-        gpu.free()
-    # and with group-NORMALISED weights both forms coincide, which is what
-    # makes the per-event value a valid cross-check of the grouped one
-    d = _replicate(data, 1)
-    w = np.asarray(d["weight"], float)
-    n = (w.size // 17) * 17
-    wg = w[:n].reshape(-1, 17)
-    d["weight"] = w.copy()
-    d["weight"][:n] = (wg / wg.sum(axis=1, keepdims=True)).reshape(-1)
-    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=17)
-    gpu = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen",
-                         resolution_size=17)
-    try:
-        hr = ref.load_data(d)
-        hg = gpu.load_data(d)
-        Qr = ref.compute(params, hr, norm=1.3)[0]
-        Qg = gpu.compute(params, hg, norm=1.3)[0]
-        assert _floor_ok(Qg, Qr)
-    finally:
-        ref.free()
-        gpu.free()
-
-
-# ── gate 7: finite differences ────────────────────────────────────────
-
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_IDENT, CFG_CP])
-@pytest.mark.parametrize("rs", [1, 17])
-def test_coeff_gradient_matches_central_differences(cfg, rs):
-    """``dcoeff`` must be ∂Q/∂coeff of THIS kernel's Q, per basis row.
-
-    This is the gate that catches a wrong CSR or a wrong m-major
-    transposition: a map that included the wrong columns would still be
-    repeatable (both computes wrong the same way), so only an independent
-    derivative can catch it.
-    """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
-    base = _in_grid(kc, 48)
-    data = _replicate(base, rs) if rs > 1 else base
-    gpu = CUDAKernelFlatPwaGenS0C2(kc, resolution_size=rs)
-    h = gpu.load_data(data)
-    try:
-        _Q0, g0, _ = gpu.compute(params, h, norm=None)
-        coeff = np.asarray(params["coeff"], np.float64).copy()
-        for i in range(coeff.size):
-            up, dn = coeff.copy(), coeff.copy()
-            up[i] += NH
-            dn[i] -= NH
-            pu, pn = dict(params), dict(params)
-            pu["coeff"], pn["coeff"] = up, dn
-            fd = (gpu.compute(pu, h, norm=None)[0]
-                  - gpu.compute(pn, h, norm=None)[0]) / (2 * NH)
-            assert np.isclose(g0["coeff"][i], fd, rtol=1e-4, atol=1e-8), (
-                f"{cfg} rs={rs} row {i}: kernel {g0['coeff'][i]!r} "
-                f"vs FD {fd!r}")
-    finally:
-        gpu.free()
-
-
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_CP])
-def test_ck_gradient_matches_fd(cfg):
-    """``dck`` after the u-merge — the same independent check."""
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
-    data = _in_grid(kc, 48)
-    gpu = CUDAKernelFlatPwaGenS0C2(kc)
-    h = gpu.load_data(data)
-    try:
-        ck = np.asarray(params["ck"], np.complex128).copy()
-        _Q0, g0, _ = gpu.compute(params, h, norm=None)
-        for i in range(ck.size):
-            for part in (0, 1):
-                d = np.zeros_like(ck)
-                d[i] = NH if part == 0 else 1j * NH
-                pu, pn = dict(params), dict(params)
-                pu["ck"], pn["ck"] = ck + d, ck - d
-                fd = (gpu.compute(pu, h, norm=None)[0]
-                      - gpu.compute(pn, h, norm=None)[0]) / (2 * NH)
-                # the kernel's dck is the raw Wirtinger half; the real
-                # parameter convention downstream is 2·Re / -2·Im
-                dres = (2.0 * np.real(g0["ck"][i]) if part == 0
-                        else -2.0 * np.imag(g0["ck"][i]))
-                assert np.isclose(dres, fd, rtol=1e-4, atol=1e-8), (
-                    f"ck[{i}] part {part}: {dres!r} vs {fd!r}")
-    finally:
-        gpu.free()
-
-
-# ── gate 8/9: chunking ────────────────────────────────────────────────
-
 def _chunk_rule(batch_size, rsize):
     """The documented rule, restated here so the C side is checked against it."""
     cap = batch_size if batch_size > 0 else 50000
@@ -954,73 +505,6 @@ def test_the_chunk_rule_is_what_the_context_reports(batch_size, rsize):
         k.free()
 
 
-def test_a_multi_chunk_call_equals_a_single_chunk_call():
-    """Batching is an inner loop: the numbers must not know about it.
-
-    Exercised with and without the grouped objective, and at batch sizes that
-    straddle both guards (1/5 are below one group at rsize 17; 1e9 is capped).
-    """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
-    data = _in_grid(kc, 500, 3)
-
-    def run(rs, bs):
-        be = CUDAKernelFlatPwaGenS0C2(kc, resolution_size=rs, batch_size=bs)
-        try:
-            h = be.load_data(data)
-            Q, g, P = be.compute(params, h, norm=1.3)
-            h.free()
-            return Q, g["ck"], g["coeff"], float(g["norm"]), np.asarray(P)
-        finally:
-            be.free()
-
-    for rs in (1, 17):
-        base = run(rs, 10 ** 9)             # one chunk
-        for bs in (1, 5, 1000, 5000, 50000):
-            got = run(rs, bs)
-            for name, a, b in (("Q", got[0], base[0]),
-                               ("dck", got[1], base[1]),
-                               ("dcoeff", got[2], base[2]),
-                               ("dnorm", got[3], base[3]),
-                               ("P", got[4], base[4])):
-                rel = _rel(a, b)
-                assert rel <= 1e-14, f"rsize={rs} batch={bs}: {name} {rel:.2e}"
-
-
-def test_a_chunk_boundary_does_not_move_the_fill():
-    """The load-time fill is chunked too — so a chunk must read ITS events.
-
-    Regression gate: the fill's `event_idx` is chunk-local, so passing the
-    sample's first events to every chunk leaves the cache of every chunk after
-    the first computed from the wrong masses (measured: Q off by 8.5 on 16
-    events at batch_size 1).  Pinned by a sample much longer than the chunk.
-    """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
-    data = _in_grid(kc, 37, 11)
-    k = CUDAKernelFlatPwaGenS0C2(kc, batch_size=4)
-    h = k.load_data(data)
-    k2 = CUDAKernelFlatPwaGenS0C2(kc, batch_size=10 ** 6)
-    h2 = k2.load_data(data)
-    try:
-        Qa, _ga, Pa = k.compute(params, h, norm=1.3)
-        Qb, _gb, Pb = k2.compute(params, h2, norm=1.3)
-        assert _rel(Pa, Pb) <= 1e-14
-        assert abs(Qa - Qb) <= 1e-12 * max(abs(Qb), 1.0)
-        # a per-event quantity: the LAST events prove the fill ran per chunk
-        assert abs(float(Pa[-1]) - float(Pb[-1])) <= 1e-13 * max(
-            abs(float(Pb[-1])), 1.0)
-    finally:
-        k.free()
-        k2.free()
-
-
-# ── gate 10: n_res == 1 enforced, loudly ─────────────────────────────
-
 def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
     f = Fitter(CFG_MB)
     f.apply_constrains()
@@ -1041,8 +525,6 @@ def test_every_other_fixture_passes_the_gate():
         k = CUDAKernelFlatPwaGenS0C2(f.kernel_config)
         k.free()
 
-
-# ── gate 11: the memory design ───────────────────────────────────────
 
 def test_the_handle_holds_no_interpolation_cache():
     """The point of this backend: the basis interp is NOT cached per event.
@@ -1108,79 +590,149 @@ def test_the_measured_handle_is_the_s0c_one():
             k.free()
 
 
-# ── contract ────────────────────────────────────────────────────────
+def test_the_helpers_are_identical_copies():
+    """The inlined helpers must equal their origins ARRAY-FOR-ARRAY.
 
-def test_rejects_an_already_deduped_config():
-    from tabpwa.pwa_gen_config import build_from_groups, dedup
-    m = Fitter(CFG_KM).model
-    dd = dedup(build_from_groups(m, n_interp=200))
-    with pytest.raises(ValueError, match="FULL"):
-        CUDAKernelFlatPwaGenS0C2(dd)
+    A case-1 copy carries its own ``uslot_map`` / ``amp_slot_map`` /
+    ``index_runs`` (it imports no other backend's module), so the copies are
+    pinned against the originals on two real configs: every returned array is
+    compared with ``np.array_equal``.
+    """
+    import tabpwa.cuda._flat_pwa_gen_s0c2 as c2
+    from tabpwa.cuda._flat_pwa_gen_1bw import index_runs as orig_index_runs
+
+    for cfg in (CFG_ONE, CFG_KM):
+        kc = Fitter(cfg, backend="numpy_flat").kernel_config
+        n_wave = int(np.asarray(kc["fl_table"]).shape[0])
+        n_basis = int(np.asarray(kc["basis_table"]).shape[0])
+        n_proj = max(1, int(np.asarray(kc["matrix_angle"]).shape[1])
+                     // n_wave)
+        gamma = np.asarray(kc["gamma_matrix"], np.float64)
+        cases = (
+            (c2.uslot_map, uslot_map,
+             (kc["basis_table"], kc["basis_m_index"])),
+            (c2.amp_slot_map, amp_slot_map,
+             (kc["matrix_angle"], kc["fl_table"], kc["fl_q_index"],
+              kc["num_table"], kc["num_m_index"], n_wave, n_proj)),
+            (c2.index_runs, orig_index_runs, (gamma, n_wave, n_basis)),
+        )
+        for copy, origin, args in cases:
+            got, want = copy(*args), origin(*args)
+            assert len(got) == len(want), (cfg, origin.__name__)
+            for i, (a, b) in enumerate(zip(got, want)):
+                assert np.array_equal(np.asarray(a), np.asarray(b)), (
+                    f"{cfg}: {origin.__name__} output {i} differs from the "
+                    f"origin")
 
 
-def test_resolution_size_below_one_is_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    with pytest.raises(ValueError, match="resolution_size"):
-        CUDAKernelFlatPwaGenS0C2(f.kernel_config, resolution_size=0)
+@pytest.mark.parametrize("cfg", [CFG_ONE, CFG_KM])
+@pytest.mark.parametrize("rs", [1, 17])
+@pytest.mark.parametrize("norm", [None, 1.3])
+def test_bitwise_vs_s0c(cfg, norm, rs):
+    """The fusion is a LAUNCH-STRUCTURE change: not one bit may move.
 
+    Both kernels run the same tree body (same block shape, chunk, shared
+    layout, fold order, one ``atomicAdd`` per feature) into three disjoint
+    output ranges, so exact equality is the only acceptable answer.  Every
+    quantity the API exposes is compared with ``np.array_equal``.
 
-def test_wrong_parameter_lengths_are_rejected():
-    f = Fitter(CFG_KM)
+    The 64-event shape is the REPRODUCIBLE one (one chunk, one gradient block),
+    which is what makes a bitwise gate possible at all: s0c's own cross-block
+    atomics make it differ from ITSELF at ne 4000 (measured — see the module
+    docstring), so a larger sample could not be gated by any kernel.
+    """
+    f = Fitter(cfg)
     f.apply_constrains()
     kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0C2(kc)
-    h = k.load_data(_in_grid(kc, 8))
+    data = _in_grid(kc, 64, 0)
     params, _ = f.build_params(f.initial_values(seed=1))
+    ref = create_backend("cuda_flat_pwa_gen_s0c", kc, model="pwa_gen",
+                         resolution_size=rs)
+    new = create_backend("cuda_flat_pwa_gen_s0c2", kc, model="pwa_gen",
+                         resolution_size=rs)
     try:
-        bad = dict(params)
-        bad["ck"] = np.zeros(k.n_wave + 1, complex)
-        with pytest.raises(ValueError, match="n_wave"):
-            k.compute(bad, h, norm=None)
-        bad = dict(params)
-        bad["coeff"] = np.zeros(k.n_basis + 1)
-        with pytest.raises(ValueError, match="n_basis"):
-            k.compute(bad, h, norm=None)
+        hr = ref.load_data(data)
+        hn = new.load_data(data)
+        Qr, gr, Pr = ref.compute(params, hr, norm=norm)
+        Qn, gn, Pn = new.compute(params, hn, norm=norm)
+        assert Qr == Qn, f"{cfg} rs={rs} norm={norm}: Q {Qr!r} != {Qn!r}"
+        assert np.array_equal(Pr, Pn), "P"
+        assert np.array_equal(gr["ck"], gn["ck"]), "dck"
+        assert np.array_equal(gr["coeff"], gn["coeff"]), "dcoeff"
+        if norm is not None:
+            assert ref.kernel._last_dnorm == new.kernel._last_dnorm, "dnorm"
+        else:
+            assert (ref.kernel._last_dnorm is None
+                    and new.kernel._last_dnorm is None)
+        # the A/B is only meaningful if it ran through the fused path
+        assert new.kernel.feature_launch_count() >= 1
     finally:
-        k.free()
+        ref.free()
+        new.free()
 
 
-def test_a_freed_handle_is_reported_not_crashed():
+def test_the_fusion_is_one_launch_per_chunk():
+    """3 launches -> 1 is the entire change; pin the count, not the intent."""
     f = Fitter(CFG_KM)
     f.apply_constrains()
     kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0C2(kc)
-    h = k.load_data(_in_grid(kc, 8))
     params, _ = f.build_params(f.initial_values(seed=1))
+    # 2048 events with the default 50k cap is ONE chunk: s0c issues 3 feature
+    # launches per chunk, s0c2 exactly 1
+    data = _in_grid(kc, 2048, 3)
+    k = CUDAKernelFlatPwaGenS0C2(kc)
+    h = k.load_data(data)
     try:
+        assert k.cap >= 2048            # one chunk on this shape
+        k.reset_feature_launch_count()
+        k.compute(params, h, norm=None)
+        assert k.feature_launch_count() == 1
+        k.reset_feature_launch_count()
+        k.compute(params, h, norm=1.3)  # the normed path issues it too
+        assert k.feature_launch_count() == 1
+        # a 3-chunk call issues 3 fused launches (s0c would issue 9): the
+        # fusion is per CHUNK, so nothing here depends on the sample size
+        k2 = CUDAKernelFlatPwaGenS0C2(kc, batch_size=1024)
+        h2 = k2.load_data(data)
+        try:
+            k2.reset_feature_launch_count()
+            k2.compute(params, h2, norm=None)
+            assert k2.feature_launch_count() == 2      # 2048 / 1024
+        finally:
+            h2.free()
+            k2.free()
+    finally:
         h.free()
-        h.free()                              # idempotent
-        with pytest.raises(RuntimeError, match="already freed"):
-            k.compute(params, h, norm=None)
-    finally:
         k.free()
 
 
-def test_two_live_handles_are_independent():
-    """The fitter holds phsp AND data at once — each load owns its arrays."""
+def test_fused_reduction_matches_the_three_separate_ones():
+    """The C-level A/B: the fused launch vs s0c's three tree launches.
+
+    ``cuda_check_fused_reduce_flat_pwa_gen_s0c2`` runs BOTH paths on the same
+    device data and ``memcmp``s every output, so this is independent of
+    ``compute`` (a matching pair of wrong kernels cannot hide here, because
+    the separate path IS s0c's launch).  The buffer shapes are the KM
+    fixture's own (n_wave 2, n_basis 5) plus a third, and 40 events is not a
+    multiple of the 1024 chunk — the short chunk is covered too.
+    """
     f = Fitter(CFG_KM)
     f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGenS0C2(kc)
-    params, _ = f.build_params(f.initial_values(seed=1))
-    a = _in_grid(kc, 16, 1)
-    b = _in_grid(kc, 16, 2)
+    k = CUDAKernelFlatPwaGenS0C2(f.kernel_config)
     try:
-        h1 = k.load_data(a)
-        h2 = k.load_data(b)
-        assert h1.ptr != h2.ptr
-        Qa1, _g, Pa = k.compute(params, h1, norm=None)
-        Qb, _g, Pb = k.compute(params, h2, norm=None)
-        Qa2 = k.compute(params, h1, norm=None)[0]
-        # h2's load did not clobber h1's
-        assert abs(Qa1 - Qa2) <= 1e-12 * max(abs(Qa1), 1.0)
-        assert _rel(Pa, Pb) > 1e-6            # ... and they are different data
-        h1.free()
-        h2.free()
+        ne = 40
+        assert (k.n_wave, k.n_basis) == (2, 5)
+        rng = np.random.default_rng(7)
+        a = rng.uniform(-1.0, 1.0, (ne, k.n_wave))    # gck_r
+        b = rng.uniform(-1.0, 1.0, (ne, k.n_wave))    # gck_i
+        c = rng.uniform(-1.0, 1.0, (ne, k.n_basis))   # gco
+        equal, count = k.check_fused_reduce(a, b, c)
+        assert equal, "the fused feature reduction is not bit-identical"
+        assert count == k.n_wave + k.n_wave + k.n_basis
+        # a wider-than-32 buffer takes the acc fallback (three launches, the
+        # same condition s0c applies) and is still bit-identical
+        wide = rng.uniform(-1.0, 1.0, (ne, 40))
+        equal, count = k.check_fused_reduce(a, wide, c)
+        assert equal and count == k.n_wave + 40 + k.n_basis
     finally:
         k.free()

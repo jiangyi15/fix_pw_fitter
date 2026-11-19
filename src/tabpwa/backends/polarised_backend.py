@@ -29,7 +29,7 @@ be picked up silently; pass ``backend="numpy_polarised"`` explicitly).
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("numpy_polarised", model="polarised_pwa")
+@register_backend("numpy_polarised", model="polarised_pwa", tags=('reference',))
 class PolarisedBackend(ComputeBackend):
     """numpy_pwa + the spin-density-matrix intensity contraction."""
 

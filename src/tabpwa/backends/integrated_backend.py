@@ -23,7 +23,7 @@ import numpy as np
 from .core import ComputeBackend, register_backend
 
 
-@register_backend("integrated", model="flavour_tag_mix")
+@register_backend("integrated", model="flavour_tag_mix", tags=('delegate',))
 class IntegratedBackend(ComputeBackend):
     """Hyper backend: Gram‑matrix norm + base backend for data NLL.
 
