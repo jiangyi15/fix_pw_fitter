@@ -138,12 +138,19 @@ def test_auto_follows_resolution_size_end_to_end():
 
 
 def test_pwa_auto_builds_on_the_suite_fixture():
-    """`config_pwa.yml` is ``n_res == 2`` — the reason s0d/s0e/1bw cannot be used."""
+    """``config_pwa.yml`` is ``n_res == 1`` for the KERNELS (``// n_wave``).
+
+    ``n_wave`` is ``matrix_angle.shape[1] = P·N``, not ``len(all_comb) = N`` —
+    dividing by N overcounts by the projection factor and once made this
+    fixture look like ``n_res = 2``, which it is not: the ``n_res == 1``
+    variants (``s0d``/``s0e``/``1bw``) all construct on it.
+    """
     f = Fitter(CFG_PWA, backend="auto")
     try:
-        n_res = int(np.asarray(f.kernel_config["bw_order"]).size
-                    // len(f.all_comb))
-        assert n_res == 2
+        kc = f.kernel_config
+        n_res = int(np.asarray(kc["bw_order"]).size
+                    // int(np.asarray(kc["matrix_angle"]).shape[1]))
+        assert n_res == 1, n_res
         if ab.cuda_state()["has_cuda"]:
             assert f.backend.chosen == "cuda_v4_pwa"
         else:

@@ -263,7 +263,7 @@ class AutoBackend(ComputeBackend):
                 f"{shape_txt})")
 
 
-@register_backend("auto", model="pwa_gen")
+@register_backend("auto", model="pwa_gen", tags=('delegate',))
 class AutoFlatPwaGenBackend(AutoBackend):
     """``auto`` for the flat ``pwa_gen`` model.
 
@@ -292,7 +292,7 @@ class AutoFlatPwaGenBackend(AutoBackend):
         return "cuda_flat_pwa_gen_s0e"
 
 
-@register_backend("auto", model="pwa")
+@register_backend("auto", model="pwa", tags=('delegate',))
 class AutoPWABackend(AutoBackend):
     """``auto`` for the plain projection-sum PWA model.
 
@@ -300,12 +300,17 @@ class AutoPWABackend(AutoBackend):
     reference without one — no preference order, no faster variant.  Every
     faster member of this family is CONDITIONAL: ``cuda_v4_pwa_cache`` is
     strictly fixed m0/g0 (it raises otherwise), and ``cuda_v4_pwa_s0d`` /
-    ``s0e`` / ``1bw`` all guard ``n_res == 1`` — which both of the suite's own
-    configs are NOT (`tests/config_pwa.yml` and `tests/config_angle.yml` both
-    have `n_res = 2`), so those would raise at construction on them.
-    ``cuda_v4_pwa`` is the only unconditional one (it records `n_res` and
-    handles it), and the s0 family's sample-size ordering is not knowable here
-    anyway.  ``resolution_size > 1`` forks to ``cuda_v5_pwa`` / ``cpu_v5_pwa``:
+    ``s0e`` / ``1bw`` guard ``n_res == 1`` — which is NOT the same as "not our
+    fixtures": the kernels compute ``n_res = bw_order.size // n_wave`` with
+    ``n_wave = matrix_angle.shape[1] = P·N``, so ``tests/config_pwa.yml`` is
+    ``n_res = 1`` and those variants DO construct on it (``config_angle.yml``,
+    the TD fixture, is the ``n_res = 2`` one).  What is not knowable here is
+    the ordering that decides between them: ``s0e`` wins below ``ne ≈ 2.7 M``
+    and ``1bw`` above, both pay a per-call cost every BFGS iteration, and
+    ``cuda_v5_pwa_s0e`` segfaults at 8.7 M — so a sample-blind choice cannot
+    make it.  ``cuda_v4_pwa`` is the model's registered default and the only
+    member with no condition of either kind.  ``resolution_size > 1`` forks to
+    ``cuda_v5_pwa`` / ``cpu_v5_pwa``:
     the v4 backend and the NumPy reference have no grouped objective and
     raise ``TypeError`` on that kwarg.  Free memory is reported by
     ``describe()``, never decisive.
