@@ -38,6 +38,7 @@ from . import cuda_flat_pwa_gen_s0e2_backend  # noqa: F401 — register cuda_fla
 from . import cuda_flat_pwa_gen_s0e3_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0e3
 from . import cuda_flat_pwa_gen_s0e4_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0e4
 from . import cuda_flat_pwa_gen_s0c_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0c
+from . import cuda_flat_pwa_gen_s0c2_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0c2
 from . import polarised_backend    # noqa: F401 — register PolarisedBackend
 from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABackend
 from . import cpu_pwa_s0c_backend  # noqa: F401 — register CPUPWAS0CBackend
