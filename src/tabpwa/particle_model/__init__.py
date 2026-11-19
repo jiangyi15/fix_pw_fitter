@@ -43,6 +43,7 @@ from . import ck_matrix_disp_v2 # noqa: F401 — register ck_matrix_disp_v2
 from . import spline_gamma_model  # noqa: F401 — register BSpline model
 from . import kmatrix_model       # noqa: F401 — register pipi_swave model
 from . import kmatrix_n_model      # noqa: F401 — register kmatrix_n model
+from . import kmatrix_n_ieps_model  # noqa: F401 — register the ieps variants
 __all__ = [
     "BaseModel", "BasisModel", "ALL_MODELS", "register_model", "build_particle",
 ]

@@ -378,6 +378,26 @@ def test_den_names_have_one_entry_per_basis_row(n_pole):
     assert len(set(mdl.get_num_name())) == n_pole
 
 
+@pytest.mark.parametrize("n_pole", [1, 2, 3])
+def test_numerator_and_denominator_share_one_row_set(n_pole):
+    """P and K ride on the SAME rows: `num_basis == den_basis[:N]`, and the ρ
+    rows are those rows times `−iρ` — one basis, three coefficient choices."""
+    n = "k"
+    m = [0.70 + 0.40 * i for i in range(n_pole)]
+    w = [0.15 + 0.05 * i for i in range(n_pole)]
+    mdl = build_particle(n, model="kmatrix_n", mass_list=m, width_list=w, L=1)
+    mdl.register_parent(_Parent())
+    grid = np.array([0.50, 0.95, 1.30])
+    den = mdl.den_basis(grid)
+    num = mdl.num_basis(grid)
+    rho = np.asarray(mdl._rho(grid), dtype=complex)
+    assert len(num) == n_pole and len(den) == 2 * n_pole + 1
+    for k in range(n_pole):
+        assert np.array_equal(num[k], den[k])          # P's rows ARE K's real rows
+        assert np.allclose(den[n_pole + 1 + k], -1j * rho * num[k],
+                           rtol=0, atol=0)              # ρ rows = −iρ × same rows
+
+
 @pytest.mark.parametrize("n_pole", [1, 2, 3, 4])
 def test_amplitude_matches_the_direct_kmatrix(n_pole):
     """`amp` == P/(1 − iρK) written out by hand (no transform machinery).
