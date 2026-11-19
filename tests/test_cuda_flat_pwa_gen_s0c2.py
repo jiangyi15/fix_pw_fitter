@@ -209,6 +209,41 @@ def test_registration():
     b.free()
 
 
+def test_the_helpers_are_identical_copies():
+    """The inlined helpers must equal their origins ARRAY-FOR-ARRAY.
+
+    A case-1 copy carries its own ``uslot_map`` / ``amp_slot_map`` /
+    ``index_runs`` (it imports no other backend's module), so the copies are
+    pinned against the originals on two real configs: every returned array is
+    compared with ``np.array_equal``.
+    """
+    import tabpwa.cuda._flat_pwa_gen_s0c2 as c2
+    from tabpwa.cuda._flat_pwa_gen_1bw import index_runs as orig_index_runs
+
+    for cfg in (CFG_ONE, CFG_KM):
+        kc = Fitter(cfg, backend="numpy_flat").kernel_config
+        n_wave = int(np.asarray(kc["fl_table"]).shape[0])
+        n_basis = int(np.asarray(kc["basis_table"]).shape[0])
+        n_proj = max(1, int(np.asarray(kc["matrix_angle"]).shape[1])
+                     // n_wave)
+        gamma = np.asarray(kc["gamma_matrix"], np.float64)
+        cases = (
+            (c2.uslot_map, uslot_map,
+             (kc["basis_table"], kc["basis_m_index"])),
+            (c2.amp_slot_map, amp_slot_map,
+             (kc["matrix_angle"], kc["fl_table"], kc["fl_q_index"],
+              kc["num_table"], kc["num_m_index"], n_wave, n_proj)),
+            (c2.index_runs, orig_index_runs, (gamma, n_wave, n_basis)),
+        )
+        for copy, origin, args in cases:
+            got, want = copy(*args), origin(*args)
+            assert len(got) == len(want), (cfg, origin.__name__)
+            for i, (a, b) in enumerate(zip(got, want)):
+                assert np.array_equal(np.asarray(a), np.asarray(b)), (
+                    f"{cfg}: {origin.__name__} output {i} differs from the "
+                    f"origin")
+
+
 def test_the_other_kernels_are_not_reused():
     """A case-1 copy: own module, own source, own library, own symbols."""
     import tabpwa.cuda._flat_pwa_gen_s0c as parent

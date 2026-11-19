@@ -5,6 +5,12 @@ Case-1 copy (kernel policy §1): own module, own ``.cu``, own ``.so``, own
 symbols, and ``kernels_flat_pwa_gen_s0c.cu`` / ``_flat_pwa_gen_s0c.py`` /
 every other ``s0*`` module stay byte-identical.
 
+KNOWN DEVIATION (not this file's): the pre-existing, committed
+``_flat_pwa_gen_s0c.py`` still imports these same helpers from ``s0e`` /
+``1bw``.  That is the same standalone-policy violation, but s0c is a working
+kernel older than the rule and is left untouched; it is a case-1 replacement's
+job to fix, never an edit here.  THIS module carries its own copies.
+
 The one change (and the measurement behind it)
 ----------------------------------------------
 
@@ -64,18 +70,22 @@ interpolation is recomputed per event per iteration into shared memory.  That
 is why s0c is 2.87 GB resident where the ``s0e`` tile is 5.91 GB, and it is
 the property this backend keeps — see the module ``__doc__`` of the ``.cu``.
 
-The three index structures, all reused (never re-implemented here)
------------------------------------------------------------------
+The three index structures, carried as VERBATIM copies
+------------------------------------------------------
 
-* ``uslot_map`` (:mod:`tabpwa.cuda._flat_pwa_gen_s0e`) — the basis
+(Kernel policy: this is a STANDALONE backend — it must not import another
+backend's module.  The helpers live below, extracted from their origins with
+`ast` and pinned by `test_the_helpers_are_identical_copies`.)
+
+* ``uslot_map`` (copied from ``_flat_pwa_gen_s0e.py``) — the basis
   interpolation dedup on ``(row bytes, mass column)``: **69 -> 43** on the real
   config.  The key is deliberately NOT ``basis_kind`` (a factor-local slot
   index, which would merge every resonance's running width into one slot).
-* ``amp_slot_map`` (:mod:`tabpwa.cuda._flat_pwa_gen_s0e`) — the ck/coeff-free
+* ``amp_slot_map`` (copied from ``_flat_pwa_gen_s0e.py``) — the ck/coeff-free
   numerator ``Amp = fa·fl·num`` dedup, keyed on every ``matrix_angle`` column
   of the wave (p-major), the ``fl`` row + column and the ``num`` row + column:
   **26 -> 13** waves.
-* ``index_runs`` (:mod:`tabpwa.cuda._flat_pwa_gen_1bw`) — the per-wave CSR of
+* ``index_runs`` (copied from ``_flat_pwa_gen_1bw.py``) — the per-wave CSR of
   the gamma's TRUE non-zeros: **92** entries against 1794 columns on the real
   config, with interior holes in 23 of 26 waves.  A hole is simply absent, so
   there is no ``g == 0`` test in the kernel to get wrong.
@@ -101,11 +111,162 @@ import numpy as np
 
 from tabpwa.backends.core import ComputeBackend, register_backend
 
-#: the two structural dedups and the sparse-row builder have ONE
-#: implementation each; importing them here is what keeps this kernel's
-#: index layout from drifting against its siblings.
-from tabpwa.cuda._flat_pwa_gen_1bw import index_runs
-from tabpwa.cuda._flat_pwa_gen_s0e import amp_slot_map, uslot_map
+# ── the three build-time helpers, copied VERBATIM from their origins ────────
+# This backend is STANDALONE (kernel policy): a case-1 copy must not import
+# another backend's MODULE, so the helpers its index layout needs travel with
+# it.  The bodies (including the error text, which therefore names the origin)
+# are extracted from the sources by `ast` at copy time and pinned against them
+# by `tests/test_cuda_flat_pwa_gen_s0c2.py::test_the_helpers_are_identical_copies`.
+#
+#   uslot_map, amp_slot_map   <- `_flat_pwa_gen_s0e.py` (lines 87-120
+#                                and lines 123-170)
+#   index_runs                <- `_flat_pwa_gen_1bw.py` (lines 176-231)
+
+
+def uslot_map(basis_table, basis_m_index):
+    """Dedup the basis interpolation on ``(row bytes, mass column)``.
+
+    Returns ``(uslot_row, uslot_col, slot_of_basis)``: per surviving slot the
+    table row and the mass column it reads, and the ``(n_basis,)`` map from a
+    basis row onto its slot.
+
+    The key is the row's **own bytes** plus the event column it is sampled
+    at.  Both are byte-exact table data, so the fold is lossless.  It is NOT
+    ``basis_kind``: that is the factor-local slot index (0 = s0, 1 = "one",
+    2 = running width, …), so a kind-keyed fold merges resonances that share
+    a slot index but not a row — measured 16 "slots" on the real config where
+    the true answer is 43, i.e. silently wrong denominators.
+    """
+    bas = np.ascontiguousarray(np.asarray(basis_table, np.complex128))
+    bmi = np.ascontiguousarray(np.asarray(basis_m_index, np.int64))
+    n = int(bas.shape[0])
+    if bmi.size != n:
+        raise ValueError(
+            f"cuda_flat_pwa_gen_s0e: basis_m_index has {bmi.size} entries, "
+            f"expected n_basis = {n}")
+    rows = np.ascontiguousarray(bas.real), np.ascontiguousarray(bas.imag)
+    seen, row_of, col_of = {}, [], []
+    slot = np.zeros(n, np.int32)
+    for m in range(n):
+        key = (rows[0][m].tobytes(), rows[1][m].tobytes(), int(bmi[m]))
+        u = seen.get(key)
+        if u is None:
+            u = len(row_of)
+            seen[key] = u
+            row_of.append(m)
+            col_of.append(int(bmi[m]))
+        slot[m] = u
+    return (np.asarray(row_of, np.int32), np.asarray(col_of, np.int32), slot)
+
+
+def amp_slot_map(matrix_angle, fl_table, fl_q_index, num_table, num_m_index,
+                 n_wave, n_proj):
+    """Dedup the ck/coeff-independent numerator ``Amp = fa·fl·num`` per wave.
+
+    A wave's whole numerator is fixed by its table rows, so two waves with
+    byte-identical rows produce byte-identical amplitudes: the fold is exact
+    and never looks at a sampled value.
+
+    The key covers **every projection** — ``matrix_angle`` is p-major, so
+    column ``p·n_wave + k`` is projection ``p`` of wave ``k`` and a wave's
+    slot must carry all ``n_proj`` of them (a key that took one column would
+    merge waves whose other projection differs).
+
+    Returns ``(slot_of_wave, rep_of_slot)``.
+    """
+    am = np.ascontiguousarray(np.asarray(matrix_angle, np.complex128))
+    fl = np.ascontiguousarray(np.asarray(fl_table, np.float64))
+    fq = np.ascontiguousarray(np.asarray(fl_q_index, np.int64))
+    nt = np.ascontiguousarray(np.asarray(num_table, np.complex128))
+    nmi = np.ascontiguousarray(np.asarray(num_m_index, np.int64))
+    nw, P = int(n_wave), int(n_proj)
+    if am.shape[1] != P * nw:
+        raise ValueError(
+            f"cuda_flat_pwa_gen_s0e: matrix_angle has {am.shape[1]} columns, "
+            f"expected n_proj·n_wave = {P}·{nw}")
+    seen, rep = {}, []
+    slot = np.zeros(nw, np.int32)
+    for k in range(nw):
+        key = []
+        for p in range(P):
+            col = am[:, p * nw + k]
+            key.append(col.real.tobytes())
+            key.append(col.imag.tobytes())
+        for d in range(fl.shape[1]):
+            key.append(fl[k, d].tobytes())
+            key.append(int(fq[k, d]))
+        for r in range(nt.shape[1]):
+            key.append(nt[k, r].real.tobytes())
+            key.append(nt[k, r].imag.tobytes())
+            key.append(int(nmi[k, r]))
+        key = tuple(key)
+        s = seen.get(key)
+        if s is None:
+            s = len(rep)
+            seen[key] = s
+            rep.append(k)
+        slot[k] = s
+    return slot, np.asarray(rep, np.int32)
+
+
+def index_runs(gamma_matrix, n_wave=None, n_basis=None):
+    """Per-wave CSR of a ``n_res == 1`` gamma's TRUE non-zeros.
+
+    Returns ``(gs_lo, gs_hi, nz_k, nz_m)``: two ``(n_wave,)`` int32 arrays and
+    the flat ``(n_nz,)`` list of ``(wave, column)`` pairs.  ``[gs_lo[k],
+    gs_hi[k])`` indexes ``nz_m``; zeros are never included.
+
+    **The run does NOT have to be contiguous.**  It is emitted as a CSR over
+    the row's true non-zeros — ``[gs_lo[k], gs_hi[k])`` indexes ``nz_m`` — so
+    a row with interior holes costs exactly its non-zeros instead of the span.
+    A hole is harmless either way: ``0 * value == 0``, and the kernel drops the
+    per-element ``g == 0`` test because the list contains no zeros.
+
+    (The earlier form required contiguity and raised otherwise, claiming a hole
+    "would make it use basis columns the factor does not select" — that was
+    false: `[lo,hi)+skip`, an explicit index list and the full walk all give the
+    identical value.  The restriction only forfeited the optimisation on any
+    config whose basis is folded — e.g. 290 vs 92 iterations on the real one.)
+
+    ``n_res > 1`` is rejected here too (the wrapper checks it earlier, this is
+    the belt-and-braces form that the kernel's own create also pins).
+    """
+    g = np.ascontiguousarray(np.asarray(gamma_matrix, np.float64))
+    if g.ndim == 3:
+        if g.shape[1] != 1:
+            raise ValueError(
+                "cuda_flat_pwa_gen_1bw needs exactly ONE BW per chain "
+                f"(top -> R + X), got n_res = {g.shape[1]} — use "
+                "cuda_flat_pwa_gen2 for multi-BW chains")
+        g = g[:, 0, :]
+    if g.ndim != 2:
+        raise ValueError(
+            f"cuda_flat_pwa_gen_1bw: gamma_matrix must be (n_wave, n_basis) "
+            f"at n_res == 1, got shape {g.shape}")
+    nw, nb = int(g.shape[0]), int(g.shape[1])
+    if ((n_wave is not None and int(n_wave) != nw)
+            or (n_basis is not None and int(n_basis) != nb)):
+        raise ValueError(
+            f"cuda_flat_pwa_gen_1bw: gamma_matrix has shape {g.shape}, "
+            f"expected ({nw if n_wave is None else int(n_wave)}, "
+            f"{nb if n_basis is None else int(n_basis)})")
+
+    gs_lo = np.zeros(nw, np.int32)      # CSR into nz_m (true non-zeros)
+    gs_hi = np.zeros(nw, np.int32)
+    nz_k, nz_m = [], []
+    for k in range(nw):
+        idx = np.nonzero(g[k])[0]
+        if idx.size == 0:
+            raise ValueError(
+                f"cuda_flat_pwa_gen_1bw: wave {k} selects no basis column "
+                f"(gamma row is all zero) — the denominator would be 0")
+        gs_lo[k], gs_hi[k] = len(nz_m), len(nz_m) + idx.size
+        nz_k.extend([k] * idx.size)
+        nz_m.extend(int(m) for m in idx)
+    return (gs_lo, gs_hi,
+            np.asarray(nz_k, np.int32), np.asarray(nz_m, np.int32))
+
+
 
 _ffi = None
 _lib = None

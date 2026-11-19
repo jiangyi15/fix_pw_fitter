@@ -359,7 +359,13 @@ The only allowed actions are:
    **adapting** the content to the new variant under its own new symbol
    names; mirror the Python wrapper module (`_<name>.py`) the same way.
    The copy links beside the old kernel — every existing kernel file
-   and its tests stay byte-identical.
+   and its tests stay byte-identical.  **A copy is STANDALONE: it must not
+   import another backend's module.**  The build-time helpers it needs
+   (`uslot_map`, `amp_slot_map`, `index_runs`) travel with it as verbatim
+   copies (extracted with `ast`, pinned by an `np.array_equal` test against
+   the originals).  `cuda_flat_pwa_gen_s0c` predates this rule and still
+   imports them from `s0e`/`1bw` — flagged, untouched; fixing it is a case-1
+   replacement's job, never an edit.
 2. **Fix a broken kernel** — a kernel whose tests fail / that does not
    work may be repaired in place.
 3. **Replace a working kernel** — take a green case-1 copy and make it
