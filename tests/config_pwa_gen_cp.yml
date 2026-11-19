@@ -55,8 +55,6 @@ particle:
     J: 1
     P: -1
     mass: 0.80
-    width: 0.30
-    model: kmatrix2
-    m1: 0.80
-    m2: 1.35
-    g1: 0.35
+    model: kmatrix_n
+    mass_list: [0.80, 1.35]
+    width_list: [0.15, 0.20]

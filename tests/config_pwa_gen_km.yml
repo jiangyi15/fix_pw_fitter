@@ -1,8 +1,10 @@
-# pwa_gen with a `kmatrix2` resonance (the BasisModel reference model):
-# one resonance, one partial wave, one projection.  Gate B: P and the NLL
-# must equal the direct `Σ g_ls·(P/(1−iρK))·fa·fl` (tests/test_pwa_gen.py).
+# pwa_gen with a two-pole `kmatrix_n` resonance (the K-matrix family's
+# only implementation): one resonance, one partial wave, one projection.
+# Gate B: P and the NLL must equal the direct
+# `Σ g_ls·(P/(1−iρK))·fa·fl` (tests/test_pwa_gen.py).
 # n_interp is raised so the tabulated basis rows reproduce the closed-form
-# rows to ~1e-12 (the interpolation is the only approximation in the chain).
+# rows to ~1e-7 (linear interpolation of the flat tables is the only
+# approximation left in the chain).
 amp_model: pwa_gen
 defaults:
   n_interp: 20000
@@ -38,12 +40,6 @@ particle:
     J: 1
     P: -1
     mass: 0.80
-    width: 0.30
-    model: kmatrix2
-    m1: 0.80
-    m2: 1.35
-    g1: 0.35
-    g2: 0.55
-    b1: 1.0
-    b2r: 0.6
-    b2i: 0.7
+    model: kmatrix_n
+    mass_list: [0.80, 1.35]
+    width_list: [0.15, 0.20]

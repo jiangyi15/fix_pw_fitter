@@ -78,7 +78,7 @@ def running_width(m, M, L=0, d=3.0, d1=None, d2=None):
 
     Dimensionless: no ``m0``/``g0``, no normalisation constant — the caller's
     coupling carries those (``Γ(m) = Γ0·shape(m)``, ``Γ(M) = Γ0``).  Shared by
-    the ``BW``/``BWRS`` models and by ``kmatrix2_bf``, whose phase space IS
+    the ``BW``/``BWRS`` models and by ``kmatrix_n``, whose phase space IS
     this shape.
     """
     q = _two_body_cm_mom(m, d1, d2)

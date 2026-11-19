@@ -10,7 +10,7 @@ Gates:
   A. a config whose resonances use the *default* ``BasisModel`` basis
      reproduces the ``pwa`` amplitude (P and gradients) — the flat config
      must not change the physics;
-  B. a ``kmatrix2`` resonance reproduces the direct
+  B. a ``kmatrix_n`` resonance (two poles) reproduces the direct
      ``Σ g_ls·(P/(1−iρK))·fa·fl`` amplitude, and every free parameter's
      gradient matches central differences through ``Fitter.get_nll``;
   C. the ``ck`` outer product ``ck_w = g_ls·n_i``: ``ck`` is flat over the
@@ -82,6 +82,92 @@ def _rel(a, b):
     return float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
 
 
+def _direct_P(f, resolved, data):
+    """``Σ_p |Σ_base g_ls·fa·fl·Π_res A_model(m)|²`` — closed-form amplitude.
+
+    Each resonance contributes its own ``amp`` at the event mass column the
+    config points it at, so for a ``kmatrix_n`` pole pair this is written out
+    as ``P(s)/(1 − i·ρ(s)·K(s))`` with
+
+        P(s) = Σ_i β_i/(m_i² − s)            (β0 = 1, β_{i≥1} = resolved)
+        K(s) = Σ_i g_i²/(m_i² − s),  g_i² = m_i·Γ_i/Re ρ(m_i)
+
+    evaluated by the model itself, **not** through the tabulated rows.  The
+    kernel's ``basis_table`` / ``num_table`` / ``gamma_matrix`` are therefore
+    the only approximation left in the comparison (``numpy_flat``
+    interpolates them linearly, ~1e-7 at ``n_interp`` 20000).
+
+    ``Σ_i ck_i·A_i`` over a base wave's numerator rows is ``g_ls·A_model``
+    (``ck_i = g_ls·n_i``), so one term remains per base wave.  ``fl``/``fa``
+    are read from the config exactly as the backend reads them — they are the
+    kernel's inputs, not part of the amplitude under test.
+    """
+    from tabpwa.param_constraint import CKProduct, complex_tail
+
+    kc = f.kernel_config
+    mass, mom, ang = data["mass"], data["q"], data["angle"]
+    ne = mass.shape[0]
+    ak = np.asarray(kc["angle_k"])
+    ab = np.asarray(kc["angle_b"])
+    ai = np.asarray(kc["angle_index"])
+    am = np.asarray(kc["matrix_angle"])
+    fl_tab = np.asarray(kc["fl_table"])
+    fl_q = np.asarray(kc["fl_q_index"])
+    num_m = np.asarray(kc["num_m_index"])
+    n_wave = fl_tab.shape[0]
+    n_proj = max(1, am.shape[1] // n_wave)
+
+    # fa: the same p-major idiom the kernels use
+    ka = np.zeros((ne, ak.shape[0]), np.complex128)
+    for a in range(ak.shape[0]):
+        ka[:, a] = np.prod(np.cos(ang[:, ai[a], :] * ak[a] + ab[a]), axis=-1)
+    fa = (ka @ am).reshape(ne, n_proj, n_wave).transpose(0, 2, 1)
+
+    # fl: barrier rows, linearly interpolated (the reference backend's rule)
+    q0, qd = float(kc["q_min"]), float(kc["q_delta"])
+    fl = np.ones((ne, n_wave))
+    for k in range(n_wave):
+        for dec in range(fl_q.shape[1]):
+            pos = (mom[:, fl_q[k, dec]] - q0) / qd
+            i0 = np.clip(pos.astype(np.int64), 0, fl_tab.shape[-1] - 2)
+            fr = pos - i0
+            fl[:, k] *= (fl_tab[k, dec, i0] * (1 - fr)
+                         + fl_tab[k, dec, i0 + 1] * fr)
+
+    # plain g_ls per base wave: the ck combinations minus their numerator heads
+    heads = set()
+    for chain in f.model.full_decay.chains:
+        for decay in chain.decays[1:]:
+            heads.update(decay.core._model.get_num_name())
+    plain = [tuple(t for t in comb
+                   if not (isinstance(t, str) and t in heads))
+             for comb in f.model.get_partial_waves_params()]
+    g_ls = np.asarray(CKProduct(plain, tail=complex_tail()).build_ck(resolved))
+
+    # the builder's wave expansion: one expanded wave per free numerator row,
+    # contiguous per base wave and in base order
+    waves = list(f.model.full_decay.get_partial_waves())
+    off = 0
+    A = np.zeros((ne, n_proj), np.complex128)
+    for b, (_ls, chain) in enumerate(waves):
+        facs = f.model._pg_chain_factors(chain)
+        n_rows = 1
+        for fac in facs:
+            if fac["heads"] and fac["rows"]:
+                n_rows *= len(fac["rows"])
+        k0 = off
+        off += n_rows
+        amp = np.ones(ne, np.complex128)
+        for fac in facs:
+            mdl = chain.decays[fac["slot"] + 1].core._model
+            col = int(num_m[k0, fac["slot"]])
+            amp *= np.asarray(mdl.amp(mass[:, col], resolved), complex)
+        for p in range(n_proj):
+            A[:, p] += g_ls[b] * fa[:, k0, p] * fl[:, k0] * amp
+    assert off == n_wave, (off, n_wave)
+    return np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
+
+
 # ── registration / schema ────────────────────────────────────────────
 
 def test_registration():
@@ -131,7 +217,7 @@ def test_shapes_agree():
 
 
 def test_a_basis_only_model_is_refused_by_the_plain_pwa_path():
-    """``kmatrix2`` cannot be expressed in the plain-``pwa`` kernel format.
+    """``kmatrix_n`` cannot be expressed in the plain-``pwa`` kernel format.
 
     That format's denominator is ``s0 − m² − i·mult·γ(m)`` with the ``m²``
     coefficient FIXED, so a resonance with no running width has no
@@ -151,7 +237,7 @@ def test_plain_pwa_has_no_flat_keys():
     """A plain ``pwa`` config is untouched by the pwa_gen vocabulary.
 
     Uses ``CFG_BASIS`` (a plain ``model: basis`` resonance, which HAS a
-    running width).  ``CFG_KM`` would be wrong here: its ``kmatrix2`` is a
+    running width).  ``CFG_KM`` would be wrong here: its ``kmatrix_n`` is a
     BASIS-ONLY model, and the plain-``pwa`` kernel format — whose denominator
     is ``s0 − m² − i·mult·γ(m)`` with the ``m²`` coefficient fixed — cannot
     express a denominator stated as a basis.  That combination is refused
@@ -209,10 +295,45 @@ def test_gate_a_default_basis_matches_plain_pwa():
     assert 0.1 < abs(ng) / abs(np_) < 10.0, (ng, np_)
 
 
-# ── gate B: kmatrix2 forward + gradients ────────────────────────────
+# ── gate B: kmatrix_n forward + gradients ───────────────────────────
+#
+# The model's own ``amp`` is gated against the direct ``P/(1−iρK)`` in
+# ``tests/test_kmatrix_n.py::test_amplitude_matches_the_direct_kmatrix``.  What
+# is checked HERE is the pwa_gen KERNEL on top of it: the tabulated
+# ``basis_table``/``num_table`` rows, the ``gamma_matrix`` selector and the
+# expanded ``ck = g_ls·n_i`` wave axis must reconstruct that same amplitude.
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_gate_b_forward_matches_direct(backend):
+    """P, norm and NLL equal the closed-form K-matrix amplitude.
+
+    Only ``numpy_flat`` is registered for the flat config, so this is the
+    kernel-vs-direct check (there is no second backend to compare against).
+    The residual is the table interpolation alone.
+    """
+    f = _loaded(CFG_KM, backend)
+    x = f.initial_values(seed=1)
+    params, resolved = f.build_params(x)
+
+    _Q, _g, P = f.backend.compute(params, f._data_holder, norm=None)
+    P_dir = _direct_P(f, resolved, f._data_np)
+    assert np.max(np.abs(P - P_dir) / P_dir) < 1e-6
+
+    # extended NLL: the same P through the same norm/bkg definition
+    norm, _ng = f._compute_norm_batched(params)
+    P_phsp = _direct_P(f, resolved, f._phsp_np)
+    norm_dir = float(np.sum(f._phsp_np["weight"] * P_phsp))
+    assert abs(norm - norm_dir) / norm_dir < 1e-6
+
+    Q, grads, P = f.backend.compute(params, f._data_holder, norm=norm)
+    w = f._data_np["weight"]
+    Q_dir = float(-np.sum(w * np.log(P_dir / norm + f._data_np["bkg"])))
+    assert abs(Q - Q_dir) / abs(Q_dir) < 1e-6
+
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_gate_b_gradients_match_fd(backend):
+    """Every free parameter (masses, widths, both β slots) matches FD."""
     f = _loaded(CFG_KM, backend)
     x = f.initial_values(seed=1)
     nll, grad = f.get_nll(x)
@@ -377,10 +498,10 @@ def test_mass_width_dropped_when_replaced_by_basis_weights():
 
     The weights are then transform OUTPUTS, so they are not free either: the
     free parameters are the resonance model's own physical inputs (here
-    ``kmatrix2``'s ``m1/m2/g1/g2/b1/b2``), which the transform maps onto the
-    basis rows.  (This used to assert the weights themselves were free, which
-    only held while the per-BW transform was missing — see
-    ``PWAGen.build_kernel_config``.)
+    ``kmatrix_n``'s ``mass0/mass1/width0/width1`` and the ``beta1`` pole
+    ratio), which the transform maps onto the basis rows.  (This used to
+    assert the weights themselves were free, which only held while the per-BW
+    transform was missing — see ``PWAGen.build_kernel_config``.)
     """
     f = Fitter(CFG_KM)
     f.apply_constrains()
@@ -390,7 +511,8 @@ def test_mass_width_dropped_when_replaced_by_basis_weights():
     # the basis weights are outputs, not inputs
     assert not (names & set(f.kernel_config["den_names"]))
     # the transform's own inputs are what is fitted
-    assert {"k2_m1", "k2_m2", "k2_g1", "k2_g2"} <= names
+    assert {"k2_mass0", "k2_mass1", "k2_width0", "k2_width1",
+            "k2_beta1r", "k2_beta1i"} <= names
 
 
 # ── one resonance, two topologies: a name spanning two mass columns ──

@@ -1,7 +1,7 @@
 """``kmatrix_n`` — a one-channel K-matrix with ANY number of poles.
 
-One class, ``n_pole = len(mass_list)``, generalising :mod:`~tabpwa.particle_model.kmatrix2_model` and
-:mod:`~tabpwa.particle_model.kmatrix3_model`::
+One class, ``n_pole = len(mass_list)`` — the K-matrix family's only
+implementation::
 
     K(s) = Σ_{i=1..N} g_i² / (m_i² − s)
     P(s) = Σ_{i=1..N} b_i  / (m_i² − s)
@@ -52,10 +52,13 @@ declared width is then reproduced only where ``Re ρ(m_i) = 1``.
 
 The FITTED parameters are the pole MASS, the pole WIDTH and the beta pair —
 ``{name}_mass{i}``, ``{name}_width{i}``, ``{name}_beta{i}{mag/phase}`` with
-``i = 0 … N−1``.  The ``mass_list`` / ``width_list`` numbers are the starting
-values of the first two; ``beta`` has NO config key and NO default — it is a
-coupling, so it starts random like ``g_ls`` and is set by ``--init`` or the
-constraint file.  There is no ``g{i}`` parameter (the coupling is derived by
+``i = 0 … N−1`` for the first two and ``i = 1 … N−1`` for beta.  The
+``mass_list`` / ``width_list`` numbers are the starting values of the first
+two; ``beta`` has NO config key and NO default — it is a coupling, so it
+starts random like ``g_ls`` and is set by ``--init`` or the constraint file.
+``beta0 ≡ 1`` is the GAUGE head: the numerator's overall complex scale is
+unobservable, so it is fixed and only the ``N−1`` relative weights are fitted
+(with ``N = 1`` there is no numerator parameter: ``A = 1/den``).  There is no ``g{i}`` parameter (the coupling is derived by
 the basis transform).
 BOTH lists are required and equal length: ``n_pole`` is not a key, and there
 is no scalar ``width`` shorthand — poles are DIFFERENT resonances, so there is
@@ -107,10 +110,8 @@ def den_names_for(name, n):
 
     ``[s0, poly, m4, m6, …]`` for the real rows ``1, s, s², …`` and
     ``[rho, srho, s2rho, …]`` for ``−iρ·s^k``.  The real spelling follows
-    ``kmatrix2``/``kmatrix3`` (``s0`` for ``s^0``, ``poly`` for ``s^1``, then
-    ``m{2k}`` for ``s^k``), so the N=2 and N=3 lists coincide with the
-    fixed-arity models' — the suffix is the ROW's index, not the weight's
-    mass dimension.
+    the row index — ``s0`` for ``s^0``, ``poly`` for ``s^1``, then
+    ``m{2k}`` for ``s^k`` — not the weight's mass dimension.
     """
     real = [f"{name}_s0", f"{name}_poly"] + [f"{name}_m{2*k}" for k in range(2, n + 1)]
     rho = [f"{name}_rho", f"{name}_srho"] + [f"{name}_s{k}rho" for k in range(2, n)]
@@ -126,8 +127,16 @@ class KMatrixNWeightsTransform(Transform):
 
     The fitted per-pole parameters are the POLE MASS, the POLE WIDTH and
     the NUMERATOR coupling — ``mass0..mass{N−1}``, ``width0..width{N−1}``,
-    ``beta0..beta{N−1}`` (polar: ``beta{i}{mag}``/``beta{i}{phase}``) — not the
-    K-matrix coupling ``g``.  The basis rows need
+    ``beta1..beta{N−1}`` (polar: ``beta{i}{mag}``/``beta{i}{phase}``) — not the
+    K-matrix coupling ``g``.
+
+    ``beta0`` is a FIXED head, ``1 + 0i``: the numerator's overall complex
+    scale is unobservable (``P → |c|²P`` and ``norm → |c|²norm``, so ``P/norm``
+    and the NLL are unchanged), so exposing it would only add two flat
+    directions.  What remains is ``N−1`` relative complex weights, i.e. the
+    same freedom as ``N`` Breit-Wigners with one overall reference fixed —
+    and at ``N = 1`` there is no numerator parameter at all (the amplitude is
+    ``1/den``, exactly ``BWRS`` / ``GS_rho``).  The basis rows need
     the coefficient ``g_i²`` (``K = Σ g_i²/(m_i² − s)``), so the transform
     converts each width ONCE, ``g_i² = m_i·w_i/Re ρ(m_i)`` (or ``m_i·w_i``
     under ``width_norm: false``) through the model's own
@@ -151,7 +160,10 @@ class KMatrixNWeightsTransform(Transform):
         self.n_pole = int(n_pole or len(num_names))
         keys = [f"mass{i}" for i in range(self.n_pole)]
         keys += [f"width{i}" for i in range(self.n_pole)]
-        for i in range(self.n_pole):
+        # beta0 is the GAUGE head (fixed to 1): the numerator's overall scale
+        # is unobservable (`P/norm` is invariant under it), so it is not a
+        # parameter — only the N-1 relative weights are.
+        for i in range(1, self.n_pole):
             keys += [f"beta{i}{mag}", f"beta{i}{phase}"]
         self._keys = tuple(keys)
         self.input_names = [f"{name}_{k}" for k in self._keys]
@@ -171,8 +183,9 @@ class KMatrixNWeightsTransform(Transform):
         m = [p[f"mass{i}"] for i in range(n)]
         w = [p[f"width{i}"] for i in range(n)]
         g2 = np.asarray(self._coupling_sq(m, w), dtype=float)
-        b = [p[f"beta{i}{mag}"] * np.exp(1j * p[f"beta{i}{phase}"])
-             for i in range(n)]
+        b = [1.0 + 0.0j]                     # beta0: the fixed gauge head
+        b += [p[f"beta{i}{mag}"] * np.exp(1j * p[f"beta{i}{phase}"])
+              for i in range(1, n)]
         den, num = kmatrix_n_weights(m, list(g2), b)
         vals = []
         for x in num:                       # (mag, phase) per head, interleaved
@@ -257,7 +270,7 @@ class KMatrixNModel(BasisModel):
         """
         out = self._pole_values()
         mag, phase = self.tail
-        for i in range(self.n_pole):
+        for i in range(1, self.n_pole):      # beta0 is the fixed gauge head
             out[f"beta{i}{mag}"] = 1.0
             out[f"beta{i}{phase}"] = 0.0
         return out
@@ -269,10 +282,12 @@ class KMatrixNModel(BasisModel):
         their configured value in ``initial_values``: a pole mass/width is
         physics (narrow basin, label-sensitive — a random mass is nonsense).
 
-        ``beta{i}`` is deliberately absent: it is a COUPLING, linear in the
-        amplitude and zero at the origin, so — like ``g_ls`` — it starts
-        random (``U(-π, π)``) and is set by ``--init`` / the constraint file.
-        There is no ``beta{i}`` config key either.
+        ``beta{i}`` (``i ≥ 1``) is deliberately absent: it is a COUPLING,
+        linear in the amplitude and zero at the origin, so — like ``g_ls`` —
+        it starts random (``U(-π, π)``) and is set by ``--init`` / the
+        constraint file.  There is no ``beta{i}`` config key either, and
+        ``beta0`` is not a parameter at all: it is the gauge head, fixed to
+        ``1`` by the transform.
         """
         return {f"{self.name}_{k}": v for k, v in self._pole_values().items()}
 

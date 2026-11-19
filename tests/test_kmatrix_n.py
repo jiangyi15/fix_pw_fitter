@@ -4,7 +4,7 @@ Gates: the pole content is the ``mass_list`` / ``width_list`` pair
 (``n_pole = len(mass_list)``), that pair alone reproduces ``BWRS`` / ``GS_rho``
 at one pole (the width -> coupling rule is the width-preserving one), the
 FITTED parameters are the pole masses and WIDTHS (there is no ``g``), the
-generic class matches the fixed-arity models at N = 2 and N = 3, the phase
+amplitude equals the hand-written ``P/(1 − iρK)`` for N = 1…4, the phase
 space is an overridable METHOD (the GS variant is a subclass), and
 ``pwa_gen`` builds the ``2N+1``-row flat basis.
 """
@@ -28,22 +28,18 @@ class _Parent:
 
 
 def _resolve(n, m, w, b):
-    """Resolved dict for a width-parameter model (``mass{i}`` / ``width{i}``)."""
+    """Resolved dict for a width-parameter model.
+
+    ``mass{i}`` / ``width{i}`` for every pole, ``beta{i}`` for ``i >= 1``
+    only: ``beta0`` is the fixed gauge head, not a parameter.
+    """
     out = {f"{n}_mass{i}": float(mi) for i, mi in enumerate(m)}
     out.update({f"{n}_width{i}": float(wi) for i, wi in enumerate(w)})
     for i, bi in enumerate(b):
+        if i == 0:
+            continue
         out[f"{n}_beta{i}r"] = float(abs(bi))
         out[f"{n}_beta{i}i"] = float(np.angle(bi))
-    return out
-
-
-def _resolve_g(n, m, g, b):
-    """Resolved dict for the fixed-arity models (``m{i}`` / ``g{i}`` / ``b{i}``)."""
-    out = {f"{n}_m{i}": float(mi) for i, mi in enumerate(m, start=1)}
-    out.update({f"{n}_g{i}": float(gi) for i, gi in enumerate(g, start=1)})
-    for i, bi in enumerate(b, start=1):
-        out[f"{n}_b{i}r"] = float(abs(bi))
-        out[f"{n}_b{i}i"] = float(np.angle(bi))
     return out
 
 
@@ -128,50 +124,29 @@ def test_default_L_comes_from_the_decay(model):
     assert bare.default_L() == (0 if model == "kmatrix_n" else 1)
 
 
-@pytest.mark.parametrize("model,fallback", [
-    ("BWRS", 0), ("kmatrix2_bf", 0), ("kmatrix3", 0), ("kmatrix3_gs", 1)])
-def test_default_L_is_shared_by_the_other_models(model, fallback):
-    """`BasisModel.default_L` is one rule for the whole family."""
+def test_default_L_is_shared_by_the_other_models():
+    """`BasisModel.default_L` is one rule for the whole family (`BWRS` here)."""
+    from tabpwa.particle_model.bwr_model import running_width
+
     n, m0, G0 = "rho", 0.775, 0.149
-    mdl = build_particle(n, model=model, mass=m0, width=G0)
-    assert mdl.default_L() == fallback                    # no tree attached
+    mdl = build_particle(n, model="BWRS", mass=m0, width=G0)
+    assert mdl.default_L() == 0                        # no tree attached
     mdl.register_parent(_ParentLS([(1, 1), (3, 1)]))
     assert mdl.default_L() == 1
-
     grid = np.array([0.60, 0.775, 1.00])
-    if model == "BWRS":
-        from tabpwa.particle_model.bwr_model import running_width
-        assert np.allclose(mdl.gamma(grid)[0],
-                           running_width(grid, m0, 1, 3.0,
-                                         _Out.mass, _Out.mass))
-    elif model == "kmatrix3_gs":
-        from tabpwa.particle_model.gs_rho_model import gs_unit
-        assert np.allclose(mdl._rho(grid),
-                           gs_unit(grid, m0, 1, 3.0, _Out.mass, _Out.mass))
-    else:
-        assert np.allclose(mdl._rho(grid),
-                           phase_space(grid, 1, 3.0, _Out.mass, _Out.mass))
+    assert np.allclose(mdl.gamma(grid)[0],
+                       running_width(grid, m0, 1, 3.0, _Out.mass, _Out.mass))
 
     # an explicit `L` still wins over the tree
-    ex = build_particle(n, model=model, mass=m0, width=G0, L=2)
+    ex = build_particle(n, model="BWRS", mass=m0, width=G0, L=2)
     ex.register_parent(_ParentLS([(0, 0), (2, 0)]))
     assert ex.default_L() == 0
-    if model == "BWRS":
-        from tabpwa.particle_model.bwr_model import running_width
-        assert np.allclose(ex.gamma(grid)[0],
-                           running_width(grid, m0, 2, 3.0,
-                                         _Out.mass, _Out.mass))
-    elif model == "kmatrix3_gs":
-        from tabpwa.particle_model.gs_rho_model import gs_unit
-        assert np.allclose(ex._rho(grid),
-                           gs_unit(grid, m0, 2, 3.0, _Out.mass, _Out.mass))
-    else:
-        assert np.allclose(ex._rho(grid),
-                           phase_space(grid, 2, 3.0, _Out.mass, _Out.mass))
+    assert np.allclose(ex.gamma(grid)[0],
+                       running_width(grid, m0, 2, 3.0, _Out.mass, _Out.mass))
 
 
-def test_beta_has_no_config_key_or_default():
-    """`beta{i}` is a coupling: no config key, no default — random like g_ls."""
+def test_beta0_is_the_gauge_head_and_beta1_starts_random():
+    """`beta0` is fixed to 1; `beta{i>=1}` are couplings with no default."""
     from tabpwa import Fitter
     from tabpwa.config_loader import RawConfig
 
@@ -179,6 +154,7 @@ def test_beta_has_no_config_key_or_default():
     mdl = build_particle(n, model="kmatrix_n", mass_list=[0.8, 1.35],
                          width_list=[0.3, 0.25], beta0=1.0)   # key is inert
     assert f"{n}_beta0r" not in mdl.get_defaults()
+    assert f"{n}_beta1r" not in mdl.get_defaults()
     assert f"{n}_mass0" in mdl.get_defaults()
     assert f"{n}_width0" in mdl.get_defaults()
 
@@ -189,12 +165,23 @@ def test_beta_has_no_config_key_or_default():
     d["backend"] = {"name": "numpy_flat", "resolution_size": 1}
     f = Fitter(d)
     f.apply_constrains()
-    assert f"{n}_beta0r" in f.cm.var_registry.flat_names     # IS a parameter
-    assert f"{n}_beta0r" not in f.cm.defaults                # with no start value
+    flat = list(f.cm.var_registry.flat_names)
+    assert f"{n}_beta1r" in flat                     # a free relative weight
+    assert f"{n}_beta0r" not in flat                 # the gauge head, not a param
+    assert f"{n}_beta1r" not in f.cm.defaults        # no start value
     res = f.cm.flat_resolve(f.initial_values(seed=7))
     assert res[f"{n}_mass0"] == pytest.approx(0.8)           # anchor kept
     assert res[f"{n}_width0"] == pytest.approx(0.3)
-    assert res[f"{n}_beta0r"] != pytest.approx(1.0)          # random draw
+    assert res[f"{n}_beta1r"] != pytest.approx(1.0)          # random draw
+
+    # N = 1 has NO numerator parameter at all (A = 1/den)
+    one = build_particle(n, model="kmatrix_n", mass_list=[0.8],
+                         width_list=[0.3])
+    assert one.make_basis_transform().input_names == [
+        f"{n}_mass0", f"{n}_width0"]
+    # ... and with beta0 fixed, N poles carry 2N + 2(N-1) free parameters,
+    # the same count as N Breit-Wigners with one overall reference
+    assert len([x for x in flat if x.startswith(n + "_")]) == 2 * 2 + 2
 
 
 @pytest.mark.parametrize("n_pole", [1, 2, 3, 4, 5])
@@ -219,16 +206,29 @@ def test_den_names_have_one_entry_per_basis_row(n_pole):
     assert len(set(mdl.get_num_name())) == n_pole
 
 
-@pytest.mark.parametrize("n_pole", [2, 3])
-def test_den_names_match_the_fixed_arity_models(n_pole):
-    """Same names as `kmatrix2` / `kmatrix3` at the same arity."""
+@pytest.mark.parametrize("n_pole", [1, 2, 3, 4])
+def test_amplitude_matches_the_direct_kmatrix(n_pole):
+    """`amp` == P/(1 − iρK) written out by hand (no transform machinery).
+
+    ``beta0 = 1`` (the gauge head) and ``beta{i>=1} = 1`` (the transform's
+    fallback), so P = Σ_i 1/(m_i² − s) and K = Σ_i g_i²/(m_i² − s).
+    """
     n = "k"
-    ref = "kmatrix2" if n_pole == 2 else "kmatrix3"
-    a = build_particle(n, model="kmatrix_n",
-                       mass_list=[0.7 + 0.2 * i for i in range(n_pole)],
-                       width_list=[0.15] * n_pole).get_den_name()
-    b = build_particle(n, model=ref).get_den_name()
-    assert a == b
+    m = [0.70 + 0.40 * i for i in range(n_pole)]
+    w = [0.15 + 0.05 * i for i in range(n_pole)]
+    mdl = build_particle(n, model="kmatrix_n", mass_list=m, width_list=w, L=1)
+    mdl.register_parent(_Parent())
+
+    grid = np.array([0.50, 0.95, 1.30])
+    s = grid ** 2
+    rho = np.asarray(mdl._rho(grid), dtype=complex)
+    g2 = np.asarray(mdl._coupling_sq(m, w), dtype=float)
+    K = sum(g2[i] / (m[i] ** 2 - s) for i in range(n_pole))
+    P = sum(1.0 / (m[i] ** 2 - s) for i in range(n_pole))
+    expected = P / (1.0 - 1j * rho * K)
+
+    assert np.allclose(mdl.amp(grid, mdl.get_defaults()), expected,
+                       rtol=1e-13, atol=1e-13)
 
 
 def test_parameters_are_masses_and_widths():
@@ -241,10 +241,12 @@ def test_parameters_are_masses_and_widths():
     assert f"{n}_width0" in keys and f"{n}_mass0" in keys
     # the scalar reference pair is build-time only — not a fit parameter
     assert f"{n}_mass" not in keys and f"{n}_width" not in keys
-    assert set(mdl.make_basis_transform().input_names) == {
+    names = mdl.make_basis_transform().input_names
+    assert set(names) == {
         f"{n}_mass0", f"{n}_mass1", f"{n}_width0", f"{n}_width1",
-        f"{n}_beta0r", f"{n}_beta0i", f"{n}_beta1r", f"{n}_beta1i",
+        f"{n}_beta1r", f"{n}_beta1i",          # beta0 is the fixed gauge head
     }
+    assert f"{n}_beta0r" not in names
 
 
 
@@ -341,27 +343,6 @@ def test_width_convention_is_re_rho_at_the_pole(model):
     assert mG[i0].real == pytest.approx(m0 * G0, rel=1e-13)   # Γ(m0) = Γ0
 
 
-@pytest.mark.parametrize("n_pole", [2, 3])
-def test_matches_the_fixed_arity_models(n_pole):
-    n, mass, L = "k2", 0.80, 1
-    m = [0.80, 1.35, 1.80][:n_pole]
-    w = [0.30, 0.30, 0.25][:n_pole]
-    b = [0.9 + 0.0j, 0.4 + 0.0j, 0.2 + 0.0j][:n_pole]
-    ref_model = "kmatrix2_bf" if n_pole == 2 else "kmatrix3"
-    ref = build_particle(n, model=ref_model, mass=mass, width=0.3, L=L)
-    gen = build_particle(n, model="kmatrix_n", mass_list=m, width_list=w, L=L)
-    for mdl in (ref, gen):
-        mdl.register_parent(_Parent())
-    assert gen.n_pole == n_pole
-    grid = np.array([0.60, 0.80, 1.00, 1.50, 2.0])
-    # the fixed-arity models take the coupling; ours takes the width — feed
-    # both the SAME g² through the width -> coupling rule
-    g = np.sqrt(gen._coupling_sq(m, w))
-    assert np.allclose(gen.amp(grid, _resolve(n, m, w, b)),
-                       ref.amp(grid, _resolve_g(n, m, g, b)),
-                       rtol=1e-12, atol=1e-14)
-
-
 def test_weights_are_the_polynomial_coefficients():
     n = "k"
     m = [0.80, 1.35, 1.80, 2.40]
@@ -383,7 +364,8 @@ def test_weights_are_the_polynomial_coefficients():
         return out
 
     den_direct = prod() - 1j * rho * sum(g[i] ** 2 * prod(i) for i in range(4))
-    num_direct = sum(b[i] * prod(i) for i in range(4))
+    # beta0 = 1 (the gauge head); b[1:] are the fitted relative weights
+    num_direct = prod(0) + sum(b[i] * prod(i) for i in range(1, 4))
 
     # the width that produces the intended g² at each pole
     w = np.array(g) ** 2 * np.asarray(mdl._rho(np.array(m)), complex).real \
@@ -396,7 +378,9 @@ def test_weights_are_the_polynomial_coefficients():
     num = sum(out[f"{h}r"] * np.exp(1j * out[f"{h}i"]) * row
               for h, row in zip(mdl.get_num_name(), mdl.num_basis(grid)))
     assert np.allclose(den, den_direct, rtol=1e-14, atol=1e-14)
-    assert np.allclose(num, num_direct, rtol=1e-14, atol=1e-14)
+    # the numerator sums the beta0 head (O(m^6)) with three smaller ones, so
+    # the cancellation costs a couple of ulp at the m^0 coefficient
+    assert np.allclose(num, num_direct, rtol=1e-13, atol=1e-13)
 
 
 def test_rho_is_a_method_not_an_option():

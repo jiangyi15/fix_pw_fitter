@@ -1,10 +1,11 @@
 """Tests for the rational-lineshape basis interface (``BasisModel``) and the
-``kmatrix2`` reference model.
+``kmatrix_n`` reference model.
 
-Particle layer only: these tests exercise the amplitude algebra, the
-real-slot physical-parameter → weight transform (magnitude/phase ``b``
-slots, ``ck`` convention), and the VJP the kernel gradient chain will
-rely on.  No kernel / backend / fitter involvement.
+Particle layer only: these tests exercise the amplitude algebra, the real-slot
+physical-parameter → basis-weight transform (pole masses/widths plus the
+numerator ``beta`` magnitude/phase slots, the ``ck`` convention), and the VJP
+the kernel gradient chain will rely on.  No kernel / backend / fitter
+involvement.
 """
 
 import numpy as np
@@ -15,74 +16,91 @@ from tabpwa.param_constraint import CKProduct, complex_tail
 from tabpwa.particle_model import ALL_MODELS, build_particle
 from tabpwa.particle_model.base import (
     BaseModel, BasisModel, DefaultBasisModel)
-from tabpwa.particle_model.kmatrix2_model import (
-    KMatrix2Model, KMatrix2WeightsTransform, M_PI as KM_PI,
-)
+from tabpwa.particle_model.bwr_model import phase_space
+from tabpwa.particle_model.kmatrix_n_model import KMatrixNModel
 
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-CASES = [
-    dict(m1=0.80, m2=1.35, g1=0.35, g2=0.55, b1=0.9, b2=0.4),
-    dict(m1=0.65, m2=1.55, g1=0.20, g2=0.90, b1=1.3, b2=-0.6),
-    dict(m1=0.95, m2=1.15, g1=0.60, g2=0.10, b1=0.2, b2=0.8),
-]
+#: the two-pole reference content, and a non-trivial production coupling
+#: (``beta1 = mag·exp(i·phase)``; ``beta0 ≡ 1`` is the fixed gauge head)
+MASSES = [0.80, 1.35]
+WIDTHS = [0.35, 0.55]
+BETA = 0.8 * np.exp(0.4j)
 
-# non-trivial production phases (b = mag·exp(i·phase))
-PHASE_CASE = dict(m1=0.80, m2=1.35, g1=0.35, g2=0.55,
-                  b1=0.8 * np.exp(0.4j), b2=1.2 * np.exp(-1.1j))
+#: the p-wave phase space the ``kmatrix_n`` gates use, and the daughter
+#: masses its no-tree fallback reads
+L_KN = 1
+D_KN = 3.0
+D2, D3 = 0.13957039, 0.1349768
 
 
-def _phys_params(name, m1, m2, g1, g2, b1, b2, tail=None):
-    """Build the 8 real input slots (complex b → magnitude/phase pair).
+def _kn_model(name="k", masses=MASSES, widths=WIDTHS, **kw):
+    return build_particle(name, model="kmatrix_n",
+                          mass_list=list(masses), width_list=list(widths),
+                          L=kw.pop("L", L_KN), **kw)
 
-    The slot suffixes follow the active ``complex_tail()`` unless given.
+
+def _kn_params(name, masses, widths, beta=None, tail=None):
+    """The real input slots of a (two-)pole model.
+
+    ``mass{i}``/``width{i}`` for every pole; ``beta1{mag,phase}`` only when
+    there is a second pole — ``beta0`` is fixed to ``1 + 0i`` and is not a
+    parameter.  The suffixes follow the active ``complex_tail()`` unless given.
     """
     mag, phase = tuple(tail) if tail is not None else complex_tail()
-    b1, b2 = complex(b1), complex(b2)
-    return {
-        f"{name}_m1": m1, f"{name}_m2": m2,
-        f"{name}_g1": g1, f"{name}_g2": g2,
-        f"{name}_b1{mag}": abs(b1), f"{name}_b1{phase}": float(np.angle(b1)),
-        f"{name}_b2{mag}": abs(b2), f"{name}_b2{phase}": float(np.angle(b2)),
-    }
+    d = {}
+    for i, (mm, ww) in enumerate(zip(masses, widths)):
+        d[f"{name}_mass{i}"] = float(mm)
+        d[f"{name}_width{i}"] = float(ww)
+    if len(masses) > 1:
+        b = complex(beta)
+        d[f"{name}_beta1{mag}"] = abs(b)
+        d[f"{name}_beta1{phase}"] = float(np.angle(b))
+    return d
 
 
-def _num_w(mdl, params):
-    """Complex numerator weights from the transform's (mag, phase) slots."""
-    from tabpwa.param_constraint import complex_tail
+def _num_weights(mdl, params):
+    """Complex numerator weights as the model reads them (head or ck pair)."""
     mag, ph = complex_tail()
     out = []
     for h in mdl.get_num_name():
         if h in params:
-            out.append(params[h])
+            out.append(complex(params[h]))
         else:
-            out.append(float(params[f"{h}{mag}"])
-                       * np.exp(1j * float(params[f"{h}{ph}"])))
+            out.append(float(params.get(f"{h}{mag}", 0.0))
+                       * np.exp(1j * float(params.get(f"{h}{ph}", 0.0))))
     return out or [1.0]
 
 
-def _mass_grid(p1, p2, n=241, lo=0.25, hi=1.75):
+def _mass_grid(*poles, n=241, lo=0.30, hi=1.70):
     """Grid spanning below threshold and both poles (poles excluded)."""
     m = np.linspace(lo, hi, n)
-    return m[(np.abs(m - p1) > 1e-4) & (np.abs(m - p2) > 1e-4)]
+    for p in poles:
+        m = m[np.abs(m - p) > 1e-4]
+    return m
 
 
-def _direct_km2(m, case, m_pi=KM_PI):
-    """Independent direct evaluation of ``P / (1 - i·ρ·K)``."""
+def _direct_kn(m, masses, widths, beta=None, L=L_KN, d=D_KN, d2=D2, d3=D3):
+    """Independent direct evaluation of ``P / (1 − i·ρ·K)``.
+
+    ``K = Σ g_i²/(m_i² − s)``, ``P = Σ b_i/(m_i² − s)`` with the fixed gauge
+    head ``b_0 = 1`` and ``g_i² = m_i·Γ_i/ρ(m_i)`` (the model's width
+    convention).  The ``-i`` lives in the basis row, so only ``ρ`` at the pole
+    is real there.
+    """
+    n = len(masses)
+    assert n <= 2, "this reference helper covers the gates' 1- and 2-pole cases"
     s = np.asarray(m, dtype=float) ** 2
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rho = np.asarray(np.emath.sqrt(1.0 - (2.0 * m_pi) ** 2 / s),
-                         dtype=complex)
-        k = (case["g1"] ** 2 / (case["m1"] ** 2 - s)
-             + case["g2"] ** 2 / (case["m2"] ** 2 - s))
-        p = (complex(case["b1"]) / (case["m1"] ** 2 - s)
-             + complex(case["b2"]) / (case["m2"] ** 2 - s))
-        return p / (1.0 - 1j * rho * k)
-
-
-def _km2_model(name="k2", mass=0.80, width=0.30):
-    return build_particle(name, model="kmatrix2", mass=mass, width=width)
+    rho = np.asarray(phase_space(np.asarray(m, dtype=float), L, d, d2, d3),
+                     dtype=float)
+    rho_pole = np.asarray(phase_space(np.asarray(masses, dtype=float),
+                                      L, d, d2, d3), dtype=float)
+    g2 = [masses[i] * widths[i] / rho_pole[i] for i in range(n)]
+    b = [1.0 + 0.0j] + ([complex(beta)] if n > 1 else [])
+    k = sum(g2[i] / (masses[i] ** 2 - s) for i in range(n))
+    p = sum(b[i] / (masses[i] ** 2 - s) for i in range(n))
+    return p / (1.0 - 1j * rho * k)
 
 
 # ── 1. BasisModel defaults reproduce the plain BW bit-for-bit ────────
@@ -103,8 +121,8 @@ def test_basis_default_matches_bw_bitwise():
     den = basis.den_basis(m)
     assert len(den) == len(basis.get_den_name()) == 3
     # the m² weight is the SHARED literal "one" (value -1), not "r_poly":
-    # `poly` is kmatrix2's FITTED polynomial coefficient -(m1^2+m2^2), a
-    # different quantity with a different free/fixed status.
+    # `poly` is the K-matrix family's FITTED polynomial coefficient
+    # -(m1^2+m2^2) — a different quantity with a different free/fixed status.
     # the kernel-facing m0*g slot carries the ``_t`` suffix so it can never
     # collide with the physical fit parameter of the same base name
     assert basis.get_den_name() == ["r_s0", "one", "r_width_t"]
@@ -168,20 +186,17 @@ def test_denominator_weights_real_rows_complex():
     assert any(np.any(np.imag(r) != 0) for r in rows)
     g = mdl.make_basis_transform().forward({"r_mass": 0.775, "r_width": 0.149})
     assert all(np.isrealobj(v) for v in g.values())
-    assert np.all(np.imag(_num_w(mdl, {})) == 0)
+    assert np.all(np.imag(_num_weights(mdl, {})) == 0)
 
-    # -- KMatrix2 at several random magnitude/phase points --
-    km = _km2_model()
-    m = _mass_grid(0.8, 1.35)
+    # -- kmatrix_n at several random pole / beta points --
+    km = _kn_model()
     rng = np.random.default_rng(11)
     for _ in range(5):
-        case = dict(
-            m1=rng.uniform(0.60, 1.00), m2=rng.uniform(1.10, 1.60),
-            g1=rng.uniform(0.05, 0.80), g2=rng.uniform(0.05, 0.80),
-            b1=rng.uniform(0.10, 1.00) * np.exp(1j * rng.uniform(-np.pi, np.pi)),
-            b2=rng.uniform(0.10, 1.00) * np.exp(1j * rng.uniform(-np.pi, np.pi)),
-        )
-        params = _phys_params("k2", **case)
+        masses = [rng.uniform(0.60, 1.00), rng.uniform(1.10, 1.60)]
+        widths = [rng.uniform(0.05, 0.80), rng.uniform(0.05, 0.80)]
+        beta = rng.uniform(0.10, 1.00) * np.exp(
+            1j * rng.uniform(-np.pi, np.pi))
+        params = _kn_params("k", masses, widths, beta)
         out = km.make_basis_transform().apply_forward(dict(params))
         # every transform output is a real float (fd_backward contract)
         assert all(np.isrealobj(v) for v in out.values())
@@ -190,6 +205,7 @@ def test_denominator_weights_real_rows_complex():
         # numerator outputs are real Cartesian/polar slots
         assert all(np.isrealobj(out[name]) for name in km.num_slot_names())
 
+    m = _mass_grid(*MASSES)
     rows = km.den_basis(m)
     assert all(np.iscomplexobj(r) for r in rows)
     assert any(np.any(np.imag(r) != 0) for r in rows)
@@ -197,39 +213,38 @@ def test_denominator_weights_real_rows_complex():
 
 
 def test_phases_flow_through_numerator_path():
-    """Magnitude/phase ``b`` slots reproduce complex production couplings."""
-    case = PHASE_CASE
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"])
-    params = _phys_params("k2", **case)
+    """The ``beta`` (magnitude, phase) pair reproduces the complex coupling."""
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES)
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
 
     tr = mdl.make_basis_transform()
     out = tr.apply_forward(dict(params))
     assert all(np.isrealobj(v) for v in out.values())
 
-    b1, b2 = complex(case["b1"]), complex(case["b2"])
-    m1s, m2s = case["m1"] ** 2, case["m2"] ** 2
-    n0 = b1 * m2s + b2 * m1s
-    n1 = -(b1 + b2)
-    n0m, n0p, n1m, n1p = (out[name] for name in mdl.num_slot_names())
+    b1 = complex(BETA)
+    m0s, m1s = MASSES[0] ** 2, MASSES[1] ** 2
+    # numerator coefficients: beta0 = 1 fixed, beta1 the fitted coupling
+    n0 = m1s + b1 * m0s
+    n1 = -(1.0 + b1)
+    n0m, n0p, n1m, n1p = mdl.num_slot_names()
     # numerator outputs use the (magnitude, phase) tail convention
-    assert n0m == pytest.approx(abs(n0), rel=1e-14, abs=1e-15)
-    assert n0p == pytest.approx(np.angle(n0), rel=1e-14, abs=1e-15)
-    assert n1m == pytest.approx(abs(n1), rel=1e-14, abs=1e-15)
-    assert n1p == pytest.approx(np.angle(n1), rel=1e-14, abs=1e-15)
+    assert out[n0m] == pytest.approx(abs(n0), rel=1e-14, abs=1e-15)
+    assert out[n0p] == pytest.approx(np.angle(n0), rel=1e-14, abs=1e-15)
+    assert out[n1m] == pytest.approx(abs(n1), rel=1e-14, abs=1e-15)
+    assert out[n1p] == pytest.approx(np.angle(n1), rel=1e-14, abs=1e-15)
     # denominator weights stay real
     assert np.all(np.imag([out[name] for name in mdl.get_den_name()]) == 0)
 
     # the complex numerator weights, read from the transform's slots
-    nw = _num_w(mdl, out)
+    nw = _num_weights(mdl, out)
     assert nw[0] == pytest.approx(n0, rel=1e-14, abs=1e-15)
     assert nw[1] == pytest.approx(n1, rel=1e-14, abs=1e-15)
 
-    ref = _direct_km2(m, case, m_pi=mdl.m_pi)
+    ref = _direct_kn(m, MASSES, WIDTHS, BETA)
     assert np.allclose(mdl.amp(m, params), ref, rtol=1e-12, atol=1e-14)
     # amp_raw takes the weights as given, i.e. the transform's output
-    assert np.allclose(mdl.amp_raw(m, out), ref,
-                       rtol=1e-12, atol=1e-14)
+    assert np.allclose(mdl.amp_raw(m, out), ref, rtol=1e-12, atol=1e-14)
 
 
 def test_transform_outputs_feed_ckproduct():
@@ -239,10 +254,9 @@ def test_transform_outputs_feed_ckproduct():
     handed straight to ``CKProduct.build_ck``, which reads the
     ``(magnitude, phase)`` pair and forms ``r·exp(iθ)``.
     """
-    case = PHASE_CASE
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"])
-    params = _phys_params("k2", **case)
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES)
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
 
     tr = mdl.make_basis_transform()
     out = tr.apply_forward(dict(params))
@@ -254,10 +268,10 @@ def test_transform_outputs_feed_ckproduct():
     # consumer, which looks up the expanded slots the transform produced
     w0, w1 = CKProduct([[heads[0]], [heads[1]]], tail=tail).build_ck(out)
 
-    b1, b2 = complex(case["b1"]), complex(case["b2"])
-    m1s, m2s = case["m1"] ** 2, case["m2"] ** 2
-    n0 = b1 * m2s + b2 * m1s
-    n1 = -(b1 + b2)
+    b1 = complex(BETA)
+    m0s, m1s = MASSES[0] ** 2, MASSES[1] ** 2
+    n0 = m1s + b1 * m0s
+    n1 = -(1.0 + b1)
     assert w0 == pytest.approx(n0, rel=1e-14, abs=1e-15)
     assert w1 == pytest.approx(n1, rel=1e-14, abs=1e-15)
 
@@ -269,23 +283,23 @@ def test_transform_outputs_feed_ckproduct():
         den = den + out[name] * row
     amp = (w0 * num_rows[0] + w1 * num_rows[1]) / den
 
-    ref = _direct_km2(m, case, m_pi=mdl.m_pi)
+    ref = _direct_kn(m, MASSES, WIDTHS, BETA)
     assert np.allclose(amp, ref, rtol=1e-12, atol=1e-14)
     assert np.allclose(mdl.amp(m, params), amp, rtol=1e-12, atol=1e-14)
 
 
 def test_bare_head_real_numerator_weight():
     """A real numerator weight may be given as one parameter named the head."""
-    mdl = _km2_model()
-    m = _mass_grid(0.8, 1.35)
-    params = {"k2_n0": 2.5, "k2_n1": -0.7}
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES)
+    params = {"k_n0": 2.5, "k_n1": -0.7}
 
-    nw = _num_w(mdl, params)
+    nw = _num_weights(mdl, params)
     assert nw[0] == pytest.approx(2.5, rel=0, abs=0)
     assert nw[1] == pytest.approx(-0.7, rel=0, abs=0)
 
     # amplitude with the bare-head path vs the manual basis ratio
-    resolved = mdl._resolved(params)
+    resolved = mdl.make_basis_transform().apply_forward(dict(params))
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), mdl.den_basis(m)):
         den = den + resolved[name] * row
@@ -293,44 +307,26 @@ def test_bare_head_real_numerator_weight():
     amp = (2.5 * num_rows[0] - 0.7 * num_rows[1]) / den
     # amp_raw reads the weights as given: keep the bare head, drop the
     # expanded pair the transform would produce
-    given = mdl._resolved(params)
+    given = dict(resolved)
     for n in mdl.num_slot_names():
         given.pop(n, None)
     given.update(params)                 # keep the caller's bare heads
     assert np.allclose(mdl.amp_raw(m, given), amp, rtol=0, atol=0)
 
 
-# ── 2. kmatrix2 amplitude == the direct formula ──────────────────────
-
-@pytest.mark.parametrize("case", CASES)
-def test_kmatrix2_matches_direct_formula(case):
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"])
-    params = _phys_params("k2", **case)
-
-    got = mdl.amp(m, params)
-    ref = _direct_km2(m, case, m_pi=mdl.m_pi)
-    assert np.allclose(got, ref, rtol=1e-12, atol=1e-14)
-
-    # grid actually crosses both poles and the ππ threshold
-    assert m.min() < 2 * mdl.m_pi < m.max()
-    assert m.min() < case["m1"] < m.max()
-    assert m.min() < case["m2"] < m.max()
-
-
-# ── 3. basis reconstruction == amplitude_raw ─────────────────────────
+# ── 2. basis reconstruction == amplitude_raw ─────────────────────────
 
 def test_basis_route_equals_raw_amplitude():
-    case = PHASE_CASE
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"])
-    params = _phys_params("k2", **case)
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES)
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
 
     tr = mdl.make_basis_transform()
     resolved = tr.apply_forward(dict(params))
 
     num_rows = mdl.num_basis(m)
     den_rows = mdl.den_basis(m)
+    # two poles: 2 numerator rows, 2N+1 = 5 denominator rows
     assert len(num_rows) == 2
     assert len(mdl.get_num_name()) == 2      # one head per basis row
     assert len(mdl.num_slot_names()) == 4    # expanded (mag, phase) slots
@@ -340,7 +336,7 @@ def test_basis_route_equals_raw_amplitude():
     assert np.all(np.imag([resolved[n] for n in mdl.get_den_name()]) == 0)
 
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(_num_w(mdl, resolved), num_rows):
+    for weight, row in zip(_num_weights(mdl, resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
@@ -353,49 +349,53 @@ def test_basis_route_equals_raw_amplitude():
 
 
 def test_amplitude_uses_transform_defaults_for_empty_params():
-    mdl = _km2_model()
-    m = _mass_grid(0.8, 0.88)
-    params = {f"k2_{k}": v for k, v in mdl._phys().items()}
+    """A dict without the ``beta`` slots resolves to the transform fallback."""
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES, n=241)[::8]
+    params = mdl.get_defaults()
     assert np.allclose(mdl.amp(m, {}), mdl.amp(m, params),
                        rtol=1e-14, atol=0)
+    # the fallback is beta1 = 1·e^{i0}, i.e. the same point written out
+    full = {**params, "k_beta1r": 1.0, "k_beta1i": 0.0}
+    assert np.allclose(mdl.amp(m, {}), mdl.amp(m, full), rtol=1e-14, atol=0)
 
 
-# ── 4. transform forward: exact weights + name alignment ─────────────
+# ── 3. transform forward: exact weights + name alignment ─────────────
 
 def test_transform_forward_weights_and_names():
-    mdl = _km2_model()
+    mdl = _kn_model()
     tr = mdl.make_basis_transform()
-    assert isinstance(tr, KMatrix2WeightsTransform)
-    # default complex_tail() = ("r", "i"): magnitude/phase input slots
+    # default complex_tail() = ("r", "i"): (magnitude, phase) input slots
     assert tr.input_names == [
-        "k2_m1", "k2_m2", "k2_g1", "k2_g2",
-        "k2_b1r", "k2_b1i", "k2_b2r", "k2_b2i",
+        "k_mass0", "k_mass1", "k_width0", "k_width1",
+        "k_beta1r", "k_beta1i",
     ]
-    assert mdl.get_num_name() == ["k2_n0", "k2_n1"]     # heads (one per row)
+    assert mdl.get_num_name() == ["k_n0", "k_n1"]       # heads (one per row)
     assert mdl.num_slot_names() == [
-        "k2_n0r", "k2_n0i", "k2_n1r", "k2_n1i",
+        "k_n0r", "k_n0i", "k_n1r", "k_n1i",
     ]
     assert tr.output_names == mdl.num_slot_names() + mdl.get_den_name()
 
-    case = PHASE_CASE
-    params = _phys_params("k2", **case)
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
     out = tr.apply_forward(dict(params))
 
-    m1s, m2s = case["m1"] ** 2, case["m2"] ** 2
-    g1s, g2s = case["g1"] ** 2, case["g2"] ** 2
-    b1, b2 = complex(case["b1"]), complex(case["b2"])
-    n0 = b1 * m2s + b2 * m1s
-    n1 = -(b1 + b2)
+    m0s, m1s = MASSES[0] ** 2, MASSES[1] ** 2
+    rho_pole = phase_space(np.asarray(MASSES), L_KN, D_KN, D2, D3)
+    g2 = [MASSES[i] * WIDTHS[i] / rho_pole[i] for i in range(2)]
+    b1 = complex(BETA)
+    # numerator coefficients of (b0·(m1²−s) + b1·(m0²−s)); b0 = 1
+    n0 = m1s + b1 * m0s
+    n1 = -(1.0 + b1)
     expected = {
-        "k2_s0": m1s * m2s,                       # 1 row (kernel s0)
-        "k2_poly": -(m1s + m2s),                  # m² row (kernel poly)
-        "k2_m4": 1.0,                             # m⁴ row
-        "k2_rho": g1s * m2s + g2s * m1s,          # −i·ρ row
-        "k2_srho": g1s + g2s,                     # +i·s·ρ row
-        "k2_n0r": abs(n0),                        # numerator magnitude
-        "k2_n0i": np.angle(n0),                   # numerator phase
-        "k2_n1r": abs(n1),
-        "k2_n1i": np.angle(n1),
+        "k_n0r": abs(n0),                          # numerator magnitude
+        "k_n0i": np.angle(n0),                     # numerator phase
+        "k_n1r": abs(n1),
+        "k_n1i": np.angle(n1),
+        "k_s0": m0s * m1s,                         # Π(m_i²) → s^0 row
+        "k_poly": -(m0s + m1s),                    # s^1 row
+        "k_m4": 1.0,                               # s² row
+        "k_rho": g2[0] * m1s + g2[1] * m0s,        # −i·ρ row
+        "k_srho": -(g2[0] + g2[1]),                # −i·s·ρ row
     }
     assert set(expected) == set(tr.output_names)
     for name, val in expected.items():
@@ -405,15 +405,15 @@ def test_transform_forward_weights_and_names():
         assert np.isrealobj(out[name])
 
 
-# ── 5. VJP of the real input slots (FD reference) ────────────────────
+# ── 4. VJP of the real input slots (FD reference) ────────────────────
 
-def test_transform_backward_matches_finite_difference():
-    """fd_backward runs on real slots (incl. phases) and matches FD."""
-    mdl = _km2_model()
-    params = _phys_params("k2", **PHASE_CASE)
+def test_kmatrix_n_transform_backward_matches_finite_difference():
+    """fd_backward runs on real slots (incl. the beta phase) and matches FD."""
+    mdl = _kn_model()
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
     tr = mdl.make_basis_transform()
     out = tr.apply_forward(dict(params))
-    assert all(np.isrealobj(v) for v in out.values())
+    assert all(np.isrealobj(out[n]) for n in tr.output_names)
 
     rng = np.random.default_rng(7)
     cot = {name: float(rng.normal()) for name in tr.output_names}
@@ -427,26 +427,32 @@ def test_transform_backward_matches_finite_difference():
 
     for name in tr.input_names:
         x = float(params[name])
-        h = 1e-6 * max(1.0, abs(x))
-        p_plus = dict(params)
-        p_minus = dict(params)
-        p_plus[name] = x + h
-        p_minus[name] = x - h
-        fd = (scalar(p_plus) - scalar(p_minus)) / (2.0 * h)
-        rel = abs(vjp[name] - fd) / max(abs(fd), 1e-12)
-        assert rel < 1e-5, (name, vjp[name], fd)
+        # a reference step an order above ``fd_eps`` so the two centered
+        # differences are independent evaluations of the same derivative
+        h = 1e-5 * max(1.0, abs(x))
+        fd = (scalar({**params, name: x + h})
+              - scalar({**params, name: x - h})) / (2.0 * h)
+        assert abs(vjp[name] - fd) <= 1e-8 * max(abs(fd), 1.0), (
+            name, vjp[name], fd)
 
-    # the phase slots are genuinely differentiated (nonzero derivatives)
-    assert abs(vjp["k2_b1i"]) > 0
-    assert abs(vjp["k2_b2i"]) > 0
+    # apply_backward: outputs leave the dict, inputs accumulate
+    grad = {**cot, "k_mass0": 0.0}
+    tr.apply_forward(dict(params))
+    tr.apply_backward(grad)
+    for name in tr.output_names:
+        assert name not in grad
+    for name in tr.input_names:
+        assert grad[name] == pytest.approx(vjp[name], rel=1e-12, abs=1e-12)
+
+    # the phase slot is genuinely differentiated (nonzero derivative)
+    assert abs(vjp["k_beta1i"]) > 0
 
 
 def test_amplitude_gradient_chain_with_real_cotangents():
     """The real-slot VJP reproduces the amplitude gradient chain."""
-    case = PHASE_CASE
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"], n=65)
-    params = _phys_params("k2", **case)
+    mdl = _kn_model()
+    m = _mass_grid(*MASSES, n=65)
+    params = _kn_params("k", MASSES, WIDTHS, BETA)
 
     tr = mdl.make_basis_transform()
     resolved = tr.apply_forward(dict(params))
@@ -454,7 +460,7 @@ def test_amplitude_gradient_chain_with_real_cotangents():
     num_rows = mdl.num_basis(m)
     den_rows = mdl.den_basis(m)
     num = np.zeros_like(m, dtype=complex)
-    for weight, row in zip(_num_w(mdl, resolved), num_rows):
+    for weight, row in zip(_num_weights(mdl, resolved), num_rows):
         num = num + weight * row
     den = np.zeros_like(m, dtype=complex)
     for name, row in zip(mdl.get_den_name(), den_rows):
@@ -487,7 +493,10 @@ def test_amplitude_gradient_chain_with_real_cotangents():
 
     for name in tr.input_names:
         x = float(params[name])
-        h = 1e-6 * max(1.0, abs(x))
+        # an order above ``fd_eps``: the reference must not repeat the
+        # transform's own step, or the two finite differences would share
+        # their truncation error instead of cross-checking the chain
+        h = 1e-5 * max(1.0, abs(x))
         p_plus = dict(params)
         p_minus = dict(params)
         p_plus[name] = x + h
@@ -497,97 +506,63 @@ def test_amplitude_gradient_chain_with_real_cotangents():
         assert rel < 1e-5, (name, vjp[name], fd)
 
 
-# ── 6. registration, tail scoping & phase degeneracy ─────────────────
+# ── 5. registration, tail scoping ────────────────────────────────────
 
-def test_kmatrix2_registration_and_defaults():
-    assert "kmatrix2" in ALL_MODELS
-    assert ALL_MODELS["kmatrix2"] is KMatrix2Model
+def test_kmatrix_n_registration_and_defaults():
+    assert "kmatrix_n" in ALL_MODELS
+    assert ALL_MODELS["kmatrix_n"] is KMatrixNModel
 
-    mdl = _km2_model()
-    assert isinstance(mdl, KMatrix2Model)
+    mdl = _kn_model()
+    assert isinstance(mdl, KMatrixNModel)
 
+    # ONLY the pole anchors have defaults: a mass/width is physics, while a
+    # beta is a COUPLING (random start, like g_ls) and beta0 is the fixed
+    # gauge head — so neither appears here
     defaults = mdl.get_defaults()
+    assert set(defaults) == {"k_mass0", "k_mass1", "k_width0", "k_width1"}
+    assert defaults["k_mass0"] == pytest.approx(0.80)
+    assert defaults["k_mass1"] == pytest.approx(1.35)
+    assert defaults["k_width0"] == pytest.approx(0.35)
+    assert defaults["k_width1"] == pytest.approx(0.55)
+
     tr = mdl.make_basis_transform()
-    for name in tr.input_names:
-        assert name in defaults
-
-    # defaults derived from mass / width (pole-1 nominal values)
-    assert defaults["k2_mass"] == pytest.approx(0.80)
-    assert defaults["k2_width"] == pytest.approx(0.30)
-    assert defaults["k2_m1"] == pytest.approx(0.80)
-    assert defaults["k2_m2"] == pytest.approx(0.88)
-    assert defaults["k2_g1"] == pytest.approx(0.15)
-    assert defaults["k2_g2"] == pytest.approx(0.15)
-    # magnitude/phase slots (default b = 1·e^{i0} = 1)
-    assert defaults["k2_b1r"] == pytest.approx(1.0)    # magnitude
-    assert defaults["k2_b1i"] == pytest.approx(0.0)    # phase
-    assert defaults["k2_b2r"] == pytest.approx(1.0)
-    assert defaults["k2_b2i"] == pytest.approx(0.0)
-
-    # complex kwarg converted to (|b|, arg b) slots
-    mdl2 = build_particle("k2", model="kmatrix2", mass=0.8, width=0.3,
-                          m2=1.9, g1=0.4,
-                          b1=0.8 * np.exp(0.4j), b2=1.2 * np.exp(-1.1j))
-    d2 = mdl2.get_defaults()
-    assert d2["k2_m2"] == pytest.approx(1.9)
-    assert d2["k2_g1"] == pytest.approx(0.4)
-    assert d2["k2_g2"] == pytest.approx(0.15)
-    assert d2["k2_b1r"] == pytest.approx(0.8)
-    assert d2["k2_b1i"] == pytest.approx(0.4)
-    assert d2["k2_b2r"] == pytest.approx(1.2)
-    assert d2["k2_b2i"] == pytest.approx(-1.1)
+    assert set(tr.input_names) == set(defaults) | {"k_beta1r", "k_beta1i"}
+    # ... so the pole anchors alone are a valid amplitude (beta falls back)
+    m = _mass_grid(*MASSES)
+    amp0 = mdl.amp(m, {})
+    assert np.all(np.isfinite(amp0))
+    assert np.allclose(amp0, mdl.amp(m, defaults), rtol=0, atol=0)
 
 
 def test_complex_tail_scope_renames_coupling_slots():
-    case = PHASE_CASE
-    m = _mass_grid(case["m1"], case["m2"])
+    m = _mass_grid(*MASSES)
 
     with scope(complex_tail=("rho", "phi")):
-        mdl = _km2_model()
+        mdl = _kn_model()
         assert mdl.tail == ("rho", "phi")
         tr = mdl.make_basis_transform()
         assert tr.input_names == [
-            "k2_m1", "k2_m2", "k2_g1", "k2_g2",
-            "k2_b1rho", "k2_b1phi", "k2_b2rho", "k2_b2phi",
+            "k_mass0", "k_mass1", "k_width0", "k_width1",
+            "k_beta1rho", "k_beta1phi",
         ]
         # numerator heads are tail-independent; the expanded slots rename
-        assert mdl.get_num_name() == ["k2_n0", "k2_n1"]
+        assert mdl.get_num_name() == ["k_n0", "k_n1"]
         assert mdl.num_slot_names() == [
-            "k2_n0rho", "k2_n0phi", "k2_n1rho", "k2_n1phi",
+            "k_n0rho", "k_n0phi", "k_n1rho", "k_n1phi",
         ]
         assert tr.output_names == mdl.num_slot_names() + mdl.get_den_name()
-        defaults = mdl.get_defaults()
-        for name in tr.input_names:
-            assert name in defaults
-        params = _phys_params("k2", **case)     # follows complex_tail()
-        assert "k2_b1rho" in params and "k2_b1phi" in params
+        params = _kn_params("k", MASSES, WIDTHS, BETA)   # follows complex_tail()
+        assert "k_beta1rho" in params and "k_beta1phi" in params
+        # the renamed slots are transform inputs, and only they are NOT
+        # pole anchors (the beta is deliberately not a default)
+        assert set(tr.input_names) - set(mdl.get_defaults()) == {
+            "k_beta1rho", "k_beta1phi"}
         got = mdl.amp(m, params)
 
-    # same physical b, default-named slots → same amplitude
-    ref_mdl = _km2_model()
-    ref = ref_mdl.amp(m, _phys_params("k2", **case))
+    # same physical beta, default-named slots → same amplitude
+    ref_mdl = _kn_model()
+    ref = ref_mdl.amp(m, _kn_params("k", MASSES, WIDTHS, BETA))
     assert np.allclose(got, ref, rtol=1e-13, atol=1e-15)
-
-
-def test_common_phase_is_degenerate_with_wave_coupling():
-    """b_i → e^{iα} b_i scales the numerator ⇒ |A| unchanged."""
-    case = PHASE_CASE
-    alpha = 0.37
-    shifted = dict(case,
-                   b1=case["b1"] * np.exp(1j * alpha),
-                   b2=case["b2"] * np.exp(1j * alpha))
-    # arg(b2/b1) is invariant under the common phase
-    assert np.angle(complex(shifted["b2"]) / complex(shifted["b1"])) \
-        == pytest.approx(np.angle(complex(case["b2"]) / complex(case["b1"])))
-
-    mdl = _km2_model()
-    m = _mass_grid(case["m1"], case["m2"])
-    a1 = mdl.amp(m, _phys_params("k2", **case))
-    a2 = mdl.amp(m, _phys_params("k2", **shifted))
-    assert np.allclose(np.abs(a1), np.abs(a2), rtol=1e-12, atol=1e-14)
-    # the shifted amplitude is the original times the common phase
-    assert np.allclose(a2, np.exp(1j * alpha) * a1,
-                       rtol=1e-12, atol=1e-14)
 
 
 # ── the interface split, pinned ─────────────────────────────────────
@@ -598,18 +573,19 @@ def test_basis_model_is_the_interface_and_knows_no_mass_or_width():
     The two interfaces are parallel: ``gamma`` / ``get_gamma_name`` /
     ``get_gamma_count`` / ``get_bw_params`` / ``make_mass_width_transform``
     belong to ``BaseModel``, which also supplies the default basis.  A
-    basis-only model (``kmatrix2``) therefore has none of them.
+    basis-only model (``kmatrix_n``) therefore has none of them.
     """
     PWA = ("gamma", "get_gamma_name", "get_gamma_count", "get_bw_params",
            "make_mass_width_transform")
     for name in PWA:
         assert not hasattr(BasisModel, name), (
             f"BasisModel must not define {name!r} — that is the pwa interface")
-    # ... and kmatrix2, the basis-only model, lacks them too
-    km = build_particle("k2", model="kmatrix2", mass=0.775, width=0.15)
+    # ... and kmatrix_n, the basis-only model, lacks them too
+    km = build_particle("k", model="kmatrix_n",
+                        mass_list=list(MASSES), width_list=list(WIDTHS), L=L_KN)
     assert isinstance(km, BasisModel) and not isinstance(km, BaseModel)
     for name in PWA:
-        assert not hasattr(km, name), f"kmatrix2 must not have {name!r}"
+        assert not hasattr(km, name), f"kmatrix_n must not have {name!r}"
 
 
 def test_amp_is_a_real_method_not_a_stale_alias():
@@ -761,89 +737,3 @@ def test_plain_basis_transform_requires_its_declared_inputs():
         tr.apply_forward({k: v for k, v in phys.items() if k != "ro_mass"})
     with pytest.raises(KeyError):
         tr.apply_forward({k: v for k, v in phys.items() if k != "ro_width"})
-
-
-def test_kmatrix2_one_pole_is_the_standard_bw():
-    """One pole ⇒ ``f = (1 − iρ·bf²·K)^{-1}·P`` IS the plain Breit-Wigner.
-
-    With ``K = 1/(m0²−s)`` and ``P = β/(m0²−s)``::
-
-        f = β / (m0² − s − i·ρ·bf²)
-          = β / (m0² − s − i·m0·Γ0·γ(m))
-
-    provided ``bf² = m0·Γ0`` and ``ρ ≡ γ(m)``.  That identification is what
-    makes the K-matrix a generalisation of the BW rather than a different
-    lineshape, and it fixes the coupling normalisation: the K-matrix coupling
-    is ``m0·Γ0``, not ``Γ0``.
-    """
-    n = "k2"
-    m0, g1, beta = 0.80, 0.35, 0.9
-    km = build_particle(n, model="kmatrix2", mass=m0, width=0.3)
-    params = {f"{n}_m1": m0, f"{n}_m2": 1.35, f"{n}_g1": g1, f"{n}_g2": 0.0,
-              f"{n}_b1r": beta, f"{n}_b1i": 0.0,
-              f"{n}_b2r": 0.0, f"{n}_b2i": 0.0}
-
-    m = np.array([0.60, 0.80, 1.00])
-    s = m ** 2
-    rho = np.emath.sqrt(1.0 - (2.0 * km.m_pi) ** 2 / s).astype(complex)
-
-    gamma0 = g1 ** 2 / m0                       # bf² = m0·Γ0
-    bw = beta / (m0 ** 2 - s - 1j * m0 * gamma0 * rho)
-    assert np.allclose(km.amp(m, params), bw, rtol=1e-14, atol=0)
-
-    # ... and the second pole genuinely changes the shape (not vacuous)
-    two = dict(params, **{f"{n}_g2": 0.25, f"{n}_b2r": 0.4})
-    assert not np.allclose(km.amp(m, two), bw, rtol=1e-6, atol=0)
-
-
-class _Out:
-    mass = 0.13957039
-
-
-class _Dec:
-    outs = [_Out(), _Out()]
-
-
-class _Parent:
-    """Minimal decay-tree stub: the two pions the running width needs."""
-
-    _decays = [_Dec()]
-
-
-def test_kmatrix2_bf_one_pole_is_bwrs_exactly():
-    """``kmatrix2_bf``'s ρ IS the particle's BWRS running width.
-
-    With one pole the K-matrix ``f = (1 − iρ·bf²·K)^{-1}·P`` is the BWRS
-    amplitude exactly, for ``bf² = m0·Γ0`` and ``ρ = γ(m)`` — same table, no
-    ad-hoc shape and no extra constant.  The model is basis-only: it reports
-    no running width, so the plain ``pwa`` path refuses it rather than
-    plotting a Breit-Wigner.
-    """
-    from tabpwa.particle_model.bwr_model import phase_space
-
-    n, mass, width, L = "rho", 0.775, 0.149, 1
-    bw = build_particle(n, model="BWRS", mass=mass, width=width, L=L)
-    kmb = build_particle(n, model="kmatrix2_bf", mass=mass, width=width, L=L)
-    for mdl in (bw, kmb):
-        mdl.register_parent(_Parent())
-
-    m = np.array([0.60, 0.775, 1.00])
-    a_bw = bw.amplitude(m, {f"{n}_mass": mass, f"{n}_width": width})
-    # bf² = m0·Γ0/ρ(m0): ρ is M-FREE, so the coupling carries the scale
-    rho_m0 = phase_space(np.array([mass]), L, 3.0, _Out.mass, _Out.mass)[0]
-    a_km = kmb.amp(m, {f"{n}_m1": mass, f"{n}_m2": 2.0,
-                       f"{n}_g1": np.sqrt(mass * width / rho_m0), f"{n}_g2": 0.0,
-                       f"{n}_b1r": 1.0, f"{n}_b1i": 0.0,
-                       f"{n}_b2r": 0.0, f"{n}_b2i": 0.0})
-    assert np.allclose(a_km, a_bw, rtol=1e-12, atol=1e-14)
-
-    # the second pole genuinely changes the shape
-    two = {f"{n}_m1": mass, f"{n}_m2": 1.45,
-           f"{n}_g1": np.sqrt(mass * width), f"{n}_g2": 0.40,
-           f"{n}_b1r": 1.0, f"{n}_b1i": 0.0, f"{n}_b2r": 0.6, f"{n}_b2i": 0.0}
-    assert not np.allclose(kmb.amp(m, two), a_bw, rtol=1e-4, atol=0)
-
-    # a pure BasisModel: it has NONE of the running-width interface, so the
-    # plain-pwa path refuses it by interface rather than by an empty list
-    for name in ("gamma", "get_gamma_name", "make_mass_width_transform"):
-        assert not hasattr(kmb, name), name

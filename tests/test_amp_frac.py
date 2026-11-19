@@ -454,10 +454,10 @@ def test_named_sweep_equals_the_x_sweep_for_the_names_it_covers():
 
     # A name that exists in the pwa_gen parameter surface: the basis weights
     # replace the physical mass/width, and they are TRANSFORM OUTPUTS, so what
-    # is fitted is the resonance model's own inputs (`kmatrix2`'s m1/m2/g1/...).
+    # is fitted is the resonance model's own inputs (`kmatrix_n`'s mass0/width0/...).
     # (This used to pick `k2_m4`, a basis weight, which was only free while
     # the per-BW transform was missing -- see PWAGen.build_kernel_config.)
-    name = "k2_m1"
+    name = "k2_mass1"
     j = flat.index(name)
     fn = lambda d: [float(d[name])]
 
@@ -551,7 +551,7 @@ def test_param_names_means_the_same_on_every_route():
 
     # a non-empty set is accepted on every route and does not blow up
     for kw in ({}, {"batch": 32}):
-        v, e = af.fractions([[0]], param_names=["k2_m1"], **kw)
+        v, e = af.fractions([[0]], param_names=["k2_mass1"], **kw)
         assert np.all(np.isfinite(e)) and np.all(np.asarray(e) > 0)
     f.free()
 

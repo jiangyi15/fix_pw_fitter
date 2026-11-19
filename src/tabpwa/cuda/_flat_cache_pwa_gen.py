@@ -20,7 +20,7 @@ The fold is lossless: ``coeff`` is gathered onto the surviving rows with the
 same ``keep`` list, so a caller's full-form vector is remapped rather than
 reinterpreted.  Folding on the structural key (not on sampled values) cannot
 merge two rows that merely look alike numerically — two identical
-``kmatrix2`` models at different mass columns stay apart, correctly.
+``kmatrix_n`` models at different mass columns stay apart, correctly.
 
 Host contract, identical to the other flat backends::
 

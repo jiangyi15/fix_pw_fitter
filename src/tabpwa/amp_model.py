@@ -250,7 +250,7 @@ class AmplitudeModel(BaseModel):
 
         The two particle interfaces are SEPARATE: only a ``BaseModel`` has a
         mass/width stage, and ``BasisModel`` deliberately does not declare one
-        (a basis-only model such as ``kmatrix2`` has no concept of it).  So
+        (a basis-only model such as ``kmatrix_n`` has no concept of it).  So
         the walk — which crosses both kinds — asks which interface the model
         implements and skips the basis-only ones.  Deduplicated by instance:
         one particle can appear in several chains.
@@ -407,7 +407,7 @@ class PWAGen(PWA):
         # here would recurse (``get_ck_map`` -> ``build_kernel_config``).
         # No ``m0_names`` / ``g0_names`` here: they are the PLAIN-PWA width
         # index, read by the pwa kernel path and its tests.  A basis path has
-        # no gamma table, and a basis-only model (``kmatrix2``) has no running
+        # no gamma table, and a basis-only model (``kmatrix_n``) has no running
         # width at all — asking it for ``get_gamma_name()`` was a category
         # error (and nothing on this path reads the key).  ``kernel_params``
         # takes the m0/g0 names from ``model.g0_phys_name``, which is empty
@@ -603,7 +603,8 @@ class PWAGen(PWA):
         # ``den_basis`` returns, and the weight that multiplies it comes from
         # the same model, so the pair is self-consistent by construction.
         # (Pinning it here would break a model that legitimately emits ``+m²``
-        # with a negated weight — `kmatrix2` does exactly that.)
+        # with a negated weight — `kmatrix_n` does exactly that: the `s^N`
+        # coefficient is `-1`.)
         return names, rows
 
     def _pg_host_records(self, n_blocks=1):

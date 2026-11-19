@@ -1,4 +1,4 @@
-# pwa_gen with a TWO-RESONANCE chain (`n_res == 2`) on the `kmatrix2` basis.
+# pwa_gen with a TWO-RESONANCE chain (`n_res == 2`) on the `kmatrix_n` basis.
 #
 # The top decay is widened to three daughters, two of which are resonances:
 #
@@ -6,12 +6,13 @@
 #
 # so every wave's denominator is the PRODUCT of two Breit-Wigner factors
 # (`bw_{w,0}·bw_{w,1}`, the `cpu_pwa_gen` model).  `pipi` keeps the
-# `kmatrix2` BasisModel basis (5 denominator rows, numerator active) while
-# `sig` is an ordinary BW (3 rows), so the factor layout is also ragged:
-# `off` is per (wave, factor) and `n_basis_tot < n_fact·n_basis`.
+# `kmatrix_n` BasisModel basis (5 denominator rows for two poles, numerator
+# active with two heads) while `sig` is an ordinary BW (3 rows), so the
+# factor layout is also ragged: `off` is per (wave, factor) and
+# `n_basis_tot < n_fact·n_basis`.
 #
 # `n_interp` is raised (as in config_pwa_gen_km.yml) so the tabulated basis
-# rows reproduce the closed-form ones to ~1e-12.
+# rows reproduce the closed-form ones to ~1e-7.
 amp_model: pwa_gen
 defaults:
   n_interp: 20000
@@ -61,12 +62,6 @@ particle:
     J: 1
     P: -1
     mass: 0.80
-    width: 0.30
-    model: kmatrix2
-    m1: 0.80
-    m2: 1.35
-    g1: 0.35
-    g2: 0.55
-    b1: 1.0
-    b2r: 0.6
-    b2i: 0.7
+    model: kmatrix_n
+    mass_list: [0.80, 1.35]
+    width_list: [0.15, 0.20]

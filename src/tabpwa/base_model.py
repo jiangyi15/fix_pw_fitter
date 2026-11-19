@@ -234,7 +234,7 @@ class BaseModel:
         for chain in self.full_decay.chains:
             for decay in chain.decays[1:]:
                 # Only a ``BaseModel`` has a running width; a basis-only model
-                # (``kmatrix2``) legitimately has none, and that is a property
+                # (``kmatrix_n``) legitimately has none, and that is a property
                 # of the INTERFACE it implements — not something to probe for.
                 # The refusal happens once, up front, in
                 # ``_build_base_kernel_config``.

@@ -143,7 +143,7 @@ class BasisModel:
     (``gamma`` / ``get_gamma_name``) that the plain ``pwa`` family reads, and
     supplies this interface's DEFAULT implementation (its ``den_basis``
     composes ``[1, −m², −i·γ…]`` from that running width).  A model that states
-    its basis directly — ``kmatrix2`` — subclasses **this** class and has no
+    its basis directly — ``kmatrix_n`` — subclasses **this** class and has no
     ``gamma`` and no ``get_gamma_name`` at all::
 
         BasisModel.amp_raw(m, params)     rows × weights, NO transform
@@ -205,7 +205,7 @@ class BasisModel:
         Default ``None``: the basis weights ARE the raw parameters, so no
         transform is needed.  Overridden by :class:`BaseModel` (whose weights
         are ``m0²`` / ``m0·g``) and by models with their own mapping
-        (``kmatrix2``).
+        (``kmatrix_n``).
         """
         return None
 
@@ -255,8 +255,8 @@ class BasisModel:
         """Denominator rows ``G_j(m)`` — REQUIRED (no generic default).
 
         A basis cannot invent its own denominator: the rows ARE the model's
-        physics.  ``BaseModel`` supplies the plain-BW one; ``kmatrix2`` and
-        the GS family supply theirs.
+        physics.  ``BaseModel`` supplies the plain-BW one; ``kmatrix_n``
+        and the GS family supply theirs.
         """
         raise NotImplementedError(
             f"{type(self).__name__}.den_basis: a basis must state its "
@@ -325,7 +325,7 @@ class BaseModel(BasisModel):
         get_defaults() -> dict[str, float]
         get_gamma_count() -> int            (default 1)
         get_gamma_name() -> list[str]       (default [`{name}_width`])
-        …and any ``BasisModel`` hook (``kmatrix2`` overrides ``den_basis``).
+        …and any ``BasisModel`` hook (``kmatrix_n`` overrides ``den_basis``).
     """
 
     def __init__(self, name, **kwargs):
@@ -431,9 +431,8 @@ class BaseModel(BasisModel):
 
         The m² weight is the SHARED literal ``"one"``, not ``{name}_poly``:
         its value is the same ``+1`` for every resonance (the row is ``−m²``),
-        and ``poly`` is ``kmatrix2``'s word for a *fitted* coefficient
-        ``−(m1²+m2²)`` — a different quantity with a different free/fixed
-        status.
+        while ``poly`` reads like a *fitted* coefficient — a different
+        quantity with a different free/fixed status.
         """
         return ([f"{self.name}_s0", "one"]
                 + [f"{g}_t" for g in self.get_gamma_name()])
@@ -554,7 +553,7 @@ class PlainBasisWeightsTransform(Transform):
 
     This is :class:`BaseModel`'s default, NOT the interface's: it is derived
     from ``get_gamma_name()`` / ``gamma()``, which only ``BaseModel`` has.  A
-    model that states its basis directly (``kmatrix2``, and anything else
+    model that states its basis directly (``kmatrix_n``, and anything else
     subclassing :class:`BasisModel` alone) supplies its own transform instead —
     ``BasisModel.make_basis_transform`` defaults to ``None``.
 
@@ -573,16 +572,16 @@ class PlainBasisWeightsTransform(Transform):
     no other transform has to be registered before it for it to be correct.
 
     A model whose basis weights are NOT ``m0 · coupling`` must override this
-    with its own basis transform — ``kmatrix2`` does.
+    with its own basis transform — ``kmatrix_n`` does.
 
     The default basis is ``[1, −m², −i·γ_j(m)]`` with weights
     ``[m0², +1, m0·g_j]`` — the plain BW denominator.  A model that overrides
-    ``den_basis`` **must** override this too.  ``kmatrix2`` does.  The base
+    ``den_basis`` **must** override this too.  ``kmatrix_n`` does.  The base
     class cannot derive an arbitrary basis' weights from ``m0``/``g``.
 
     It maps the weight names positionally (``m0²`` then ``m0·{g}``), which is
     the ``[1, −m², −i·γ_j]`` layout.  A model with a DIFFERENT basis must
-    override it — ``kmatrix2`` does (``KMatrix2WeightsTransform``).
+    override it — ``kmatrix_n`` does (``KMatrixNWeightsTransform``).
     """
 
     _has_inverse = False
