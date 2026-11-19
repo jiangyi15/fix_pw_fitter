@@ -322,6 +322,88 @@ def real_plotter():
     return PWGroupPlotter(f, r, groups).compute()
 
 
+@pytest.fixture(scope="module")
+def bkg_plotter():
+    """Real Fitter with a NON-zero background and purity 0.8."""
+    from tabpwa import Fitter, FitResult
+    from tabpwa.config_loader import load_config
+    from tabpwa.pwa_build import build_tree_event_data, generate_pwa_phsp
+    from tabpwa.plot_pw_groups import PWGroupPlotter
+
+    dic = load_config("tests/config_pwa.yml")
+    dic["data"] = dict(dic.get("data") or {})
+    dic["data"]["purity"] = 0.8
+    f = Fitter(dic, backend="numpy_pwa")
+    f.apply_constrains()
+    model, kc = f.model, f.kernel_config
+    tree = f.decay_tree
+    chain = tree.partial_waves()[0][1]
+    byt = {tree.topo_index[ch.topo_id()]: ch
+           for _, ch in tree.partial_waves()}
+    phsp = build_tree_event_data(
+        model, kc, byt, generate_pwa_phsp(model, chain, 1200, seed=51))
+    data = build_tree_event_data(
+        model, kc, byt, generate_pwa_phsp(model, chain, 1200, seed=52))
+    # deliberately non-uniform, so a wrong normalisation cannot pass by luck
+    n = phsp["weight"].shape[0]
+    phsp["bkg"] = 0.2 + 0.1 * np.cos(np.arange(n) * 0.37)
+    f.set_phsp(phsp)
+    f.set_data(data)
+    r = FitResult.from_x(f.initial_values(seed=53))
+    groups = {"ALL": list(range(len(model.full_decay.get_partial_waves())))}
+    return PWGroupPlotter(f, r, groups).compute()
+
+
+def test_var_samples_normalises_to_the_uncut_data(bkg_plotter):
+    """Signal + background are anchored to the ORIGINAL (uncut) data total.
+
+    The extra weights are display/selection weights applied PER EVENT; they
+    must enter exactly once.  Anchoring ``bkg_scale`` to ``sum(dw)`` (the cut
+    total) *and* multiplying ``w_bkg`` by the cut counted it twice — then a
+    cut on the data silently moved the background normalisation.
+    """
+    p = bkg_plotter
+    f = p.fitter
+    varfun = pwa_mass_varfun
+    purity = f._purity
+    assert purity == pytest.approx(0.8)
+    wd = float(np.sum(f._data_np["weight"]))
+
+    base = p.var_samples(varfun)
+    assert float(np.sum(base["w_model"])) == pytest.approx(purity * wd)
+    assert float(np.sum(base["w_bkg"])) == pytest.approx((1.0 - purity) * wd)
+
+    # a DATA cut must not move either normalisation
+    cut_d = (np.arange(f._data_np["weight"].size) % 2 == 0).astype(float)
+    s_d = p.var_samples(varfun, data_weight_extra=cut_d)
+    assert float(np.sum(s_d["w_bkg"])) == pytest.approx(
+        float(np.sum(base["w_bkg"])))
+    assert float(np.sum(s_d["w_model"])) == pytest.approx(
+        float(np.sum(base["w_model"])))
+
+    # a PHSP extra enters ONCE: the ratio is the extra-weighted bkg integral
+    cut_p = (np.arange(f._phsp_np["weight"].size) % 3 == 0).astype(float)
+    s_p = p.var_samples(varfun, phsp_weight_extra=cut_p)
+    phsp_w = np.asarray(f._phsp_np["weight"], dtype=float)
+    bkg = np.asarray(f._phsp_np["bkg"], dtype=float)
+    once = float(np.sum(phsp_w * bkg * cut_p) / np.sum(phsp_w * bkg))
+    assert float(np.sum(s_p["w_bkg"])) == pytest.approx(
+        float(np.sum(base["w_bkg"])) * once, rel=1e-12)
+    # the same single factor against the uncut anchor
+    assert float(np.sum(s_p["w_bkg"])) == pytest.approx((1.0 - purity) * wd * once)
+
+
+def test_plot_2d_bkg_matches_var_samples(bkg_plotter):
+    """The 2D panel uses the same bkg normalisation as var_samples."""
+    p = bkg_plotter
+    f = p.fitter
+    varfun = pwa_mass_varfun
+    cut_d = (np.arange(f._data_np["weight"].size) % 2 == 0).astype(float)
+    s_d = p.var_samples(varfun, data_weight_extra=cut_d)
+    assert float(np.sum(s_d["w_bkg"])) == pytest.approx(
+        float(np.sum(p.var_samples(varfun)["w_bkg"])))
+
+
 def test_plot_2d_boundary_draw(tmp_path, real_plotter):
     import matplotlib
     matplotlib.use("Agg")
