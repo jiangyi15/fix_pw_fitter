@@ -46,7 +46,14 @@ sits in the basis row, hence ``Re`` at the pole only — ``ρ(m)`` itself stays
 complex there (``Re ρ_gs`` is exactly 1, so the GS variant needs no coupling
 override).  ``width_norm: false`` switches that normalisation OFF
 (``g_i² = m_i·Γ_i``) for a phase space already normalised at the pole — the
-declared width is then reproduced only where ``Re ρ(m_i) = 1``.
+declared width is then reproduced only where ``Re ρ(m_i) = 1``.  It also makes
+the basis transform's VJP ANALYTIC: every weight is then a polynomial in
+``m_i²`` and ``Γ_i`` (linear in ``β``).  ``width_norm: true`` is analytic too —
+its only non-polynomial piece, ``dRe ρ/dm``, is the hook :meth:`drho_dm`
+(two centred ``ρ`` evaluations by default; override it with the exact
+expression and the VJP sharpens with it) rather than a difference of the whole
+transform — so ``KMatrixNWeightsTransform.backward`` is closed form in BOTH
+modes and makes no extra ``forward`` calls.
 ``mass_list: [m0]`` / ``width_list: [Γ0]`` alone therefore reproduces ``BWRS`` /
 ``GS_rho`` with no manual coupling arithmetic.
 
@@ -74,10 +81,16 @@ from tabpwa.param_constraint import Transform, complex_tail
 
 
 def _prod_minus_s(roots, skip=None):
-    """Ascending coefficients of ``Π_{i ≠ skip} (roots[i] − s)``."""
+    """Ascending coefficients of ``Π_{i ∉ skip} (roots[i] − s)``.
+
+    ``skip`` is an index or a tuple of indices (the VJP needs the second
+    derivative ``Π_{i ≠ j, i ≠ k}`` as well as the first).
+    """
+    skip = () if skip is None else \
+        ((skip,) if isinstance(skip, (int, np.integer)) else tuple(skip))
     c = np.array([1.0])
     for i, r in enumerate(roots):
-        if i == skip:
+        if i in skip:
             continue
         out = np.zeros(len(c) + 1)
         out[:len(c)] += r * c
@@ -148,13 +161,14 @@ class KMatrixNWeightsTransform(Transform):
     _has_inverse = False
 
     def __init__(self, name, den_names, num_names, defaults, tail=None,
-                 n_pole=None, coupling_sq=None):
+                 n_pole=None, coupling_sq=None, coupling_jac=None):
         if coupling_sq is None:
             raise ValueError(
                 "KMatrixNWeightsTransform needs the model's `coupling_sq` "
                 "(width -> g²) rule")
         self.tail = tuple(tail) if tail is not None else complex_tail()
         self._coupling_sq = coupling_sq
+        self._coupling_jac = coupling_jac
         mag, phase = self.tail
         self.name = name
         self.n_pole = int(n_pole or len(num_names))
@@ -192,6 +206,117 @@ class KMatrixNWeightsTransform(Transform):
             vals += [float(np.abs(x)), float(np.angle(x))]
         vals += [float(x) for x in den]
         return {out: val for out, val in zip(self.output_names, vals)}
+
+    def backward(self, grad_out, d_in=None):
+        """VJP of :meth:`forward` — ANALYTIC for a linear width rule.
+
+        ``width_norm: false`` gives ``g_i² = m_i·Γ_i``, so every weight is a
+        polynomial in ``m_i²`` and ``Γ_i`` (and linear in ``β``) and the
+        adjoint below is exact::
+
+            w(s) = Π_i (m_i² − s)                 ∂w/∂m_j = 2m_j Π_{l≠j}
+            u(s) = Σ_i g2_i Π_{l≠i}               ∂u/∂Γ_j = (∂g2_j/∂Γ_j) Π_{l≠j}
+                                                  ∂u/∂m_j = (∂g2_j/∂m_j) Π_{l≠j}
+                                                            + 2m_j Σ_{i≠j} g2_i Π_{l≠i,j}
+            n(s) = Σ_i β_i Π_{l≠i}                ∂n/∂m_j = 2m_j Σ_{i≠j} β_i Π_{l≠i,j}
+
+        with ``Π_{l≠j} = _prod_minus_s(m², j)``.  The ``(magnitude, phase)``
+        numerator slots are adjointed in the polar chart (a head with
+        ``|n| = 0`` has no phase and contributes nothing).
+
+        ``width_norm: true`` divides by ``Re ρ(m_i)``.  The only derivative
+        that is not closed form there, ``dRe ρ/dm``, comes from two centred
+        evaluations of ``ρ`` (``_coupling_sq_jac``), so this VJP is analytic in
+        BOTH modes; a model that cannot supply partials at all still falls back
+        to the inherited finite-difference VJP.
+        """
+        d = self._last_input if d_in is None else d_in
+        p = self._inputs(d)
+        n = self.n_pole
+        mass = [p[f"mass{i}"] for i in range(n)]
+        width = [p[f"width{i}"] for i in range(n)]
+        g2, dg2_dm, dg2_dg = self._coupling_jac(mass, width)
+        if dg2_dm is None:                     # non-polynomial rule -> FD
+            return self.fd_backward(grad_out, d_in=d)
+
+        mag, phase = self.tail
+        beta = [1.0 + 0.0j]                    # beta0: the fixed gauge head
+        beta += [p[f"beta{i}{mag}"] * np.exp(1j * p[f"beta{i}{phase}"])
+                 for i in range(1, n)]
+
+        g2 = np.asarray(g2, dtype=float)
+        dg2_dm = np.asarray(dg2_dm, dtype=float)
+        dg2_dg = np.asarray(dg2_dg, dtype=float)
+        roots = [float(x) ** 2 for x in mass]
+        P = [_prod_minus_s(roots, j) for j in range(n)]
+        pair = {}
+
+        def P2(i, j):
+            """``Π_{l ≠ i, j}`` (the second-derivative factor)."""
+            if (i, j) not in pair:
+                pair[(i, j)] = _prod_minus_s(roots, (i, j))
+            return pair[(i, j)]
+
+        gm = np.zeros(n)
+        gG = np.zeros(n)
+        num_off = 2 * n                        # the numerator slots come first
+        den_off = num_off
+        rho_off = den_off + (n + 1)
+
+        # real rows: w = Π_i (m_i² − s); ∂w/∂m_j = 2m_j Π_{l≠j} has degree
+        # n − 1, so the s^n coefficient (k = n) is mass-independent
+        for k in range(n):
+            cw = float(grad_out.get(self.output_names[den_off + k], 0.0))
+            if cw:
+                for j in range(n):
+                    gm[j] += cw * 2.0 * mass[j] * P[j][k]
+
+        # rho rows: u = Σ_i g2_i Π_{l≠i}
+        for k in range(n):
+            cu = float(grad_out.get(self.output_names[rho_off + k], 0.0))
+            if not cu:
+                continue
+            for j in range(n):
+                # the cross term has degree n − 2, so it vanishes for k = n−1
+                second = (sum(g2[i] * P2(i, j)[k] for i in range(n) if i != j)
+                          if k <= n - 2 else 0.0)
+                gm[j] += cu * (dg2_dm[j] * P[j][k]
+                               + 2.0 * mass[j] * second)
+                gG[j] += cu * dg2_dg[j] * P[j][k]
+
+        # numerator heads: n_k = Σ_i β_i Π_{l≠i}, emitted as (|n_k|, arg n_k)
+        nk = [sum(beta[i] * P[i][k] for i in range(n)) for k in range(n)]
+        q = []
+        for k in range(n):
+            cm = float(grad_out.get(self.output_names[2 * k], 0.0))
+            cp = float(grad_out.get(self.output_names[2 * k + 1], 0.0))
+            a = abs(nk[k])
+            if a == 0.0:
+                q.append(0j)                   # no phase at a zero head
+            else:
+                q.append(cm * nk[k] / a + 1j * cp * nk[k] / (a * a))
+
+        for k in range(n):
+            if q[k] == 0:
+                continue
+            for j in range(n):
+                if k > n - 2:
+                    continue            # ∂n/∂m has degree n − 2
+                second = sum(beta[i] * P2(i, j)[k]
+                             for i in range(n) if i != j)
+                gm[j] += (2.0 * mass[j] * second * q[k].conjugate()).real
+
+        out = {}
+        for j in range(n):
+            out[f"mass{j}"] = float(gm[j])
+            out[f"width{j}"] = float(gG[j])
+        for j in range(1, n):
+            Q = sum(q[k].conjugate() * P[j][k] for k in range(n))
+            out[f"beta{j}{mag}"] = float((Q * np.exp(
+                1j * p[f"beta{j}{phase}"])).real)
+            out[f"beta{j}{phase}"] = float((1j * beta[j] * Q).real)
+        return {name: out[key] for name, key in
+                zip(self.input_names, self._keys)}
 
 
 @register_model("kmatrix_n")
@@ -343,6 +468,69 @@ class KMatrixNModel(BasisModel):
         pos = rho > 0
         return np.where(pos, g2 / np.where(pos, rho, 1.0), g2)
 
+    #: Relative step of the DEFAULT ``dRe ρ/dm`` difference.
+    #:
+    #: Chosen from measured error against a Richardson-extrapolated truth
+    #: (relative, worst over ``phase_space`` L=0/1 at m = 0.30 (near
+    #: threshold), 0.775, 2.0 and ``gs_unit`` at 0.775)::
+    #:
+    #:     eps      fp64 rho        fp32-valued rho
+    #:     1e-3     1.2e-4          1.2e-4
+    #:     1e-4     1.2e-6          8.9e-4
+    #:     1e-5     1.2e-8          5.7e-3      <- default
+    #:     1e-6     1.5e-10         2.4e-2
+    #:     1e-7     4.6e-9          1.0
+    #:
+    #: Our ``_rho`` is fp64, where 1e-6 is the optimum and 1e-5 is within
+    #: 1.2e-8; 1e-7 is already past the round-off knee.  A ρ that is evaluated
+    #: or tabulated in low precision moves the knee out by ~100x — set
+    #: ``_RHO_FD_EPS = 1e-3`` there, or override :meth:`drho_dm` exactly.
+    _RHO_FD_EPS = 1e-5
+
+    def drho_dm(self, m):
+        """``d Re ρ / dm`` — the ONE non-polynomial derivative in the model.
+
+        Default: a centred difference of :meth:`_rho` (two cheap scalar
+        evaluations, no ``forward`` of the basis transform).  This is the
+        single hook for an exact expression — override it in a subclass or on
+        an instance and the whole VJP sharpens with it, nothing else changes::
+
+            model.drho_dm = lambda m: exact_drho(m)     # exact
+
+        ``Re`` is taken BEFORE differencing: the coupling rule uses
+        ``Re ρ(m)`` only, so the imaginary part carries no derivative.
+        """
+        m_arr = np.asarray(m, dtype=float)
+        h = self._RHO_FD_EPS * np.maximum(1.0, np.abs(m_arr))
+        rho_p = np.asarray(self._rho(m_arr + h), dtype=complex).real
+        rho_m = np.asarray(self._rho(m_arr - h), dtype=complex).real
+        return (rho_p - rho_m) / (2.0 * h)
+
+    def _coupling_sq_jac(self, m, gamma):
+        """``(g², ∂g²/∂m, ∂g²/∂Γ)`` — closed form apart from ``drho_dm``.
+
+        ``width_norm: false`` (``g² = m·Γ``) is linear in both, exact.
+
+        ``width_norm: true`` (``g² = m·Γ/Re ρ(m)``) is analytic in ``Γ``
+        (``∂g²/∂Γ = m/Re ρ``); the mass slot needs ``dRe ρ/dm``, which comes
+        from :meth:`drho_dm` (centred difference by default, exact if
+        overridden).  Below threshold (``Re ρ ≤ 0``) the rule falls back to
+        ``m·Γ`` and so do the partials.
+        """
+        m_arr = np.asarray(m, dtype=float)
+        w_arr = np.asarray(gamma, dtype=float)
+        g2 = self._coupling_sq(m_arr, w_arr)
+        if not self.width_norm:
+            return g2, w_arr, m_arr
+        rho = np.asarray(self._rho(m_arr), dtype=complex).real
+        pos = rho > 0
+        drho = np.asarray(self.drho_dm(m_arr), dtype=float)
+        safe = np.where(pos, rho, 1.0)
+        dg2_dg = np.where(pos, m_arr / safe, m_arr)
+        dg2_dm = np.where(pos, w_arr / safe - m_arr * w_arr * drho / safe ** 2,
+                          w_arr)
+        return g2, dg2_dm, dg2_dg
+
     # -- basis ------------------------------------------------------
 
     def den_basis(self, m):
@@ -370,7 +558,8 @@ class KMatrixNModel(BasisModel):
         return KMatrixNWeightsTransform(
             self.name, self.get_den_name(), self.get_num_name(),
             defaults, tail=self.tail, n_pole=self.n_pole,
-            coupling_sq=self._coupling_sq)
+            coupling_sq=self._coupling_sq,
+            coupling_jac=self._coupling_sq_jac)
 
 
 @register_model("kmatrix_n_gs")

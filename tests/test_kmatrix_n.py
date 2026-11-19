@@ -184,6 +184,178 @@ def test_beta0_is_the_gauge_head_and_beta1_starts_random():
     assert len([x for x in flat if x.startswith(n + "_")]) == 2 * 2 + 2
 
 
+def test_drho_dm_step_choice_is_pinned():
+    """`_RHO_FD_EPS = 1e-5`: fp64-exact to 1e-6, and 1e-3 is the low-precision
+    escape hatch (it is measurably better when the *values* are fp32)."""
+    n = "k"
+    masses = [0.30, 0.60, 0.775, 2.00]
+
+    def d(mdl, m, h, f32=False):
+        a = np.asarray(mdl._rho(np.array([m + h])), dtype=complex).real[0]
+        b = np.asarray(mdl._rho(np.array([m - h])), dtype=complex).real[0]
+        if f32:
+            a, b = np.float32(a), np.float32(b)
+        return (float(a) - float(b)) / (2.0 * h)
+
+    def truth(mdl, m):                       # Richardson on a coarse pair
+        h = 1e-4
+        return (4.0 * d(mdl, m, h / 2) - d(mdl, m, h)) / 3.0
+
+    worst64 = worst32 = worst32_coarse = 0.0
+    for model in ("kmatrix_n", "kmatrix_n_gs"):
+        for mass in masses:
+            mdl = build_particle(n, model=model, mass_list=[mass],
+                                 width_list=[0.15], L=1)
+            mdl.register_parent(_Parent())
+            assert mdl._RHO_FD_EPS == 1e-5
+            t = truth(mdl, mass)
+            h = mdl._RHO_FD_EPS * max(1.0, mass)
+            worst64 = max(worst64, abs(d(mdl, mass, h) - t) / abs(t))
+            worst32 = max(worst32, abs(d(mdl, mass, h, True) - t) / abs(t))
+            worst32_coarse = max(
+                worst32_coarse,
+                abs(d(mdl, mass, 1e-3 * max(1.0, mass), True) - t) / abs(t))
+
+    assert worst64 <= 1e-6                   # fp64: no practical error
+    assert worst32_coarse <= 1e-3            # coarse step survives fp32 values
+    assert worst32_coarse * 10.0 < worst32   # ... and beats the fine step there
+
+
+def test_drho_dm_hook_defaults_to_fd_and_takes_an_exact_override():
+    """`drho_dm` is the one hook: FD by default, exact if the user supplies it."""
+    n = "k"
+    mdl = build_particle(n, model="kmatrix_n", mass_list=[0.70, 1.10],
+                         width_list=[0.15, 0.20], L=1)      # width_norm: true
+    mdl.register_parent(_Parent())
+    m = np.array([0.70, 1.10])
+    w = np.array([0.15, 0.20])
+
+    # default: a centred difference of Re rho (an independent step here)
+    h = 1e-6
+    ref = (np.asarray(mdl._rho(m + h), dtype=complex).real
+           - np.asarray(mdl._rho(m - h), dtype=complex).real) / (2.0 * h)
+    assert np.allclose(mdl.drho_dm(m), ref, rtol=1e-6)
+
+    # an EXACT override: pretend rho = m², so dRe rho/dm = 2m
+    mdl._rho = lambda x: np.asarray(x, dtype=float) ** 2
+    mdl.drho_dm = lambda x: 2.0 * np.asarray(x, dtype=float)
+    g2, dg2_dm, dg2_dg = mdl._coupling_sq_jac(m, w)
+    assert np.allclose(g2, w / m)                 # m·Γ/m²
+    assert np.allclose(dg2_dm, -w / m ** 2)       # exact, no FD error
+    assert np.allclose(dg2_dg, 1.0 / m)
+
+    # ... and the full VJP is then exact against a difference of `forward`
+    tr = mdl.make_basis_transform()
+    params = {f"{n}_mass0": 0.70, f"{n}_mass1": 1.10,
+              f"{n}_width0": 0.15, f"{n}_width1": 0.20,
+              f"{n}_beta1r": 0.7, f"{n}_beta1i": -0.4}
+    tr.apply_forward(dict(params))
+    cot = {nm: float(i + 1) * (1.0 if i % 2 == 0 else -1.0)
+           for i, nm in enumerate(tr.output_names)}
+    vjp = tr.backward(cot, d_in=dict(params))
+
+    def scalar(x):
+        o = tr.forward(x)
+        return sum(cot[k] * o[k] for k in tr.output_names)
+
+    for name, val in vjp.items():
+        x = params[name]
+        step = 1e-5 * max(1.0, abs(x))
+        fd = (scalar({**params, name: x + step})
+              - scalar({**params, name: x - step})) / (2.0 * step)
+        assert val == pytest.approx(fd, rel=1e-6, abs=1e-9), name
+
+
+@pytest.mark.parametrize("n_pole", [1, 2, 3, 4])
+def test_width_norm_false_has_an_analytic_vjp(n_pole):
+    """`g² = m·Γ` makes every weight polynomial ⇒ closed-form VJP, no FD."""
+    n = "k"
+    m = [0.70 + 0.40 * i for i in range(n_pole)]
+    w = [0.15 + 0.05 * i for i in range(n_pole)]
+    mdl = build_particle(n, model="kmatrix_n", mass_list=m, width_list=w,
+                         width_norm=False, L=1)
+    mdl.register_parent(_Parent())
+    tr = mdl.make_basis_transform()
+    params = {f"{n}_mass{i}": m[i] for i in range(n_pole)}
+    params.update({f"{n}_width{i}": w[i] for i in range(n_pole)})
+    for i in range(1, n_pole):
+        params[f"{n}_beta{i}r"] = 0.5 + 0.2 * i
+        params[f"{n}_beta{i}i"] = -0.3 * i
+    tr.apply_forward(dict(params))
+
+    cot = {nm: float(i + 1) * (1.0 if i % 2 == 0 else -1.0)
+           for i, nm in enumerate(tr.output_names)}
+    calls = []
+    original = tr.forward
+    tr.forward = lambda d: (calls.append(1), original(d))[1]
+    try:
+        vjp = tr.backward(cot, d_in=dict(params))
+    finally:
+        tr.forward = original
+    assert calls == []            # analytic: no forward evaluations at all
+
+    def scalar(x):
+        o = original(x)
+        return sum(cot[k] * o[k] for k in tr.output_names)
+
+    for name, val in vjp.items():
+        x = params[name]
+        h = 1e-5 * max(1.0, abs(x))          # an order above fd_eps
+        fd = (scalar({**params, name: x + h})
+              - scalar({**params, name: x - h})) / (2.0 * h)
+        assert val == pytest.approx(fd, rel=1e-7, abs=1e-8), name
+
+
+def test_width_norm_true_vjp_is_analytic_apart_from_rho():
+    """`g² = m·Γ/Re ρ(m)` — analytic VJP; only `dRe ρ/dm` is a difference.
+
+    The ρ derivative is TWO cheap evaluations of ``_rho``, not the 2·n_input
+    differences of the whole transform, so ``backward`` still calls no
+    ``forward``.
+    """
+    n = "k"
+    mdl = build_particle(n, model="kmatrix_n", mass_list=[0.70, 1.10],
+                         width_list=[0.15, 0.20], L=1)      # width_norm: true
+    mdl.register_parent(_Parent())
+    m = np.array([0.70, 1.10])
+    w = np.array([0.15, 0.20])
+
+    _, dg2_dm, dg2_dg = mdl._coupling_sq_jac(m, w)
+    ref = (np.asarray(mdl._coupling_sq(m + 1e-7, w), dtype=float)
+           - np.asarray(mdl._coupling_sq(m - 1e-7, w), dtype=float)) / 2e-7
+    assert np.allclose(dg2_dm, ref, rtol=1e-6)
+    rho = np.asarray(mdl._rho(m), dtype=complex).real
+    assert np.allclose(dg2_dg, m / rho, rtol=1e-12)
+
+    tr = mdl.make_basis_transform()
+    params = {f"{n}_mass0": 0.70, f"{n}_mass1": 1.10,
+              f"{n}_width0": 0.15, f"{n}_width1": 0.20,
+              f"{n}_beta1r": 0.7, f"{n}_beta1i": -0.4}
+    tr.apply_forward(dict(params))
+    cot = {nm: float(i + 1) * (1.0 if i % 2 == 0 else -1.0)
+           for i, nm in enumerate(tr.output_names)}
+
+    calls = []
+    original = tr.forward
+    tr.forward = lambda d: (calls.append(1), original(d))[1]
+    try:
+        vjp = tr.backward(cot, d_in=dict(params))
+    finally:
+        tr.forward = original
+    assert calls == []                     # no full-transform differences
+
+    def scalar(x):
+        o = original(x)
+        return sum(cot[k] * o[k] for k in tr.output_names)
+
+    for name, val in vjp.items():
+        x = params[name]
+        h = 1e-5 * max(1.0, abs(x))        # an order above fd_eps
+        fd = (scalar({**params, name: x + h})
+              - scalar({**params, name: x - h})) / (2.0 * h)
+        assert val == pytest.approx(fd, rel=1e-6, abs=1e-8), name
+
+
 @pytest.mark.parametrize("n_pole", [1, 2, 3, 4, 5])
 def test_den_names_have_one_entry_per_basis_row(n_pole):
     """`get_den_name()` / `get_num_name()` must match the basis LENGTH."""
