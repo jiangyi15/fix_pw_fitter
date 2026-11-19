@@ -263,10 +263,14 @@ class KMatrixNModel(BasisModel):
     def get_defaults(self):
         """The per-pole fit parameters — ``mass{i}`` / ``width{i}`` / ``beta{i}…``.
 
-        The reference ``M`` and the scalar ``mass``/``width`` shorthand are
-        BUILD-time (``_reference_mass``), not parameters: they feed the
-        defaults above, so exposing them would add a free direction with no
-        gradient.
+        This dict is the model's ADVERTISED parameter surface: it feeds
+        ``AmplitudeModel.particle_defaults`` → ``cm.defaults`` and the printed
+        / saved fit metadata.  Only names the basis transform consumes belong
+        in it (registration itself comes from the transform's ``input_names``,
+        so an extra entry is inert — it just reads like a parameter that
+        nothing can move).  The scalar ``mass``/``width`` are BUILD-time
+        (``_reference_mass``; and the fallback shape when no ``masses`` /
+        ``widths`` are given), so they stay out.
         """
         return {f"{self.name}_{key}": val for key, val in self._phys().items()}
 
