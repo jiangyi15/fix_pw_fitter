@@ -372,6 +372,9 @@ def test_var_samples_normalises_to_the_uncut_data(bkg_plotter):
     base = p.var_samples(varfun)
     assert float(np.sum(base["w_model"])) == pytest.approx(purity * wd)
     assert float(np.sum(base["w_bkg"])) == pytest.approx((1.0 - purity) * wd)
+    # ONE definition, shared by every panel: the normaliser takes no extra
+    assert p._bkg_normaliser() == pytest.approx(
+        (1.0 - purity) * wd / p._bkg_norm)
 
     # a DATA cut must not move either normalisation
     cut_d = (np.arange(f._data_np["weight"].size) % 2 == 0).astype(float)

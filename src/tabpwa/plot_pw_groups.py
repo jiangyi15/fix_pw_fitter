@@ -489,6 +489,25 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
+    def _bkg_normaliser(self):
+        """``bkg_scale``, anchored to the ORIGINAL (uncut) data total.
+
+        The signal is ``_scale = purity·Σw_data / Σ(phsp_w·P)``; the
+        background must share that anchor, ``(1−purity)·Σw_data /
+        Σ(phsp_w·bkg)``, so an extra weight (a cut, a tag weight) enters
+        exactly ONCE — through the per-event arrays the caller multiplies in
+        — and a cut shows up as the fraction difference it should.  Taking
+        ``Σ(w_data·extra)`` here would anchor the background to the CUT total
+        while the denominator stays uncut, and the cut would then be applied
+        twice.  THE one definition: every panel calls this.
+        """
+        f = self.fitter
+        if not (self._bkg_norm > 0):
+            return 0.0
+        purity = f._purity if f._purity is not None else 1.0
+        dn = self.data_var_np if self.data_var_np is not None else f._data_np
+        return float(np.sum(dn["weight"])) * (1.0 - purity) / self._bkg_norm
+
     def var_samples(self, varfun, data_weight_extra=None,
                     phsp_weight_extra=None):
         """Weighted variable samples (pre-binning) — the plot data.
@@ -520,16 +539,7 @@ class PWGroupPlotter:
         # matches the pre-refactor plot_var handling
         extra = np.asarray(1.0 if phsp_weight_extra is None
                            else phsp_weight_extra, dtype=float)
-        purity = f._purity if f._purity is not None else 1.0
-        # The background is anchored to the ORIGINAL, UNCUT data total — the
-        # same one :meth:`compute` used for ``_scale`` — so an extra weight (a
-        # cut, a tag weight) enters exactly ONCE, through the per-event
-        # ``extra`` below, and the plotted fractions show the cut's effect.
-        # ``sum(dw)`` here would anchor bkg to the CUT total *and* multiply by
-        # the cut again (the double count this replaces).
-        data_total = float(np.sum(dn["weight"]))
-        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
-                     if self._bkg_norm > 0 else 0.0)
+        bkg_scale = self._bkg_normaliser()
         x_data = varfun(dn)
         x_phsp = varfun(pv)
         return {
@@ -987,12 +997,7 @@ class PWGroupPlotter:
         w_sig = extra * self._P_total * self._scale
         w_bkg = np.zeros_like(w_sig)
         if self._bkg_norm > 0:
-            purity = f._purity if f._purity is not None else 1.0
-            # uncut anchor (see var_samples): the extra enters only through
-            # the per-event ``extra``, never twice
-            data_total = float(np.sum(dn["weight"]))
-            bkg_scale = data_total * (1.0 - purity) / self._bkg_norm
-            w_bkg = extra * self._bkg_var * bkg_scale
+            w_bkg = extra * self._bkg_var * self._bkg_normaliser()
         w_fit = w_sig + w_bkg
 
         xlo0, xhi0 = x_range if x_range is not None else (np.min(p1), np.max(p1))
@@ -1209,11 +1214,7 @@ class PWGroupPlotter:
         pw_all_sig = np.concatenate([extra * self._P_total * self._scale * s
                                      for s in scl])
 
-        purity = f._purity if f._purity is not None else 1.0
-        # uncut anchor (see var_samples)
-        data_total = float(np.sum(f._data_np["weight"]))
-        bkg_scale = (data_total * (1.0 - purity) / self._bkg_norm
-                     if self._bkg_norm > 0 else 0.0)
+        bkg_scale = self._bkg_normaliser()
         pw_all_bkg = np.concatenate([extra * self._bkg_var * bkg_scale * s
                                      for s in scl])
 
