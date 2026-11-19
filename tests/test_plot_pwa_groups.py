@@ -410,7 +410,8 @@ def test_cut_function_applies_to_both_samples(bkg_plotter):
     def cut(d):
         return (d["mass"][:, 0] > 0.8).astype(float)
 
-    via_func = p.var_samples(varfun, cut_function=cut)
+    d_cut, p_cut = p.resolved_extras(cut)
+    via_func = p.var_samples(varfun, d_cut, p_cut)
     via_arrays = p.var_samples(varfun,
                                data_weight_extra=cut(f._data_np),
                                phsp_weight_extra=cut(f._phsp_np))
@@ -423,18 +424,58 @@ def test_cut_function_applies_to_both_samples(bkg_plotter):
     assert 0 < np.count_nonzero(cut(f._data_np)) < cut(f._data_np).size
 
     with pytest.raises(ValueError, match="not both"):
-        p.var_samples(varfun, data_weight_extra=cut(f._data_np),
-                      cut_function=cut)
+        p.resolved_extras(cut, data_weight_extra=cut(f._data_np))
 
     # a scalar return broadcasts to one weight per event
-    smp = p.var_samples(varfun, cut_function=lambda d: 2.0)
+    smp = p.var_samples(varfun, *p.resolved_extras(lambda d: 2.0))
     base = p.var_samples(varfun)
     assert np.sum(smp["w_model"]) == pytest.approx(2.0 * np.sum(base["w_model"]))
     assert np.sum(smp["w_bkg"]) == pytest.approx(2.0 * np.sum(base["w_bkg"]))
 
     # a wrong-shaped return is an error, not a silent broadcast
     with pytest.raises(ValueError, match="one weight per event"):
-        p.var_samples(varfun, cut_function=lambda d: np.ones(3))
+        p.resolved_extras(lambda d: np.ones(3))
+
+    # var_samples itself takes ONLY per-sample weights now
+    with pytest.raises(TypeError):
+        p.var_samples(varfun, cut_function=cut)
+
+
+def test_many_cut_variations_are_plot_level(tmp_path, bkg_plotter):
+    """The same fit, several cuts — the plot is the only thing that changes.
+
+    Each call re-resolves the cut into the two per-event arrays, so the fit,
+    `_scale`, `_bkg_norm` and the uncut anchor are untouched; the areas follow
+    the cut while the background keeps its uncut normalisation.
+    """
+    p = bkg_plotter
+    f = p.fitter
+    purity = f._purity
+    wd = float(np.sum(f._data_np["weight"]))
+    phsp_w = np.asarray(f._phsp_np["weight"], dtype=float)
+    bkg = np.asarray(f._phsp_np["bkg"], dtype=float)
+    w_data = np.asarray(f._data_np["weight"], dtype=float)
+
+    masses = f._data_np["mass"][:, 0]
+    phsp_m = f._phsp_np["mass"][:, 0]
+    seen = []
+    for i, thr in enumerate((0.5, 0.8, 1.2)):
+        cut = lambda d, _t=thr: (d["mass"][:, 0] > _t).astype(float)
+        smp = p.var_samples(pwa_mass_varfun, *p.resolved_extras(cut))
+        frac_d = cut(f._data_np)
+        frac_p = cut(f._phsp_np)
+        assert float(np.sum(smp["w_data"])) == pytest.approx(
+            float(np.sum(w_data * frac_d)))
+        assert float(np.sum(smp["w_bkg"])) == pytest.approx(
+            (1.0 - purity) * wd * float(np.sum(phsp_w * bkg * frac_p)
+                                        / np.sum(phsp_w * bkg)))
+        # drawing works for every variation, and only the plot moves
+        p.plot_var(lambda d: [d["mass"][:, 0]], ["m"], 0.3, 3.0, 0.1,
+                   f"cut{i}", output=str(tmp_path), cut_function=cut)
+        assert (tmp_path / f"cut{i}.png").exists()
+        seen.append(float(np.sum(smp["w_data"])))
+    assert seen[0] > seen[1] > seen[2]          # tighter cut, fewer events
+    assert float(np.sum(f._data_np["weight"])) == pytest.approx(wd)   # untouched
 
 
 def test_plot_2d_bkg_matches_var_samples(bkg_plotter):

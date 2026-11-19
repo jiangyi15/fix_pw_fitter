@@ -155,3 +155,30 @@ def test_stack_plotter_forwards_axis_style(tmp_path, monkeypatch, stacked):
     finally:
         for fig in figs:
             plt.close(fig)
+
+
+def test_stack_plotter_applies_one_cut_to_every_dataset(tmp_path):
+    """`cut_function` on the stack: resolved PER DATASET, data and phsp."""
+    joint, fa, fb = _joint_two()
+    x = joint.initial_values(seed=8)
+    sp = PWStackPlotter([(fa, x, {}), (fb, x, {})],
+                        labels=["A", "B"]).compute()
+
+    cut = lambda d: (d["mass"][:, 0] > d["mass"][:, 0].mean()).astype(float)
+    merged = sp.merged_samples(VARFUN, cut_function=cut)
+    parts = [pl.var_samples(VARFUN, *pl.resolved_extras(cut))
+             for pl in sp.plotters]
+    for key in ("w_data", "w_model", "w_bkg"):
+        want = np.concatenate([s[key] for s in parts])
+        assert np.array_equal(merged[key], want), key
+    # the cut really bit, and differs per dataset
+    assert not np.array_equal(parts[0]["w_data"], 
+                              sp.plotters[0].var_samples(VARFUN)["w_data"])
+    assert np.sum(parts[0]["w_data"]) > 0
+
+    # stacked and overlaid both draw with the cut
+    for stacked in (True, False):
+        path = tmp_path / f"cut_{stacked}.png"
+        sp.plot_var(VARFUN, ["m"], 0.2, 3.0, 0.1, f"cut_{stacked}",
+                    stacked=stacked, cut_function=cut, output=str(tmp_path))
+        assert path.exists()

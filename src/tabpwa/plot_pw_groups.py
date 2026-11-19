@@ -14,37 +14,17 @@ from .plot_pw_draw import (bin_edges, draw_overlay_figure, draw_var_figure,
                            panel_axes, save_figure)
 
 
-def resolve_extra(cut_function, explicit, sample, what="sample"):
+def resolve_extra(explicit, sample, what="sample"):
     """Per-event extra weight of ONE sample, as a float ndarray.
 
-    ``cut_function`` is the SAME callable for the data and for the Monte
-    Carlo — typically a cut, e.g.::
-
-        cut_function=lambda d: (d["mass"][:, 0] > 1.0).astype(float)
-
-    but any per-event weight (tag weight, sWeight, efficiency) is fine.  Being
-    one function, the two samples cannot end up with different selections by
-    accident.
-
-    It is called with the dict the caller is about to plot — with ``use_rec``
-    that is the ORIGINAL-row sample, not the fitter's resolution-copied one —
-    so write it in terms of the event content (masses, angles, …), never in
-    terms of a row count; the returned length is checked against that dict.
-    ``explicit`` is the per-sample escape hatch (data sWeights and MC weights
-    genuinely differ).  Giving both is ambiguous and raises.  A scalar (from
-    either) is broadcast to the sample, so ``extra[mask]`` always works
-    downstream; a returned array must be one weight per event.
+    ``explicit`` is a per-event array (a cut, a tag weight, an sWeight …) or a
+    scalar, which is broadcast; ``None`` means 1.0.  One weight per event is
+    enforced HERE, so a weight written against the wrong row count is an error
+    rather than a silent broadcast — which is also why ``extra[mask]`` always
+    works downstream (never a 0-d array).
     """
     n = int(np.shape(np.asarray(sample["weight"]))[0])
-    if cut_function is not None:
-        if explicit is not None:
-            raise ValueError(
-                "give EITHER cut_function (ONE callable applied to data AND "
-                "phsp) OR data_weight_extra/phsp_weight_extra, not both — "
-                "mixing them leaves it unclear which selection a sample got")
-        w = cut_function(sample)
-    else:
-        w = 1.0 if explicit is None else explicit
+    w = 1.0 if explicit is None else explicit
     if np.ndim(w) == 0:
         return np.full(n, float(w))
     w = np.asarray(w, dtype=float)
@@ -530,10 +510,38 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
-    def _resolve_extras(self, cut_function, data_extra, phsp_extra, dn, pv):
-        """``(data_extra, phsp_extra)`` as arrays — see :func:`resolve_extra`."""
-        return (resolve_extra(cut_function, data_extra, dn, "data"),
-                resolve_extra(cut_function, phsp_extra, pv, "phsp"))
+    def resolved_extras(self, cut_function=None, data_weight_extra=None,
+                        phsp_weight_extra=None, dn=None, pv=None):
+        """``(data_extra, phsp_extra)`` arrays from a cut callable or arrays.
+
+        THIS is the plot-level home of ``cut_function``: ONE callable is
+        evaluated on both samples, so data and Monte Carlo cannot get
+        different selections by accident.  ``data_weight_extra`` /
+        ``phsp_weight_extra`` stay as the per-sample escape hatch (data
+        sWeights vs MC weights genuinely differ); a callable AND an array is
+        ambiguous and raises.
+
+        The callable is handed the dict that is ABOUT to be plotted — under
+        ``use_rec`` that is the ORIGINAL-row sample, not the fitter's
+        resolution-copied one — so write it in terms of the event content
+        (masses, angles, …), never a row count; the length is checked against
+        that dict.  :meth:`var_samples` takes only the resulting arrays.
+        """
+        if cut_function is not None and (data_weight_extra is not None
+                                         or phsp_weight_extra is not None):
+            raise ValueError(
+                "give EITHER cut_function (ONE callable applied to data AND "
+                "phsp) OR data_weight_extra/phsp_weight_extra, not both — "
+                "mixing them leaves it unclear which selection a sample got")
+        if dn is None:
+            dn = self.data_var_np if self.data_var_np is not None \
+                else self.fitter._data_np
+        if pv is None:
+            pv = self.phsp_var_np if self.phsp_var_np is not None \
+                else self.fitter._phsp_np
+        d = data_weight_extra if cut_function is None else cut_function(dn)
+        p = phsp_weight_extra if cut_function is None else cut_function(pv)
+        return resolve_extra(d, dn, "data"), resolve_extra(p, pv, "phsp")
 
     def _bkg_normaliser(self):
         """``bkg_scale``, anchored to the ORIGINAL (uncut) data total.
@@ -555,7 +563,7 @@ class PWGroupPlotter:
         return float(np.sum(dn["weight"])) * (1.0 - purity) / self._bkg_norm
 
     def var_samples(self, varfun, data_weight_extra=None,
-                    phsp_weight_extra=None, cut_function=None):
+                    phsp_weight_extra=None):
         """Weighted variable samples (pre-binning) — the plot data.
 
         Exactly the arrays :meth:`plot_var` histograms, exposed so several
@@ -571,11 +579,9 @@ class PWGroupPlotter:
         * ``w_groups``              — ``{group_label: weights}`` (signal
           only; group-summed to the variable rows),
 
-        ``cut_function`` is ONE callable applied to BOTH samples (a cut, a
-        tag weight, …), so data and Monte Carlo cannot get different
-        selections; ``data_weight_extra`` / ``phsp_weight_extra`` are the
-        per-sample escape hatch for genuinely different weights — give one or
-        the other.
+        ``data_weight_extra`` / ``phsp_weight_extra`` are per-sample weights
+        (arrays or scalars); the plot methods turn ONE ``cut_function`` into
+        them via :meth:`resolved_extras`.
 
         Plus ``meta`` with the per-dataset ``scale``, ``bkg_scale``,
         ``n_var`` and the group labels.
@@ -585,10 +591,8 @@ class PWGroupPlotter:
         f = self.fitter
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        wd_extra, wp_extra = self._resolve_extras(
-            cut_function, data_weight_extra, phsp_weight_extra, dn, pv)
-        dw = dn["weight"] * wd_extra
-        extra = wp_extra           # per-event array (never 0-d)
+        dw = dn["weight"] * resolve_extra(data_weight_extra, dn, "data")
+        extra = resolve_extra(phsp_weight_extra, pv, "phsp")
         bkg_scale = self._bkg_normaliser()
         x_data = varfun(dn)
         x_phsp = varfun(pv)
@@ -717,8 +721,9 @@ class PWGroupPlotter:
 
         # the plot data (pre-binning weighted samples) — shared with
         # PWStackPlotter so merged datasets bin exactly the same arrays
-        smp = self.var_samples(varfun, data_weight_extra, phsp_weight_extra,
-                               cut_function=cut_function)
+        data_weight_extra, phsp_weight_extra = self.resolved_extras(
+            cut_function, data_weight_extra, phsp_weight_extra)
+        smp = self.var_samples(varfun, data_weight_extra, phsp_weight_extra)
         return draw_var_figure(
             smp, labels, lo, hi, bin_width, prefix, ranges=ranges,
             legend=legend, output=output, fmt=fmt, group_labels=glabels,
@@ -754,7 +759,7 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        wd_extra, extra = self._resolve_extras(
+        wd_extra, extra = self.resolved_extras(
             cut_function, data_weight_extra, phsp_weight_extra,
             f._data_np, f._phsp_np)
         dw = f._data_np["weight"] * wd_extra
@@ -861,7 +866,7 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        wd_extra, wp_extra = self._resolve_extras(
+        wd_extra, wp_extra = self.resolved_extras(
             cut_function, data_weight_extra, phsp_weight_extra,
             f._data_np, f._phsp_np)
         dw = f._data_np["weight"] * wd_extra
@@ -1038,7 +1043,7 @@ class PWGroupPlotter:
         # those rows, so rows align 1:1 with the reduced _P_total/_bkg_var.
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        wd_extra, extra = self._resolve_extras(
+        wd_extra, extra = self.resolved_extras(
             cut_function, data_weight_extra, phsp_weight_extra, dn, pv)
         dw = dn["weight"] * wd_extra
 
@@ -1237,7 +1242,7 @@ class PWGroupPlotter:
         from scipy.interpolate import CubicSpline
 
         f = self.fitter
-        wd_extra, extra = self._resolve_extras(
+        wd_extra, extra = self.resolved_extras(
             cut_function, data_weight_extra, phsp_weight_extra,
             f._data_np, f._phsp_np)
         dw = f._data_np["weight"] * wd_extra

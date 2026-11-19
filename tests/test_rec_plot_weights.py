@@ -79,7 +79,7 @@ def test_cut_function_runs_on_the_rec_rows():
     def cut(d):
         return (d["mass"][:, 0] > 0.6).astype(float)
 
-    smp = plotter.var_samples(pwa_mass_varfun, cut_function=cut)
+    smp = plotter.var_samples(pwa_mass_varfun, *plotter.resolved_extras(cut))
     assert len(smp["x_data"][0]) == n_orig
     assert len(smp["w_model"]) == n_rec
     assert len(smp["w_bkg"]) == n_rec
@@ -95,5 +95,4 @@ def test_cut_function_runs_on_the_rec_rows():
 
     # a function written against the SMEARED row count is caught
     with pytest.raises(ValueError, match="one weight per event"):
-        plotter.var_samples(pwa_mass_varfun,
-                            cut_function=lambda d: np.ones(3))
+        plotter.resolved_extras(lambda d: np.ones(3))

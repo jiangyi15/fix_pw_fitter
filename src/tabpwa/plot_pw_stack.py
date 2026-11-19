@@ -82,9 +82,11 @@ class PWStackPlotter:
         resolve_extra`); the per-sample arrays override it.  Group curves are restricted to the labels present
         in **every** dataset (a warning lists any dropped ones).
         """
-        per = [pl.var_samples(varfun, data_weight_extra, phsp_weight_extra,
-                              cut_function=cut_function)
-               for pl in self.plotters]
+        per = []
+        for pl in self.plotters:
+            d, p = pl.resolved_extras(cut_function, data_weight_extra,
+                                      phsp_weight_extra)
+            per.append(pl.var_samples(varfun, d, p))
         n_var = per[0]["meta"]["n_var"]
 
         def cat(key):
@@ -151,8 +153,8 @@ class PWStackPlotter:
                 smooth_sigma=smooth_sigma, unit=unit, show_pull=show_pull,
                 mc_uncert=mc_uncert, yscale=yscale, xscale=xscale,
                 upper_ylim=upper_ylim)
-        samples = [pl.var_samples(varfun, data_weight_extra,
-                                  phsp_weight_extra, cut_function)
+        samples = [pl.var_samples(varfun, *pl.resolved_extras(
+                       cut_function, data_weight_extra, phsp_weight_extra))
                    for pl in self.plotters]
         return draw_overlay_figure(
             samples, self.labels, lo, hi, bin_width, prefix, ranges=ranges,
