@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""A/B/C the s0e tile family — base, packed-CSR (s0e2), Newton reciprocal (s0e3).
+"""A/B the s0e tile family — base, packed-CSR (s0e2), Newton reciprocal (s0e3),
+and split phase-A rows + pre-gathered coefficients (s0e4).
 
-`s0e3` is a case-1 copy of `s0e` with **exactly one numerical change**: the
-REAL reciprocal ``1/|D|²`` of the tile kernel's phase A is an fp32 seed plus
-two fp64 Newton refinements instead of the IEEE fp64 divide, with an
-exact-divide fallback outside the fp32-seed range.  The divide is ~25-30 % of
-the fp64 work on the production shape (26 fp64 divides, 130 dot FMAs and 104
-common values per event, and fp64 div is unpipelined on consumer GPUs), so
-this script is the measurement that says whether the swap pays.
+`s0e4` is a case-1 copy of `s0e` with **exactly two changes**: the fitted
+coefficients are pre-gathered into CSR order on the host (``cw[i] =
+coeff[nz_m[i]]``, one upload of ``n_nz`` doubles per call), and a ``gamma``
+row with more than ``split_nnz`` non-zeros is split into two contiguous halves
+handled by two threads, so phase A's barrier would wait for ``~nnz/2`` instead
+of ``nnz``.  On the production shape (26 waves, ``{1: 5, 3: 11, 9: 8, 10: 2}``
+non-zeros, te 8 = one item per thread) that tail is 10 vs a mean of 4.1 =
+2.46x, and sorting the items does not help (measured) — which is the hypothesis
+the split was meant to test.
+``split_nnz`` is a CREATE-TIME knob (0 = the compiled default, 6), so the
+threshold is swept here with one process and one kernel binary.
+
+MEASURED outcome (this machine, production shape, min of 5 interleaved rounds):
+the split is **NOT a win** — s0e4 lands at 0.94-0.95x of s0e at te 8 (and
+0.85-0.88x at te 4), because 8 events x 36 segments oversubscribes the
+256-thread block, so the critical path stays at ~10 non-zeros while every
+(e,k) pays a shared-memory atomic plus the extra phase-A2 pass.  The rows are
+kept as the measurement that says so; see the kernel header for the full table.
 
 Variants measured (all on the SAME config, sample and parameters):
 
@@ -16,6 +28,7 @@ Variants measured (all on the SAME config, sample and parameters):
     s0e3                the Newton reciprocal, ``te = 0`` (kernel's choice)
     s0e3 te=rsize       the same, tile pinned to one log-sum group
     s0e3 te=2*rsize     the same, two groups per tile
+    s0e4 T0/T3/T6/T9    the split rows, threshold 0 (default) / 3 / 6 / 9
 
 Shapes: ``ne`` in 4000 / 20000 / 50000, ``rsize`` in 1 / 17 (per-event and
 grouped objective), ``norm`` None / 1.3 — on the fixture ``pwa_gen`` config
@@ -43,6 +56,8 @@ so a ``regex:`` filter picks the right one):
         --set full -o /tmp/opencode/s0e2_tile python tests/benchmark_s0e_variants.py
     ncu --target-processes all --kernel-name regex:gps03_tile_kernel \\
         --set full -o /tmp/opencode/s0e3_tile python tests/benchmark_s0e_variants.py
+    ncu --target-processes all --kernel-name regex:gps04_tile_kernel \\
+        --set full -o /tmp/opencode/s0e4_tile python tests/benchmark_s0e_variants.py
 """
 import argparse
 import os
@@ -64,17 +79,24 @@ CFG_PROD = ("/home/jiangy/github/project94/pwa_workspace/jpsi_eta_pi_pi/"
             "04_model_search/run_423_kmatrix_n_20261119_141110/"
             "config_kn4_plot.yml")
 
-#: (label, backend name) — the ``te`` variants are expanded per ``rsize``
+#: (label, backend name) — the ``te``/``split_nnz`` variants are expanded per
+#: ``rsize``
 VARIANTS = (
     ("s0e", "cuda_flat_pwa_gen_s0e"),
     ("s0e2", "cuda_flat_pwa_gen_s0e2"),
     ("s0e3", "cuda_flat_pwa_gen_s0e3"),
 )
 S0E3 = "cuda_flat_pwa_gen_s0e3"
+S0E4 = "cuda_flat_pwa_gen_s0e4"
+#: the phase-A segmentation thresholds swept for s0e4 (0 = the compiled
+#: default, 6).  They cost nothing but a create — the same kernel, a different
+#: segment list — so one process can interleave the whole sweep.
+S0E4_SPLITS = (0, 3, 6, 9)
 #: the tile kernel symbol of each read-only variant, for the ``ncu`` commands
 KERNELS = {"cuda_flat_pwa_gen_s0e": "gps0_tile_kernel",
            "cuda_flat_pwa_gen_s0e2": "gps02_tile_kernel",
-           "cuda_flat_pwa_gen_s0e3": "gps03_tile_kernel"}
+           "cuda_flat_pwa_gen_s0e3": "gps03_tile_kernel",
+           "cuda_flat_pwa_gen_s0e4": "gps04_tile_kernel"}
 
 
 def _events(kc, ne, seed=123):
@@ -110,10 +132,12 @@ def _label(name):
 
 
 def _variants_for(rs):
-    """``[(label, backend name, kwargs)]`` — the s0e3 ``te`` sweep included."""
+    """``[(label, backend name, kwargs)]`` — the ``te`` / ``split_nnz`` sweeps."""
     out = [(lab, name, {}) for lab, name in VARIANTS]
     out.append((f"s0e3 te={rs}", S0E3, {"te": rs}))
     out.append((f"s0e3 te={2 * rs}", S0E3, {"te": 2 * rs}))
+    for T in S0E4_SPLITS:
+        out.append((f"s0e4 T{T}", S0E4, {"split_nnz": T}))
     return out
 
 
@@ -274,7 +298,8 @@ def main():
               f"--set full -o /tmp/opencode/{tag}_tile "
               f"python tests/benchmark_s0e_variants.py")
     print("#   (gps03_tile_kernel serves both s0e3 rows — te only changes the "
-          "grid, not the kernel)")
+          "grid, not the kernel; gps04_tile_kernel serves every s0e4 row — "
+          "split_nnz only changes the segment LIST, a create argument)")
 
 
 if __name__ == "__main__":
