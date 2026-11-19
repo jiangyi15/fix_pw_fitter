@@ -72,15 +72,18 @@ class PWStackPlotter:
     # ── merged plot data ──────────────────────────────────────────
 
     def merged_samples(self, varfun, data_weight_extra=None,
-                       phsp_weight_extra=None):
+                       phsp_weight_extra=None, cut_function=None):
         """Concatenate every dataset's weighted samples (pre-binning).
 
         Returns the same dict shape as
         :meth:`PWGroupPlotter.var_samples`, with the per-dataset arrays
-        concatenated.  Group curves are restricted to the labels present
+        concatenated.  ``cut_function`` is the ONE callable applied to every
+        dataset's data AND phsp (see :func:`tabpwa.plot_pw_groups.
+        resolve_extra`); the per-sample arrays override it.  Group curves are restricted to the labels present
         in **every** dataset (a warning lists any dropped ones).
         """
-        per = [pl.var_samples(varfun, data_weight_extra, phsp_weight_extra)
+        per = [pl.var_samples(varfun, data_weight_extra, phsp_weight_extra,
+                              cut_function=cut_function)
                for pl in self.plotters]
         n_var = per[0]["meta"]["n_var"]
 
@@ -117,6 +120,8 @@ class PWStackPlotter:
 
     def plot_var(self, varfun, labels, lo, hi, bin_width, prefix,
                  stacked=True, ranges=None, legend=True, show_pull=False,
+                 data_weight_extra=None, phsp_weight_extra=None,
+                 cut_function=None,
                  mc_uncert=False, smooth_sigma=None, unit="GeV", fmt="png",
                  output=None, group_labels=None, colors=None, zorders=None,
                  yscale=None, xscale=None, upper_ylim=None):
@@ -130,10 +135,15 @@ class PWStackPlotter:
 
         ``yscale`` / ``xscale`` / ``upper_ylim`` style the axes; each is a
         single value for every sub-variable or one entry per sub-variable.
+
+        ``cut_function`` is ONE callable applied to every dataset's data AND
+        phsp (a cut, a tag weight, …); ``data_weight_extra`` /
+        ``phsp_weight_extra`` are the per-sample arrays and override it.
         """
         output = output or self.output
         if stacked:
-            smp = self.merged_samples(varfun)
+            smp = self.merged_samples(varfun, data_weight_extra,
+                                      phsp_weight_extra, cut_function)
             return draw_var_figure(
                 smp, labels, lo, hi, bin_width, prefix, ranges=ranges,
                 legend=legend, output=output, fmt=fmt,
@@ -141,7 +151,9 @@ class PWStackPlotter:
                 smooth_sigma=smooth_sigma, unit=unit, show_pull=show_pull,
                 mc_uncert=mc_uncert, yscale=yscale, xscale=xscale,
                 upper_ylim=upper_ylim)
-        samples = [pl.var_samples(varfun) for pl in self.plotters]
+        samples = [pl.var_samples(varfun, data_weight_extra,
+                                  phsp_weight_extra, cut_function)
+                   for pl in self.plotters]
         return draw_overlay_figure(
             samples, self.labels, lo, hi, bin_width, prefix, ranges=ranges,
             legend=legend, output=output, fmt=fmt, unit=unit,

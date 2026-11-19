@@ -396,6 +396,47 @@ def test_var_samples_normalises_to_the_uncut_data(bkg_plotter):
     assert float(np.sum(s_p["w_bkg"])) == pytest.approx((1.0 - purity) * wd * once)
 
 
+def test_cut_function_applies_to_both_samples(bkg_plotter):
+    """ONE callable for data AND phsp — the point of the API.
+
+    Passing it must give exactly the arrays of the two explicit per-sample
+    arrays, so there is no way for the selections to drift apart; and giving
+    both a callable and an explicit array is refused (ambiguous).
+    """
+    p = bkg_plotter
+    f = p.fitter
+    varfun = pwa_mass_varfun
+
+    def cut(d):
+        return (d["mass"][:, 0] > 0.8).astype(float)
+
+    via_func = p.var_samples(varfun, cut_function=cut)
+    via_arrays = p.var_samples(varfun,
+                               data_weight_extra=cut(f._data_np),
+                               phsp_weight_extra=cut(f._phsp_np))
+    for key in ("w_data", "w_model", "w_bkg"):
+        assert np.array_equal(via_func[key], via_arrays[key]), key
+    for lbl in via_func["w_groups"]:
+        assert np.array_equal(via_func["w_groups"][lbl],
+                              via_arrays["w_groups"][lbl])
+    # the cut really bites (not an accidental all-ones array)
+    assert 0 < np.count_nonzero(cut(f._data_np)) < cut(f._data_np).size
+
+    with pytest.raises(ValueError, match="not both"):
+        p.var_samples(varfun, data_weight_extra=cut(f._data_np),
+                      cut_function=cut)
+
+    # a scalar return broadcasts to one weight per event
+    smp = p.var_samples(varfun, cut_function=lambda d: 2.0)
+    base = p.var_samples(varfun)
+    assert np.sum(smp["w_model"]) == pytest.approx(2.0 * np.sum(base["w_model"]))
+    assert np.sum(smp["w_bkg"]) == pytest.approx(2.0 * np.sum(base["w_bkg"]))
+
+    # a wrong-shaped return is an error, not a silent broadcast
+    with pytest.raises(ValueError, match="one weight per event"):
+        p.var_samples(varfun, cut_function=lambda d: np.ones(3))
+
+
 def test_plot_2d_bkg_matches_var_samples(bkg_plotter):
     """The 2D panel uses the same bkg normalisation as var_samples."""
     p = bkg_plotter

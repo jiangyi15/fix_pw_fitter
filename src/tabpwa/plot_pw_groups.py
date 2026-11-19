@@ -14,6 +14,47 @@ from .plot_pw_draw import (bin_edges, draw_overlay_figure, draw_var_figure,
                            panel_axes, save_figure)
 
 
+def resolve_extra(cut_function, explicit, sample, what="sample"):
+    """Per-event extra weight of ONE sample, as a float ndarray.
+
+    ``cut_function`` is the SAME callable for the data and for the Monte
+    Carlo — typically a cut, e.g.::
+
+        cut_function=lambda d: (d["mass"][:, 0] > 1.0).astype(float)
+
+    but any per-event weight (tag weight, sWeight, efficiency) is fine.  Being
+    one function, the two samples cannot end up with different selections by
+    accident.
+
+    It is called with the dict the caller is about to plot — with ``use_rec``
+    that is the ORIGINAL-row sample, not the fitter's resolution-copied one —
+    so write it in terms of the event content (masses, angles, …), never in
+    terms of a row count; the returned length is checked against that dict.
+    ``explicit`` is the per-sample escape hatch (data sWeights and MC weights
+    genuinely differ).  Giving both is ambiguous and raises.  A scalar (from
+    either) is broadcast to the sample, so ``extra[mask]`` always works
+    downstream; a returned array must be one weight per event.
+    """
+    n = int(np.shape(np.asarray(sample["weight"]))[0])
+    if cut_function is not None:
+        if explicit is not None:
+            raise ValueError(
+                "give EITHER cut_function (ONE callable applied to data AND "
+                "phsp) OR data_weight_extra/phsp_weight_extra, not both — "
+                "mixing them leaves it unclear which selection a sample got")
+        w = cut_function(sample)
+    else:
+        w = 1.0 if explicit is None else explicit
+    if np.ndim(w) == 0:
+        return np.full(n, float(w))
+    w = np.asarray(w, dtype=float)
+    if w.shape != (n,):
+        raise ValueError(
+            f"{what}: extra weight has shape {w.shape}, expected ({n},) — "
+            f"one weight per event of this sample")
+    return w
+
+
 # ── same-charge-pair variables (B → (π⁺π⁺)(π⁻π⁻)) ────────────────
 
 def samesign_varfun(x):
@@ -489,6 +530,11 @@ class PWGroupPlotter:
         """Return ``(P_total, P_groups, scale)`` after :meth:`compute`."""
         return self._P_total, self._P_groups, self._scale
 
+    def _resolve_extras(self, cut_function, data_extra, phsp_extra, dn, pv):
+        """``(data_extra, phsp_extra)`` as arrays — see :func:`resolve_extra`."""
+        return (resolve_extra(cut_function, data_extra, dn, "data"),
+                resolve_extra(cut_function, phsp_extra, pv, "phsp"))
+
     def _bkg_normaliser(self):
         """``bkg_scale``, anchored to the ORIGINAL (uncut) data total.
 
@@ -509,7 +555,7 @@ class PWGroupPlotter:
         return float(np.sum(dn["weight"])) * (1.0 - purity) / self._bkg_norm
 
     def var_samples(self, varfun, data_weight_extra=None,
-                    phsp_weight_extra=None):
+                    phsp_weight_extra=None, cut_function=None):
         """Weighted variable samples (pre-binning) — the plot data.
 
         Exactly the arrays :meth:`plot_var` histograms, exposed so several
@@ -525,7 +571,13 @@ class PWGroupPlotter:
         * ``w_groups``              — ``{group_label: weights}`` (signal
           only; group-summed to the variable rows),
 
-        plus ``meta`` with the per-dataset ``scale``, ``bkg_scale``,
+        ``cut_function`` is ONE callable applied to BOTH samples (a cut, a
+        tag weight, …), so data and Monte Carlo cannot get different
+        selections; ``data_weight_extra`` / ``phsp_weight_extra`` are the
+        per-sample escape hatch for genuinely different weights — give one or
+        the other.
+
+        Plus ``meta`` with the per-dataset ``scale``, ``bkg_scale``,
         ``n_var`` and the group labels.
         """
         if not self._ready:
@@ -533,12 +585,10 @@ class PWGroupPlotter:
         f = self.fitter
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        dw = dn["weight"] * (1.0 if data_weight_extra is None
-                             else data_weight_extra)
-        # may be a per-event array (documented for cut/tag weights) —
-        # matches the pre-refactor plot_var handling
-        extra = np.asarray(1.0 if phsp_weight_extra is None
-                           else phsp_weight_extra, dtype=float)
+        wd_extra, wp_extra = self._resolve_extras(
+            cut_function, data_weight_extra, phsp_weight_extra, dn, pv)
+        dw = dn["weight"] * wd_extra
+        extra = wp_extra           # per-event array (never 0-d)
         bkg_scale = self._bkg_normaliser()
         x_data = varfun(dn)
         x_phsp = varfun(pv)
@@ -625,6 +675,7 @@ class PWGroupPlotter:
                  legend=False, output="plots/", ranges=None,
                  group_labels=None, colors=None,
                  data_weight_extra=None, phsp_weight_extra=None,
+                 cut_function=None,
                  smooth_sigma=None, unit="GeV", show_pull=False,
                  mc_uncert=False, fmt="png",
                  yscale=None, xscale=None, upper_ylim=None):
@@ -666,7 +717,8 @@ class PWGroupPlotter:
 
         # the plot data (pre-binning weighted samples) — shared with
         # PWStackPlotter so merged datasets bin exactly the same arrays
-        smp = self.var_samples(varfun, data_weight_extra, phsp_weight_extra)
+        smp = self.var_samples(varfun, data_weight_extra, phsp_weight_extra,
+                               cut_function=cut_function)
         return draw_var_figure(
             smp, labels, lo, hi, bin_width, prefix, ranges=ranges,
             legend=legend, output=output, fmt=fmt, group_labels=glabels,
@@ -678,7 +730,7 @@ class PWGroupPlotter:
                        n_bins, prefix, tag_data=None, tag_phsp=None,
                        output="plots/", ranges=None,
                        data_weight_extra=None, phsp_weight_extra=None,
-                       fmt="png"):
+                       cut_function=None, fmt="png"):
         """Plot asymmetry ``(N(tag>0) - N(tag<0)) / (N(tag>0) + N(tag<0))``.
 
         When *tag_data* / *tag_phsp* are ``None`` (default), uses
@@ -702,9 +754,10 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        extra = np.asarray(1.0 if phsp_weight_extra is None
-                           else phsp_weight_extra, dtype=float)
+        wd_extra, extra = self._resolve_extras(
+            cut_function, data_weight_extra, phsp_weight_extra,
+            f._data_np, f._phsp_np)
+        dw = f._data_np["weight"] * wd_extra
 
         # Default: centre frac on 0 so frac==0.5 → tag==0 (excluded from both sides)
         # frac = P(B0) in data → tag = frac - 0.5
@@ -786,7 +839,7 @@ class PWGroupPlotter:
     def plot_time_asymmetry(self, t_min=0, t_max=10, n_bins=20,
                             output="plots/", prefix="time_asym", params=None,
                             data_weight_extra=None, phsp_weight_extra=None,
-                            fmt="png"):
+                            cut_function=None, fmt="png"):
         """Plot time-dependent asymmetry using exact theoretical formula.
 
         Data: binned time asymmetry ``(N(tag>0) - N(tag<0))/(N(tag>0) + N(tag<0))``.
@@ -808,13 +861,16 @@ class PWGroupPlotter:
         import matplotlib.pyplot as plt
 
         f = self.fitter
-        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
+        wd_extra, wp_extra = self._resolve_extras(
+            cut_function, data_weight_extra, phsp_weight_extra,
+            f._data_np, f._phsp_np)
+        dw = f._data_np["weight"] * wd_extra
         frac_data = f._data_np["frac"]
         tag_data = frac_data - 0.5
 
         # ── Compute coefficients I, Ī, J (with optional extra phsp weight) ──
         I_val, Ibar_val, ReJ, ImJ = self.compute_coefficients(
-            phsp_weight_extra=phsp_weight_extra)
+            phsp_weight_extra=wp_extra)
 
         # ── Time parameters from the fit ──────────────────────────
         if params is None:
@@ -908,7 +964,8 @@ class PWGroupPlotter:
 
     def plot_2d(self, varfun, labels, prefix, binning=[[2, 2]] * 3,
                 output="plots/", data_weight_extra=None,
-                phsp_weight_extra=None, cmap="jet", plot_scatter=True,
+                phsp_weight_extra=None, cut_function=None, cmap="jet",
+                plot_scatter=True,
                 scatter_style={"s": 1, "c": "black"}, scatter_step=1, fmt="png", ax=None,
                 x_range=None, y_range=None,
                 boundary=None, boundary_style=None, plot_figs=None,
@@ -981,9 +1038,9 @@ class PWGroupPlotter:
         # those rows, so rows align 1:1 with the reduced _P_total/_bkg_var.
         dn = self.data_var_np if self.data_var_np is not None else f._data_np
         pv = self.phsp_var_np if self.phsp_var_np is not None else f._phsp_np
-        dw = dn["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        extra = np.asarray(1.0 if phsp_weight_extra is None
-                           else phsp_weight_extra, dtype=float)
+        wd_extra, extra = self._resolve_extras(
+            cut_function, data_weight_extra, phsp_weight_extra, dn, pv)
+        dw = dn["weight"] * wd_extra
 
         d1, d2 = varfun(dn)
         p1, p2 = varfun(pv)
@@ -1144,6 +1201,7 @@ class PWGroupPlotter:
     def plot_stacked_perm(self, varfun, xlabel, lo, hi, bin_width,
                           prefix, output="plots/",
                           data_weight_extra=None, phsp_weight_extra=None,
+                          cut_function=None,
                           smooth_sigma=None, unit="GeV", scales=None,
                           show_pull=False, legend=False,
                           fmt="png"):
@@ -1179,9 +1237,10 @@ class PWGroupPlotter:
         from scipy.interpolate import CubicSpline
 
         f = self.fitter
-        dw = f._data_np["weight"] * (data_weight_extra if data_weight_extra is not None else 1.0)
-        extra = np.asarray(1.0 if phsp_weight_extra is None
-                           else phsp_weight_extra, dtype=float)
+        wd_extra, extra = self._resolve_extras(
+            cut_function, data_weight_extra, phsp_weight_extra,
+            f._data_np, f._phsp_np)
+        dw = f._data_np["weight"] * wd_extra
 
         var_data = varfun(f._data_np)
         var_phsp = varfun(f._phsp_np)
