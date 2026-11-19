@@ -730,6 +730,27 @@ Fixtures: `tests/config_pwa_gen.yml` (default basis, gate A),
 `tests/test_pwa_gen_s0e.py`, `tests/benchmark_pwa_gen.py`,
 `tests/benchmark_pwa_gen_s0e.py`.
 
+**`skip`** (`model: skip`) is a particle model whose denominator basis is the single constant row `[1]` —
+the way a config STATES "this factor is 1".  It carries no flag: the decision is a DICT-ONLY optimisation
+of the built flat config, `tabpwa/pwa_gen_config.drop_unit_factors(kc)`, applied once inside `build_from_groups`
+(`return drop_unit_factors(config)`), so every `pwa_gen` backend — `numpy_flat` included — receives it.  `drop_unit_factors`
+drops every factor `r` whose DENOMINATOR is the constant 1 in EVERY wave — the check is the whole
+chain `gamma_matrix[:, r]` (which rows it selects) → `basis_table` (the row really is 1, not merely named
+`one`) → the weight (`den_names == "one"`, the fixed parameter-free coefficient).  The numerator is NOT
+consulted: it is expanded per wave through `num_m_index` and is not part of the factor's identity.  It
+shrinks ONLY the factor axis: `num_table`, `gamma_matrix`, and the basis rows only that factor selected
+(`basis_table`, `basis_m_index` ROWS, `basis_m_key`, `basis_kind`, `den_names`, `basis_key`); the shared
+`one` row survives.  `num_m_index`
+and `basis_m_index` keep their STRUCTURAL values — they ARE the mass column (`n_res·topo + r`), so nothing
+is remapped and the event buffer keeps a column per structural factor (`pwa_build` and `read_var` stay
+structural; the kernel simply never reads the dropped column).  A factor that is 1 in only SOME waves is
+LEFT ALONE (the axis is shared), and `drop_unit_factors` returns `kc` ITSELF when nothing is droppable, so
+every existing config is bit-identical.  `model.n_res` / `decay_tree.n_res` stay the STRUCTURAL `n_decay − 1`.
+A config switches it off with `drop_unit: false`, which keeps every factor — the reference the drop has to
+agree with (same P, Q within 1e-13).  `skip` is `pwa_gen` only: on the plain `pwa` path it declares no
+running width, so that guard is the error.  `one` is NOT this — numerically 1 but occupying a slot, so its
+users' configs are untouched.
+
 ### Barrier factors & build-time defaults
 
 The Blatt-Weisskopf form factor `F_L(q)` of every decay vertex is baked into

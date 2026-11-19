@@ -1,0 +1,56 @@
+# A chain with one CONSTANT factor and one real one:
+#
+#     a -> (b -> e f) (c -> g h) d
+#
+# `b: model: skip` is literally 1 and is SKIPPED (no BW slot, no
+# mass/width parameters), so the chain has n_res == 1 and the n_res == 1
+# kernels (1bw / s0e / s0c / s0c2) accept it.  `c` is an ordinary Breit-Wigner.
+# The twin `config_skip_one.yml` states the same factor as `model: one`
+# (numerically 1 but occupying a slot) for the equivalence gate.
+amp_model: pwa
+data:
+  dat_order: [e, f, g, h, d]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  a:
+    - [b, c, d]
+  b: [e, f]
+  c: [g, h]
+particle:
+  $top: a
+  $finals: [e, f, g, h, d]
+  a:
+    J: 1
+    P: -1
+    spins: [-1, 1]
+    mass: 3.0
+  b:
+    J: 0
+    P: +1
+    model: skip
+  c:
+    J: 1
+    P: -1
+    mass: 0.775
+    width: 0.149
+  d:
+    J: 0
+    P: -1
+    mass: 0.547
+  e:
+    J: 0
+    P: -1
+    mass: 0.139
+  f:
+    J: 0
+    P: -1
+    mass: 0.139
+  g:
+    J: 0
+    P: -1
+    mass: 0.493
+  h:
+    J: 0
+    P: -1
+    mass: 0.493

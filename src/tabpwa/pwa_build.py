@@ -238,7 +238,8 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
     full_decay = getattr(cfg, "full_decay", None) or getattr(cfg, "full")
     if not list(full_decay.get_partial_waves()):
         raise ValueError("no partial waves in config")
-    n_decay, n_res, n_topo = cfg.n_decay, cfg.n_res, cfg.n_topo
+    n_decay, n_topo = cfg.n_decay, cfg.n_topo
+    n_res = cfg.n_res
     finals = list(cfg.finals)
     n = momenta.shape[0]
 
@@ -324,6 +325,8 @@ def pwa_event_data_tree(cfg, kc, chains_by_topo, momenta, spinful_names=(),
         inv_leaf = {nm: _inv(mom[:, names.index(nm)]) for nm in names}
         for idx, d in enumerate(chain.decays):
             if idx > 0:
+                # STRUCTURAL column: a dropped factor's column simply stops
+                # being referenced by the config, it is never renumbered
                 mass[:, n_res * tid + idx - 1] = inv_m[idx]
             mm = [(inv_m[idx_of[o.name]] if o.name in idx_of
                    else inv_leaf[o.name]) for o in d.outs]

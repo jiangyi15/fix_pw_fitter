@@ -1,0 +1,57 @@
+# The `one` twin of `config_skip.yml` (same topology): the constant
+#
+#     a -> (b -> e f) (c -> g h) d
+#
+# `b: model: one` is literally 1 and is SKIPPED (no BW slot, no
+# so this chain keeps n_res == 2.  Used only by the equivalence gate.
+#
+#
+#
+amp_model: pwa
+data:
+  dat_order: [e, f, g, h, d]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  a:
+    - [b, c, d]
+  b: [e, f]
+  c: [g, h]
+particle:
+  $top: a
+  $finals: [e, f, g, h, d]
+  a:
+    J: 1
+    P: -1
+    spins: [-1, 1]
+    mass: 3.0
+  b:
+    J: 0
+    P: +1
+    model: one
+    mass: 1.0
+  c:
+    J: 1
+    P: -1
+    mass: 0.775
+    width: 0.149
+  d:
+    J: 0
+    P: -1
+    mass: 0.547
+  e:
+    J: 0
+    P: -1
+    mass: 0.139
+  f:
+    J: 0
+    P: -1
+    mass: 0.139
+  g:
+    J: 0
+    P: -1
+    mass: 0.493
+  h:
+    J: 0
+    P: -1
+    mass: 0.493

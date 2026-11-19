@@ -413,7 +413,10 @@ class PWAGen(PWA):
                 n_blocks=self.decay_tree.n_perm * self.decay_tree.n_cp)
             self._pg_combs = comb_exp
             from tabpwa.pwa_gen_config import build_from_groups
-            kc = build_from_groups(self)
+            # config key `drop_unit: false` keeps the unoptimised BW axis — the
+            # reference the drop must agree with (see pwa_gen_config.drop_unit_factors)
+            kc = build_from_groups(
+                self, drop_unit=bool(self.dic.get("drop_unit", True)))
         # ── host metadata (names / counts, no kernel arrays) ────────
         kc["n_blocks"] = int(C)
         kc["n_perm"] = self.decay_tree.n_perm
@@ -593,7 +596,8 @@ class PWAGen(PWA):
         # enforces it — so the numerator protocol is always available; there is
         # no "is it a basis model" test to make here.
         out = []
-        for slot, decay in enumerate(chain.decays[1:]):
+        slot = 0
+        for decay in chain.decays[1:]:
             mdl = decay.core._model
             heads = list(mdl.get_num_name())
             rows = [None]
@@ -613,6 +617,7 @@ class PWAGen(PWA):
                     for i in range(len(heads))]
             out.append({"slot": slot, "name": decay.core.name,
                         "heads": heads, "rows": rows})
+            slot += 1
         return out
 
     def _pg_den_basis(self, name, model, grid):

@@ -56,7 +56,100 @@ import itertools
 import numpy as np
 
 
-def build_from_groups(model, n_interp=None):
+def drop_unit_factors(kc):
+    """Drop the BW factors that are the IDENTITY in every wave.
+
+    A pure KERNEL-CONFIG optimisation, on the parsed dict only: no particle
+    model, no name, no flag is consulted — everything is read from the arrays
+    ``build_from_groups`` emitted.
+
+    Factor ``r`` is droppable when, in EVERY wave, its DENOMINATOR selects
+    only basis rows named ``"one"`` — the factor axis is the denominator's
+    (``basis_m_index`` / ``gamma_matrix``); the numerator is expanded per wave
+    through ``num_m_index`` and is not part of the factor's identity.  Those
+    ``r`` are removed from the factor axis
+    ``(wave, r)`` — ``num_table``, ``num_m_index``, ``gamma_matrix`` — and the
+    basis rows that only a dropped factor selected are pruned with them (the
+    shared ``"one"`` row survives whenever a kept factor uses it).
+
+    The axis is SHARED, so a factor that is the identity in only some waves is
+    NOT dropped (a partial drop would silently mis-align the remaining
+    factors); ``kc`` itself is returned in that case, and whenever nothing is
+    droppable, so existing configs are bit-identical.
+
+    The mass COLUMNS are NOT touched: ``num_m_index`` / ``basis_m_index`` stay
+    STRUCTURAL indices into the event ``mass`` array (which still carries a
+    column per factor).  Only the factor axis shrinks; the kernel never reads
+    the dropped factor's column.  A factor that is 1 in only SOME waves is
+    left alone.
+    """
+    if "gamma_matrix" not in kc or "den_names" not in kc:
+        return kc
+    gam = np.asarray(kc["gamma_matrix"])
+    if gam.ndim != 3:
+        return kc
+    n_wave, n_res, n_basis = gam.shape
+    den = [str(n) for n in kc["den_names"]]
+    if len(den) != n_basis:
+        return kc
+    # a row of the denominator is the constant ONE only when all three say so:
+    # the selection (gamma_matrix), the ROW ITSELF (basis_table == 1) and the
+    # weight it is multiplied by (den_names -> the fixed "one" coefficient,
+    # which carries no parameter and is pinned to 1)
+    tab = kc.get("basis_table")
+    tab = np.asarray(tab) if tab is not None else None
+    is_one = np.zeros(len(den), bool)
+    for j, name in enumerate(den):
+        if str(name) != "one":
+            continue
+        if tab is None or np.allclose(np.asarray(tab[j]).ravel(), 1.0,
+                                      rtol=0.0, atol=1e-14):
+            is_one[j] = True
+    drop = []
+    for r in range(n_res):
+        identity = True
+        for k in range(n_wave):
+            sel = np.nonzero(gam[k, r])[0]
+            if sel.size == 0 or not np.all(is_one[sel]):
+                identity = False
+                break
+        if identity:
+            drop.append(r)
+    if not drop:
+        return kc
+    keep = np.ones(n_res, bool)
+    keep[drop] = False
+    if not keep.any():
+        # never empty the axis: a config with no factor left is refused by the
+        # builder, and dropping everything here would be a silent no-op shape
+        return kc
+
+    out = {**kc}
+    for key in ("num_table", "num_m_index"):
+        if key in out and np.shape(out[key])[1:2] == (n_res,):
+            out[key] = np.asarray(out[key])[:, keep]
+    gam = gam[:, keep, :]
+    used = np.unique(np.nonzero(gam.reshape(-1, n_basis))[1]) \
+        if n_wave * int(keep.sum()) else np.zeros(0, int)
+    out["gamma_matrix"] = gam[:, :, used]
+    # `num_m_index`/`basis_m_index` keep their STRUCTURAL values: they are
+    # columns of the event `mass` array, which stays structural (the builder
+    # writes every factor).  Only the ROWS of `basis_m_index` are pruned, with
+    # the basis rows they label.
+    for key in ("basis_table", "basis_m_index", "basis_m_key", "basis_kind"):
+        if key in out:
+            arr = out[key]
+            out[key] = [arr[i] for i in used] if key == "basis_key" \
+                else np.asarray(arr)[used]
+    out["den_names"] = [den[i] for i in used]
+    out["basis_key"] = [tuple(kc["basis_key"][i]) for i in used] \
+        if "basis_key" in kc else out.get("basis_key")
+    # the factor axis is gone from these two; they are plain-pwa keys and the
+    # flat config does not emit them, so nothing to renumber here
+    return out
+
+
+def build_from_groups(model, n_interp=None, drop_unit=True):
     """Build the flat kernel config by looping over the decay groups.
 
     A *base* wave is one partial wave of the decay tree; it **expands** into
@@ -74,7 +167,7 @@ def build_from_groups(model, n_interp=None):
     n_base = len(waves)
     topo_id = model.topo_index
     n_decay = int(model.n_decay)
-    n_res = int(model.n_res)
+    n_res = int(model.n_res)                 # structural
     states = model._helicity_external_states()
     P = len(states)
 
@@ -243,8 +336,10 @@ def build_from_groups(model, n_interp=None):
     for k, (_blk, base, _combo) in enumerate(expansion):
         ls, chain = waves[base]
         row = []
-        for r, _fac in enumerate(per_wave_factors[base]):
-            name = chain.decays[r + 1].core.name
+        for r, fac in enumerate(per_wave_factors[base]):
+            # the FACTOR's own name, not `decays[r+1]`: a CONSTANT factor is
+            # skipped, so the factor slot and the decay index diverge
+            name = fac["name"]
             mdl = models[name]
             # No transform is needed to STATE the basis: the rows come from
             # the model and the names from ``get_den_name()``.  Whether a
@@ -281,7 +376,7 @@ def build_from_groups(model, n_interp=None):
             for c in slots:
                 gamma_matrix[k, r, c] = 1.0
 
-    return {
+    ret = {
         "fl_table": fl_table,
         "fl_q_index": fl_q_index,
         "num_table": num_table,
@@ -302,6 +397,10 @@ def build_from_groups(model, n_interp=None):
         "q_delta": q_delta,
         "wave_names": wave_names,
     }
+    # `drop_unit=False` keeps every factor, which is the reference the
+    # optimisation must agree with: same amplitude, one factor fewer
+    return drop_unit_factors(ret) if drop_unit else ret
+
 
 
 # ── helpers ─────────────────────────────────────────────────────────

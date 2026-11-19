@@ -146,6 +146,8 @@ class MassVar(BaseVar):
         self.cfg = cfg
         self.topo_name = topo_name
         tid = cfg.topo_index_from_name(topo_name)
+        # STRUCTURAL BW axis: the mass buffer has a column per factor, and
+        # `drop_unit_factors` only stops the kernel reading a dropped one
         n_res = int(getattr(cfg, "n_res", 1))
         self.topo_id = tid
         self.col = n_res * tid

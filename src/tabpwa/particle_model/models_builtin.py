@@ -5,7 +5,7 @@ and is available through ``build_particle(model=...)``.
 """
 
 import numpy as np
-from .base import BaseModel, register_model
+from .base import BaseModel, BasisModel, register_model
 from tabpwa.param_constraint import Transform
 
 
@@ -234,6 +234,41 @@ class OneModel(BaseModel):
     # declares this model to have no free basis weights.  ``pwa_gen``'s
     # combined transform supplies the constant ``"one"`` itself, so nothing is
     # missing.  (Returning ``None`` would instead OPT THE MODEL OUT.)
+
+
+@register_model("skip")
+class SkipModel(BasisModel):
+    """A factor that is literally ``1`` — and is therefore SKIPPED.
+
+    ``model: skip`` is the name that says what happens to it: it is elided
+    from the BW axis.
+
+    This is the way a config STATES that a factor is 1: an ordinary model with
+    the denominator basis ``[1]`` (one weight, the shared ``"one"``), no
+    numerator head and ``amp_raw ≡ 1``.  It carries NO flag and no special
+    attribute — the flat config decides at build time, by looking at the
+    ARRAYS, that a factor selecting only the constant row can be dropped
+    (:func:`tabpwa.pwa_gen_config.drop_unit_factors`).  A chain
+    ``A -> (B -> E F) C D`` with ``B: model: skip`` therefore presents
+    ``n_res == 1`` to the ``1bw`` / ``s0e`` / ``s0c`` kernels.
+
+    On the plain ``pwa`` path this model has no running width, so the existing
+    "declares no running width" guard refuses it — ``model: skip`` is
+    ``pwa_gen`` only.
+    """
+
+
+    def get_defaults(self):
+        return {}
+
+    def den_basis(self, m):
+        return [np.ones_like(np.asarray(m, dtype=float), dtype=complex)]
+
+    def get_den_name(self):
+        return ["one"]
+
+    def amp_raw(self, m, params=None):
+        return np.ones_like(np.asarray(m, dtype=float), dtype=complex)
 
 
 # ── Coupled-channel Flatté ───────────────────────────────────────

@@ -1,0 +1,35 @@
+# The ONLY resonance of the chain is constant: the amplitude is 1 and there is
+# nothing to fit, so the builder must REFUSE it (never reach np.stack([])).
+amp_model: pwa
+data:
+  dat_order: [e, f, d]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  a:
+    - [b, d]
+  b: [e, f]
+particle:
+  $top: a
+  $finals: [e, f, d]
+  a:
+    J: 1
+    P: -1
+    spins: [-1, 1]
+    mass: 3.0
+  b:
+    J: 0
+    P: -1
+    model: skip
+  d:
+    J: 0
+    P: -1
+    mass: 0.547
+  e:
+    J: 0
+    P: -1
+    mass: 0.139
+  f:
+    J: 0
+    P: -1
+    mass: 0.139
