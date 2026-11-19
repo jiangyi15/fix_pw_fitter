@@ -1,6 +1,6 @@
 """``kmatrix_n`` — a one-channel K-matrix with ANY number of poles.
 
-One class, ``n_pole = len(masses)``, generalising :mod:`~tabpwa.particle_model.kmatrix2_model` and
+One class, ``n_pole = len(mass_list)``, generalising :mod:`~tabpwa.particle_model.kmatrix2_model` and
 :mod:`~tabpwa.particle_model.kmatrix3_model`::
 
     K(s) = Σ_{i=1..N} g_i² / (m_i² − s)
@@ -25,18 +25,19 @@ A pure :class:`~tabpwa.particle_model.base.BasisModel`: no ``gamma`` /
 ``get_gamma_name`` / ``make_mass_width_transform``; the plain ``pwa`` path
 refuses it and ``pwa_gen`` reads the flat basis.
 
-The pole content is a LIST of masses and widths — ``n_pole = len(masses)``::
+The pole content is a LIST — ``mass_list`` / ``width_list`` — so
+``n_pole = len(mass_list)``::
 
     particle:
       f2:                    # (the particle NAME; ``rho`` is not a key here)
         model: kmatrix_n
-        masses: [0.775, 1.45, 1.90]     # one entry per pole; sets n_pole
-        widths: [0.149, 0.30, 0.20]     # one per pole; their fit-parameter values
-        L: 1                            # default: min(decay[0].get_ls_list())
+        mass_list: [0.775, 1.45, 1.90]     # one entry per pole; sets n_pole
+        width_list: [0.149, 0.30, 0.20]    # one per pole; their fit-parameter values
+        L: 1                           # default: min(decay[0].get_ls_list())
         width_norm: true     # false: drop the /Re ρ(m_i) normalisation
         # GS variant: model: kmatrix_n_gs   (same keys, `_rho` overridden)
 
-Each ``widths[i]`` is the width of pole *i* — the WIDTH CONVENTION is
+Each ``width_list[i]`` is the width of pole *i* — the WIDTH CONVENTION is
 
     m·Γ(m) = m_i·Γ_i·ρ(m)/Re ρ(m_i)          (the −i coefficient; Γ(m_i) = Γ_i)
 
@@ -46,15 +47,20 @@ complex there (``Re ρ_gs`` is exactly 1, so the GS variant needs no coupling
 override).  ``width_norm: false`` switches that normalisation OFF
 (``g_i² = m_i·Γ_i``) for a phase space already normalised at the pole — the
 declared width is then reproduced only where ``Re ρ(m_i) = 1``.
-``masses: [m0]`` / ``widths: [Γ0]`` alone therefore reproduces ``BWRS`` /
+``mass_list: [m0]`` / ``width_list: [Γ0]`` alone therefore reproduces ``BWRS`` /
 ``GS_rho`` with no manual coupling arithmetic.
 
-The FITTED parameters are the pole MASS and the pole WIDTH —
-``{name}_mass{i}``, ``{name}_width{i}``, ``{name}_beta{i}{mag/phase}`` — so the
-numbers in ``masses`` / ``widths`` are their starting values; there is no
-``g{i}`` parameter (the coupling is derived by the basis transform).
-``n_pole``, ``mass`` and ``width`` remain as the scalar shorthand when no
-lists are given (the reference ``M`` is then ``mass``, else ``masses[0]``).
+The FITTED parameters are the pole MASS, the pole WIDTH and the beta pair —
+``{name}_mass{i}``, ``{name}_width{i}``, ``{name}_beta{i}{mag/phase}`` with
+``i = 0 … N−1``.  The ``mass_list`` / ``width_list`` numbers are the starting
+values of the first two; ``beta`` has NO config key and NO default — it is a
+coupling, so it starts random like ``g_ls`` and is set by ``--init`` or the
+constraint file.  There is no ``g{i}`` parameter (the coupling is derived by
+the basis transform).
+BOTH lists are required and equal length: ``n_pole`` is not a key, and there
+is no scalar ``width`` shorthand — poles are DIFFERENT resonances, so there is
+no total width to split.  ``mass`` (optional) is only the reference ``M`` of
+the GS unit, defaulting to ``mass_list[0]``.
 """
 import numpy as np
 
@@ -119,14 +125,14 @@ class KMatrixNWeightsTransform(Transform):
     """Real slots → ``(2N+1)`` denominator + ``2N`` numerator real weights.
 
     The fitted per-pole parameters are the POLE MASS, the POLE WIDTH and
-    the NUMERATOR coupling — ``mass1..massN``, ``width1..widthN``,
-    ``beta1..betaN`` (polar: ``beta{i}{mag}``/``beta{i}{phase}``) — not the
+    the NUMERATOR coupling — ``mass0..mass{N−1}``, ``width0..width{N−1}``,
+    ``beta0..beta{N−1}`` (polar: ``beta{i}{mag}``/``beta{i}{phase}``) — not the
     K-matrix coupling ``g``.  The basis rows need
     the coefficient ``g_i²`` (``K = Σ g_i²/(m_i² − s)``), so the transform
     converts each width ONCE, ``g_i² = m_i·w_i/Re ρ(m_i)`` (or ``m_i·w_i``
     under ``width_norm: false``) through the model's own
     :meth:`_coupling_sq`, and hands ``g²`` straight to
-    :func:`kmatrix_n_weights`.  The numbers in a config's ``widths`` are
+    :func:`kmatrix_n_weights`.  The numbers in a config's ``width_list`` are
     therefore the starting values of the parameters.
     """
 
@@ -143,9 +149,9 @@ class KMatrixNWeightsTransform(Transform):
         mag, phase = self.tail
         self.name = name
         self.n_pole = int(n_pole or len(num_names))
-        keys = [f"mass{i}" for i in range(1, self.n_pole + 1)]
-        keys += [f"width{i}" for i in range(1, self.n_pole + 1)]
-        for i in range(1, self.n_pole + 1):
+        keys = [f"mass{i}" for i in range(self.n_pole)]
+        keys += [f"width{i}" for i in range(self.n_pole)]
+        for i in range(self.n_pole):
             keys += [f"beta{i}{mag}", f"beta{i}{phase}"]
         self._keys = tuple(keys)
         self.input_names = [f"{name}_{k}" for k in self._keys]
@@ -162,11 +168,11 @@ class KMatrixNWeightsTransform(Transform):
         p = self._inputs(d)
         mag, phase = self.tail
         n = self.n_pole
-        m = [p[f"mass{i}"] for i in range(1, n + 1)]
-        w = [p[f"width{i}"] for i in range(1, n + 1)]
+        m = [p[f"mass{i}"] for i in range(n)]
+        w = [p[f"width{i}"] for i in range(n)]
         g2 = np.asarray(self._coupling_sq(m, w), dtype=float)
         b = [p[f"beta{i}{mag}"] * np.exp(1j * p[f"beta{i}{phase}"])
-             for i in range(1, n + 1)]
+             for i in range(n)]
         den, num = kmatrix_n_weights(m, list(g2), b)
         vals = []
         for x in num:                       # (mag, phase) per head, interleaved
@@ -177,10 +183,10 @@ class KMatrixNWeightsTransform(Transform):
 
 @register_model("kmatrix_n")
 class KMatrixNModel(BasisModel):
-    """One-channel K-matrix over a list of poles: ``masses`` / ``widths``.
+    """One-channel K-matrix over a list of poles: ``mass_list`` / ``width_list``.
 
-    ``n_pole = len(masses)``; ``width_norm`` (``true`` by default) chooses
-    whether a ``widths`` entry is turned into a coupling with the pole
+    ``n_pole = len(mass_list)``; ``width_norm`` (``true`` by default) chooses
+    whether a ``width_list`` entry is turned into a coupling with the pole
     ``Re ρ(m_i)`` normalisation, and ``L`` defaults to
     :meth:`BasisModel.default_L` — the lowest partial wave of the particle's
     own decay.  See the module docstring for the algebra.
@@ -190,29 +196,30 @@ class KMatrixNModel(BasisModel):
         super().__init__(name, **kwargs)
         self.tail = complex_tail()
         kw = self.kwargs
-        masses = kw.get("masses")
-        widths = kw.get("widths")
-        if masses is not None:
-            masses = [float(x) for x in masses]
-            if not masses:
-                raise ValueError(
-                    f"kmatrix_n '{name}': masses must not be empty — one "
-                    f"entry per pole")
-            n = len(masses)
-            if widths is not None and len(widths) != n:
-                raise ValueError(
-                    f"kmatrix_n '{name}': {len(widths)} widths for {n} masses "
-                    f"— one width per pole")
-            declared = kw.get("n_pole")
-            if declared is not None and int(declared) != n:
-                raise ValueError(
-                    f"kmatrix_n '{name}': n_pole={int(declared)} but "
-                    f"len(masses)={n} — the list IS the pole count")
-        else:
-            n = int(kw.get("n_pole", 2))
-        self.n_pole = int(n)
-        if self.n_pole < 1:
-            raise ValueError(f"kmatrix_n '{name}': n_pole must be >= 1")
+        masses = kw.get("mass_list")
+        widths = kw.get("width_list")
+        if masses is None or widths is None:
+            missing = [k for k, v in (("mass_list", masses),
+                                      ("width_list", widths)) if v is None]
+            raise ValueError(
+                f"kmatrix_n '{name}': declare the poles with {missing} — "
+                f"`mass_list: [...]` AND `width_list: [...]`, one entry per "
+                f"pole (there is no scalar shorthand)")
+        masses = [float(x) for x in masses]
+        widths = [float(x) for x in widths]
+        if not masses:
+            raise ValueError(
+                f"kmatrix_n '{name}': mass_list must not be empty — one entry "
+                f"per pole")
+        if len(widths) != len(masses):
+            raise ValueError(
+                f"kmatrix_n '{name}': {len(widths)} widths for {len(masses)} "
+                f"masses — one width per pole")
+        if "n_pole" in kw:
+            raise ValueError(
+                f"kmatrix_n '{name}': `n_pole` is not a key — the pole list "
+                f"IS the pole count (len(mass_list) = {len(masses)})")
+        self.n_pole = len(masses)
         norm = kw.get("width_norm", True)
         if not isinstance(norm, bool):
             raise ValueError(
@@ -222,57 +229,52 @@ class KMatrixNModel(BasisModel):
 
     # -- physical parameters ----------------------------------------
 
-    def _coupling(self, key):
-        mag, phase = self.tail
-        z = complex(self.kwargs.get(key, 1.0))
-        m = abs(z)
-        p = float(np.angle(z))
-        m = float(self.kwargs.get(f"{key}{mag}", m))
-        p = float(self.kwargs.get(f"{key}{phase}", p))
-        return m, p
-
     def _reference_mass(self):
-        """``M``: the scalar ``mass``, else the FIRST entry of ``masses``."""
+        """``M``: the scalar ``mass``, else the FIRST entry of ``mass_list``."""
         kw = self.kwargs
         if kw.get("mass") is not None:
             return float(kw["mass"])
-        masses = kw.get("masses")
+        masses = kw.get("mass_list")
         if masses:
             return float(masses[0])
         return 0.775
 
-    def _phys(self):
-        mass = self._reference_mass()
-        width = float(self.kwargs.get("width", 0.1))
-        mag, phase = self.tail
-        masses, widths = self.kwargs.get("masses"), self.kwargs.get("widths")
+    def _pole_values(self):
+        """``{mass{i}: m_i, width{i}: Γ_i}`` for ``i = 0 … N−1``."""
+        masses, widths = self.kwargs["mass_list"], self.kwargs["width_list"]
         out = {}
-        for i in range(1, self.n_pole + 1):
-            m = (float(masses[i - 1]) if masses is not None
-                 and i <= len(masses) else mass * (1 + 0.1 * (i - 1)))
-            gamma = (float(widths[i - 1]) if widths is not None
-                     and i <= len(widths) else width / self.n_pole)
-            out[f"mass{i}"] = m
-            out[f"width{i}"] = gamma
-        for i in range(1, self.n_pole + 1):
-            m, p = self._coupling(f"beta{i}")
-            out[f"beta{i}{mag}"] = m
-            out[f"beta{i}{phase}"] = p
+        for i in range(self.n_pole):
+            out[f"mass{i}"] = float(masses[i])
+            out[f"width{i}"] = float(widths[i])
+        return out
+
+    def _transform_defaults(self):
+        """Pole anchors + the β fallback.
+
+        The β entries only fill a dict that LACKS them (a partial ``amp``
+        call); in a fit the β slots are flat variables, so their value comes
+        from ``x``.
+        """
+        out = self._pole_values()
+        mag, phase = self.tail
+        for i in range(self.n_pole):
+            out[f"beta{i}{mag}"] = 1.0
+            out[f"beta{i}{phase}"] = 0.0
         return out
 
     def get_defaults(self):
-        """The per-pole fit parameters — ``mass{i}`` / ``width{i}`` / ``beta{i}…``.
+        """The POLE anchors — ``mass{i}`` / ``width{i}``, ``i = 0 … N−1``.
 
-        This dict is the model's ADVERTISED parameter surface: it feeds
-        ``AmplitudeModel.particle_defaults`` → ``cm.defaults`` and the printed
-        / saved fit metadata.  Only names the basis transform consumes belong
-        in it (registration itself comes from the transform's ``input_names``,
-        so an extra entry is inert — it just reads like a parameter that
-        nothing can move).  The scalar ``mass``/``width`` are BUILD-time
-        (``_reference_mass``; and the fallback shape when no ``masses`` /
-        ``widths`` are given), so they stay out.
+        Only these enter ``cm.defaults``, and only they therefore start at
+        their configured value in ``initial_values``: a pole mass/width is
+        physics (narrow basin, label-sensitive — a random mass is nonsense).
+
+        ``beta{i}`` is deliberately absent: it is a COUPLING, linear in the
+        amplitude and zero at the origin, so — like ``g_ls`` — it starts
+        random (``U(-π, π)``) and is set by ``--init`` / the constraint file.
+        There is no ``beta{i}`` config key either.
         """
-        return {f"{self.name}_{key}": val for key, val in self._phys().items()}
+        return {f"{self.name}_{k}": v for k, v in self._pole_values().items()}
 
     # -- phase space ------------------------------------------------
 
@@ -348,7 +350,8 @@ class KMatrixNModel(BasisModel):
         return num_names_for(self.name, self.n_pole)
 
     def make_basis_transform(self):
-        defaults = {f"{self.name}_{k}": v for k, v in self._phys().items()}
+        defaults = {f"{self.name}_{k}": v
+                    for k, v in self._transform_defaults().items()}
         return KMatrixNWeightsTransform(
             self.name, self.get_den_name(), self.get_num_name(),
             defaults, tail=self.tail, n_pole=self.n_pole,
@@ -371,7 +374,7 @@ class KMatrixNGSModel(KMatrixNModel):
     ONLY ``_rho`` differs: the width-preserving coupling default follows it
     (``g² = m_i·Γ_i/Re ρ(m_i)``, and ``Re ρ_gs(m_i) = 1`` exactly, the unit
     already carrying ``1/M``), and the ``2N+1`` rows, the ``N`` numerator
-    heads, the polynomial weights, the ``masses``/``widths`` pole list and the
+    heads, the polynomial weights, the ``mass_list``/``width_list`` pole list and the
     transform are the parent's.
     """
 
