@@ -42,9 +42,47 @@ def _latex_name(name, name_map):
     return name_map.get(base, base).strip("$") + ls_part
 
 
+def _wave_expansion(model):
+    """``[(base_index, offset, count)]``: geometry wave → FLAT ck slots.
+
+    ``AmplitudeModel.wave_expansion()`` is basis-aware: a basis particle model
+    expands one geometry wave into ``count`` contiguous flat ck slots (the
+    numerator rows), so ``sum(count) == len(model.get_partial_waves_params())``
+    is the block stride of the flat ck vector.  The base ``AmplitudeModel``
+    answers with the identity mapping (one slot per geometry wave), so a plain
+    ``pwa`` config needs no special case.
+    """
+    return list(model.wave_expansion())
+
+
+def _n_flat_waves(model):
+    """Block stride of the FLAT ck vector (expanded, not geometry)."""
+    return sum(cnt for _b, _off, cnt in _wave_expansion(model))
+
+
+def _wave_slots(idxs, expansion):
+    """All FLAT ck slots of the first geometry wave present in ``idxs``.
+
+    cp-merged mode pairs one sub-channel from each charge and uses the first
+    chain (the ``g_ls`` one) as the B0 numerator/denominator entry.  A basis
+    model owns several contiguous slots for that chain, so ``idxs[0]`` alone
+    would drop every numerator head.  With an all-ones expansion (no basis
+    model) this is exactly ``[idxs[0]]``.
+    """
+    first = idxs[0]
+    for _b, off, count in expansion:
+        if off <= first < off + count:
+            return [j for j in idxs if off <= j < off + count]
+    return [first]
+
+
 def discover_sub_decays(config, name_map, merge_cp=False):
     """Group base ck indices by resonance → sub-decay channel."""
     pws = config.full_decay.get_partial_waves_params()
+    # geometry wave -> its FLAT ck slots: the stem regex reads the geometry
+    # list (the numerator head is the LAST tuple element, so ``pw[1]`` is the
+    # plain ``B->..._g_ls_L`` name), the recorded indices are the expansion.
+    spans = {b: (off, count) for b, off, count in _wave_expansion(config)}
 
     idx_to_ls = {}
     for start, end, chain in config.chain_ck_ranges():
@@ -76,8 +114,9 @@ def discover_sub_decays(config, name_map, merge_cp=False):
         ls_info = idx_to_ls.get(i, (0, 0))
         ls_key = (sub_channel, ls_info)
 
+        off, count = spans[i]
         chains.setdefault(rx_name, OrderedDict())
-        chains[rx_name].setdefault(ls_key, []).append(i)
+        chains[rx_name].setdefault(ls_key, []).extend(range(off, off + count))
 
     if merge_cp:
         merged = OrderedDict()
@@ -126,14 +165,14 @@ def _setup(args):
     return f
 
 
-def _output_terminal(stems, csv_rows, af, n_base, merge_cp):
+def _output_terminal(stems, csv_rows, af, n_wave, merge_cp, expansion=()):
     """Terminal output. Denominator and numerator results are cached inside ``af``."""
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
             for block in range(4):
-                ls.append(block * n_base + i)
-                lsbar.append((block + 4) * n_base + i)
+                ls.append(block * n_wave + i)
+                lsbar.append((block + 4) * n_wave + i)
         return ls, lsbar
 
     print("\n" + "=" * 80)
@@ -146,23 +185,23 @@ def _output_terminal(stems, csv_rows, af, n_base, merge_cp):
         print("  " + "-" * 75)
 
         if merge_cp:
-            pi_p_all = [idxs[0] for _, idxs in subs]
-            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+            pi_p_all = [j for _, idxs in subs for j in _wave_slots(idxs, expansion)]
         else:
             pi_p_all = [idx for _, idxs in subs for idx in idxs]
-            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+        ls_p_total, lsbar_p_total = split_ls(pi_p_all)
 
         sub_groups = []
         for sub_label, idxs in subs:
+            slots = _wave_slots(idxs, expansion) if merge_cp else list(idxs)
             base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
             if sub_groups and sub_groups[-1][0] == base:
-                sub_groups[-1][1].append((sub_label, idxs[0] if merge_cp else idxs))
+                sub_groups[-1][1].append((sub_label, slots))
             else:
-                sub_groups.append((base, [(sub_label, idxs[0] if merge_cp else idxs)]))
+                sub_groups.append((base, [(sub_label, slots)]))
 
         for base_label, entries in sub_groups:
             for sub_label, pi_p_idx in entries:
-                ls_p, lsbar_p = split_ls([pi_p_idx])
+                ls_p, lsbar_p = split_ls(pi_p_idx)
                 # Denominator cached internally after first call
                 v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
                 v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
@@ -173,7 +212,7 @@ def _output_terminal(stems, csv_rows, af, n_base, merge_cp):
                 csv_rows.append((rx_label, sub_label, r0, s0, r1, s1))
 
             if len(entries) > 1:
-                all_pi_p = [e[1] for e in entries]
+                all_pi_p = [j for _lbl, slots in entries for j in slots]
                 ls_all, lsbar_all = split_ls(all_pi_p)
                 v_tot, e_tot = af.fractions([ls_all], denominator=ls_p_total)
                 v_tot1, e_tot1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
@@ -190,14 +229,15 @@ def _fmt(v, e):
     return f"{v:.4f}\\pm{max(e, 0.0):.4f}"
 
 
-def _output_latex(stems, af, n_base, name_map, output_path, compile_pdf=True, merge_cp=True):
+def _output_latex(stems, af, n_wave, name_map, output_path, compile_pdf=True,
+                  merge_cp=True, expansion=()):
     """LaTeX/PDF output.  Results cached inside ``af`` from terminal run."""
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
             for block in range(4):
-                ls.append(block * n_base + i)
-                lsbar.append((block + 4) * n_base + i)
+                ls.append(block * n_wave + i)
+                lsbar.append((block + 4) * n_wave + i)
         return ls, lsbar
 
     L = []
@@ -229,25 +269,25 @@ def _output_latex(stems, af, n_base, name_map, output_path, compile_pdf=True, me
             rx_ltx = rx_ltx.strip("$")
 
         if merge_cp:
-            pi_p_all = [idxs[0] for _, idxs in subs]
-            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+            pi_p_all = [j for _, idxs in subs for j in _wave_slots(idxs, expansion)]
         else:
             pi_p_all = [idx for _, idxs in subs for idx in idxs]
-            ls_p_total, lsbar_p_total = split_ls(pi_p_all)
+        ls_p_total, lsbar_p_total = split_ls(pi_p_all)
 
         sub_groups = []
         for sub_label, idxs in subs:
+            slots = _wave_slots(idxs, expansion) if merge_cp else list(idxs)
             base = sub_label.split(" L=")[0] if " L=" in sub_label else sub_label
             if sub_groups and sub_groups[-1][0] == base:
-                sub_groups[-1][1].append((sub_label, idxs[0] if merge_cp else idxs))
+                sub_groups[-1][1].append((sub_label, slots))
             else:
-                sub_groups.append((base, [(sub_label, idxs[0] if merge_cp else idxs)]))
+                sub_groups.append((base, [(sub_label, slots)]))
 
         n_subs = sum(len(e) + (1 if len(e) > 1 else 0) for _, e in sub_groups)
         first = True
         for base_label, entries in sub_groups:
             for k, (sub_label, pi_p_idx) in enumerate(entries):
-                ls_p, lsbar_p = split_ls([pi_p_idx])
+                ls_p, lsbar_p = split_ls(pi_p_idx)
                 # Denominator and numerators cached from terminal run
                 v_b0, e_b0 = af.fractions([ls_p], denominator=ls_p_total)
                 v_b1, e_b1 = af.fractions([lsbar_p], denominator=lsbar_p_total)
@@ -262,7 +302,7 @@ def _output_latex(stems, af, n_base, name_map, output_path, compile_pdf=True, me
                     L.append(f"   & ${sub_ltx}$ & ${_fmt(r0,s0)}$ & ${_fmt(r1,s1)}$ \\\\")
 
             if len(entries) > 1:
-                all_pi_p = [e[1] for e in entries]
+                all_pi_p = [j for _lbl, slots in entries for j in slots]
                 ls_all, lsbar_all = split_ls(all_pi_p)
                 vt, et = af.fractions([ls_all], denominator=ls_p_total)
                 vt1, et1 = af.fractions([lsbar_all], denominator=lsbar_p_total)
@@ -324,11 +364,14 @@ def main():
     name_map = f.name_display_map()
 
     stems = discover_sub_decays(f.model, name_map, merge_cp=not args.no_merge_cp)
-    n_base = len(f.full_decay.get_partial_waves_params())
+    # FLAT ck block stride (expanded waves) and the base -> slot mapping
+    n_wave = _n_flat_waves(f.model)
+    expansion = _wave_expansion(f.model)
 
     # ── Terminal output (populates ``af`` cache) ────────────────────
     csv_rows = []
-    _output_terminal(stems, csv_rows, af, n_base, merge_cp=not args.no_merge_cp)
+    _output_terminal(stems, csv_rows, af, n_wave,
+                     merge_cp=not args.no_merge_cp, expansion=expansion)
 
     # ── CSV output ─────────────────────────────────────────────────
     if args.output:
@@ -345,8 +388,9 @@ def main():
     # ── LaTeX + PDF output (reuses ``af`` cache from terminal) ──────
     if args.output:
         tex_path = args.output + ".tex"
-        _output_latex(stems, af, n_base, name_map, tex_path,
-                      compile_pdf=True, merge_cp=not args.no_merge_cp)
+        _output_latex(stems, af, n_wave, name_map, tex_path,
+                      compile_pdf=True, merge_cp=not args.no_merge_cp,
+                      expansion=expansion)
 
 
 if __name__ == "__main__":

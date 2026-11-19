@@ -57,35 +57,61 @@ def _make_label_fn(name_map):
     return label
 
 
+def _wave_expansion(model):
+    """``[(base_index, offset, count)]``: geometry wave → FLAT ck slots.
+
+    ``AmplitudeModel.wave_expansion()`` is basis-aware: a basis particle model
+    expands one geometry wave into ``count`` contiguous flat ck slots (the
+    numerator rows), so ``sum(count) == len(model.get_partial_waves_params())``
+    is the block stride of the flat ck vector.  The base ``AmplitudeModel``
+    answers with the identity mapping (one slot per geometry wave), so a plain
+    ``pwa`` config needs no special case.
+    """
+    return list(model.wave_expansion())
+
+
+def _n_flat_waves(model):
+    """Block stride of the FLAT ck vector (expanded, not geometry)."""
+    return sum(cnt for _b, _off, cnt in _wave_expansion(model))
+
+
 def group_ck_stems(config, label_fn):
     """Group base ck indices by their first-decay stem.
 
-    Returns list of (stem, label, [base_ck_indices], [wave_labels], has_ls_waves).
+    Returns list of (stem, label, [flat_ck_indices], [wave_labels], has_ls_waves).
     ``has_ls_waves`` is True when the stem has multiple distinct L values
     at the B → first-decay level (e.g. ρρ S/P/D).
+
+    A geometry wave can own several FLAT ck slots (basis particle model): the
+    stem regex reads the geometry list — the numerator head is appended as the
+    LAST tuple element, so ``pw[1]`` is still ``B->..._g_ls_L`` — while the
+    recorded indices come from ``wave_expansion`` (all slots of the wave).
     """
     pws = config.full_decay.get_partial_waves_params()
+    spans = {b: (off, count) for b, off, count in _wave_expansion(config)}
     raw = OrderedDict()
     for i, pw in enumerate(pws):
         name = pw[1]
         m = re.match(r'^B->(.+)_g_ls_(\d+)$', name)
         if not m:
             continue
-        raw.setdefault(m.group(1), []).append((i, int(m.group(2))))
+        off, count = spans[i]
+        raw.setdefault(m.group(1), []).append(
+            (int(m.group(2)), list(range(off, off + count))))
 
     result = []
     for stem, entries in sorted(raw.items(), key=lambda x: label_fn(x[0])):
         label = label_fn(stem)
-        base_idxs = [e[0] for e in entries]
-        ls_vals = sorted(set(e[1] for e in entries))
+        base_idxs = [j for _lv, idxs in entries for j in idxs]
+        ls_vals = sorted(set(lv for lv, _idxs in entries))
         has_ls = len(ls_vals) > 1
         if has_ls:
             by_l = OrderedDict()
-            for i, lv in entries:
-                by_l.setdefault(lv, []).append(i)
+            for lv, idxs in entries:
+                by_l.setdefault(lv, []).extend(idxs)
             waves = [(f"L={lv}", idxs) for lv, idxs in by_l.items()]
         else:
-            waves = [(f"L={i}", [base_idxs[i]]) for i in range(len(base_idxs))]
+            waves = [(f"L={i}", idxs) for i, (_lv, idxs) in enumerate(entries)]
         result.append((stem, label, base_idxs, waves, has_ls))
     return result
 
@@ -115,15 +141,19 @@ def _setup_fitter(args):
 
 
 def _compute_groups(f, stems, af, batch=None):
-    """Build masks, compute fractions for all groups."""
-    n_base = len(f.full_decay.get_partial_waves_params())
+    """Build masks, compute fractions for all groups.
+
+    ``n_wave`` is the FLAT ck block stride (one slot per expanded wave), not
+    the geometry count — a basis model owns several slots per geometry wave.
+    """
+    n_wave = _n_flat_waves(f.model)
 
     def split_ls(idxs):
         ls, lsbar = [], []
         for i in idxs:
             for block in range(4):
-                ls.append(block * n_base + i)
-                lsbar.append((block + 4) * n_base + i)
+                ls.append(block * n_wave + i)
+                lsbar.append((block + 4) * n_wave + i)
         return ls, lsbar
 
     groups = [(stem, label, split_ls(idxs), waves, has_ls)
@@ -135,7 +165,7 @@ def _compute_groups(f, stems, af, batch=None):
         all_masks.append(lsbar)
 
     vals, errs = af.fractions(all_masks, batch=batch)
-    return groups, vals, errs, split_ls, n_base
+    return groups, vals, errs, split_ls, n_wave
 
 
 # ── Output: terminal ───────────────────────────────────────────────────────

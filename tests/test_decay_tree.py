@@ -4,6 +4,8 @@ import inspect
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -93,3 +95,34 @@ def test_decay_tree_owns_symmetry_declarations():
     assert tree.identical_groups == [["pip", "pim"]]
     orders = tree.block_orders()
     assert len(orders) == 4 and sum(is_cp for _, is_cp in orders) == 2
+
+
+def test_unresolvable_chain_raises_instead_of_hanging():
+    """A decay output that is neither a final nor produced by a sub-decay.
+
+    ``get_topo_map`` fills bottom-up; its ``while`` had no progress check, so
+    this input (a resonance put in the ``decay:`` section instead of the
+    final state) spun forever instead of failing.  The test's real gate is
+    that it returns at all.
+    """
+    from tabpwa.config_loader import load_config
+    from tabpwa.decay_tree import DecayTree
+
+    dic = load_config(os.path.join(ROOT, "tests", "config_pwa_gen.yml"))
+    dic["decay"]["pipi"] = ["k2"]          # k2 does not decay, eta unreachable
+
+    with pytest.raises(ValueError, match="no resolvable topology"):
+        DecayTree(dic["decay"], dic["particle"])
+
+
+def test_valid_chains_still_resolve():
+    """The progress guard must not disturb a well-formed tree."""
+    from tabpwa.config_loader import load_config
+    from tabpwa.decay_tree import DecayTree
+
+    dic = load_config(os.path.join(ROOT, "tests", "config_pwa_gen.yml"))
+    tree = DecayTree(dic["decay"], dic["particle"])
+    for chain in tree.full.chains:
+        topo = chain.get_topo_map()
+        assert chain.top in topo
+        assert sorted(topo[chain.top]) == sorted(chain.finals)

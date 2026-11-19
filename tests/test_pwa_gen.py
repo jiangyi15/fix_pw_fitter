@@ -374,6 +374,58 @@ def test_gate_c_ck_is_one_slot_per_expanded_wave(cfg):
     assert len(f.model.get_ck_map()) == n_wave
 
 
+def test_wave_expansion_maps_geometry_waves_to_flat_ck_slots():
+    """``wave_expansion`` is the geometry → FLAT ck mapping the fraction scripts use.
+
+    Both ``scripts/calc_first_decay_fractions.py`` and
+    ``scripts/calc_sub_decay_ratios.py`` turn a geometry-wave index into flat
+    ck indices (and use the flat count as the block stride).  A basis particle
+    model expands ONE geometry wave into several CONTIGUOUS flat slots — one
+    per numerator row — so:
+
+      * ``sum(count)`` is the block stride and equals both the expanded wave
+        count and the flat ``ck`` length, never the geometry count;
+      * the slots of base wave ``b`` start at ``offset`` and are exactly the
+        tuples ``get_partial_waves_params()[offset:offset + count]`` (same
+        geometry prefix, distinct numerator heads);
+      * the plain ``basis`` config is the identity (every ``count == 1``).
+    """
+    plain = _cfg(CFG_BASIS)
+    km = _cfg(CFG_KM)
+    cheb = _cfg(CFG_BASIS)
+    cheb["particle"]["k2"].update({
+        "model": "ExpCheb", "n_cheb": 6, "m_range": [0.3, 2.0],
+        "mass": 0.8, "k": 1.0,
+    })
+
+    for cfg, expect_counts in ((plain, None), (km, [2]), (cheb, [7])):
+        model = Fitter(cfg).model
+        exp = model.wave_expansion()
+        pws = model.get_partial_waves_params()
+        geom = model.full_decay.get_partial_waves_params()
+
+        # one row per GEOMETRY wave, in base order
+        assert [b for b, _off, _n in exp] == list(range(len(geom)))
+        assert sum(n for _b, _off, n in exp) == len(pws) == len(model.get_ck_map())
+
+        off_expected = 0
+        for b, off, count in exp:
+            assert off == off_expected          # contiguous, in base order
+            assert count >= 1
+            # the slots really belong to this geometry wave: identical geometry
+            # prefix, and only the trailing numerator head differs
+            assert [t[:len(geom[b])] for t in pws[off:off + count]] == [geom[b]] * count
+            off_expected += count
+        assert off_expected == len(pws)
+
+        if expect_counts is not None:
+            assert [n for _b, _off, n in exp] == expect_counts
+        else:
+            # the DEFAULT BasisModel basis has one numerator row ≡ 1: identity
+            assert [n for _b, _off, n in exp] == [1] * len(geom)
+            assert [off for _b, off, _n in exp] == list(range(len(geom)))
+
+
 def test_gate_c_zero_numerator_row_collapses():
     """A numerator row with weight 0 contributes nothing to the amplitude.
 

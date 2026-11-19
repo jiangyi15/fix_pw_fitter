@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 
-from tabpwa.config_loader import Config
+from tabpwa.config_loader import Config, RawConfig
 from tabpwa.plot_pwa_groups import (
     discover_pwa_groups, pwa_mass_varfun, pwa_angle_varfun,
-    angle_variable_labels, var_ranges)
+    angle_variable_labels, var_ranges, _n_flat_waves)
 
 
 @pytest.fixture(scope="module")
@@ -37,6 +37,59 @@ def test_discover_merge(cfg_pwa):
     g = discover_pwa_groups(cfg_pwa, by="ls", merge=[(".*", "ALL")])
     assert list(g) == ["ALL"]
     assert sorted(g["ALL"]) == list(range(3))
+
+
+def _basis_two_chain_config():
+    """2 chains × 2 identical-particle blocks, ONE of them a basis model.
+
+    ``pipi`` holds a ``kmatrix_n`` (2 numerator heads → 2 flat ck slots),
+    ``pipi2`` a plain ``basis`` (1 slot): geometry waves 2, expansion
+    ``[(0,0,2), (1,2,1)]``, flat base 3, 2 blocks → 6 ck entries.
+
+    The geometry-based stride/mapping this used to use gives
+    ``k2 → [0,1,2]`` and ``k2b → [1,2,3]`` here — overlapping masks that
+    never reach slots 3-5.
+    """
+    d = RawConfig("tests/config_pwa_gen_ident.yml").to_dict()
+    d["defaults"] = {"n_interp": 2000}      # the fixture's 4000 is needless here
+    d["particle"]["pipi2"] = ["k2b"]
+    d["particle"]["k2b"] = {"J": 1, "P": -1, "mass": 0.8, "width": 0.3,
+                            "model": "basis"}
+    d["decay"]["jpsi"] = [["pipi", "eta"], ["pipi2", "eta"]]
+    d["decay"]["pipi2"] = ["pip", "pip2"]
+    d.pop("backend", None)
+    return d
+
+
+def test_discover_covers_flat_ck_slots_with_basis_expansion():
+    """Group masks are FLAT ck indices: expansion inside a wave, n_base stride."""
+    from tabpwa import Fitter
+    f = Fitter(_basis_two_chain_config())
+    f.apply_constrains()
+    m = f.model
+
+    n_ck = len(m.get_ck_map())
+    assert [c for _b, _o, c in m.wave_expansion()] == [2, 1]
+    assert _n_flat_waves(m) == 3 and n_ck == 6
+
+    for by in ("chain", "resonance", "ls"):
+        groups = discover_pwa_groups(m, by=by)
+        idxs = sorted(i for v in groups.values() for i in v)
+        # every flat ck slot is claimed exactly once, by the wave that owns it
+        assert idxs == list(range(n_ck)), by
+        # k2: slots 0,1 then 3,4 (stride 3); k2b: 2 then 5
+        assert sorted(tuple(sorted(v)) for v in groups.values()) == \
+            [(0, 1, 3, 4), (2, 5)], by
+
+
+def test_discover_identity_for_a_plain_config(cfg_pwa):
+    """No basis model: offsets 0,1,2… and one slot per geometry wave."""
+    n_wave = len(cfg_pwa.full_decay.get_partial_waves())
+    assert cfg_pwa.wave_expansion() == [(k, k, 1) for k in range(n_wave)]
+    assert _n_flat_waves(cfg_pwa) == n_wave
+    for by in ("chain", "resonance", "ls"):
+        groups = discover_pwa_groups(cfg_pwa, by=by)
+        assert sorted(i for v in groups.values() for i in v) == list(range(n_wave))
 
 
 def test_angle_var_labels_phi_first():

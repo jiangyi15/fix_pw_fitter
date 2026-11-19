@@ -57,17 +57,41 @@ def _display(config, name):
     return name
 
 
-def _base_wave_units(config, waves):
-    """Number of block duplications of the base waves in the full ck list."""
-    n_base = max(1, len(waves))
+def _n_flat_waves(config):
+    """Block stride of the FLAT ck vector: one slot per expanded wave.
+
+    A basis particle model expands ONE geometry wave into several ck slots
+    (its free numerator rows), so the stride is ``sum(count)`` over the
+    expansion — NOT the geometry count
+    ``len(full_decay.get_partial_waves())``.  ``sum(count)`` is the flat base
+    wave count by definition, and equals ``len(get_partial_waves_params())``
+    (``get_ck_map()`` before the block expansion) wherever that accessor
+    exists.
+    """
+    return max(1, sum(cnt for _b, _off, cnt in config.wave_expansion()))
+
+
+def _wave_spans(config):
+    """``{base_index: (offset, count)}`` — geometry wave → its FLAT slots.
+
+    ``AmplitudeModel.wave_expansion()`` is the basis-aware mapping (its
+    default is the identity: one slot per geometry wave).
+    """
+    return {b: (off, cnt) for b, off, cnt in config.wave_expansion()}
+
+
+def _base_wave_units(config):
+    """Number of block duplications (``n_perm · n_cp``) in the full ck list."""
+    n_base = _n_flat_waves(config)
     n_full = max(n_base, len(config.get_ck_map()))
     return max(1, n_full // n_base)
 
 
-def _expand(base, n_blk):
+def _expand(base, n_blk, n_base):
+    """Repeat FLAT base indices over the row blocks (stride ``n_base``)."""
     out = []
     for b in range(n_blk):
-        out.extend(b * len(base) + i for i in base)
+        out.extend(b * n_base + i for i in sorted(base))
     return out
 
 
@@ -77,10 +101,19 @@ def discover_pwa_groups(config, by="resonance", merge=None):
     The k-axis ground truth is ``full_decay.get_partial_waves()``:
     ``waves[k] = (ls_tuple, chain)``.  Group keys are built from the
     intermediate (non-top) resonance cores of each chain, formatted with
-    ``config.decay_tree.name_display_map()``.  The per-base indices are duplicated over
-    the full ck list (blocks × CP/permutation copies) the same way the
-    legacy plot groups expand over the 8 blocks, so masks always index the
-    real parameter vector handed to the backends.
+    ``config.decay_tree.name_display_map()``.
+
+    Each geometry wave owns one or more FLAT ck slots — a basis particle
+    model (``kmatrix_n``, ``ExpCheb``, a multi-row ``one``/``ExpSplineSVD``)
+    contributes one slot per free numerator row — so a wave's indices come
+    from ``wave_expansion()`` (all of its slots, contiguous and in base
+    order) and the block stride is the FLAT wave count
+    ``len(get_partial_waves_params())``.  Using the geometry count for
+    either is wrong as soon as a basis model is in the line: the masks then
+    point at a neighbour's slot and the last expanded slots are never
+    selected.  The indices are then duplicated over the row blocks
+    (``n_perm · n_cp`` copies), so a mask always indexes the real parameter
+    vector handed to the backends.
 
     Args:
         config: the tabpwa Config.
@@ -94,9 +127,11 @@ def discover_pwa_groups(config, by="resonance", merge=None):
     if not hasattr(config, "full_decay"):
         raise ValueError("plot_pwa_groups needs a config with full_decay")
     waves = list(config.full_decay.get_partial_waves())
-    n_blk = _base_wave_units(config, waves)
+    spans = _wave_spans(config)
+    n_base = _n_flat_waves(config)
+    n_blk = _base_wave_units(config)
 
-    raw = {}  # internal key -> base k indices
+    raw = {}  # internal key -> FLAT base k indices
 
     def _key_for(policy, chain, ls):
         cores = []
@@ -117,12 +152,13 @@ def discover_pwa_groups(config, by="resonance", merge=None):
                 if re.match(pat, key):
                     key = newlabel
                     break
-        raw.setdefault(key, []).append(k)
+        off, cnt = spans.get(k, (k, 1))
+        raw.setdefault(key, []).extend(range(off, off + cnt))
 
     groups = {}
     for key, inds in raw.items():
         display = " + ".join(_display(config, p) for p in key.split(" + "))
-        groups.setdefault(display, []).extend(_expand(inds, n_blk))
+        groups.setdefault(display, []).extend(_expand(inds, n_blk, n_base))
     return groups
 
 

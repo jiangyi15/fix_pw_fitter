@@ -150,6 +150,25 @@ class AmplitudeModel(BaseModel):
         """Kernel config for this model (base index config, model-shaped)."""
         return self.build_base_kernel_config()
 
+    def wave_expansion(self):
+        """``[(base_index, offset, count)]`` per geometry wave.
+
+        How many FLAT ck slots each geometry wave of
+        ``full_decay.get_partial_waves()`` owns: ``count`` of them,
+        CONTIGUOUS and in base order, starting at ``offset``.  The default is
+        the identity — one slot per geometry wave, ``sum(count) ==
+        len(get_partial_waves_params())``.
+
+        A BASIS model expands a wave into one slot per free numerator row
+        (``kmatrix_n``: N, ``ExpCheb``: ``n_cheb+1``), so :class:`PWAGen`
+        overrides this.  Every consumer that turns a geometry wave into a ck
+        index must use this mapping, and the block stride of the flat ck
+        vector is ``sum(count)`` — NOT the geometry count, which is
+        basis-blind.
+        """
+        waves = self.full_decay.get_partial_waves()
+        return [(k, k, 1) for k in range(len(waves))]
+
     def build_event_data(self, momenta, kernel_config, *, weight=None,
                          bkg=None):
         """Build kernel-ready event arrays for this model.
@@ -365,6 +384,7 @@ class PWAGen(PWA):
         super().__init__(config)
         self._pg_kc = None            # cached kernel config
         self._pg_combs = None         # expanded ck combinations (pre-block)
+        self._pg_mult = None          # per base wave: number of expanded slots
         self._pg_bws = []             # per base BW: {name, model, transform, …}
 
     # ── kernel config ────────────────────────────────────────────────
@@ -510,9 +530,37 @@ class PWAGen(PWA):
         return ret
 
     def get_partial_waves_params(self):
-        """Base (pre-block) ck combinations, numerator heads included."""
+        """Base (pre-block) ck combinations, numerator heads included.
+
+        One entry per EXPANDED wave: a basis particle model contributes one ck
+        slot per free numerator row, so a geometry wave can own several — see
+        :meth:`wave_expansion` for the base → expanded mapping.
+        """
         self.build_kernel_config()
         return list(self._pg_combs)
+
+    def wave_expansion(self):
+        """``[(base_index, offset, count)]`` per geometry wave — basis-aware.
+
+        Override of :meth:`AmplitudeModel.wave_expansion` (whose default is
+        the identity): ``count`` is how many EXPANDED ck slots that geometry
+        wave owns (the
+        product of its free numerator-row counts: ``1`` for a plain
+        resonance, ``N`` for ``kmatrix_n``, ``n_cheb + 1`` for ``ExpCheb``),
+        and the slots are CONTIGUOUS and in base order — so the expanded index
+        of head *h* of base wave *b* is ``offset + h``.
+
+        ``sum(count) == len(get_partial_waves_params())`` and the block stride
+        of the flat ck vector is that same total, NOT
+        ``len(full_decay.get_partial_waves_params())`` (which is the geometry
+        count and is basis-blind).
+        """
+        self.build_kernel_config()
+        out, off = [], 0
+        for k, n in enumerate(self._pg_mult):
+            out.append((k, off, int(n)))
+            off += int(n)
+        return out
 
     # ── layout construction ──────────────────────────────────────────
     def _pg_particle_models(self):
@@ -695,6 +743,7 @@ class PWAGen(PWA):
                               for h in [f["heads"][f["rows"].index(rf)]])
                 exp.append((k, combo))
                 comb_exp.append(tuple(base_combs[k]) + heads)
+        self._pg_mult = [int(m) for m in mult]
         return comb_exp, C, P
 
 @register_amplitude_model("polarised_pwa")

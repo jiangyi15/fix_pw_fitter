@@ -111,14 +111,42 @@ class DecayChain:
         return ret
 
     def get_topo_map(self):
+        """``{particle name: [final states underneath]}``, filled bottom-up.
+
+        A chain that cannot be resolved raises instead of hanging: the map
+        grows only from decays whose outputs are already known, so one decay
+        whose output is neither a declared final nor produced by a
+        sub-decay leaves every pass adding nothing — that used to spin
+        forever in this ``while``.
+        """
         topo_map = {k: [k] for k in self.finals}
         while self.top not in topo_map:
+            added = False
             for j in self.decays:
+                if j.core.name in topo_map:
+                    continue
                 if all([k.name in topo_map for k in j.outs]):
                     tmp = []
                     for k in j.outs:
                         tmp += topo_map[k.name]
                     topo_map[j.core.name] = tmp
+                    added = True
+            if not added:
+                stuck = []
+                for j in self.decays:
+                    if j.core.name in topo_map:
+                        continue
+                    missing = [k.name for k in j.outs if k.name not in topo_map]
+                    stuck.append("%s -> %s (unresolved: %s)" % (
+                        j.core.name, "+".join(k.name for k in j.outs),
+                        ", ".join(missing) or "-"))
+                raise ValueError(
+                    "decay chain has no resolvable topology: "
+                    + "; ".join(stuck)
+                    + ".  Finals are %s; every decay output must be a "
+                      "declared final or produced by a sub-decay (a decay "
+                      "whose output is neither can never be resolved)"
+                      % list(self.finals))
         return topo_map
 
     def topo_id(self):
