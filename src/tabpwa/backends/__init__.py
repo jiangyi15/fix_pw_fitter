@@ -43,6 +43,7 @@ from . import integrated_pwa_backend  # noqa: F401 — register IntegratedPWABac
 from . import cpu_pwa_s0c_backend  # noqa: F401 — register CPUPWAS0CBackend
 from . import cpu_pwa_gen_backend  # noqa: F401 — register CPUPWAGenBackend
 from . import cpu_pwa_v5_backend   # noqa: F401 — register CPUPWAV5Backend
+from . import auto_backend  # noqa: F401 — register auto
 
 __all__ = [
     "ALL_BACKENDS", "UNIVERSAL_BACKENDS", "MODEL_BACKENDS",
