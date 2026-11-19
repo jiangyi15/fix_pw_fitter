@@ -180,6 +180,25 @@ class BasisModel:
         """Store the Particle that owns this model (for decay tree access)."""
         self._parent = particle
 
+    #: ``L`` used when no decay tree is attached (a bare model in a test).
+    _L_FALLBACK = 0
+
+    def default_L(self):
+        """``L`` for this particle: the LOWEST partial wave of its own decay.
+
+        ``Decay.get_ls_list()`` enumerates the allowed ``(l, s)`` pairs of
+        ``_parent._decays[0]``; a lineshape couples to the smallest ``l``
+        unless the config sets ``L``.  Returns :attr:`_L_FALLBACK` when no
+        decay tree is attached.
+        """
+        decays = getattr(getattr(self, "_parent", None), "_decays", None) or []
+        get_ls = getattr(decays[0], "get_ls_list", None) if decays else None
+        if get_ls is not None:
+            ls = get_ls()
+            if ls:
+                return int(min(l for l, _ in ls))
+        return self._L_FALLBACK
+
     def make_basis_transform(self):
         """Physical parameters → this model's basis weight names.
 

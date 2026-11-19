@@ -32,7 +32,7 @@ The pole content is a LIST of masses and widths — ``n_pole = len(masses)``::
         model: kmatrix_n
         masses: [0.775, 1.45, 1.90]     # one entry per pole; sets n_pole
         widths: [0.149, 0.30, 0.20]     # one per pole; their fit-parameter values
-        L: 1
+        L: 1                            # default: min(decay[0].get_ls_list())
         width_norm: true     # false: drop the /Re ρ(m_i) normalisation
         # GS variant: model: kmatrix_n_gs   (same keys, `_rho` overridden)
 
@@ -181,7 +181,9 @@ class KMatrixNModel(BasisModel):
 
     ``n_pole = len(masses)``; ``width_norm`` (``true`` by default) chooses
     whether a ``widths`` entry is turned into a coupling with the pole
-    ``Re ρ(m_i)`` normalisation.  See the module docstring for the algebra.
+    ``Re ρ(m_i)`` normalisation, and ``L`` defaults to
+    :meth:`BasisModel.default_L` — the lowest partial wave of the particle's
+    own decay.  See the module docstring for the algebra.
     """
 
     def __init__(self, name, **kwargs):
@@ -284,7 +286,8 @@ class KMatrixNModel(BasisModel):
         """Phase space ``ρ(m)`` — THE overridable knob of this family."""
         kw = self.kwargs
         d2, d3 = self._daughters()
-        return phase_space(np.asarray(m, dtype=float), int(kw.get("L", 0)),
+        return phase_space(np.asarray(m, dtype=float),
+                           int(kw.get("L", self.default_L())),
                            float(kw.get("d", 3.0)), d2, d3)
 
     def _coupling_sq(self, m, gamma):
@@ -368,9 +371,12 @@ class KMatrixNGSModel(KMatrixNModel):
     transform are the parent's.
     """
 
+    _L_FALLBACK = 1
+
     def _rho(self, m):
         kw = self.kwargs
         d2, d3 = self._daughters()
         return gs_unit(np.asarray(m, dtype=float),
-                       self._reference_mass(), int(kw.get("L", 1)),
+                       self._reference_mass(),
+                       int(kw.get("L", self.default_L())),
                        float(kw.get("d", 3.0)), d2, d3)

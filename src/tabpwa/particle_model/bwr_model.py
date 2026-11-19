@@ -114,7 +114,7 @@ def bwr_gamma_prime(m, model):
         q'/q = (m^4 - a^2 b^2) / (m * p2),   p2 = (m^2-a^2)(m^2-b^2)
     """
     M  = float(model.kwargs.get("M",  model.kwargs.get("mass",  0.775)))
-    L  = int(model.kwargs.get("L", 0))
+    L  = int(model.kwargs.get("L", model.default_L()))
     d  = float(model.kwargs.get("d", 3.0))
     if not (model._parent and model._parent._decays):
         raise ValueError(f"BWR model '{model.name}': no decay tree for q0")
@@ -280,7 +280,8 @@ class BWRModel(BaseModel):
     Parameters from YAML config:
         mass          — pole mass m₀
         width         — nominal width g₀
-        L             — orbital angular momentum (default 0)
+        L             — orbital angular momentum
+                        (default: min(decay[0].get_ls_list()))
         d             — impact parameter in GeV⁻¹ (default 3.0)
         daug2Mass     — first daughter mass (required if no decay tree)
         daug3Mass     — second daughter mass (required if no decay tree)
@@ -294,7 +295,7 @@ class BWRModel(BaseModel):
 
     def gamma(self, m):
         M  = float(self.kwargs.get("M",  self.kwargs.get("mass",  0.775)))
-        L  = int(self.kwargs.get("L", 0))
+        L  = int(self.kwargs.get("L", self.default_L()))
         d  = float(self.kwargs.get("d", 3.0))
 
         # Breakup momenta — use decay tree masses (consistent with TFPWA)

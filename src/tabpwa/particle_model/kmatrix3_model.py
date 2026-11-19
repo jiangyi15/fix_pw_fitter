@@ -212,7 +212,7 @@ class KMatrix3Model(_KMatrix3Base):
                 f"kmatrix3 '{self.name}': needs the decay tree (daughters) "
                 f"to evaluate the running-width shape")
         return phase_space(
-            np.asarray(m, dtype=float), int(kw.get("L", 0)),
+            np.asarray(m, dtype=float), int(kw.get("L", self.default_L())),
             float(kw.get("d", 3.0)),
             float(parent._decays[0].outs[0].mass),
             float(parent._decays[0].outs[1].mass))
@@ -236,6 +236,8 @@ class KMatrix3GSModel(_KMatrix3Base):
     attached, else ``daug2Mass`` / ``daug3Mass`` (defaults π±, π0).
     """
 
+    _L_FALLBACK = 1
+
     def _rho(self, m):
         kw = self.kwargs
         parent = self._parent
@@ -246,5 +248,6 @@ class KMatrix3GSModel(_KMatrix3Base):
             d2 = float(kw.get("daug2Mass", 0.13957039))
             d3 = float(kw.get("daug3Mass", 0.1349768))
         return gs_unit(np.asarray(m, dtype=float),
-                       float(kw.get("mass", 0.775)), int(kw.get("L", 1)),
+                       float(kw.get("mass", 0.775)),
+                       int(kw.get("L", self.default_L())),
                        float(kw.get("d", 3.0)), d2, d3)

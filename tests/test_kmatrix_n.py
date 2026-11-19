@@ -76,6 +76,95 @@ def test_pole_count_is_len_masses():
         build_particle(n, model="kmatrix_n", masses=[])
 
 
+class _DecLS:
+    """A decay that knows its partial waves (like `Decay.get_ls_list`)."""
+
+    def __init__(self, ls):
+        self.outs = [_Out(), _Out()]
+        self._ls = list(ls)
+
+    def get_ls_list(self):
+        return list(self._ls)
+
+
+class _ParentLS:
+    def __init__(self, ls):
+        self._decays = [_DecLS(ls)]
+
+
+@pytest.mark.parametrize("model", ["kmatrix_n", "kmatrix_n_gs"])
+def test_default_L_comes_from_the_decay(model):
+    """`L` defaults to min(decay[0].get_ls_list()), the smallest l."""
+    n, m0, G0 = "rho", 0.775, 0.149
+    mdl = build_particle(n, model=model, masses=[m0], widths=[G0])
+    mdl.register_parent(_ParentLS([(1, 1), (3, 1)]))
+    assert mdl.default_L() == 1
+    grid = np.array([0.60, 0.775, 1.00])
+    if model == "kmatrix_n":
+        expect = phase_space(grid, 1, 3.0, _Out.mass, _Out.mass)
+    else:
+        from tabpwa.particle_model.gs_rho_model import gs_unit
+        expect = gs_unit(grid, m0, 1, 3.0, _Out.mass, _Out.mass)
+    assert np.allclose(mdl._rho(grid), expect, rtol=1e-15)
+
+    # an s-wave decay picks l = 0; an explicit `L` always wins
+    mdl.register_parent(_ParentLS([(0, 0), (2, 0)]))
+    assert mdl.default_L() == 0
+    mdl_explicit = build_particle(n, model=model, masses=[m0], widths=[G0], L=2)
+    mdl_explicit.register_parent(_ParentLS([(0, 0), (2, 0)]))
+    assert np.allclose(mdl_explicit._rho(grid),
+                       phase_space(grid, 2, 3.0, _Out.mass, _Out.mass)
+                       if model == "kmatrix_n"
+                       else gs_unit(grid, m0, 2, 3.0, _Out.mass, _Out.mass),
+                       rtol=1e-15)
+
+    # no decay tree: the class fallback (0 for the BW shape, 1 for GS)
+    bare = build_particle(n, model=model, masses=[m0], widths=[G0])
+    assert bare.default_L() == (0 if model == "kmatrix_n" else 1)
+
+
+@pytest.mark.parametrize("model,fallback", [
+    ("BWRS", 0), ("kmatrix2_bf", 0), ("kmatrix3", 0), ("kmatrix3_gs", 1)])
+def test_default_L_is_shared_by_the_other_models(model, fallback):
+    """`BasisModel.default_L` is one rule for the whole family."""
+    n, m0, G0 = "rho", 0.775, 0.149
+    mdl = build_particle(n, model=model, mass=m0, width=G0)
+    assert mdl.default_L() == fallback                    # no tree attached
+    mdl.register_parent(_ParentLS([(1, 1), (3, 1)]))
+    assert mdl.default_L() == 1
+
+    grid = np.array([0.60, 0.775, 1.00])
+    if model == "BWRS":
+        from tabpwa.particle_model.bwr_model import running_width
+        assert np.allclose(mdl.gamma(grid)[0],
+                           running_width(grid, m0, 1, 3.0,
+                                         _Out.mass, _Out.mass))
+    elif model == "kmatrix3_gs":
+        from tabpwa.particle_model.gs_rho_model import gs_unit
+        assert np.allclose(mdl._rho(grid),
+                           gs_unit(grid, m0, 1, 3.0, _Out.mass, _Out.mass))
+    else:
+        assert np.allclose(mdl._rho(grid),
+                           phase_space(grid, 1, 3.0, _Out.mass, _Out.mass))
+
+    # an explicit `L` still wins over the tree
+    ex = build_particle(n, model=model, mass=m0, width=G0, L=2)
+    ex.register_parent(_ParentLS([(0, 0), (2, 0)]))
+    assert ex.default_L() == 0
+    if model == "BWRS":
+        from tabpwa.particle_model.bwr_model import running_width
+        assert np.allclose(ex.gamma(grid)[0],
+                           running_width(grid, m0, 2, 3.0,
+                                         _Out.mass, _Out.mass))
+    elif model == "kmatrix3_gs":
+        from tabpwa.particle_model.gs_rho_model import gs_unit
+        assert np.allclose(ex._rho(grid),
+                           gs_unit(grid, m0, 2, 3.0, _Out.mass, _Out.mass))
+    else:
+        assert np.allclose(ex._rho(grid),
+                           phase_space(grid, 2, 3.0, _Out.mass, _Out.mass))
+
+
 @pytest.mark.parametrize("n_pole", [1, 2, 3, 4, 5])
 def test_den_names_have_one_entry_per_basis_row(n_pole):
     """`get_den_name()` / `get_num_name()` must match the basis LENGTH."""

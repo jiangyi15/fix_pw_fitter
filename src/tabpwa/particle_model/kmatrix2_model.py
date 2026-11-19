@@ -370,7 +370,7 @@ class KMatrix2BFModel(KMatrix2Model):
                 f"kmatrix2_bf '{self.name}': needs the decay tree (daughters) "
                 f"to evaluate the phase space")
         return phase_space(
-            np.asarray(m, dtype=float), int(kw.get("L", 0)),
+            np.asarray(m, dtype=float), int(kw.get("L", self.default_L())),
             float(kw.get("d", 3.0)),
             float(parent._decays[0].outs[0].mass),
             float(parent._decays[0].outs[1].mass))
