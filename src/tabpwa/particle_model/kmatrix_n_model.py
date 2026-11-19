@@ -665,6 +665,15 @@ class KMatrixNModel(BasisModel):
         the phase-space square root, not the sign of ``√s`` itself).  Each iteration is capped at
         half the current ``|m|`` so a Newton step cannot cross to another
         pole's basin; ``residual`` is the honest check on the answer.
+
+        TWO inits can land on the SAME pole — the records then coincide.  A
+        ``mass_list`` start is a ZERO-WIDTH guess, which is right for narrow
+        states; the GS unit's higher poles can be very broad (a 3-pole
+        ``kmatrix_n_gs`` has its third root at ``Γ ≈ 1.5``, and the real start
+        at that mass still lands on the second pole), so steer with ``inits=``
+        when the answer matters:
+        ``inits=[complex(m, -0.5 * g) for m, g in zip(mass_list, width_list)]``
+        (the perturbative pole) is the natural first try.
         """
         sign = self._sheet_sign(sheet)
         P, Q = self._den_polys()
