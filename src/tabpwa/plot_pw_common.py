@@ -98,7 +98,8 @@ def _diff_pipipi(x):
     return [m[:, 1, 0], m[:, 4, 0], m[:, 2, 0], m[:, 8, 0]]
 
 
-def plot_common(plotter, fitter, output="plots/", fmt="png"):
+def plot_common(plotter, fitter, output="plots/", fmt="png",
+                yscale=None, xscale=None, upper_ylim=None):
     """Plot all the common distributions (same order, same styles).
 
     Args:
@@ -106,21 +107,25 @@ def plot_common(plotter, fitter, output="plots/", fmt="png"):
         fitter: the :class:`~tabpwa.Fitter` holding the data.
         output: output directory.
         fmt: image format (png/pdf).
+        yscale, xscale, upper_ylim: axis style forwarded to every
+            ``plot_var`` panel (``None`` = the historic linear axes).
     """
     os.makedirs(output, exist_ok=True)
+    style = dict(yscale=yscale, xscale=xscale, upper_ylim=upper_ylim)
 
     # ── mass overview ─────────────────────────────────────────────
     nm = fitter._data_np["mass"].shape[1] // 8
     plotter.plot_var(
         lambda x: [x["mass"][:, i] for i in range(nm)],
         [f"mass[{i}]" for i in range(nm)],
-        0.2, 5.2, 0.05, "mass", output=output, fmt=fmt, smooth_sigma=1.0)
+        0.2, 5.2, 0.05, "mass", output=output, fmt=fmt, smooth_sigma=1.0,
+        **style)
 
     # ── angles ────────────────────────────────────────────────────
     ar = [(-np.pi, np.pi), (-1, 1), (-1, 1)] * 3
     al = [f"angle[{p},{c}]" for p in range(3) for c in range(3)]
     plotter.plot_var(_angle_var, al, 0, 1, 0.1, "angles",
-                     ranges=ar, output=output, fmt=fmt, unit="")
+                     ranges=ar, output=output, fmt=fmt, unit="", **style)
 
     # ── cos θ₁ − cos θ₂ diff-histogram over all B-block permutations ─
     n_perm = len(_CHAIN_ROWS_B)
@@ -165,7 +170,7 @@ def plot_common(plotter, fitter, output="plots/", fmt="png"):
             [_xlabels[i]], lo, hi, bw,
             f"m_pipi_sorted_{['pp1_min', 'pp1_max', 'pp2_min', 'pp2_max'][i]}",
             output=output, fmt=fmt, smooth_sigma=1.0,
-            legend=(i in (0, 2)), show_pull=True)
+            legend=(i in (0, 2)), show_pull=True, **style)
 
     # ── sorted 3π (min/max of the two charge permutations) ────────
     for prefix, idx_a, idx_b, r_min, r_max, xl_min, xl_max in [
@@ -180,7 +185,7 @@ def plot_common(plotter, fitter, output="plots/", fmt="png"):
                 lambda x, a=idx_a, b=idx_b, jj=j: [_sorted_pair(x, a, b)[jj]],
                 [label_j], rj[0], rj[1], 0.05,
                 f"{prefix}_{['min', 'max'][j]}", output=output, fmt=fmt,
-                smooth_sigma=1.0, show_pull=True, legend=True)
+                smooth_sigma=1.0, show_pull=True, legend=True, **style)
 
     # ── m(3π): (π⁺π⁺π⁻) − (π⁺π⁻π⁻) difference ───────────────────
     plotter.plot_stacked_perm(
@@ -191,7 +196,7 @@ def plot_common(plotter, fitter, output="plots/", fmt="png"):
     # ── time ──────────────────────────────────────────────────────
     plotter.plot_var(lambda x: [x["time"]], ["time"], 0, 10, 0.2, "time",
                      output=output, fmt=fmt, unit="ps",
-                     legend=True, show_pull=True)
+                     legend=True, show_pull=True, **style)
 
 
 def run(fit_json, config, data, phsp, max_events, backend, output, fmt,

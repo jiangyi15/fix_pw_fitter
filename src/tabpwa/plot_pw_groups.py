@@ -610,7 +610,8 @@ class PWGroupPlotter:
                  group_labels=None, colors=None,
                  data_weight_extra=None, phsp_weight_extra=None,
                  smooth_sigma=None, unit="GeV", show_pull=False,
-                 mc_uncert=False, fmt="png"):
+                 mc_uncert=False, fmt="png",
+                 yscale=None, xscale=None, upper_ylim=None):
         """Plot variable(s) using pre-computed weights.
 
         Args:
@@ -633,6 +634,10 @@ class PWGroupPlotter:
                 (the signal and background are components of the SAME phsp
                 event, so their weights add before squaring); default
                 False (model exact, data-only errors).
+            yscale, xscale: axis scales, e.g. ``"log"`` (default None keeps
+                the historic linear axes); one value for every subplot or
+                one entry per subplot.
+            upper_ylim: cap for the y axis (same broadcasting as *yscale*).
         """
         if not self._ready:
             raise RuntimeError("call .compute() before .plot_var()")
@@ -650,7 +655,8 @@ class PWGroupPlotter:
             smp, labels, lo, hi, bin_width, prefix, ranges=ranges,
             legend=legend, output=output, fmt=fmt, group_labels=glabels,
             colors=colors, zorders=self._zorders, smooth_sigma=smooth_sigma,
-            unit=unit, show_pull=show_pull, mc_uncert=mc_uncert)
+            unit=unit, show_pull=show_pull, mc_uncert=mc_uncert,
+            yscale=yscale, xscale=xscale, upper_ylim=upper_ylim)
 
     def plot_asymmetry(self, varfun, labels, lo, hi,
                        n_bins, prefix, tag_data=None, tag_phsp=None,

@@ -201,8 +201,11 @@ def config_panels(cfg, data_np, phsp_np):
 
     Returns ``{'mass': pg, 'angles': pg, ...}`` with each panel group *pg*
     holding the declared variable keys/labels/units and ready-made
-    varfun/ranges/bin-width for ``PWGroupPlotter.plot_var``.  Variables
-    whose topology is not present in the loaded arrays are skipped.
+    varfun/ranges/bin-width for ``PWGroupPlotter.plot_var``, plus the
+    per-variable ``yscale`` / ``upper_ylim`` lists (declaration order,
+    ``None`` where the variable does not set them) to hand to the same
+    call.  Variables whose topology is not present in the loaded arrays are
+    skipped.
     """
     from tabpwa.read_var import vars_from_config
 
@@ -236,8 +239,11 @@ def config_panels(cfg, data_np, phsp_np):
         spans = np.array([r[1] - r[0] for r in ranges])
         span = float(np.median(spans)) if len(spans) else 1.0
         width = span / 60.0 if span > 0 else 1.0
+        # per-sub-variable axis style, in declaration order (None = unset)
         return {"keys": keys, "labels": labels, "units": units,
-                "varfun": varfun, "ranges": ranges, "width": width}
+                "varfun": varfun, "ranges": ranges, "width": width,
+                "yscale": [v.plot_cfg.get("yscale") for v in vrs],
+                "upper_ylim": [v.plot_cfg.get("upper_ylim") for v in vrs]}
 
     for key, v in items:
         if getattr(v, "kind", None) == "mass":
@@ -261,8 +267,10 @@ def config_plot_items(cfg, data_np, phsp_np, nbins=60):
     Every variable (mass, angle, extra expr) becomes its own item with a
     ready single-variable ``varfun``, fixed/auto range, bin width and a
     filename stem — call ``PWGroupPlotter.plot_var`` once per item so each
-    variable gets its own figure.  Items whose topology is absent from the
-    loaded arrays are skipped.
+    variable gets its own figure.  Each item also carries that variable's
+    ``plot:`` axis style (``legend``, ``yscale``, ``upper_ylim``), so the
+    per-variable entry and the ``plot.config`` defaults reach the axes.
+    Items whose topology is absent from the loaded arrays are skipped.
     """
     from tabpwa.read_var import vars_from_config
 
@@ -291,6 +299,10 @@ def config_plot_items(cfg, data_np, phsp_np, nbins=60):
             "width": float(width), "stem": _safe_stem(v.name),
             "kind": getattr(v, "kind", "expr"),
             "legend": bool(cfg_.get("legend", True)),
+            # axis style from the variable's plot entry (over the
+            # plot.config defaults) — each item is one figure
+            "yscale": cfg_.get("yscale"),
+            "upper_ylim": cfg_.get("upper_ylim"),
             "varfun": lambda x, vv=v: [vv.read(x)]})
     return out
 

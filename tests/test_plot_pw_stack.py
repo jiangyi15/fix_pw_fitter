@@ -121,3 +121,37 @@ def test_stack_plotter_group_intersection_warns():
     sp = PWStackPlotter([(fa, x, groups_a), (fb, x, {})]).compute()
     with pytest.warns(RuntimeWarning, match="not present in every dataset"):
         sp.merged_samples(VARFUN)
+
+
+@pytest.mark.parametrize("stacked", [True, False])
+def test_stack_plotter_forwards_axis_style(tmp_path, monkeypatch, stacked):
+    """yscale / upper_ylim reach the axes in both drawing modes."""
+    import matplotlib.pyplot as plt
+    import tabpwa.plot_pw_draw as draw_mod
+
+    figs = []
+
+    def _capture(fig, output, prefix, fmt="png"):
+        import os
+        os.makedirs(output, exist_ok=True)
+        path = os.path.join(output, prefix + "." + fmt)
+        fig.savefig(path)
+        figs.append(fig)
+        return path
+
+    monkeypatch.setattr(draw_mod, "save_figure", _capture)
+
+    joint, fa, fb = _joint_two()
+    x = joint.initial_values(seed=8)
+    sp = PWStackPlotter([(fa, x, {}), (fb, x, {})], labels=["A", "B"],
+                        output=str(tmp_path))
+    try:
+        sp.plot_var(VARFUN, ["m(pipi)"], 0.4, 1.6, 0.04, "axis_style",
+                    stacked=stacked, yscale="log", upper_ylim=110.0)
+        ax = figs[-1].axes[0]
+        assert ax.get_yscale() == "log"
+        assert ax.get_ylim()[1] == pytest.approx(110.0)
+        assert ax.get_ylim()[0] > 0
+    finally:
+        for fig in figs:
+            plt.close(fig)

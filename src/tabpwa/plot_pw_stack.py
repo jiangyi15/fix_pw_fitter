@@ -118,7 +118,8 @@ class PWStackPlotter:
     def plot_var(self, varfun, labels, lo, hi, bin_width, prefix,
                  stacked=True, ranges=None, legend=True, show_pull=False,
                  mc_uncert=False, smooth_sigma=None, unit="GeV", fmt="png",
-                 output=None, group_labels=None, colors=None, zorders=None):
+                 output=None, group_labels=None, colors=None, zorders=None,
+                 yscale=None, xscale=None, upper_ylim=None):
         """Draw one variable set, stacked (default) or overlaid.
 
         ``stacked=True`` merges the plot data and bins once: data points,
@@ -126,6 +127,9 @@ class PWStackPlotter:
         curves.  ``stacked=False`` overlays the datasets (each with its
         own colour, data points + its own model curve) so no normalisation
         is implied.  Returns the saved path.
+
+        ``yscale`` / ``xscale`` / ``upper_ylim`` style the axes; each is a
+        single value for every sub-variable or one entry per sub-variable.
         """
         output = output or self.output
         if stacked:
@@ -135,11 +139,13 @@ class PWStackPlotter:
                 legend=legend, output=output, fmt=fmt,
                 group_labels=group_labels, colors=colors, zorders=zorders,
                 smooth_sigma=smooth_sigma, unit=unit, show_pull=show_pull,
-                mc_uncert=mc_uncert)
+                mc_uncert=mc_uncert, yscale=yscale, xscale=xscale,
+                upper_ylim=upper_ylim)
         samples = [pl.var_samples(varfun) for pl in self.plotters]
         return draw_overlay_figure(
             samples, self.labels, lo, hi, bin_width, prefix, ranges=ranges,
-            legend=legend, output=output, fmt=fmt, unit=unit)
+            legend=legend, output=output, fmt=fmt, unit=unit,
+            yscale=yscale, xscale=xscale, upper_ylim=upper_ylim)
 
     def plot_common(self, stacked=True, output=None, fmt="png", **kw):
         """Mass overview (all mass columns) — stacked or overlaid."""

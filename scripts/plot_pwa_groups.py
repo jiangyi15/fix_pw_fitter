@@ -154,6 +154,7 @@ def main():
             it["varfun"], [it["label"]], lo, hi, it["width"], it["stem"],
             output=args.output, fmt=args.format, unit=it["unit"],
             smooth_sigma=args.smooth, legend=it["legend"],
+            yscale=it["yscale"], upper_ylim=it["upper_ylim"],
             ranges=[it["range"]], show_pull=not args.no_pull,
             mc_uncert=args.mc_uncert)
     if not items:
