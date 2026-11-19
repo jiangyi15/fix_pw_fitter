@@ -286,7 +286,7 @@ def _arch_flags(nvcc):
         flags = []
         for sm in sms:
             sm = sm.strip()
-            flags.extend(['-gencode', f'arch=compute_{sm[3:]},code={sm}'])
+            flags.extend(['-gencode', f'arch=compute_{sm[3:]},{_code(sm)}'])
         return flags
     try:
         r = subprocess.run(
@@ -295,15 +295,17 @@ def _arch_flags(nvcc):
         if r.returncode == 0:
             ver = r.stdout.strip()
             sm = f'sm_{ver.replace(".", "")}'
+            if _ptx_enabled():
+                return [f'-gencode', f'arch=compute_{sm[3:]},{_code(sm)}']
             return [f'-arch={sm}']
     except Exception:
         pass
     r = subprocess.run([nvcc, '--version'], capture_output=True, text=True)
     m = re.search(r'release (\d+\.\d+)', r.stdout)
     cuda_ver = float(m.group(1)) if m else 0
-    flags = ['-gencode', 'arch=compute_86,code=sm_86']  # Ampere+
+    flags = ['-gencode', f'arch=compute_86,{_code("sm_86")}']  # Ampere+
     if cuda_ver < 13:
-        flags = ['-gencode', 'arch=compute_70,code=sm_70'] + flags  # +Volta
+        flags = ['-gencode', f'arch=compute_70,{_code("sm_70")}'] + flags
     return flags
 
 
@@ -344,6 +346,74 @@ def _hash_path(src_name, tag=None):
     return os.path.join(HASH_DIR, src_name + ".hash")
 
 
+def _target_sms():
+    """The SM list this build targets, e.g. ``["sm_120"]`` or ``["sm_70","sm_86"]``."""
+    sig = _arch_signature()
+    if sig.startswith("arch:"):
+        raw = sig[len("arch:"):]
+    elif sig.startswith("auto:"):
+        # auto:12.0 -> sm_120 (the signature stores the compute_cap string)
+        raw = "sm_" + sig[len("auto:"):].replace(".", "")
+    else:
+        return []
+    out = []
+    for part in raw.replace(",", " ").split():
+        part = part.strip()
+        if part.startswith("compute_"):
+            part = "sm_" + part[len("compute_"):]
+        if part.startswith("sm_") and part[3:].isdigit():
+            out.append(part)
+    return out
+
+
+def _env_flag_tokens(name):
+    raw = os.environ.get(name, "")
+    return [tok for tok in raw.split() if tok]
+
+
+def _extra_flags(sms=None):
+    """Environment-provided extra nvcc flags — the per-arch tuning hook.
+
+    ``TABPWA_NVCC_FLAGS``      appended to EVERY kernel build;
+    ``TABPWA_NVCC_FLAGS_<SM>`` appended only when that SM is targeted, so one
+    tree can carry e.g. a V100 recipe and a consumer recipe::
+
+        TABPWA_NVCC_FLAGS_SM70="-Xptxas -O3 -maxrregcount=48"
+        TABPWA_NVCC_FLAGS_SM120="-Xptxas -O3"
+
+    Both are part of the build key, so changing a flag rebuilds instead of
+    silently reusing a binary built with the old ones.  There is no
+    "magic" arch flag: the useful ones are register budgeting
+    (``-maxrregcount`` / ``__launch_bounds__``) and ``-Xptxas -O3`` (the
+    default) — pick them from a profile, not from taste.
+    """
+    if sms is None:
+        sms = _target_sms()
+    out = _env_flag_tokens("TABPWA_NVCC_FLAGS")
+    for sm in sms:
+        # both spellings, so TABPWA_NVCC_FLAGS_SM120 and _SM_120 work
+        for name in (f"TABPWA_NVCC_FLAGS_{sm.upper()}",
+                     f"TABPWA_NVCC_FLAGS_SM{sm[3:]}"):
+            out.extend(_env_flag_tokens(name))
+    return out
+
+
+def _ptx_enabled():
+    """``TABPWA_CUDA_PTX=1`` embeds PTX beside the SASS of every arch.
+
+    Then one binary survives an SM bump by JIT (e.g. an ``sm_70`` build runs
+    on an ``sm_120`` card), at the cost of JIT time on first use.  Off by
+    default: a native build is what the fitter wants.
+    """
+    return os.environ.get("TABPWA_CUDA_PTX", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _code(sm):
+    """The ``code=`` half of a ``-gencode`` pair (SASS, plus PTX when asked)."""
+    return f"code=[{sm},compute_{sm[3:]}]" if _ptx_enabled() else f"code={sm}"
+
+
 def _arch_signature():
     """The architecture the compile targets, as a stable string.
 
@@ -380,6 +450,17 @@ def _build_key(src_name, tag, nvcc):
     except Exception:
         pass
     h.update((flag_arch or "").encode())
+    # ... and so do the extra flags and the PTX choice (env-driven).  Mixed in
+    # ONLY when set, so the default build keeps the historical key and an
+    # existing binary is not invalidated by this hook merely existing.
+    try:
+        extra = " ".join(_extra_flags())
+    except Exception:
+        extra = ""
+    if extra:
+        h.update(("extra:" + extra).encode())
+    if _ptx_enabled():
+        h.update(b"ptx:1")
     if nvcc:
         r = subprocess.run([nvcc, '--version'], capture_output=True,
                            text=True)
@@ -421,11 +502,13 @@ def _compiler_flags():
     if not nvcc:
         raise RuntimeError(
             "no nvcc found — set TABPWA_NVCC, CUDA_HOME or put nvcc on PATH")
-    key = (nvcc, _override_arch or "", _arch_signature())
+    key = (nvcc, _override_arch or "", _arch_signature(),
+           tuple(_extra_flags()), _ptx_enabled())
     if _flags_cache is not None and _flags_key == key:
         return _flags_cache
     base = [nvcc, '-shared', '-Xcompiler', '-fPIC', '-lcudart', '-lm', '-O2']
     base.extend(_arch_flags(nvcc))
+    base.extend(_extra_flags())
     probe_file = os.path.join(HASH_DIR, '_probe.so')
     os.makedirs(HASH_DIR, exist_ok=True)
     # any real source works as a probe; which one is irrelevant, the flags

@@ -1,0 +1,14 @@
+"""cuda_flat_pwa_gen_s0e3 backend — the s0e fused tile on the flat ``pwa_gen``
+config, with the reciprocal by Newton refinement from an fp32 seed.
+
+Thin registration shim; the kernel lives in
+:mod:`tabpwa.cuda._flat_pwa_gen_s0e3`.  A multi-BW chain (``n_res != 1``) is
+rejected at construction with a ``ValueError`` naming ``cuda_flat_pwa_gen2``.
+"""
+from .core import register_backend
+from tabpwa.cuda import _flat_pwa_gen_s0e3 as _k
+
+
+@register_backend("cuda_flat_pwa_gen_s0e3", model="pwa_gen")
+class CUDAFlatPwaGenS0E3Backend(_k.CUDAFlatPwaGenS0E3Backend):
+    """Registered alias of the wrapper in ``tabpwa.cuda._flat_pwa_gen_s0e3``."""
