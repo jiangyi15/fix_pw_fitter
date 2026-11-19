@@ -99,6 +99,11 @@ def _prod_minus_s(roots, skip=None):
     return c
 
 
+def _polyval_asc(c, s):
+    """Value of an ASCENDING-coefficient polynomial ``c`` at ``s``."""
+    return np.polyval(np.asarray(c, dtype=complex)[::-1], s)
+
+
 def kmatrix_n_weights(m, g2, b):
     """``(den_weights, num_weights)`` for ``len(m)`` poles (real / complex).
 
@@ -428,13 +433,24 @@ class KMatrixNModel(BasisModel):
         return (float(kw.get("daug2Mass", 0.13957039)),
                 float(kw.get("daug3Mass", 0.1349768)))
 
-    def _rho(self, m):
-        """Phase space ``ρ(m)`` — THE overridable knob of this family."""
+    def _rho(self, m, sheet=1):
+        """Phase space ``ρ(m)`` — THE overridable knob of this family.
+
+        ``sheet`` is the SIGN OF THE BREAKUP-MOMENTUM SQUARE ROOT (int ``1``
+        principal, ``−1`` the other branch): that is the whole of a Riemann
+        sheet here, and ``ρ`` is odd in ``q``, so ``ρ(m, −1) = −ρ(m, 1)``.
+        A COMPLEX ``m`` is the analytic continuation (the pole search
+        evaluates this at a complex mass); a real ``m`` keeps the exact
+        previous path, including the below-threshold clamp.
+        """
         kw = self.kwargs
         d2, d3 = self._daughters()
-        return phase_space(np.asarray(m, dtype=float),
+        m_arr = np.asarray(m)
+        if not np.iscomplexobj(m_arr):
+            m_arr = m_arr.astype(float)
+        return phase_space(m_arr,
                            int(kw.get("L", self.default_L())),
-                           float(kw.get("d", 3.0)), d2, d3)
+                           float(kw.get("d", 3.0)), d2, d3, sheet)
 
     def _coupling_sq(self, m, gamma):
         """``g_i²`` for a pole of width ``gamma`` at mass ``m`` (arrays ok).
@@ -531,6 +547,159 @@ class KMatrixNModel(BasisModel):
                           w_arr)
         return g2, dg2_dm, dg2_dg
 
+    # -- pole structure ---------------------------------------------
+
+    @staticmethod
+    def _sheet_sign(sheet):
+        """``+1`` / ``−1`` — the phase-space square-root sign; an INT only."""
+        if (isinstance(sheet, bool) or isinstance(sheet, float)
+                or not isinstance(sheet, (int, np.integer))
+                or sheet not in (1, -1)):
+            raise ValueError(
+                f"sheet must be the int 1 or −1 (the sign of the phase-space "
+                f"square root q = ±sqrt(p²)/(2m)), got {sheet!r}")
+        return int(sheet)
+
+    def _pole_lists(self):
+        """``(mass_list, width_list)`` as floats — the model's own values."""
+        return ([float(x) for x in self.kwargs["mass_list"]],
+                [float(x) for x in self.kwargs["width_list"]])
+
+    def _den_polys(self):
+        """``(P, Q)``: ascending coefficients of the two real polynomials.
+
+        ``P(s) = Π_i (m_i² − s)`` (the real-row weights) and
+        ``Q(s) = Σ_i g_i² Π_{j≠i} (m_j² − s)`` (the ``−iρ`` row weights),
+        with ``g_i²`` from the model's own width rule — the same numbers the
+        basis transform publishes, so the pole is the one the amplitude has.
+        """
+        mass, width = self._pole_lists()
+        roots = [x * x for x in mass]
+        g2 = np.asarray(self._coupling_sq(np.asarray(mass, dtype=float),
+                                          np.asarray(width, dtype=float)),
+                        dtype=float)
+        P = _prod_minus_s(roots)
+        Q = np.zeros(len(roots))
+        for i in range(len(roots)):
+            Q += g2[i] * _prod_minus_s(roots, i)
+        return P.astype(complex), Q.astype(complex)
+
+    def den(self, m, sheet=1):
+        """``D(m) = P(m²) − i·ρ(m; sheet)·Q(m²)`` at a complex MASS ``m``.
+
+        ``D = 0`` is the pole condition: it is the amplitude's denominator
+        with the numerator cancelled (``β`` normalises the numerator, so it
+        cannot move a zero).  ``m`` may be an array and a complex ``m`` takes
+        the analytic continuation of ``ρ``.
+
+        ``sheet`` is the int ``1`` / ``−1`` and it is nothing but the SIGN OF
+        THE SQUARE ROOT in the phase space (``q = ±sqrt(p²)/(2m)``) — the
+        branch that decides which Riemann sheet the amplitude sits on.  It
+        enters through ``ρ`` alone, so a multi-channel model can put each
+        channel on its own branch; for this one-channel family the two
+        branches differ by ``q → −q``.
+        """
+        P, Q = self._den_polys()
+        return self._den_value(m, P, Q, self._sheet_sign(sheet))
+
+    def _den_value(self, m, P, Q, sheet):
+        m_arr = np.asarray(m)
+        if not np.iscomplexobj(m_arr):
+            m_arr = m_arr.astype(float)
+        s = m_arr ** 2
+        rho = np.asarray(self._rho(m_arr, sheet))
+        return _polyval_asc(P, s) - 1j * rho * _polyval_asc(Q, s)
+
+    def _den_deriv(self, m, P, Q, sheet, eps=1e-6):
+        """``dD/dm`` at a complex mass (``dρ/dm`` by a centred difference).
+
+        ``ρ`` is the only non-polynomial piece; its derivative is a two-point
+        difference in ``m`` — the pole positions it feeds are converged to
+        ~1e-9, far below any physics scale, and the alternative (a complex
+        step) would silently be wrong for a ``ρ`` that is not analytic.
+        """
+        m = complex(m)
+        h = eps * max(1.0, abs(m))
+        one = np.asarray([m])
+        rho = complex(np.asarray(self._rho(one, sheet)).reshape(-1)[0])
+        rho_p = complex(np.asarray(self._rho(one + h, sheet)).reshape(-1)[0])
+        rho_m = complex(np.asarray(self._rho(one - h, sheet)).reshape(-1)[0])
+        drho = (rho_p - rho_m) / (2.0 * h)
+        s = m * m
+        dP = np.polyder(np.asarray(P, dtype=complex)[::-1])
+        dQ = np.polyder(np.asarray(Q, dtype=complex)[::-1])
+        # d/ds = (1/2m)·d/dm for the ρ term, and P(m²), Q(m²) chain by 2m
+        return (2.0 * m * np.polyval(dP, s)
+                - 1j * (drho * _polyval_asc(Q, s)
+                        + rho * 2.0 * m * np.polyval(dQ, s)))
+
+    def solve_pole(self, inits=None, sheet=1, tol=1e-9, maxiter=100):
+        """Complex pole positions ``m = √s`` where ``den(m) == 0``.
+
+        A K-matrix pole is NOT the peak of a Breit-Wigner: ``get_bw_params``
+        (a real running-width peak) does not exist for this model, and the
+        pole is the zero of ``D(m) = P(m²) − i·sheet·ρ(m)·Q(m²)`` in the
+        complex mass plane — the analytic continuation of the very ``ρ`` the
+        amplitude uses.
+
+        Args:
+            inits: complex MASSES to start Newton from (``inits=[0.775-0.07j]``);
+                ``None`` starts from each configured ``mass_list`` entry, which
+                is the zero-width location of its pole.
+            sheet: int ``1`` / ``−1`` — the sign of the phase-space square
+                root, i.e. which branch of ``q = ±sqrt(p²)/(2m)`` (the Riemann
+                sheet) the pole is searched on.
+            tol: relative step at which the iteration stops (~1e-9: the
+                centred-difference ``dρ/dm`` sets the floor).
+            maxiter: Newton iterations per init.
+
+        Returns:
+            one dict per init, in init order::
+
+                {"m": complex mass √s, "s": m²,
+                 "mass": Re m, "width": −2·Im m,
+                 "residual": |D(m)|, "converged": bool, "n_iter": int}
+
+        ``width = −2·Im √s``, i.e. the usual ``√s = M − iΓ/2`` convention: a
+        physical resonance has ``Im √s < 0`` (``sheet`` chooses the branch of
+        the phase-space square root, not the sign of ``√s`` itself).  Each iteration is capped at
+        half the current ``|m|`` so a Newton step cannot cross to another
+        pole's basin; ``residual`` is the honest check on the answer.
+        """
+        sign = self._sheet_sign(sheet)
+        P, Q = self._den_polys()
+        if inits is None:
+            starts = list(self._pole_lists()[0])
+        else:
+            starts = [complex(x) for x in np.atleast_1d(inits).tolist()]
+        out = []
+        for m0 in starts:
+            m = complex(m0)
+            n_iter, converged = 0, False
+            for n_iter in range(1, int(maxiter) + 1):
+                D = complex(np.asarray(
+                    self._den_value(m, P, Q, sign)).reshape(-1)[0])
+                if not np.isfinite(D):
+                    break
+                dD = self._den_deriv(m, P, Q, sign)
+                if not np.isfinite(dD) or dD == 0:
+                    break
+                step = D / dD
+                cap = 0.5 * max(abs(m), 1e-12)
+                if abs(step) > cap:
+                    step *= cap / abs(step)
+                m -= step
+                if abs(step) <= tol * max(1.0, abs(m)):
+                    converged = True
+                    break
+            resid = float(abs(complex(
+                np.asarray(self._den_value(m, P, Q, sign)).reshape(-1)[0])))
+            out.append({"m": complex(m), "s": complex(m * m),
+                        "mass": float(m.real), "width": float(-2.0 * m.imag),
+                        "residual": resid, "converged": bool(converged),
+                        "n_iter": int(n_iter)})
+        return out
+
     # -- basis ------------------------------------------------------
 
     def den_basis(self, m):
@@ -584,10 +753,14 @@ class KMatrixNGSModel(KMatrixNModel):
 
     _L_FALLBACK = 1
 
-    def _rho(self, m):
+    def _rho(self, m, sheet=1):
+        """``gs_unit`` at ``m`` — ``sheet`` is the sign of its square roots."""
         kw = self.kwargs
         d2, d3 = self._daughters()
-        return gs_unit(np.asarray(m, dtype=float),
+        m_arr = np.asarray(m)
+        if not np.iscomplexobj(m_arr):
+            m_arr = m_arr.astype(float)
+        return gs_unit(m_arr,
                        self._reference_mass(),
                        int(kw.get("L", self.default_L())),
-                       float(kw.get("d", 3.0)), d2, d3)
+                       float(kw.get("d", 3.0)), d2, d3, sheet)

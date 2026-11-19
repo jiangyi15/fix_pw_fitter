@@ -29,13 +29,29 @@ from .base import BaseModel, register_model
 # ── Helper functions (shared with GS_rho) ──────────────────────
 
 
-def _two_body_cm_mom(m, m1, m2):
-    """Real breakup momentum, 0 below threshold."""
+def _two_body_cm_mom(m, m1, m2, sheet=1):
+    """Breakup momentum, 0 below threshold on the REAL axis.
+
+    ``sheet`` is the SIGN OF THE SQUARE ROOT — ``q = ±sqrt(p²)/(2m)``, the int
+    ``1`` (principal) or ``−1`` (the other branch).  That is the whole of a
+    Riemann sheet here: for a MULTI-channel model each channel carries its own
+    ``sqrt`` and can sit on its own branch, which is why the sign lives on the
+    root and not on ``ρ`` as a whole.
+
+    A COMPLEX ``m`` takes the analytic continuation with NO clamp (the branch
+    that continues the physical region, ``q`` real and positive above
+    threshold, into ``Im q < 0`` for ``Im s < 0``) — what a pole search needs.
+    The real path is otherwise unchanged, bit for bit, including the
+    below-threshold clamp to 0.
+    """
     s = m ** 2
     m12s = (m1 + m2) ** 2
     m12d = (m1 - m2) ** 2
     p2 = (s - m12s) * (s - m12d)
-    return np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
+    if np.iscomplexobj(p2):
+        return sheet * np.sqrt(p2) / (2 * m)
+    return sheet * np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
+
 
 
 _BP_COEFF = {
@@ -57,8 +73,11 @@ def _bprime_poly(L, z):
     return val
 
 
-def phase_space(m, L=0, d=3.0, d1=None, d2=None):
+def phase_space(m, L=0, d=3.0, d1=None, d2=None, sheet=1):
     """The M-FREE phase space ``(q/m)·q^{2L}·B'_L(q d)²``.
+
+    ``sheet`` is the sign of the breakup-momentum square root (int ``±1``);
+    ``ρ`` is odd in ``q``, so the other branch gives ``−ρ``.
 
     No reference mass anywhere: ``Γ(m) = g² · phase_space(m)`` and the
     coupling ``g²`` carries the scale.  ``B'² = 1/_bprime_poly`` here (that
@@ -69,7 +88,7 @@ def phase_space(m, L=0, d=3.0, d1=None, d2=None):
     K-matrix whose ``ρ`` is this function reproduces the BW/GS propagator at
     one pole with ``bf² = m0·Γ0 / ρ(m0)``.
     """
-    q = _two_body_cm_mom(m, d1, d2)
+    q = _two_body_cm_mom(m, d1, d2, sheet)
     return (q / m) * q ** (2 * L) / _bprime_poly(L, (q * d) ** 2)
 
 

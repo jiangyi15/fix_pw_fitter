@@ -26,42 +26,53 @@ from .base import BaseModel, register_model
 # ── Helper functions (NumPy translation of TF reference) ────────
 
 
-def _two_body_cm_mom(m, m1, m2):
+def _two_body_cm_mom(m, m1, m2, sheet=1):
     """Relative momentum for a two-body decay at mass *m*.
 
-    ``p = sqrt((m² - (m1+m2)²)(m² - (m1-m2)²)) / (2m)``,
-    clamped to 0 below threshold.
+    ``p = ±sqrt((m² - (m1+m2)²)(m² - (m1-m2)²)) / (2m)``: ``sheet`` is the
+    SIGN OF THE SQUARE ROOT (int ``1`` principal, ``−1`` the other branch) —
+    the whole of a Riemann sheet here, so a multi-channel model can put each
+    channel on its own branch.  Clamped to 0 below threshold on the real axis;
+    a COMPLEX *m* takes the analytic continuation (no clamp), which is what
+    the K-matrix pole search evaluates.
     """
     s = m ** 2
     m12s = (m1 + m2) ** 2
     m12d = (m1 - m2) ** 2
     p2 = (s - m12s) * (s - m12d)
+    if np.iscomplexobj(p2):
+        return sheet * np.sqrt(p2) / (2 * m)
     # Clamp to 0 below threshold, divide by (2m)² then sqrt
-    p = np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
+    p = sheet * np.sqrt(np.where(p2 > 0, p2, 0)) / (2 * m)
     return p
 
 
-def _h_fun(s, m1, m2):
+
+def _h_fun(s, m1, m2, sheet=1):
     """GS h(s) function.
 
     TFPWA reference::
 
         k = cal_monentum(m, m1, m2)   # standard q_cm (NO *m factor)
         return 2/pi * k/sqrt(s) * log((sqrt(s) + 2*k) / sm)
+
+    ``sheet`` is the sign of ``k``'s square root (see
+    :func:`_two_body_cm_mom`); ``sqrt(s)`` itself keeps its principal branch,
+    so the log argument carries the flipped ``k``.
     """
     pi = np.pi
     sm = m1 + m2
     sqrt_s = np.sqrt(s)
-    k = _two_body_cm_mom(sqrt_s, m1, m2)  # standard q_cm, NO *m
+    k = _two_body_cm_mom(sqrt_s, m1, m2, sheet)  # standard q_cm, NO *m
     return (2.0 / pi) * (k / sqrt_s) * np.log((sqrt_s + 2.0 * k) / sm)
 
 
-def _dh_ds_fun(s, m1, m2):
+def _dh_ds_fun(s, m1, m2, sheet=1):
     """Derivative dh/ds at *s*."""
     pi = np.pi
     sqrt_s = np.sqrt(s)
-    k = _two_body_cm_mom(sqrt_s, m1, m2)
-    ret = _h_fun(s, m1, m2) * (1.0 / (8.0 * k ** 2) - 1.0 / (2.0 * s))
+    k = _two_body_cm_mom(sqrt_s, m1, m2, sheet)
+    ret = _h_fun(s, m1, m2, sheet) * (1.0 / (8.0 * k ** 2) - 1.0 / (2.0 * s))
     ret = ret + 1.0 / (2.0 * pi * s)
     return ret
 
@@ -86,7 +97,7 @@ def _d_fun(s, m1, m2):
     return ret
 
 
-def _fs_fun(s, m2, gam, m1, m2m):
+def _fs_fun(s, m2, gam, m1, m2m, sheet=1):
     """GS mass-shift function fs(s).
 
     TFPWA reference::
@@ -95,10 +106,10 @@ def _fs_fun(s, m2, gam, m1, m2m):
         k_m2 = cal_monentum(sqrt(m2), m1, m2m)   # standard q_cm, NO *m
         f = gam * m2 / k_m2**3 * [k_s**2*(h(s)-h(m2)) + (m2-s)*k_m2**2*dh_ds(m2)]
     """
-    k_s = _two_body_cm_mom(np.sqrt(s), m1, m2m)   # standard q_cm
-    k_m2 = _two_body_cm_mom(np.sqrt(m2), m1, m2m)  # standard q_cm
+    k_s = _two_body_cm_mom(np.sqrt(s), m1, m2m, sheet)   # standard q_cm
+    k_m2 = _two_body_cm_mom(np.sqrt(m2), m1, m2m)  # reference: principal
     f = gam * m2 / k_m2 ** 3
-    f *= k_s ** 2 * (_h_fun(s, m1, m2m) - _h_fun(m2, m1, m2m)) \
+    f *= k_s ** 2 * (_h_fun(s, m1, m2m, sheet) - _h_fun(m2, m1, m2m)) \
          + (m2 - s) * k_m2 ** 2 * _dh_ds_fun(m2, m1, m2m)
     return f
 
@@ -136,21 +147,27 @@ def _bprime(L, q, q0, d):
 # the decay tree (when attached by then), then cached on the model.
 # The shape functions never read the config at call time.
 
-def gs_unit(m, M, L=1, d=3.0, d2=None, d3=None):
+def gs_unit(m, M, L=1, d=3.0, d2=None, d3=None, sheet=1):
     """The GS complex unit ``Γ(m)/g0 + i·fs(m²)/M``.
 
     ``D_GS(s) = M² − s − i·M·g0·gs_unit(m) = M² − s + g0·fs − i·M·Γ``.
     Complex and DIMENSIONLESS in the width: the coupling supplies ``g0``.
     Shared by ``GS_rho``'s ``gamma()`` and by the K-matrix GS variants, whose
     phase space IS this unit (one pole ⇒ GS exactly, ``bf² = M·Γ0``).
+
+    A complex ``m`` is the analytic continuation (principal branches, no
+    below-threshold clamp) — the K-matrix pole search evaluates this at a
+    complex mass.  A real ``m`` keeps the exact previous path.
     """
     d2 = 0.13957039 if d2 is None else float(d2)
     d3 = 0.1349768 if d3 is None else float(d3)
-    m_arr = np.asarray(m, dtype=float)
-    q = _two_body_cm_mom(m_arr, d2, d3)
-    q0 = _two_body_cm_mom(float(M), d2, d3)
+    m_arr = np.asarray(m)
+    if not np.iscomplexobj(m_arr):
+        m_arr = m_arr.astype(float)
+    q = _two_body_cm_mom(m_arr, d2, d3, sheet)
+    q0 = _two_body_cm_mom(float(M), d2, d3)      # reference: principal
     gamma_run = _gamma_run(m_arr, 1.0, q, q0, int(L), float(M), float(d))
-    fs_val = _fs_fun(m_arr ** 2, float(M) ** 2, 1.0, d2, d3)
+    fs_val = _fs_fun(m_arr ** 2, float(M) ** 2, 1.0, d2, d3, sheet)
     return gamma_run + 1j * fs_val / float(M)
 
 
