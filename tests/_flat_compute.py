@@ -89,6 +89,9 @@ FLOORS = {
     # P 3.0e-6, dck 1.4e-6, dcoeff 5.0e-6.  Gated at the s0c numbers
     # (2e-5 / 4e-5 / 2e-4, rel-OR-abs) — a >5x margin on every quantity.
     "cpu_flat_pwa_gen": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
+    # the CACHED cpu leaf is a case-1 copy of the one above, bit-identical to
+    # it (gated exactly, in its own file), so it keeps the same floor.
+    "cpu_flat_pwa_gen_cached": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
 }
 
 #: the tag vocabulary — DECLARED at registration in ``src/tabpwa/backends``,
