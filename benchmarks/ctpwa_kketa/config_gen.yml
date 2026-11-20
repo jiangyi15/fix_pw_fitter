@@ -1,18 +1,29 @@
 # J/psi -> K+ K- eta — the benchmark model of Xiang, Fang & Liu,
 # Chin. Phys. C 51, 013003 (2027), doi:10.1088/1674-1137/aeb254 (CTPWA).
 #
-# From the paper: 3-body J/psi -> K+ K- eta, 10^6 signal events,
-# 5 x 10^6 phase-space events, "16 intermediate resonances ... with 33
-# complex couplings", probing both the K+K- and the K eta subsystems, with
-# two scenarios (resonance masses/widths fixed, and ten of them floating).
+# The paper's text gives only the counts ("16 intermediate resonances ... with
+# 33 complex couplings"); the MODEL is the component legend of its fit figure
+# (results_plot.pdf, arXiv:2608.25963v2), which lists every amplitude:
 #
-# The paper's exact resonance list is not in its public repo (only a
-# 6-resonance demo ships there), so the 16 below are the PDG states that
-# populate those two subsystems in this mass range; the topology, the event
-# counts and the 33-coupling dimension are the paper's.
+#   K+K- eta sector (J/psi -> X eta, X -> K+K-), L = J:
+#     phi(1020)   omega(1420)  phi(1680)   X(1750)     omega(2220)    5 x 1--
+#     omega_3(1670) phi_3(1850) rho_3(1690) rho_3(1990) rho_3(2250)  5 x 3--
+#     rho_5(2350)                                                   1 x 5--
+#     + non-resonant NR_1(KK), NR_3(KK), NR_5(KK)
 #
-# Data are placeholders: point `data:` at your own ntuple (the four-momenta
-# of K+, K-, eta) to run it.
+#   K eta sector (J/psi -> K* Kbar, K* -> K eta), same set for K+ and K-:
+#     K_1*(1410) K_1*(1680) K_1*(2380)    3 x 1+
+#     K_2*(1430) K_2*(1980)               2 x 2+
+#     K_3*(1780)  K_4*(2045)  K_5*(2380)  3-, 4+, 5-
+#     + non-resonant NR_1(K eta), NR_3(K eta)
+#
+# 19 distinct resonances (11 + 8) + 7 non-resonant partial waves.  Every
+# resonance carries ONE (L, S) combination at its vertex (L = J), which is what
+# makes the coupling count follow the component count.
+#
+# Masses/widths are PDG values (the paper's fit results differ slightly; they
+# do not affect the timing).  A K*(892) in K eta is excluded by threshold:
+# 0.8955 < m_K + m_eta = 1.0415, so q0 = 0 and the amplitude is NaN.
 amp_model: pwa_gen
 backend:
   name: auto
@@ -26,12 +37,11 @@ data:
   purity: 1.0
 
 decay:
-  # every chain is 2-body + sub-decay (n_decay / n_res must be uniform);
-  # the non-resonant 3-body part is a `model: one` term in R_KK (see particle)
+  # every chain is 2-body + sub-decay (n_decay / n_res must be uniform)
   jpsi:
-    - [R_KK, eta]                   # K+K- resonances
-    - [Kp, R_Kpeta]                 # K+ eta resonances
-    - [Km, R_Kmeta]                 # K- eta resonances
+    - [R_KK, eta]
+    - [Kp, R_Kpeta]
+    - [Km, R_Kmeta]
   R_KK: [Kp, Km]
   R_Kpeta: [Kp, eta]
   R_Kmeta: [Km, eta]
@@ -40,14 +50,19 @@ particle:
   $top: jpsi
   $finals: [Kp, Km, eta]
 
-  # ── the 16 resonances ────────────────────────────────────────────────
-  R_KK:      [phi1020, f0980, f21270, f01370, f01500, f01710, phi1680]          # 7
-  # K*(892) CANNOT couple to K eta (0.8955 < m_K + m_eta = 1.0415): q0 = 0 and
-  # the amplitude is NaN for every event.  Only states above threshold here.
-  R_Kpeta:   [K1_1270p, K1_1400p, K2st1430p, Kst1680p, K2_1580p,
-              K1460p, Kst1410p, K1830p, Kst1950p]
-  R_Kmeta:   [K1_1270m, K1_1400m, K2st1430m, Kst1680m, K2_1580m,
-              K1460m, Kst1410m, K1830m, Kst1950m]
+  # ── K+K- eta sector: 11 resonances, L = J ────────────────────────────
+  R_KK: [phi1020, omega1420, phi1680, X1750, omega2220,
+         omega3_1670, phi3_1850, rho3_1690, rho3_1990, rho3_2250,
+         rho5_2350,
+         NR1_KK, NR3_KK, NR5_KK]                     # + non-resonant L=1,3,5
+
+  # ── K eta sector: 8 resonances per charge ────────────────────────────
+  R_Kpeta: [K1st1410p, K1st1680p, K1st2380p, K2st1430p, K2st1980p,
+            K3st1780p, K4st2045p, K5st2380p,
+            NR1_Kpeta, NR3_Kpeta]
+  R_Kmeta: [K1st1410m, K1st1680m, K1st2380m, K2st1430m, K2st1980m,
+            K3st1780m, K4st2045m, K5st2380m,
+            NR1_Kmeta, NR3_Kmeta]
 
   jpsi:
     J: 1
@@ -59,36 +74,50 @@ particle:
   Km:  {J: 0, P: -1, mass: 0.493677}
   eta: {J: 0, P: -1, mass: 0.547862}
 
-  # K+K- subsystem (parity +, C + for the J=1 state)
-  phi1020: {J: 1, P: -1, mass: 1.019461, width: 0.004249, model: BWR}
-  f0980:   {J: 0, P: +1, mass: 0.990,    width: 0.070,    model: BWR}
-  f21270:  {J: 2, P: +1, mass: 1.2755,   width: 0.1867,   model: BWR}
-  f01370:  {J: 0, P: +1, mass: 1.370,    width: 0.350,    model: BWR}
-  f01500:  {J: 0, P: +1, mass: 1.506,    width: 0.112,    model: BWR}
-  f01710:  {J: 0, P: +1, mass: 1.704,    width: 0.123,    model: BWR}
-  phi1680: {J: 1, P: -1, mass: 1.680,    width: 0.150,    model: BWR}
+  # ── K+K- eta sector (all J^PC = 1--, 3--, 5--: C = -1 and P = (-1)^J) ──
+  phi1020:     {J: 1, P: -1, mass: 1.019461, width: 0.004249, model: BWR}
+  omega1420:   {J: 1, P: -1, mass: 1.410,    width: 0.290,    model: BWR}
+  phi1680:     {J: 1, P: -1, mass: 1.680,    width: 0.150,    model: BWR}
+  X1750:       {J: 1, P: -1, mass: 1.750,    width: 0.100,    model: BWR}
+  omega2220:   {J: 1, P: -1, mass: 2.220,    width: 0.200,    model: BWR}
+  omega3_1670: {J: 3, P: -1, mass: 1.667,    width: 0.168,    model: BWR}
+  phi3_1850:   {J: 3, P: -1, mass: 1.854,    width: 0.087,    model: BWR}
+  rho3_1690:   {J: 3, P: -1, mass: 1.690,    width: 0.190,    model: BWR}
+  rho3_1990:   {J: 3, P: -1, mass: 1.988,    width: 0.188,    model: BWR}
+  rho3_2250:   {J: 3, P: -1, mass: 2.247,    width: 0.240,    model: BWR}
+  rho5_2350:   {J: 5, P: -1, mass: 2.350,    width: 0.250,    model: BWR}
 
-  # K eta subsystem, one charge state each (same quantum numbers)
-  Kst1950p:   {J: 1, P: -1, mass: 1.950,  width: 0.250,  model: BWR}
-  K1_1270p:   {J: 1, P: +1, mass: 1.270,  width: 0.090,  model: BWR}
-  K1_1400p:   {J: 1, P: +1, mass: 1.400,  width: 0.174,  model: BWR}
-  K2st1430p:  {J: 2, P: +1, mass: 1.4324, width: 0.109,  model: BWR}
-  Kst1680p:   {J: 1, P: -1, mass: 1.718,  width: 0.322,  model: BWR}
-  K2_1580p:   {J: 2, P: -1, mass: 1.580,  width: 0.110,  model: BWR}
-  K1460p:     {J: 0, P: -1, mass: 1.460,  width: 0.260,  model: BWR}
-  Kst1410p:   {J: 1, P: -1, mass: 1.414,  width: 0.232,  model: BWR}
-  K1830p:     {J: 0, P: -1, mass: 1.830,  width: 0.250,  model: BWR}
+  # ── non-resonant partial waves (constant amplitude, L = J) ───────────
+  NR1_KK:    {J: 1, P: -1, mass: 1.50, model: one}
+  NR3_KK:    {J: 3, P: -1, mass: 1.50, model: one}
+  NR5_KK:    {J: 5, P: -1, mass: 1.50, model: one}
+  NR1_Kpeta: {J: 1, P: -1, mass: 1.50, model: one}
+  NR3_Kpeta: {J: 3, P: -1, mass: 1.50, model: one}
+  NR1_Kmeta: {J: 1, P: -1, mass: 1.50, model: one}
+  NR3_Kmeta: {J: 3, P: -1, mass: 1.50, model: one}
 
-  Kst1950m:   {J: 1, P: -1, mass: 1.950,  width: 0.250,  model: BWR}
-  K1_1270m:   {J: 1, P: +1, mass: 1.270,  width: 0.090,  model: BWR}
-  K1_1400m:   {J: 1, P: +1, mass: 1.400,  width: 0.174,  model: BWR}
-  K2st1430m:  {J: 2, P: +1, mass: 1.4324, width: 0.109,  model: BWR}
-  Kst1680m:   {J: 1, P: -1, mass: 1.718,  width: 0.322,  model: BWR}
-  K2_1580m:   {J: 2, P: -1, mass: 1.580,  width: 0.110,  model: BWR}
-  K1460m:     {J: 0, P: -1, mass: 1.460,  width: 0.260,  model: BWR}
-  Kst1410m:   {J: 1, P: -1, mass: 1.414,  width: 0.232,  model: BWR}
-  K1830m:     {J: 0, P: -1, mass: 1.830,  width: 0.250,  model: BWR}
+  # ── K eta sector, K+ charge state ────────────────────────────────────
+  K1st1410p: {J: 1, P: -1, mass: 1.414,  width: 0.232, model: BWR}
+  K1st1680p: {J: 1, P: -1, mass: 1.718,  width: 0.322, model: BWR}
+  K1st2380p: {J: 1, P: -1, mass: 2.380,  width: 0.300, model: BWR}
+  K2st1430p: {J: 2, P: +1, mass: 1.4324, width: 0.109, model: BWR}
+  K2st1980p: {J: 2, P: +1, mass: 1.973,  width: 0.373, model: BWR}
+  K3st1780p: {J: 3, P: -1, mass: 1.780,  width: 0.159, model: BWR}
+  K4st2045p: {J: 4, P: +1, mass: 2.045,  width: 0.198, model: BWR}
+  K5st2380p: {J: 5, P: -1, mass: 2.380,  width: 0.300, model: BWR}
 
-# The paper's second scenario floats ten resonance parameters; here that is
-# the constraint layer's job (e.g. a constraint file unfixing them), so the
-# two scenarios are the same config with different fixed/free sets.
+  # ── K eta sector, K- charge state ────────────────────────────────────
+  K1st1410m: {J: 1, P: -1, mass: 1.414,  width: 0.232, model: BWR}
+  K1st1680m: {J: 1, P: -1, mass: 1.718,  width: 0.322, model: BWR}
+  K1st2380m: {J: 1, P: -1, mass: 2.380,  width: 0.300, model: BWR}
+  K2st1430m: {J: 2, P: +1, mass: 1.4324, width: 0.109, model: BWR}
+  K2st1980m: {J: 2, P: +1, mass: 1.973,  width: 0.373, model: BWR}
+  K3st1780m: {J: 3, P: -1, mass: 1.780,  width: 0.159, model: BWR}
+  K4st2045m: {J: 4, P: +1, mass: 2.045,  width: 0.198, model: BWR}
+  K5st2380m: {J: 5, P: -1, mass: 2.380,  width: 0.300, model: BWR}
+
+# The paper's two scenarios are a fixed/free choice, not a different config:
+# `BWR` masses/widths are FREE by default in this framework (x = 104), so
+# bench.py pins them with `--fix-mw` (the paper's first column, x = 66) or
+# leaves exactly the named ones free with `--free-mw` (their ten-parameter
+# column, x = 76).

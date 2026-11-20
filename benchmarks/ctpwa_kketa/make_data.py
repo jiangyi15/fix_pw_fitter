@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Generate the CTPWA benchmark samples with the framework's OWN generator
-
-NOTE: currently BROKEN for 3-body chains — `tabpwa.pwa_build.generate_pwa_phsp`
-returns four-vectors with negative energies that sum to zero (Sigma E = 0,
-m^2 = -9.59) on `jpsi -> R + c`, including on `tests/config_pwa.yml`.  Use
-`make_flat_data.py` for a TIMING sample until that is fixed.
-
-`toy_pwa_generate` builds phase space with the framework's `generate_pwa_phsp`
-(the exact inverse of `decay_angles_from_momenta`) and accepts events by
-rejection against the model's |A|², so the sample is a model toy rather than
-hand-made kinematics.
+"""CTPWA benchmark samples, built by the framework itself.
 
     python make_data.py --n-data 1000000 --n-phsp 5000000
 
-Both outputs are kernel-format `.npz` (`.data_arr` / `.phsp_arr`), which the
-config loads with `Fitter.load_dataset`.
+Two steps, both framework code — no hand-written kinematics:
+
+1. `pwa_build.generate_pwa_phsp(model, chain, n)` — flat 3-body phase space of
+   `jpsi -> (K+ K-) + eta`, sampled with the exact three-body density and
+   boosted up the chain (the inverse of `decay_angles_from_momenta`).  Its
+   four-vectors are **(E, px, py, pz)**, which is what the loaders below read.
+2. `model.build_event_data(momenta, kc)` — the same conversion
+   `Fitter.load_momenta_conf` uses, so `mass` / `q` / `angle` are guaranteed
+   to be laid out the way the kernels index them.
+
+The phase space is flat (unit weights), which is what a *timing* sample needs;
+`toy_pwa_generate` would be the choice for a model toy, but its rejection
+acceptance on this model is ~0.2 %, i.e. ~5x10^8 candidates for 10^6 events.
+
+The `pwa_gen` config reads the same arrays: both configs share the shape and
+the interpolation grids (asserted here).
 """
 import argparse
 import os
@@ -28,31 +32,63 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=os.path.join(HERE, "config.yml"))
-    ap.add_argument("--backend", default="cuda_v4_pwa_cache")
     ap.add_argument("--n-data", type=int, default=1_000_000)
     ap.add_argument("--n-phsp", type=int, default=5_000_000)
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--batch", type=int, default=250_000)
+    ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--out", default=os.path.join(HERE, "data"))
-    ap.add_argument("--batch", type=int, default=50000)
-    args = ap.parse_args()
+    a = ap.parse_args()
 
     from tabpwa import Fitter
-    from tabpwa.toy_pwa import toy_pwa_generate
+    from tabpwa.pwa_build import generate_pwa_phsp
 
-    os.makedirs(args.out, exist_ok=True)
-    f = Fitter(args.config, backend=args.backend)
-    f.apply_constrains()
+    f = Fitter(a.config, backend="numpy_pwa")
+    kc = f.kernel_config
+    model = f.model
+    chain = model.full_decay.chains[0]
 
-    t0 = time.perf_counter()
-    data, phsp, x0 = toy_pwa_generate(f, args.n_data, seed=args.seed,
-                                      n_phsp=args.n_phsp,
-                                      batch_size=args.batch, verbose=True)
-    dt = time.perf_counter() - t0
-    np.savez(os.path.join(args.out, "data.npz"), **{f"{k}": v for k, v in data.items()})
-    np.savez(os.path.join(args.out, "phsp.npz"), **{f"{k}": v for k, v in phsp.items()})
-    print(f"data {len(data['weight']):,} events | phsp {len(phsp['weight']):,} "
-          f"events | {dt:.0f} s", flush=True)
-    f.backend.free()
+    def convert(n, seed):
+        t0 = time.perf_counter()
+        chunks = []
+        for k in range(0, n, a.batch):
+            m = min(a.batch, n - k)
+            chunks.append(generate_pwa_phsp(model, chain, m, seed=seed + k))
+        mom = np.concatenate(chunks)
+        ev = model.build_event_data(mom, kc)
+        ev = {k: np.asarray(v) for k, v in ev.items()}
+        ev["weight"] = np.ones(len(mom))
+        ev["bkg"] = np.zeros(len(mom))
+        print(f"  {n:,} events: momenta {mom.shape} -> mass {ev['mass'].shape} "
+              f"q {ev['q'].shape} angle {ev['angle'].shape} "
+              f"({time.perf_counter() - t0:.0f} s)", flush=True)
+        return ev
+
+    os.makedirs(a.out, exist_ok=True)
+    data = convert(a.n_data, a.seed)
+    phsp = convert(a.n_phsp, a.seed + 7919)
+
+    # validity gates: finite, and inside every interpolation grid
+    for tag, ev in (("data", data), ("phsp", phsp)):
+        for k in ("mass", "q"):
+            v = ev[k]
+            assert np.isfinite(v).all(), f"{tag}.{k} has non-finite values"
+    m = phsp["mass"]
+    m_lo = float(kc.get("gamma_min", kc.get("m_min")))
+    m_hi = m_lo + float(kc.get("gamma_delta", kc.get("m_delta"))) * (
+        np.asarray(kc.get("gamma_table", kc.get("basis_table"))).shape[-1] - 1)
+    q_t = np.asarray(kc["fl_table"])
+    q_lo = float(kc.get("fl_min", kc.get("q_min")))
+    q_hi = q_lo + float(kc.get("fl_delta", kc.get("q_delta"))) * (q_t.shape[-1] - 1)
+    print(f"  grids: mass [{m_lo:.4f}, {m_hi:.4f}] q [{q_lo:.4f}, {q_hi:.4f}]")
+    for tag, ev in (("data", data), ("phsp", phsp)):
+        print(f"  {tag}: mass [{ev['mass'].min():.4f}, {ev['mass'].max():.4f}] "
+              f"q [{ev['q'].min():.4f}, {ev['q'].max():.4f}]")
+        assert m_lo <= ev["mass"].min() and ev["mass"].max() <= m_hi, "mass out of grid"
+        assert q_lo <= ev["q"].min() and ev["q"].max() <= q_hi, "q out of grid"
+
+    np.savez(os.path.join(a.out, "data.npz"), **data)
+    np.savez(os.path.join(a.out, "phsp.npz"), **phsp)
+    print(f"wrote {a.out}/data.npz ({a.n_data:,}) and phsp.npz ({a.n_phsp:,})")
 
 
 if __name__ == "__main__":
