@@ -211,6 +211,65 @@ def test_every_choice_is_registered():
         assert chosen in backends_for_model(model), (model, chosen, kw)
 
 
+def test_a_large_sample_uses_the_measured_ordering(monkeypatch):
+    """The record is keyed by SHAPE and device, not by the event count alone.
+
+    Same shape as the production config it was measured on (26 waves, 64
+    basis, 2 projections, cc 12.0) and a large sample -> the measured order.
+    """
+    import tabpwa.backends.auto_backend as ab
+    sig = ((12, 0), 26, 64, 2)
+    assert sig in ab.FLAT_RATE_MEV_S
+    best = max(ab.FLAT_RATE_MEV_S[sig], key=ab.FLAT_RATE_MEV_S[sig].get)
+    assert best == "cuda_flat_pwa_gen_s0e2"
+
+    kc = dict(_km_kc())
+    kc["n_proj"] = 2
+    # the recorded shape: 26 waves, 64 basis, 2 projections
+    monkeypatch.setattr(ab, "flat_shape", lambda kc: (26, 1, 64))
+    monkeypatch.setattr(ab, "cuda_state",
+                        lambda: dict(STATE_AMPLE, cc=(12, 0)))
+    assert _choose(AutoFlatPwaGenBackend, kc,
+                   n_events=8_746_347) == best
+
+
+def test_a_different_shape_is_not_ordered(monkeypatch):
+    """A shape that was never measured gets no ordering — availability stands."""
+    import tabpwa.backends.auto_backend as ab
+    monkeypatch.setattr(ab, "cuda_state",
+                        lambda: dict(STATE_AMPLE, cc=(12, 0)))
+    kc = _km_kc()                       # 2 waves, 5 basis: NOT in the record
+    assert _choose(AutoFlatPwaGenBackend, kc,
+                   n_events=8_746_347) == "cuda_flat_pwa_gen_s0e"
+
+
+def test_a_small_sample_keeps_the_availability_answer(monkeypatch):
+    import tabpwa.backends.auto_backend as ab
+    kc = _km_kc()
+    monkeypatch.setattr(ab, "cuda_state", lambda: dict(STATE_AMPLE))
+    assert _choose(AutoFlatPwaGenBackend, kc,
+                   n_events=ab.LARGE_SAMPLE - 1) == "cuda_flat_pwa_gen_s0e"
+    assert _choose(AutoFlatPwaGenBackend, kc) == "cuda_flat_pwa_gen_s0e"
+
+
+def test_another_device_falls_back_to_availability(monkeypatch):
+    """The record is for CC 12.0; elsewhere it is not extrapolated."""
+    import tabpwa.backends.auto_backend as ab
+    kc = _km_kc()
+    monkeypatch.setattr(ab, "cuda_state",
+                        lambda: dict(STATE_AMPLE, cc=(8, 0)))
+    assert _choose(AutoFlatPwaGenBackend, kc,
+                   n_events=8_746_347) == "cuda_flat_pwa_gen_s0e"
+
+
+def test_a_multi_bw_sample_is_still_the_general_backend(monkeypatch):
+    import tabpwa.backends.auto_backend as ab
+    monkeypatch.setattr(ab, "cuda_state", lambda: dict(STATE_AMPLE))
+    kc = Fitter(CFG_MB).kernel_config
+    assert _choose(AutoFlatPwaGenBackend, kc,
+                   n_events=8_746_347) == "cuda_flat_pwa_gen2"
+
+
 def test_auto_is_a_registered_backend():
     assert "auto" in backends_for_model("pwa_gen")
     assert "auto" in backends_for_model("pwa")

@@ -162,6 +162,48 @@ def tile_bytes(n_wave, n_basis, n_proj, rsize=1, budget=_TILE_SMEM_BUDGET):
     return 8 * (te * (2 * W + 5 * N + 4 * P + 3) + 4 * N + 2 * NB + 3)
 
 
+#: Sample size above which the per-item rate is FLAT (measured: 38.3 Mev/s at
+#: 200 k and 38.9 at 8.7 M, a 44x range, within 2 %), so the exact count is not
+#: needed — a coarse "large enough" class is.  Below it the fixed per-call cost
+#: dominates (3.1 Mev/s at 2 k) and the ordering changes.
+LARGE_SAMPLE = 200_000
+
+#: MEASURED throughput, Mev/s — keyed by the SHAPE it was measured on, because
+#: the rate is a property of the kernel config (waves x basis x projections),
+#: not of the event count alone.  Key: (cc, n_wave, n_basis, n_proj).
+#: Measured through ``Fitter.get_nll`` at 8.7 M events on the production flat
+#: config (n_wave 26, n_basis 64, n_proj 2, 130 CSR non-zeros), rsize 17.
+#: A shape that is not in the table gets no ordering at all — the availability
+#: answer stands — rather than extrapolating from a different config.
+FLAT_RATE_MEV_S = {
+    ((12, 0), 26, 64, 2): {
+        "cuda_flat_pwa_gen_s0e2": 34.0,
+        "cuda_flat_pwa_gen_s0e": 33.2,
+        "cuda_flat_pwa_gen_s0e3": 32.7,
+        "cuda_flat_pwa_gen_1bw": 24.7,
+        "cuda_flat_pwa_gen_s0c": 18.3,
+        "cuda_flat_pwa_gen_s0c2": 17.8,
+        "cuda_flat_pwa_gen2": 6.55,
+    },
+}
+
+
+def rate_record(kernel_config, st):
+    """The measured record for THIS config and device, or None.
+
+    Both keys must match: the compute capability (fp64 = 1/32 of fp32 on the
+    consumer part measured; a datacenter part orders differently) and the
+    SHAPE (n_wave, n_basis, n_proj) — the same kernel on a 2-wave/5-basis
+    config is not the same rate.
+    """
+    try:
+        n_wave, _n_res, n_basis = flat_shape(kernel_config)
+    except Exception:
+        return None
+    n_proj = int(kernel_config.get("n_proj", 1) or 1)
+    return FLAT_RATE_MEV_S.get((st.get("cc"), n_wave, n_basis, n_proj))
+
+
 GIB = 1024**3
 
 
@@ -289,6 +331,19 @@ class AutoFlatPwaGenBackend(AutoBackend):
             return "cuda_flat_pwa_gen_s0c"   # the s0e create would refuse it
         if not st["has_cuda"]:
             return "numpy_flat"
+        # The tile fits.  On a LARGE sample the rate is flat, so the measured
+        # record can order the leaves that are still eligible; the exact event
+        # count is not needed, only the class.  A small sample or another
+        # device keeps the plain availability answer (s0e) — the fixed
+        # per-call cost dominates there and the record does not apply.
+        n_events = kw.get("n_events")
+        table = (rate_record(kernel_config, st)
+                 if n_events is not None and int(n_events) >= LARGE_SAMPLE
+                 else None)
+        if table:
+            eligible = {n for n in table if n in backends_for_model(self.MODEL)}
+            if eligible:
+                return max(eligible, key=lambda n: table[n])
         return "cuda_flat_pwa_gen_s0e"
 
 
