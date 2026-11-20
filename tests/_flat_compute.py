@@ -83,6 +83,9 @@ FLOORS = {
     "cuda_flat_pwa_gen_s0e2": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0e3": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0e4": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
+    # case-1 copies of s0e2: same floors (FMA re-association + the deduped
+    # denominator move the numbers by <= 1 ulp, measured in their own files)
+    "cuda_flat_pwa_gen_s0e5": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     # the CPU leaf is fp64 end to end, so its gap to the reference is the
     # Catmull-Rom-vs-linear interpolation difference, not accumulation:
     # MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 -> Q 9.3e-7,
