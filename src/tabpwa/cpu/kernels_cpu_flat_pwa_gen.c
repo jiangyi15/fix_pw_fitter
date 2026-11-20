@@ -24,8 +24,13 @@
  *
  * ── the vectorisation: EVENTS are the lanes ────────────────────────────
  *
- * One AVX-512 register holds 8 events (`__m512d`), so a "tile" is 8 events
- * and every per-event quantity is a vector:
+ * A tile is 8 events and every per-event quantity is a vector of them.  The
+ * WIDTH is a compile-time abstraction (`vpd` / `CFPG_LANES`, see the block
+ * after the includes): one zmm on AVX-512, two ymm halves on AVX2+FMA.  The
+ * CFPG_LANES LOGICAL lanes are the same in both builds, so the tile boundaries, the
+ * parallel partition, the lane -> event mapping and every reduction's
+ * grouping are identical and the two builds are bit-identical (gated in
+ * `tests/test_cpu_flat_pwa_gen.py`).  Concretely:
  *
  *   ka[a]   = Π_j cos(angle[e, col_a, j]·k_a[j] + b_a[j])          (n_ab)
  *   fa[c]   = Σ_a ka[a]·matrix_angle[a,c]           (CSR over the nz)
@@ -38,6 +43,13 @@
  *
  * i.e. exactly the GPU tile's arithmetic with an event per lane instead of
  * a thread per (event, wave).  Tables and accumulators are fp64 end to end.
+ *
+ * Two builds, ONE algorithm: AVX-512 (one zmm) and AVX2+FMA (two ymm halves),
+ * bit-identical by construction — see THE WIDTH below.  MEASURED on the
+ * production shape (8.7 M events, rsize 17, `Fitter.get_nll`, 32 threads):
+ * AVX-512 411 ms / 21.3 Mev/s (data pass) and 466 ms / 22.0 Mev/s (all
+ * events); AVX2+FMA 455 ms / 19.2 and 520 ms / 19.7 — i.e. only ~10 % apart,
+ * because the kernel is gather-bound, not FLOP-bound.
  *
  * Five folds, all EXACT and all measured on the production shape:
  *
@@ -116,7 +128,7 @@
  * `cpu_flat_pwa_gen_compute(..., long long* stage)` accumulates `rdtsc`
  * cycle counts on thread 0 per stage (0 = w = gamma·coeff, 1 = the shared
  * grid/bin work, 2 = ka, 3 = fa, 4 = fl, 5 = num, 6 = den, 7 = fwd+bwd,
- * 8 = accumulate) when `stage != NULL`; the benchmark harness scales them
+ * CFPG_LANES = accumulate) when `stage != NULL`; the benchmark harness scales them
  * by the measured wall time.  In a fit the pointer is NULL and the whole
  * instrumentation is a predictable-not-taken branch.
  * ══════════════════════════════════════════════════════════════════════ */
@@ -130,11 +142,16 @@
 #include <immintrin.h>
 #include <dlfcn.h>
 
-#if !defined(__AVX512F__)
-#error "cpu_flat_pwa_gen is the AVX-512 fp64 flat-config kernel: build it with -march=native (or -mavx512f -mavx512vl -mavx512dq -mfma) on an AVX-512 host"
-#endif
+/*: the per-group SCALAR arithmetic (S/Pb/W, `scale`, `dqp`) must round the
+ *  same way in both builds.  GCC contracts `a*b + c` into an FMA under
+ *  `-ffp-contract=fast` (the default), but WHICH scalar loops it contracts
+ *  differs between the AVX-512 and the AVX2 cost model — measured: the two
+ *  builds then disagree on Q by 1 ulp at ne = 4 and on dck/dcoeff by 1 ulp
+ *  at ne = 5.  Turning contraction off for this file costs nothing (the
+ *  vector path uses explicit fma intrinsics, unaffected by the flag) and
+ *  makes the two builds bit-identical. */
+#pragma GCC optimize ("fp-contract=off")
 
-#define CFPG_LANES   8      /* AVX-512 fp64 lanes = events per tile        */
 #define CFPG_MAXCAP  1024   /* per-thread group buffer (events); rsize cap */
 #define CFPG_NSTAGE  9
 #define CFPG_MAX_K   8      /* |k| ceiling of the Chebyshev fast path      */
@@ -142,11 +159,221 @@
  *  Chebyshev path — a test/benchmark hook, never used by the wrapper */
 #define CFPG_FLAG_GENERAL_COS 1
 
+/* ══════════════════════════════════════════════════════════════════════
+ * THE WIDTH — ONE algorithm, TWO builds.
+ *
+ * `vpd` is a vector of `CFPG_LANES` (= 8) events.  AVX-512 puts it in one
+ * zmm; AVX2+FMA puts it in two ymm halves.  Everything below is written
+ * once, against `vpd`, so there is no second implementation to keep in
+ * sync — and because the number of LOGICAL lanes is 8 in BOTH builds, the
+ * lane -> event mapping, the tile boundaries and every reduction's
+ * grouping are identical too: the two builds are bit-identical, not merely
+ * close (a 4-lane TILE would regroup Q and the gradient accumulators by
+ * event%4 instead of event%8 and differ at ~1e-16; the per-lane arithmetic
+ * is unaffected either way).
+ *
+ * Three things are deliberately NOT the hardware width:
+ *   * `vgather` zeroes the lanes past `nl` in BOTH builds (the AVX-512
+ *     masked gather does it; AVX2 applies the same mask afterwards), so an
+ *     inactive lane carries 0 through the whole chain instead of whatever
+ *     the clamped index happened to hit;
+ *   * `vhsum`/`vhsum_n` reduce with ONE explicit tree, written out, in
+ *     both builds (not `_mm512_reduce_add_pd`'s macro, whose association is
+ *     a header detail);
+ *   * `cfpg_log8` calls the 4-WIDE libmvec entry in both builds: glibc's
+ *     8-wide `log` is not bit-equal to its 4-wide one (measured 5040 of
+ *     1.6 M samples differ), while its 8-wide `cos` is (0 of 1.6 M), so
+ *     `cos`/`sin` may use each build's own width and `log` may not.
+ * ══════════════════════════════════════════════════════════════════════ */
+#if defined(__AVX512F__) && defined(__AVX512VL__)
+#define CFPG_ISA      1                    /* 1 = one zmm per vpd        */
+#define CFPG_ISA_NAME "avx512f"
+#define CFPG_LANES    8                    /* logical lanes = events/tile */
+typedef __m512d vpd;
+typedef __m256i vi32;
+
+static inline __mmask8 cfpg_mask(int nl) { return (__mmask8)((1u << nl) - 1u); }
+static inline vpd vzero(void) { return _mm512_setzero_pd(); }
+static inline vpd vset1(double x) { return _mm512_set1_pd(x); }
+static inline vpd vload(const double *p) { return _mm512_loadu_pd(p); }
+static inline void vstore(double *p, vpd v) { _mm512_storeu_pd(p, v); }
+static inline vpd vloadn(int nl, const double *p)
+{ return _mm512_maskz_loadu_pd(cfpg_mask(nl), p); }
+static inline void vstoren(double *p, int nl, vpd v)
+{ _mm512_mask_storeu_pd(p, cfpg_mask(nl), v); }
+static inline vpd vmaskz(int nl, vpd v)
+{ return _mm512_maskz_mov_pd(cfpg_mask(nl), v); }
+static inline vpd vadd(vpd a, vpd b) { return _mm512_add_pd(a, b); }
+static inline vpd vsub(vpd a, vpd b) { return _mm512_sub_pd(a, b); }
+static inline vpd vmul(vpd a, vpd b) { return _mm512_mul_pd(a, b); }
+static inline vpd vdiv(vpd a, vpd b) { return _mm512_div_pd(a, b); }
+static inline vpd vmin(vpd a, vpd b) { return _mm512_min_pd(a, b); }
+static inline vpd vmax(vpd a, vpd b) { return _mm512_max_pd(a, b); }
+static inline vpd vfma(vpd a, vpd b, vpd c) { return _mm512_fmadd_pd(a, b, c); }
+static inline vpd vfmsub(vpd a, vpd b, vpd c)
+{ return _mm512_fmsub_pd(a, b, c); }
+static inline vpd vfnmadd(vpd a, vpd b, vpd c)
+{ return _mm512_fnmadd_pd(a, b, c); }
+static inline vpd vgather(const int *idx, const double *base, int nl)
+{ return _mm512_mask_i32gather_pd(_mm512_setzero_pd(), cfpg_mask(nl),
+                                  _mm256_loadu_si256((const __m256i*)idx),
+                                  base, 8); }
+static inline vi32 vfloor_i(vpd v)
+{ return _mm512_cvtpd_epi32(_mm512_floor_pd(v)); }
+static inline vpd vi2pd(vi32 v) { return _mm512_cvtepi32_pd(v); }
+static inline vi32 vizero(void) { return _mm256_setzero_si256(); }
+static inline vi32 vi_max(vi32 a, int k)
+{ return _mm256_max_epi32(a, _mm256_set1_epi32(k)); }
+static inline vi32 vi_min(vi32 a, int k)
+{ return _mm256_min_epi32(a, _mm256_set1_epi32(k)); }
+static inline vi32 vi_add(vi32 a, int k)
+{ return _mm256_add_epi32(a, _mm256_set1_epi32(k)); }
+static inline vi32 vi_sub(vi32 a, int k)
+{ return _mm256_sub_epi32(a, _mm256_set1_epi32(k)); }
+static inline void vstorei(int *p, vi32 v) { _mm256_storeu_si256((__m256i*)p, v); }
+static inline void vsplit(vpd v, __m256d *lo, __m256d *hi)
+{ *lo = _mm512_castpd512_pd256(v); *hi = _mm512_extractf64x4_pd(v, 1); }
+static inline vpd vjoin(__m256d lo, __m256d hi)
+{ return _mm512_insertf64x4(_mm512_castpd256_pd512(lo), hi, 1); }
+
+#elif defined(__AVX2__) && defined(__FMA__)
+#define CFPG_ISA      0                    /* 0 = two ymm halves per vpd */
+#define CFPG_ISA_NAME "avx2"
+#define CFPG_LANES    8                    /* logical lanes = events/tile */
+typedef struct { __m256d a, b; } vpd;
+typedef struct { __m128i a, b; } vi32;
+
+/*: lane mask for `k` live lanes of a 4-lane half (0..4) — the AVX2
+ *  masked load/store/AND masks, so a partial tile never reads past `ne`
+ *  and never keeps a value in a lane the caller did not ask for. */
+static inline __m256i cfpg_m4(int k)
+{
+    static const long long bits[5][4] = {
+        {0, 0, 0, 0}, {-1, 0, 0, 0}, {-1, -1, 0, 0},
+        {-1, -1, -1, 0}, {-1, -1, -1, -1}};
+    if (k < 0) k = 0;
+    if (k > 4) k = 4;
+    return _mm256_loadu_si256((const __m256i*)bits[k]);
+}
+static inline vpd vzero(void)
+{ vpd r; r.a = r.b = _mm256_setzero_pd(); return r; }
+static inline vpd vset1(double x)
+{ vpd r; r.a = r.b = _mm256_set1_pd(x); return r; }
+static inline vpd vload(const double *p)
+{ vpd r; r.a = _mm256_loadu_pd(p); r.b = _mm256_loadu_pd(p + 4); return r; }
+static inline void vstore(double *p, vpd v)
+{ _mm256_storeu_pd(p, v.a); _mm256_storeu_pd(p + 4, v.b); }
+static inline vpd vloadn(int nl, const double *p)
+{
+    vpd r;
+    r.a = _mm256_maskload_pd(p, cfpg_m4(nl));
+    r.b = _mm256_maskload_pd(p + 4, cfpg_m4(nl - 4));
+    return r;
+}
+static inline void vstoren(double *p, int nl, vpd v)
+{
+    _mm256_maskstore_pd(p, cfpg_m4(nl), v.a);
+    _mm256_maskstore_pd(p + 4, cfpg_m4(nl - 4), v.b);
+}
+static inline vpd vmaskz(int nl, vpd v)
+{
+    vpd r;
+    r.a = _mm256_and_pd(v.a, _mm256_castsi256_pd(cfpg_m4(nl)));
+    r.b = _mm256_and_pd(v.b, _mm256_castsi256_pd(cfpg_m4(nl - 4)));
+    return r;
+}
+static inline vpd vadd(vpd x, vpd y)
+{ vpd r; r.a = _mm256_add_pd(x.a, y.a); r.b = _mm256_add_pd(x.b, y.b); return r; }
+static inline vpd vsub(vpd x, vpd y)
+{ vpd r; r.a = _mm256_sub_pd(x.a, y.a); r.b = _mm256_sub_pd(x.b, y.b); return r; }
+static inline vpd vmul(vpd x, vpd y)
+{ vpd r; r.a = _mm256_mul_pd(x.a, y.a); r.b = _mm256_mul_pd(x.b, y.b); return r; }
+static inline vpd vdiv(vpd x, vpd y)
+{ vpd r; r.a = _mm256_div_pd(x.a, y.a); r.b = _mm256_div_pd(x.b, y.b); return r; }
+static inline vpd vmin(vpd x, vpd y)
+{ vpd r; r.a = _mm256_min_pd(x.a, y.a); r.b = _mm256_min_pd(x.b, y.b); return r; }
+static inline vpd vmax(vpd x, vpd y)
+{ vpd r; r.a = _mm256_max_pd(x.a, y.a); r.b = _mm256_max_pd(x.b, y.b); return r; }
+static inline vpd vfma(vpd x, vpd y, vpd z)
+{ vpd r; r.a = _mm256_fmadd_pd(x.a, y.a, z.a);
+  r.b = _mm256_fmadd_pd(x.b, y.b, z.b); return r; }
+static inline vpd vfmsub(vpd x, vpd y, vpd z)
+{ vpd r; r.a = _mm256_fmsub_pd(x.a, y.a, z.a);
+  r.b = _mm256_fmsub_pd(x.b, y.b, z.b); return r; }
+static inline vpd vfnmadd(vpd x, vpd y, vpd z)
+{ vpd r; r.a = _mm256_fnmadd_pd(x.a, y.a, z.a);
+  r.b = _mm256_fnmadd_pd(x.b, y.b, z.b); return r; }
+static inline vpd vgather(const int *idx, const double *base, int nl)
+{
+    vpd r;
+    r.a = _mm256_i32gather_pd(base, _mm_loadu_si128((const __m128i*)idx), 8);
+    r.b = _mm256_i32gather_pd(base, _mm_loadu_si128((const __m128i*)(idx + 4)),
+                              8);
+    return vmaskz(nl, r);            /* 0 past `nl`, exactly as AVX-512 */
+}
+static inline vi32 vfloor_i(vpd v)
+{
+    vi32 r;
+    r.a = _mm256_cvtpd_epi32(_mm256_floor_pd(v.a));
+    r.b = _mm256_cvtpd_epi32(_mm256_floor_pd(v.b));
+    return r;
+}
+static inline vpd vi2pd(vi32 v)
+{ vpd r; r.a = _mm256_cvtepi32_pd(v.a); r.b = _mm256_cvtepi32_pd(v.b); return r; }
+static inline vi32 vizero(void)
+{ vi32 r; r.a = r.b = _mm_setzero_si128(); return r; }
+static inline vi32 vi_max(vi32 v, int k)
+{
+    vi32 r; const __m128i kk = _mm_set1_epi32(k);
+    r.a = _mm_max_epi32(v.a, kk); r.b = _mm_max_epi32(v.b, kk); return r;
+}
+static inline vi32 vi_min(vi32 v, int k)
+{
+    vi32 r; const __m128i kk = _mm_set1_epi32(k);
+    r.a = _mm_min_epi32(v.a, kk); r.b = _mm_min_epi32(v.b, kk); return r;
+}
+static inline vi32 vi_add(vi32 v, int k)
+{
+    vi32 r; const __m128i kk = _mm_set1_epi32(k);
+    r.a = _mm_add_epi32(v.a, kk); r.b = _mm_add_epi32(v.b, kk); return r;
+}
+static inline vi32 vi_sub(vi32 v, int k)
+{
+    vi32 r; const __m128i kk = _mm_set1_epi32(k);
+    r.a = _mm_sub_epi32(v.a, kk); r.b = _mm_sub_epi32(v.b, kk); return r;
+}
+static inline void vstorei(int *p, vi32 v)
+{ _mm_storeu_si128((__m128i*)p, v.a); _mm_storeu_si128((__m128i*)(p + 4), v.b); }
+static inline void vsplit(vpd v, __m256d *lo, __m256d *hi)
+{ *lo = v.a; *hi = v.b; }
+static inline vpd vjoin(__m256d lo, __m256d hi)
+{ vpd r; r.a = lo; r.b = hi; return r; }
+
+#else
+#error "cpu_flat_pwa_gen needs AVX2+FMA (AVX-512 is used when the compiler enables it, e.g. -march=native on a Zen4/modern-Intel host)"
+#endif
+
+/*: the canonical horizontal reduction — ONE tree, written out, used by both
+ *  builds (and by `vhsum_n` after zeroing the lanes past `nl`, which is what
+ *  the AVX-512 masked reduce does internally).  Order matters: it is part of
+ *  the bit-identity contract, so it may not be an intrinsic whose tree is a
+ *  header detail. */
+static inline double vhsum(vpd v)
+{
+    double t[CFPG_LANES];
+    vstore(t, v);
+    return ((t[0] + t[4]) + (t[2] + t[6])) + ((t[1] + t[5]) + (t[3] + t[7]));
+}
+
+static inline double vhsum_n(int nl, vpd v) { return vhsum(vmaskz(nl, v)); }
+
 /* ── libmvec (glibc's vectorised cos/log), resolved with dlsym so that a
  *    build without `-lmvec` still loads and falls back to scalar libm ── */
-typedef __m512d (*cfpg_vfn)(__m512d);
-static cfpg_vfn cfpg_vcos = NULL;
-static cfpg_vfn cfpg_vlog = NULL;
+typedef vpd (*cfpg_vfn8)(vpd);
+typedef __m256d (*cfpg_vfn4)(__m256d);
+static cfpg_vfn8 cfpg_vcos8 = NULL;
+static cfpg_vfn4 cfpg_vcos4 = NULL;
+static cfpg_vfn4 cfpg_vlog4 = NULL;
 static int cfpg_vmath_ok = 0;
 
 static void cfpg_vmath_init(void)
@@ -154,39 +381,58 @@ static void cfpg_vmath_init(void)
     void *h = dlopen("libmvec.so.1", RTLD_LAZY | RTLD_GLOBAL);
     if (!h) h = dlopen("libmvec.so", RTLD_LAZY | RTLD_GLOBAL);
     if (h) {
-        cfpg_vcos = (cfpg_vfn)(void (*)(void))dlsym(h, "_ZGVeN8v_cos");
-        cfpg_vlog = (cfpg_vfn)(void (*)(void))dlsym(h, "_ZGVeN8v_log");
+        cfpg_vcos4 = (cfpg_vfn4)(void (*)(void))dlsym(h, "_ZGVdN4v_cos");
+        cfpg_vlog4 = (cfpg_vfn4)(void (*)(void))dlsym(h, "_ZGVdN4v_log");
+#if CFPG_ISA
+        cfpg_vcos8 = (cfpg_vfn8)(void (*)(void))dlsym(h, "_ZGVeN8v_cos");
+#endif
     }
-    cfpg_vmath_ok = (cfpg_vcos != NULL && cfpg_vlog != NULL) ? 1 : 0;
+    cfpg_vmath_ok = (cfpg_vcos4 != NULL && cfpg_vlog4 != NULL
+#if CFPG_ISA
+                     && cfpg_vcos8 != NULL
+#endif
+                     ) ? 1 : 0;
 }
 
-static inline __m512d cfpg_cos8(__m512d v)
+/*: cos of 8 events.  Each build uses its own width: the 8-wide and 4-wide
+ *  libmvec `cos` are bit-equal (measured over the production argument range,
+ *  0 of 1.6 M samples differ), so this is the same number either way. */
+static inline vpd cfpg_cos8(vpd v)
 {
-    if (__builtin_expect(cfpg_vmath_ok == 1, 1)) return cfpg_vcos(v);
-    double b[8];
-    _mm512_storeu_pd(b, v);
-    for (int i = 0; i < 8; i++) b[i] = cos(b[i]);
-    return _mm512_loadu_pd(b);
+    if (__builtin_expect(cfpg_vmath_ok == 1, 1)) {
+#if CFPG_ISA
+        return cfpg_vcos8(v);
+#else
+        __m256d lo, hi;
+        vsplit(v, &lo, &hi);
+        return vjoin(cfpg_vcos4(lo), cfpg_vcos4(hi));
+#endif
+    }
+    double b[CFPG_LANES];
+    vstore(b, v);
+    for (int i = 0; i < CFPG_LANES; i++) b[i] = cos(b[i]);
+    return vload(b);
 }
 
-static inline __m512d cfpg_sin8(__m512d v)
+static inline vpd cfpg_sin8(vpd v)
 {
-    if (__builtin_expect(cfpg_vmath_ok == 1, 1))
-        return cfpg_vcos(_mm512_sub_pd(v,
-                                       _mm512_set1_pd(1.5707963267948966)));
-    double b[8];
-    _mm512_storeu_pd(b, v);
-    for (int i = 0; i < 8; i++) b[i] = sin(b[i]);
-    return _mm512_loadu_pd(b);
+    return cfpg_cos8(vsub(v, vset1(1.5707963267948966)));
 }
 
-static inline __m512d cfpg_log8(__m512d v)
+/*: log of 8 events — the 4-WIDE entry in BOTH builds, because glibc's
+ *  8-wide `log` is not bit-equal to its 4-wide one (5040 of 1.6 M samples
+ *  differ) and Q must not depend on which one the build could reach. */
+static inline vpd cfpg_log8(vpd v)
 {
-    if (__builtin_expect(cfpg_vmath_ok == 1, 1)) return cfpg_vlog(v);
-    double b[8];
-    _mm512_storeu_pd(b, v);
-    for (int i = 0; i < 8; i++) b[i] = log(b[i]);
-    return _mm512_loadu_pd(b);
+    if (__builtin_expect(cfpg_vmath_ok == 1, 1)) {
+        __m256d lo, hi;
+        vsplit(v, &lo, &hi);
+        return vjoin(cfpg_vlog4(lo), cfpg_vlog4(hi));
+    }
+    double b[CFPG_LANES];
+    vstore(b, v);
+    for (int i = 0; i < CFPG_LANES; i++) b[i] = log(b[i]);
+    return vload(b);
 }
 
 /* ── the Catmull-Rom weights of (pm1, p0, p1, p2) ───────────────────────
@@ -195,77 +441,56 @@ static inline __m512d cfpg_log8(__m512d v)
  *                             + t(-pm1 + 3p0 - 3p1 + p2)))
  *   = w0·pm1 + w1·p0 + w2·p1 + w3·p2
  */
-static inline void cfpg_cr_weights(__m512d t, double *w)
+static inline void cfpg_cr_weights(vpd t, double *w)
 {
-    const __m512d half = _mm512_set1_pd(0.5);
-    const __m512d t2 = _mm512_mul_pd(t, t);
-    const __m512d h = _mm512_mul_pd(half, t);
-    const __m512d w0 = _mm512_mul_pd(h, _mm512_fmadd_pd(
-                           t, _mm512_sub_pd(_mm512_set1_pd(2.0), t),
-                           _mm512_set1_pd(-1.0)));
-    const __m512d w1 = _mm512_fmadd_pd(_mm512_mul_pd(half, t2),
-                         _mm512_fmsub_pd(_mm512_set1_pd(3.0), t,
-                                         _mm512_set1_pd(5.0)),
-                         _mm512_set1_pd(1.0));
-    const __m512d w2 = _mm512_mul_pd(h, _mm512_fmadd_pd(
-                           t, _mm512_fnmadd_pd(_mm512_set1_pd(3.0), t,
-                                               _mm512_set1_pd(4.0)),
-                           _mm512_set1_pd(1.0)));
-    const __m512d w3 = _mm512_mul_pd(_mm512_mul_pd(half, t2),
-                         _mm512_sub_pd(t, _mm512_set1_pd(1.0)));
-    _mm512_storeu_pd(w + 0, w0);
-    _mm512_storeu_pd(w + 8, w1);
-    _mm512_storeu_pd(w + 16, w2);
-    _mm512_storeu_pd(w + 24, w3);
+    const vpd half = vset1(0.5);
+    const vpd t2 = vmul(t, t);
+    const vpd h = vmul(half, t);
+    const vpd w0 = vmul(h, vfma(t, vsub(vset1(2.0), t), vset1(-1.0)));
+    const vpd w1 = vfma(vmul(half, t2), vfmsub(vset1(3.0), t, vset1(5.0)),
+                        vset1(1.0));
+    const vpd w2 = vmul(h, vfma(t, vfnmadd(vset1(3.0), t, vset1(4.0)),
+                                vset1(1.0)));
+    const vpd w3 = vmul(vmul(half, t2), vsub(t, vset1(1.0)));
+    vstore(w + 0 * CFPG_LANES, w0);
+    vstore(w + 1 * CFPG_LANES, w1);
+    vstore(w + 2 * CFPG_LANES, w2);
+    vstore(w + 3 * CFPG_LANES, w3);
 }
 
 /*: one x column's grid position for the tile — the four neighbouring
  *  RELATIVE bin indices (clamped at the row edges exactly like the CUDA
  *  tile's `gps0_interp_*`) and the four Catmull-Rom weights.  Shared by
  *  every table row sampled at that column. */
-static inline void cfpg_bin(int *idx, double *w, __m512d x, double xmin,
+static inline void cfpg_bin(int *idx, double *w, vpd x, double xmin,
                             double xdelta, int bins)
 {
-    const __m512d diff = _mm512_div_pd(_mm512_sub_pd(x, _mm512_set1_pd(xmin)),
-                                       _mm512_set1_pd(xdelta));
-    __m256i b = _mm512_cvtpd_epi32(_mm512_floor_pd(diff));
-    b = _mm256_max_epi32(b, _mm256_setzero_si256());
-    b = _mm256_min_epi32(b, _mm256_set1_epi32(bins - 2));
-    __m512d s = _mm512_sub_pd(diff, _mm512_cvtepi32_pd(b));
-    s = _mm512_min_pd(_mm512_max_pd(s, _mm512_setzero_pd()),
-                      _mm512_set1_pd(1.0));
-    _mm256_storeu_si256((__m256i*)(idx + 8), b);
-    _mm256_storeu_si256((__m256i*)(idx + 16),
-                        _mm256_add_epi32(b, _mm256_set1_epi32(1)));
-    _mm256_storeu_si256((__m256i*)(idx + 0),
-                        _mm256_max_epi32(_mm256_sub_epi32(
-                                             b, _mm256_set1_epi32(1)),
-                                         _mm256_setzero_si256()));
-    _mm256_storeu_si256((__m256i*)(idx + 24),
-                        _mm256_min_epi32(_mm256_add_epi32(
-                                             b, _mm256_set1_epi32(2)),
-                                         _mm256_set1_epi32(bins - 1)));
+    const vpd diff = vdiv(vsub(x, vset1(xmin)), vset1(xdelta));
+    vi32 b = vfloor_i(diff);
+    b = vi_max(b, 0);
+    b = vi_min(b, bins - 2);
+    vpd s = vsub(diff, vi2pd(b));
+    s = vmin(vmax(s, vzero()), vset1(1.0));
+    vstorei(idx + 0 * CFPG_LANES, vi_max(vi_sub(b, 1), 0));
+    vstorei(idx + 1 * CFPG_LANES, b);
+    vstorei(idx + 2 * CFPG_LANES, vi_add(b, 1));
+    vstorei(idx + 3 * CFPG_LANES, vi_min(vi_add(b, 2), bins - 1));
     cfpg_cr_weights(s, w);
 }
 
 /*: Catmull-Rom of one table row from a column's precomputed bin/weights.
  *  `row_base` is `table + row*bins`, the indices are already row-relative. */
-static inline __m512d cfpg_interp(const double *row_base, const int *idx,
-                                  const double *w, __mmask8 m)
+static inline vpd cfpg_interp(const double *row_base, const int *idx,
+                              const double *w, int nl)
 {
-    const __m512d z = _mm512_setzero_pd();
-    const __m512d pm1 = _mm512_mask_i32gather_pd(
-        z, m, _mm256_loadu_si256((const __m256i*)(idx + 0)), row_base, 8);
-    const __m512d p0 = _mm512_mask_i32gather_pd(
-        z, m, _mm256_loadu_si256((const __m256i*)(idx + 8)), row_base, 8);
-    const __m512d p1 = _mm512_mask_i32gather_pd(
-        z, m, _mm256_loadu_si256((const __m256i*)(idx + 16)), row_base, 8);
-    const __m512d p2 = _mm512_mask_i32gather_pd(
-        z, m, _mm256_loadu_si256((const __m256i*)(idx + 24)), row_base, 8);
-    __m512d v = _mm512_fmadd_pd(_mm512_loadu_pd(w + 8), p0,
-                                _mm512_mul_pd(_mm512_loadu_pd(w + 0), pm1));
-    v = _mm512_fmadd_pd(_mm512_loadu_pd(w + 16), p1, v);
-    return _mm512_fmadd_pd(_mm512_loadu_pd(w + 24), p2, v);
+    const vpd pm1 = vgather(idx + 0 * CFPG_LANES, row_base, nl);
+    const vpd p0 = vgather(idx + 1 * CFPG_LANES, row_base, nl);
+    const vpd p1 = vgather(idx + 2 * CFPG_LANES, row_base, nl);
+    const vpd p2 = vgather(idx + 3 * CFPG_LANES, row_base, nl);
+    vpd v = vfma(vload(w + 1 * CFPG_LANES), p0,
+                 vmul(vload(w + 0 * CFPG_LANES), pm1));
+    v = vfma(vload(w + 2 * CFPG_LANES), p1, v);
+    return vfma(vload(w + 3 * CFPG_LANES), p2, v);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -307,8 +532,8 @@ static CFPGLayout cfpg_layout(int A, int n_fa, int N, int P, int R, int U,
 {
     CFPGLayout L;
     int o = 0;
-    L.mw    = o; o += n_mass * 32;
-    L.qw    = o; o += n_mom * 32;
+    L.mw    = o; o += n_mass * (4 * CFPG_LANES);
+    L.qw    = o; o += n_mom * (4 * CFPG_LANES);
     L.cs    = o; o += n_aj * CFPG_LANES;
     L.sn    = o; o += n_aj * CFPG_LANES;
     L.ka    = o; o += A * CFPG_LANES;
@@ -344,6 +569,10 @@ static CFPGLayout cfpg_layout(int A, int n_fa, int N, int P, int R, int U,
     L.total   = o;
     return L;
 }
+
+/*: the ISA this `.so` was built for ("avx512f" = one zmm per vpd,
+ *  "avx2" = two ymm halves) — reported, never assumed by the caller. */
+const char *cpu_flat_pwa_gen_isa(void) { return CFPG_ISA_NAME; }
 
 /* ══════════════════════════════════════════════════════════════════════
  * context and one loaded sample
@@ -398,11 +627,6 @@ typedef struct {
     int ne;
 } CFPGData;
 
-static inline __mmask8 cfpg_mask(int n)
-{
-    return (n >= CFPG_LANES) ? (__mmask8)0xFF : (__mmask8)((1u << n) - 1);
-}
-
 /* ── forward + per-event gradient basis for a tile of n ≤ 8 events ─────
  *
  * Writes P into `h->P[e0 .. e0+n)` and, when `want_vg`, the segment
@@ -420,7 +644,7 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
     const int N = c->N, P = c->P, R = c->R, D = c->D, NB = c->NB;
     const int A = c->n_ab, U = c->n_uslot, nfa = c->n_fa;
     const int ne = h->ne;
-    const __mmask8 m = cfpg_mask(n);
+    const int m = n;   /* live lanes of this tile */
     const CFPGLayout L = c->L;
     const CFPGILayout I = c->I;
     int *midx = it + I.midx, *qidx = it + I.qidx;
@@ -443,12 +667,12 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
     /* ── 1. the shared grid positions: ONE divide per x column, and the
      *      bin indices + CR weights every row sampled there reuses ────── */
     for (int col = 0; col < c->n_mass; col++)
-        cfpg_bin(midx + col * 32, mw + col * 32,
-                 _mm512_maskz_loadu_pd(m, h->mass_s + (size_t)col * ne + e0),
+        cfpg_bin(midx + col * (4 * CFPG_LANES), mw + col * (4 * CFPG_LANES),
+                 vloadn(m, h->mass_s + (size_t)col * ne + e0),
                  c->m_min, c->m_delta, c->m_bins);
     for (int col = 0; col < c->n_momentum; col++)
-        cfpg_bin(qidx + col * 32, qw + col * 32,
-                 _mm512_maskz_loadu_pd(m, h->q_s + (size_t)col * ne + e0),
+        cfpg_bin(qidx + col * (4 * CFPG_LANES), qw + col * (4 * CFPG_LANES),
+                 vloadn(m, h->q_s + (size_t)col * ne + e0),
                  c->q_min, c->q_delta, c->fl_bins);
     const long long t1 = st ? __rdtsc() : 0;
 
@@ -459,107 +683,107 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
      *               then a Chebyshev pair per component. */
     if (!c->int_k) {
         for (int a = 0; a < A; a++) {
-            __m512d prod = _mm512_set1_pd(c->ach_aconst[a]);
+            vpd prod = vset1(c->ach_aconst[a]);
             for (int i = c->ach_off[a]; i < c->ach_off[a + 1]; i++) {
                 const double *base =
                     h->ang_s + (size_t)(c->ach_col[i] * c->n_comp) * ne + e0;
-                const __m512d x =
-                    _mm512_maskz_loadu_pd(m, base + (size_t)c->ach_j[i] * ne);
-                prod = _mm512_mul_pd(prod, cfpg_cos8(_mm512_fmadd_pd(
-                    x, _mm512_set1_pd(c->ach_k[i]),
-                    _mm512_set1_pd(c->ach_b[i]))));
+                const vpd x =
+                    vloadn(m, base + (size_t)c->ach_j[i] * ne);
+                prod = vmul(prod, cfpg_cos8(vfma(
+                    x, vset1(c->ach_k[i]),
+                    vset1(c->ach_b[i]))));
             }
-            _mm512_storeu_pd(ka + a * 8, prod);
+            vstore(ka + a * CFPG_LANES, prod);
         }
     } else {
         double *cs = t + L.cs, *sn = t + L.sn;
         for (int i = 0; i < c->n_aj; i++) {
-            const __m512d x = _mm512_maskz_loadu_pd(
+            const vpd x = vloadn(
                 m, h->ang_s + (size_t)i * ne + e0);
-            _mm512_storeu_pd(cs + i * 8, cfpg_cos8(x));
-            _mm512_storeu_pd(sn + i * 8, cfpg_sin8(x));
+            vstore(cs + i * CFPG_LANES, cfpg_cos8(x));
+            vstore(sn + i * CFPG_LANES, cfpg_sin8(x));
         }
         for (int a = 0; a < A; a++) {
-            __m512d prod = _mm512_set1_pd(c->ach_aconst[a]);
+            vpd prod = vset1(c->ach_aconst[a]);
             for (int i = c->ach_off[a]; i < c->ach_off[a + 1]; i++) {
                 const int pair = c->ach_pair[i];
-                const __m512d cv = _mm512_loadu_pd(cs + pair * 8);
-                const __m512d sv = _mm512_loadu_pd(sn + pair * 8);
+                const vpd cv = vload(cs + pair * CFPG_LANES);
+                const vpd sv = vload(sn + pair * CFPG_LANES);
                 const int kk = c->ach_kabs[i];
                 if (__builtin_expect(kk == 1, 1)) {
                     /* cos(x + b) = cos x·cos b − sin x·sin b  (T_1 = c, U_0 = 1) */
-                    prod = _mm512_mul_pd(prod, _mm512_fmsub_pd(
-                        cv, _mm512_set1_pd(c->ach_cb[i]),
-                        _mm512_mul_pd(sv, _mm512_set1_pd(
+                    prod = vmul(prod, vfmsub(
+                        cv, vset1(c->ach_cb[i]),
+                        vmul(sv, vset1(
                             (double)c->ach_sgn[i] * c->ach_sb[i]))));
                     continue;
                 }
-                const __m512d two_c = _mm512_add_pd(cv, cv);
+                const vpd two_c = vadd(cv, cv);
                 /* T_|k|(c) */
-                __m512d tm1 = _mm512_set1_pd(1.0), tc = cv;
+                vpd tm1 = vset1(1.0), tc = cv;
                 for (int q = 2; q <= kk; q++) {
-                    const __m512d tn = _mm512_fmsub_pd(two_c, tc, tm1);
+                    const vpd tn = vfmsub(two_c, tc, tm1);
                     tm1 = tc;
                     tc = tn;
                 }
                 /* U_{|k|-1}(c) */
-                __m512d um1 = _mm512_set1_pd(1.0);
-                __m512d uc = (kk >= 2) ? two_c : _mm512_set1_pd(1.0);
+                vpd um1 = vset1(1.0);
+                vpd uc = (kk >= 2) ? two_c : vset1(1.0);
                 for (int q = 2; q < kk; q++) {
-                    const __m512d un = _mm512_fmsub_pd(two_c, uc, um1);
+                    const vpd un = vfmsub(two_c, uc, um1);
                     um1 = uc;
                     uc = un;
                 }
-                const __m512d cterm = _mm512_mul_pd(
-                    tc, _mm512_set1_pd(c->ach_cb[i]));
-                const __m512d sterm = _mm512_mul_pd(
-                    _mm512_mul_pd(uc, sv),
-                    _mm512_set1_pd((double)c->ach_sgn[i] * c->ach_sb[i]));
-                prod = _mm512_mul_pd(prod, _mm512_sub_pd(cterm, sterm));
+                const vpd cterm = vmul(
+                    tc, vset1(c->ach_cb[i]));
+                const vpd sterm = vmul(
+                    vmul(uc, sv),
+                    vset1((double)c->ach_sgn[i] * c->ach_sb[i]));
+                prod = vmul(prod, vsub(cterm, sterm));
             }
-            _mm512_storeu_pd(ka + a * 8, prod);
+            vstore(ka + a * CFPG_LANES, prod);
         }
     }
     const long long t2 = st ? __rdtsc() : 0;
 
     /* ── 3. fa = ka · matrix_angle, over the matrix's TRUE non-zeros ─── */
     for (int col = 0; col < nfa; col++) {
-        __m512d sr = _mm512_setzero_pd(), si = _mm512_setzero_pd();
+        vpd sr = vzero(), si = vzero();
         for (int i = c->fa_ptr[col]; i < c->fa_ptr[col + 1]; i++) {
-            const __m512d kv = _mm512_loadu_pd(ka + c->fa_row[i] * 8);
-            sr = _mm512_fmadd_pd(kv, _mm512_set1_pd(c->fa_r[i]), sr);
-            si = _mm512_fmadd_pd(kv, _mm512_set1_pd(c->fa_i[i]), si);
+            const vpd kv = vload(ka + c->fa_row[i] * CFPG_LANES);
+            sr = vfma(kv, vset1(c->fa_r[i]), sr);
+            si = vfma(kv, vset1(c->fa_i[i]), si);
         }
-        _mm512_storeu_pd(fa_r + col * 8, sr);
-        _mm512_storeu_pd(fa_i + col * 8, si);
+        vstore(fa_r + col * CFPG_LANES, sr);
+        vstore(fa_i + col * CFPG_LANES, si);
     }
     const long long t3 = st ? __rdtsc() : 0;
 
     /* ── 4. barriers: fl[k] = Π_d interp(fl_table, q) ────────────────── */
     for (int u = 0; u < c->n_fl_u; u++)
-        _mm512_storeu_pd(flv + u * 8,
+        vstore(flv + u * CFPG_LANES,
                          cfpg_interp(c->fl_tab
                                      + (size_t)c->fl_u_row[u] * c->fl_bins,
-                                     qidx + c->fl_u_col[u] * 32,
-                                     qw + c->fl_u_col[u] * 32, m));
+                                     qidx + c->fl_u_col[u] * (4 * CFPG_LANES),
+                                     qw + c->fl_u_col[u] * (4 * CFPG_LANES), m));
     for (int k = 0; k < N; k++) {
-        __m512d p = _mm512_loadu_pd(flv + c->fl_use[k * D] * 8);
+        vpd p = vload(flv + c->fl_use[k * D] * CFPG_LANES);
         for (int d = 1; d < D; d++)
-            p = _mm512_mul_pd(p,
-                              _mm512_loadu_pd(flv + c->fl_use[k * D + d] * 8));
-        _mm512_storeu_pd(flw + k * 8, p);
+            p = vmul(p,
+                              vload(flv + c->fl_use[k * D + d] * CFPG_LANES));
+        vstore(flw + k * CFPG_LANES, p);
     }
     const long long t4 = st ? __rdtsc() : 0;
 
     /* ── 5. numerator: ONE complex interpolation per deduped use ─────── */
     for (int u = 0; u < c->n_num_u; u++) {
         const int row = c->num_u_row[u];
-        const int *idx = midx + c->num_u_col[u] * 32;
-        const double *w = mw + c->num_u_col[u] * 32;
+        const int *idx = midx + c->num_u_col[u] * (4 * CFPG_LANES);
+        const double *w = mw + c->num_u_col[u] * (4 * CFPG_LANES);
         const size_t off = (size_t)row * (size_t)c->m_bins;
-        _mm512_storeu_pd(nuv_r + u * 8,
+        vstore(nuv_r + u * CFPG_LANES,
                          cfpg_interp(c->num_r + off, idx, w, m));
-        _mm512_storeu_pd(nuv_i + u * 8,
+        vstore(nuv_i + u * CFPG_LANES,
                          cfpg_interp(c->num_i + off, idx, w, m));
     }
     const long long t5 = st ? __rdtsc() : 0;
@@ -567,187 +791,187 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
     /* ── 6. denominators: F at the unique slots, then D = Π_r Σ w·F ──── */
     for (int u = 0; u < U; u++) {
         if (c->us_const[u]) {
-            _mm512_storeu_pd(Fu_r + u * 8, _mm512_set1_pd(c->us_cr[u]));
-            _mm512_storeu_pd(Fu_i + u * 8, _mm512_set1_pd(c->us_ci[u]));
+            vstore(Fu_r + u * CFPG_LANES, vset1(c->us_cr[u]));
+            vstore(Fu_i + u * CFPG_LANES, vset1(c->us_ci[u]));
             continue;
         }
         const int row = c->us_row[u];
-        const int *idx = midx + c->us_col[u] * 32;
-        const double *w = mw + c->us_col[u] * 32;
+        const int *idx = midx + c->us_col[u] * (4 * CFPG_LANES);
+        const double *w = mw + c->us_col[u] * (4 * CFPG_LANES);
         const size_t off = (size_t)row * (size_t)c->m_bins;
-        _mm512_storeu_pd(Fu_r + u * 8,
+        vstore(Fu_r + u * CFPG_LANES,
                          cfpg_interp(c->bas_r + off, idx, w, m));
-        _mm512_storeu_pd(Fu_i + u * 8,
+        vstore(Fu_i + u * CFPG_LANES,
                          cfpg_interp(c->bas_i + off, idx, w, m));
     }
     const double *w = c->w_nz;
     for (int kr = 0; kr < N * R; kr++) {
-        __m512d sr = _mm512_setzero_pd(), si = _mm512_setzero_pd();
+        vpd sr = vzero(), si = vzero();
         for (int i = c->g_off[kr]; i < c->g_off[kr + 1]; i++) {
-            const __m512d wv = _mm512_set1_pd(w[i]);
-            sr = _mm512_fmadd_pd(
-                wv, _mm512_loadu_pd(Fu_r + c->g_u[i] * 8), sr);
-            si = _mm512_fmadd_pd(
-                wv, _mm512_loadu_pd(Fu_i + c->g_u[i] * 8), si);
+            const vpd wv = vset1(w[i]);
+            sr = vfma(
+                wv, vload(Fu_r + c->g_u[i] * CFPG_LANES), sr);
+            si = vfma(
+                wv, vload(Fu_i + c->g_u[i] * CFPG_LANES), si);
         }
-        _mm512_storeu_pd(s_r + kr * 8, sr);
-        _mm512_storeu_pd(s_i + kr * 8, si);
+        vstore(s_r + kr * CFPG_LANES, sr);
+        vstore(s_i + kr * CFPG_LANES, si);
     }
     for (int k = 0; k < N; k++) {
-        __m512d dr = _mm512_loadu_pd(s_r + (k * R) * 8);
-        __m512d di = _mm512_loadu_pd(s_i + (k * R) * 8);
+        vpd dr = vload(s_r + (k * R) * CFPG_LANES);
+        vpd di = vload(s_i + (k * R) * CFPG_LANES);
         for (int r = 1; r < R; r++) {
-            const __m512d er = _mm512_loadu_pd(s_r + (k * R + r) * 8);
-            const __m512d ei = _mm512_loadu_pd(s_i + (k * R + r) * 8);
-            const __m512d tr = _mm512_sub_pd(_mm512_mul_pd(dr, er),
-                                             _mm512_mul_pd(di, ei));
-            di = _mm512_fmadd_pd(dr, ei, _mm512_mul_pd(di, er));
+            const vpd er = vload(s_r + (k * R + r) * CFPG_LANES);
+            const vpd ei = vload(s_i + (k * R + r) * CFPG_LANES);
+            const vpd tr = vsub(vmul(dr, er),
+                                             vmul(di, ei));
+            di = vfma(dr, ei, vmul(di, er));
             dr = tr;
         }
-        _mm512_storeu_pd(den_r + k * 8, dr);
-        _mm512_storeu_pd(den_i + k * 8, di);
-        _mm512_storeu_pd(rden + k * 8,
-                         _mm512_maskz_mov_pd(
-                             m, _mm512_div_pd(
-                                    _mm512_set1_pd(1.0),
-                                    _mm512_fmadd_pd(dr, dr,
-                                                    _mm512_mul_pd(di, di)))));
+        vstore(den_r + k * CFPG_LANES, dr);
+        vstore(den_i + k * CFPG_LANES, di);
+        vstore(rden + k * CFPG_LANES,
+                         vmaskz(
+                             m, vdiv(
+                                    vset1(1.0),
+                                    vfma(dr, dr,
+                                                    vmul(di, di)))));
         /* others_{k,r} = Π_{l≠r} s_l  (1 at n_res == 1) */
         for (int r = 0; r < R; r++) {
-            __m512d pr = _mm512_set1_pd(1.0), pi = _mm512_setzero_pd();
+            vpd pr = vset1(1.0), pi = vzero();
             for (int l = 0; l < R; l++) {
                 if (l == r) continue;
-                const __m512d er = _mm512_loadu_pd(s_r + (k * R + l) * 8);
-                const __m512d ei = _mm512_loadu_pd(s_i + (k * R + l) * 8);
-                const __m512d tr = _mm512_sub_pd(_mm512_mul_pd(pr, er),
-                                                 _mm512_mul_pd(pi, ei));
-                pi = _mm512_fmadd_pd(pr, ei, _mm512_mul_pd(pi, er));
+                const vpd er = vload(s_r + (k * R + l) * CFPG_LANES);
+                const vpd ei = vload(s_i + (k * R + l) * CFPG_LANES);
+                const vpd tr = vsub(vmul(pr, er),
+                                                 vmul(pi, ei));
+                pi = vfma(pr, ei, vmul(pi, er));
                 pr = tr;
             }
-            _mm512_storeu_pd(oth_r + (k * R + r) * 8, pr);
-            _mm512_storeu_pd(oth_i + (k * R + r) * 8, pi);
+            vstore(oth_r + (k * R + r) * CFPG_LANES, pr);
+            vstore(oth_i + (k * R + r) * CFPG_LANES, pi);
         }
     }
     const long long t6 = st ? __rdtsc() : 0;
 
     /* ── 7. common, A_p, P_e ─────────────────────────────────────────── */
     for (int k = 0; k < N; k++) {
-        __m512d nr = _mm512_loadu_pd(nuv_r + c->num_use[k * R] * 8);
-        __m512d ni = _mm512_loadu_pd(nuv_i + c->num_use[k * R] * 8);
+        vpd nr = vload(nuv_r + c->num_use[k * R] * CFPG_LANES);
+        vpd ni = vload(nuv_i + c->num_use[k * R] * CFPG_LANES);
         for (int r = 1; r < R; r++) {
-            const __m512d er = _mm512_loadu_pd(
-                nuv_r + c->num_use[k * R + r] * 8);
-            const __m512d ei = _mm512_loadu_pd(
-                nuv_i + c->num_use[k * R + r] * 8);
-            const __m512d tr = _mm512_sub_pd(_mm512_mul_pd(nr, er),
-                                             _mm512_mul_pd(ni, ei));
-            ni = _mm512_fmadd_pd(nr, ei, _mm512_mul_pd(ni, er));
+            const vpd er = vload(
+                nuv_r + c->num_use[k * R + r] * CFPG_LANES);
+            const vpd ei = vload(
+                nuv_i + c->num_use[k * R + r] * CFPG_LANES);
+            const vpd tr = vsub(vmul(nr, er),
+                                             vmul(ni, ei));
+            ni = vfma(nr, ei, vmul(ni, er));
             nr = tr;
         }
-        const __m512d fl = _mm512_loadu_pd(flw + k * 8);
-        nr = _mm512_mul_pd(nr, fl);
-        ni = _mm512_mul_pd(ni, fl);
+        const vpd fl = vload(flw + k * CFPG_LANES);
+        nr = vmul(nr, fl);
+        ni = vmul(ni, fl);
         /* common = (num·fl)·conj(D)/|D|² */
-        const __m512d dr = _mm512_loadu_pd(den_r + k * 8);
-        const __m512d di = _mm512_loadu_pd(den_i + k * 8);
-        const __m512d rd = _mm512_loadu_pd(rden + k * 8);
-        _mm512_storeu_pd(cm_r + k * 8,
-                         _mm512_mul_pd(_mm512_fmadd_pd(
-                                           ni, di, _mm512_mul_pd(nr, dr)),
+        const vpd dr = vload(den_r + k * CFPG_LANES);
+        const vpd di = vload(den_i + k * CFPG_LANES);
+        const vpd rd = vload(rden + k * CFPG_LANES);
+        vstore(cm_r + k * CFPG_LANES,
+                         vmul(vfma(
+                                           ni, di, vmul(nr, dr)),
                                        rd));
-        _mm512_storeu_pd(cm_i + k * 8,
-                         _mm512_mul_pd(_mm512_fmsub_pd(
-                                           ni, dr, _mm512_mul_pd(nr, di)),
+        vstore(cm_i + k * CFPG_LANES,
+                         vmul(vfmsub(
+                                           ni, dr, vmul(nr, di)),
                                        rd));
     }
     for (int p = 0; p < P; p++) {
-        __m512d ar = _mm512_setzero_pd(), ai = _mm512_setzero_pd();
+        vpd ar = vzero(), ai = vzero();
         for (int k = 0; k < N; k++) {
             const int col = c->fa_slot[p * N + k];
-            const __m512d cr = _mm512_loadu_pd(cm_r + k * 8);
-            const __m512d ci = _mm512_loadu_pd(cm_i + k * 8);
-            const __m512d fr = _mm512_loadu_pd(fa_r + col * 8);
-            const __m512d fi = _mm512_loadu_pd(fa_i + col * 8);
-            const __m512d xr = _mm512_fmsub_pd(_mm512_set1_pd(ck_r[k]), cr,
-                                               _mm512_mul_pd(
-                                                   _mm512_set1_pd(ck_i[k]),
+            const vpd cr = vload(cm_r + k * CFPG_LANES);
+            const vpd ci = vload(cm_i + k * CFPG_LANES);
+            const vpd fr = vload(fa_r + col * CFPG_LANES);
+            const vpd fi = vload(fa_i + col * CFPG_LANES);
+            const vpd xr = vfmsub(vset1(ck_r[k]), cr,
+                                               vmul(
+                                                   vset1(ck_i[k]),
                                                    ci));
-            const __m512d xi = _mm512_fmadd_pd(_mm512_set1_pd(ck_r[k]), ci,
-                                               _mm512_mul_pd(
-                                                   _mm512_set1_pd(ck_i[k]),
+            const vpd xi = vfma(vset1(ck_r[k]), ci,
+                                               vmul(
+                                                   vset1(ck_i[k]),
                                                    cr));
-            ar = _mm512_fmadd_pd(xr, fr, ar);
-            ar = _mm512_fnmadd_pd(xi, fi, ar);
-            ai = _mm512_fmadd_pd(xr, fi, ai);
-            ai = _mm512_fmadd_pd(xi, fr, ai);
+            ar = vfma(xr, fr, ar);
+            ar = vfnmadd(xi, fi, ar);
+            ai = vfma(xr, fi, ai);
+            ai = vfma(xi, fr, ai);
         }
-        _mm512_storeu_pd(Ar + p * 8, ar);
-        _mm512_storeu_pd(Ai + p * 8, ai);
+        vstore(Ar + p * CFPG_LANES, ar);
+        vstore(Ai + p * CFPG_LANES, ai);
     }
     {
-        __m512d pe = _mm512_setzero_pd();
+        vpd pe = vzero();
         for (int p = 0; p < P; p++) {
-            const __m512d ar = _mm512_loadu_pd(Ar + p * 8);
-            const __m512d ai = _mm512_loadu_pd(Ai + p * 8);
-            pe = _mm512_fmadd_pd(ar, ar, pe);
-            pe = _mm512_fmadd_pd(ai, ai, pe);
+            const vpd ar = vload(Ar + p * CFPG_LANES);
+            const vpd ai = vload(Ai + p * CFPG_LANES);
+            pe = vfma(ar, ar, pe);
+            pe = vfma(ai, ai, pe);
         }
-        _mm512_mask_storeu_pd(h->P + e0, m, pe);
+        vstoren(h->P + e0, m, pe);
     }
 
     /* ── 8. v_k, pv_k, a2 and the unscaled dQ/dcoeff of the tile ─────── */
     for (int k = 0; k < N; k++) {
-        __m512d ur = _mm512_setzero_pd(), ui = _mm512_setzero_pd();
+        vpd ur = vzero(), ui = vzero();
         for (int p = 0; p < P; p++) {
             const int col = c->fa_slot[p * N + k];
-            const __m512d ar = _mm512_loadu_pd(Ar + p * 8);
-            const __m512d ai = _mm512_loadu_pd(Ai + p * 8);
-            const __m512d fr = _mm512_loadu_pd(fa_r + col * 8);
-            const __m512d fi = _mm512_loadu_pd(fa_i + col * 8);
+            const vpd ar = vload(Ar + p * CFPG_LANES);
+            const vpd ai = vload(Ai + p * CFPG_LANES);
+            const vpd fr = vload(fa_r + col * CFPG_LANES);
+            const vpd fi = vload(fa_i + col * CFPG_LANES);
             /* conj(A_p)·fa */
-            ur = _mm512_fmadd_pd(ar, fr, ur);
-            ur = _mm512_fmadd_pd(ai, fi, ur);
-            ui = _mm512_fmadd_pd(ar, fi, ui);
-            ui = _mm512_fnmadd_pd(ai, fr, ui);
+            ur = vfma(ar, fr, ur);
+            ur = vfma(ai, fi, ur);
+            ui = vfma(ar, fi, ui);
+            ui = vfnmadd(ai, fr, ui);
         }
-        const __m512d cr = _mm512_loadu_pd(cm_r + k * 8);
-        const __m512d ci = _mm512_loadu_pd(cm_i + k * 8);
+        const vpd cr = vload(cm_r + k * CFPG_LANES);
+        const vpd ci = vload(cm_i + k * CFPG_LANES);
         /* v = u·common, deliberately WITHOUT ck: grad_ck must not carry it */
-        const __m512d vr = _mm512_sub_pd(_mm512_mul_pd(ur, cr),
-                                         _mm512_mul_pd(ui, ci));
-        const __m512d vi = _mm512_fmadd_pd(ur, ci, _mm512_mul_pd(ui, cr));
+        const vpd vr = vsub(vmul(ur, cr),
+                                         vmul(ui, ci));
+        const vpd vi = vfma(ur, ci, vmul(ui, cr));
         /* pv = -v/D = -v·conj(D)/|D|² */
-        const __m512d dr = _mm512_loadu_pd(den_r + k * 8);
-        const __m512d di = _mm512_loadu_pd(den_i + k * 8);
-        const __m512d rd = _mm512_loadu_pd(rden + k * 8);
-        const __m512d pvr = _mm512_mul_pd(
-            _mm512_fnmadd_pd(_mm512_set1_pd(1.0),
-                             _mm512_fmadd_pd(vi, di, _mm512_mul_pd(vr, dr)),
-                             _mm512_setzero_pd()), rd);
-        const __m512d pvi = _mm512_mul_pd(
-            _mm512_fmsub_pd(vr, di, _mm512_mul_pd(vi, dr)), rd);
+        const vpd dr = vload(den_r + k * CFPG_LANES);
+        const vpd di = vload(den_i + k * CFPG_LANES);
+        const vpd rd = vload(rden + k * CFPG_LANES);
+        const vpd pvr = vmul(
+            vfnmadd(vset1(1.0),
+                             vfma(vi, di, vmul(vr, dr)),
+                             vzero()), rd);
+        const vpd pvi = vmul(
+            vfmsub(vr, di, vmul(vi, dr)), rd);
         for (int r = 0; r < R; r++) {
-            const __m512d orr = _mm512_loadu_pd(oth_r + (k * R + r) * 8);
-            const __m512d oii = _mm512_loadu_pd(oth_i + (k * R + r) * 8);
+            const vpd orr = vload(oth_r + (k * R + r) * CFPG_LANES);
+            const vpd oii = vload(oth_i + (k * R + r) * CFPG_LANES);
             /* ck·pv, then × others, then × 2 (the 2Re of the chain) */
-            const __m512d xr = _mm512_fmsub_pd(_mm512_set1_pd(ck_r[k]), pvr,
-                                               _mm512_mul_pd(
-                                                   _mm512_set1_pd(ck_i[k]),
+            const vpd xr = vfmsub(vset1(ck_r[k]), pvr,
+                                               vmul(
+                                                   vset1(ck_i[k]),
                                                    pvi));
-            const __m512d xi = _mm512_fmadd_pd(_mm512_set1_pd(ck_r[k]), pvi,
-                                               _mm512_mul_pd(
-                                                   _mm512_set1_pd(ck_i[k]),
+            const vpd xi = vfma(vset1(ck_r[k]), pvi,
+                                               vmul(
+                                                   vset1(ck_i[k]),
                                                    pvr));
-            const __m512d yr = _mm512_sub_pd(_mm512_mul_pd(xr, orr),
-                                             _mm512_mul_pd(xi, oii));
-            const __m512d yi = _mm512_fmadd_pd(xr, oii,
-                                               _mm512_mul_pd(xi, orr));
-            _mm512_storeu_pd(a2r + (k * R + r) * 8, _mm512_add_pd(yr, yr));
-            _mm512_storeu_pd(a2i + (k * R + r) * 8, _mm512_add_pd(yi, yi));
+            const vpd yr = vsub(vmul(xr, orr),
+                                             vmul(xi, oii));
+            const vpd yi = vfma(xr, oii,
+                                               vmul(xi, orr));
+            vstore(a2r + (k * R + r) * CFPG_LANES, vadd(yr, yr));
+            vstore(a2i + (k * R + r) * CFPG_LANES, vadd(yi, yi));
         }
         if (want_vg) {
-            _mm512_mask_storeu_pd(seg_vr + (size_t)k * cap + so, m, vr);
-            _mm512_mask_storeu_pd(seg_vi + (size_t)k * cap + so, m, vi);
+            vstoren(seg_vr + (size_t)k * cap + so, m, vr);
+            vstoren(seg_vi + (size_t)k * cap + so, m, vi);
         }
     }
     if (want_vg) {
@@ -756,23 +980,23 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
            first — a tile offset reused by a later tile must not inherit the
            previous tile's g. */
         for (int mm = 0; mm < NB; mm++)
-            _mm512_mask_storeu_pd(seg_g + (size_t)mm * cap + so, m,
-                                  _mm512_setzero_pd());
+            vstoren(seg_g + (size_t)mm * cap + so, m,
+                                  vzero());
         for (int kr = 0; kr < N * R; kr++) {
-            const __m512d xr = _mm512_loadu_pd(a2r + kr * 8);
-            const __m512d xi = _mm512_loadu_pd(a2i + kr * 8);
+            const vpd xr = vload(a2r + kr * CFPG_LANES);
+            const vpd xi = vload(a2i + kr * CFPG_LANES);
             for (int i = c->g_off[kr]; i < c->g_off[kr + 1]; i++) {
                 const int mu = c->g_u[i], mm = c->g_m[i];
-                const __m512d wv = _mm512_set1_pd(c->g_w[i]);
+                const vpd wv = vset1(c->g_w[i]);
                 double *gp = seg_g + (size_t)mm * cap + so;
-                __m512d acc = _mm512_loadu_pd(gp);
-                acc = _mm512_fmadd_pd(
-                    xr, _mm512_mul_pd(wv, _mm512_loadu_pd(Fu_r + mu * 8)),
+                vpd acc = vload(gp);
+                acc = vfma(
+                    xr, vmul(wv, vload(Fu_r + mu * CFPG_LANES)),
                     acc);
-                acc = _mm512_fnmadd_pd(
-                    xi, _mm512_mul_pd(wv, _mm512_loadu_pd(Fu_i + mu * 8)),
+                acc = vfnmadd(
+                    xi, vmul(wv, vload(Fu_i + mu * CFPG_LANES)),
                     acc);
-                _mm512_storeu_pd(gp, acc);
+                vstore(gp, acc);
             }
         }
     }
@@ -789,7 +1013,7 @@ static void cfpg_tile(CFPGCtx *c, CFPGData *h, double *t, int *it, int e0,
 }
 
 /* ── accumulate a segment's gradient with the now-known dQ/dP_e ──────── */
-static void cfpg_seg_acc(CFPGCtx *c, double *t, __m512d dqp, int so, int n,
+static void cfpg_seg_acc(CFPGCtx *c, double *t, vpd dqp, int so, int n,
                          long long *st)
 {
     const long long t0 = st ? __rdtsc() : 0;
@@ -798,21 +1022,21 @@ static void cfpg_seg_acc(CFPGCtx *c, double *t, __m512d dqp, int so, int n,
     const double *seg_vr = t + L.seg_vr, *seg_vi = t + L.seg_vi;
     const double *seg_g = t + L.seg_g;
     double *acr = t + L.acc_ckr, *aci = t + L.acc_cki, *acg = t + L.acc_g;
-    dqp = _mm512_maskz_mov_pd(cfpg_mask(n), dqp);
+    dqp = vmaskz(n, dqp);
     for (int k = 0; k < N; k++) {
-        double *pr = acr + k * 8, *pi = aci + k * 8;
-        _mm512_storeu_pd(pr, _mm512_fmadd_pd(
-            dqp, _mm512_loadu_pd(seg_vr + (size_t)k * cap + so),
-            _mm512_loadu_pd(pr)));
-        _mm512_storeu_pd(pi, _mm512_fmadd_pd(
-            dqp, _mm512_loadu_pd(seg_vi + (size_t)k * cap + so),
-            _mm512_loadu_pd(pi)));
+        double *pr = acr + k * CFPG_LANES, *pi = aci + k * CFPG_LANES;
+        vstore(pr, vfma(
+            dqp, vload(seg_vr + (size_t)k * cap + so),
+            vload(pr)));
+        vstore(pi, vfma(
+            dqp, vload(seg_vi + (size_t)k * cap + so),
+            vload(pi)));
     }
     for (int mm = 0; mm < NB; mm++) {
-        double *pg = acg + mm * 8;
-        _mm512_storeu_pd(pg, _mm512_fmadd_pd(
-            dqp, _mm512_loadu_pd(seg_g + (size_t)mm * cap + so),
-            _mm512_loadu_pd(pg)));
+        double *pg = acg + mm * CFPG_LANES;
+        vstore(pg, vfma(
+            dqp, vload(seg_g + (size_t)mm * cap + so),
+            vload(pg)));
     }
     if (st) st[8] += __rdtsc() - t0;
 }
@@ -967,8 +1191,8 @@ void* cpu_flat_pwa_gen_create(
     c->L = cfpg_layout(n_ab, n_fa, n_wave, n_proj, n_res, n_uslot, n_basis,
                        n_mass, n_momentum, n_fl_u, n_num_u, c->n_aj, c->cap);
     c->I.midx = 0;
-    c->I.qidx = n_mass * 32;
-    c->I.total = (n_mass + n_momentum) * 32;
+    c->I.qidx = n_mass * (4 * CFPG_LANES);
+    c->I.total = (n_mass + n_momentum) * (4 * CFPG_LANES);
     c->scratch = (double*)calloc((size_t)c->n_threads * c->L.total,
                                  sizeof(double));
     c->iscratch = (int*)calloc((size_t)c->n_threads * c->I.total,
@@ -1068,9 +1292,9 @@ double cpu_flat_pwa_gen_compute(
         double *dqp = t + L.dqp;
         long long *st = (stage && tid == 0) ? stage : NULL;
         double Q = 0.0, Dn = 0.0;
-        memset(t + L.acc_ckr, 0, sizeof(double) * (size_t)(N * 8));
-        memset(t + L.acc_cki, 0, sizeof(double) * (size_t)(N * 8));
-        memset(t + L.acc_g, 0, sizeof(double) * (size_t)(NB * 8));
+        memset(t + L.acc_ckr, 0, sizeof(double) * (size_t)(N * CFPG_LANES));
+        memset(t + L.acc_cki, 0, sizeof(double) * (size_t)(N * CFPG_LANES));
+        memset(t + L.acc_g, 0, sizeof(double) * (size_t)(NB * CFPG_LANES));
 
         if (pathA) {
             /* one event at a time: dQ/dP closes inside the tile */
@@ -1078,28 +1302,28 @@ double cpu_flat_pwa_gen_compute(
             for (int tile = 0; tile < ntiles; tile++) {
                 const int e0 = tile * CFPG_LANES;
                 const int n = (ne - e0 < CFPG_LANES) ? ne - e0 : CFPG_LANES;
-                const __mmask8 m = cfpg_mask(n);
+                const int m = n;   /* live lanes of this tile */
                 cfpg_tile(c, h, t, it, e0, n, ck_r, ck_i, 0, 1, st);
-                const __m512d wv = _mm512_maskz_loadu_pd(m, h->weight + e0);
-                const __m512d bv = _mm512_maskz_loadu_pd(m, h->bkg + e0);
-                const __m512d P = _mm512_maskz_loadu_pd(m, h->P + e0);
-                __m512d dq;
+                const vpd wv = vloadn(m, h->weight + e0);
+                const vpd bv = vloadn(m, h->bkg + e0);
+                const vpd P = vloadn(m, h->P + e0);
+                vpd dq;
                 if (!use_norm) {
-                    Q += _mm512_mask_reduce_add_pd(m, _mm512_mul_pd(wv, P));
+                    Q += vhsum_n(m, vmul(wv, P));
                     dq = wv;
                 } else {
-                    const __m512d nv = _mm512_set1_pd(norm);
+                    const vpd nv = vset1(norm);
                     /* pdf = P/norm + b = (P + b·norm)/norm */
-                    const __m512d den = _mm512_fmadd_pd(bv, nv, P);
-                    Q -= _mm512_mask_reduce_add_pd(
-                        m, _mm512_mul_pd(wv, cfpg_log8(
-                               _mm512_div_pd(den, nv))));
-                    dq = _mm512_maskz_mov_pd(
-                        m, _mm512_div_pd(_mm512_set1_pd(-1.0), den));
-                    dq = _mm512_mul_pd(dq, wv);
-                    Dn += _mm512_mask_reduce_add_pd(
-                        m, _mm512_div_pd(_mm512_mul_pd(wv, P),
-                                         _mm512_mul_pd(nv, den)));
+                    const vpd den = vfma(bv, nv, P);
+                    Q -= vhsum_n(
+                        m, vmul(wv, cfpg_log8(
+                               vdiv(den, nv))));
+                    dq = vmaskz(
+                        m, vdiv(vset1(-1.0), den));
+                    dq = vmul(dq, wv);
+                    Dn += vhsum_n(
+                        m, vdiv(vmul(wv, P),
+                                         vmul(nv, den)));
                 }
                 cfpg_seg_acc(c, t, dq, 0, n, st);
             }
@@ -1157,10 +1381,10 @@ double cpu_flat_pwa_gen_compute(
                     for (int sl = 0; sl < nsl; sl += CFPG_LANES) {
                         const int nn = (nsl - sl < CFPG_LANES)
                                        ? nsl - sl : CFPG_LANES;
-                        const __mmask8 m = cfpg_mask(nn);
+                        const int m = nn;
                         for (int e = 0; e < nn; e++)
                             dqp[e] = scale * h->weight[e0 + so + sl + e] / norm;
-                        cfpg_seg_acc(c, t, _mm512_maskz_loadu_pd(m, dqp),
+                        cfpg_seg_acc(c, t, vloadn(m, dqp),
                                      so + sl, nn, st);
                     }
                 }
@@ -1179,23 +1403,20 @@ double cpu_flat_pwa_gen_compute(
     for (int tid = 0; tid < nth; tid++) {
         const double *t = c->scratch + (size_t)tid * c->L.total;
         for (int k = 0; k < N; k++) {
-            g_ck_r[k] += _mm512_reduce_add_pd(
-                             _mm512_loadu_pd(t + c->L.acc_ckr + k * 8));
-            g_ck_i[k] += _mm512_reduce_add_pd(
-                             _mm512_loadu_pd(t + c->L.acc_cki + k * 8));
+            g_ck_r[k] += vhsum(
+                             vload(t + c->L.acc_ckr + k * CFPG_LANES));
+            g_ck_i[k] += vhsum(
+                             vload(t + c->L.acc_cki + k * CFPG_LANES));
         }
         for (int mm = 0; mm < NB; mm++)
-            g_coeff[mm] += _mm512_reduce_add_pd(
-                               _mm512_loadu_pd(t + c->L.acc_g + mm * 8));
+            g_coeff[mm] += vhsum(
+                               vload(t + c->L.acc_g + mm * CFPG_LANES));
     }
     *dnorm_out = Dn;
     if (return_p && P_out) memcpy(P_out, h->P, sizeof(double) * (size_t)ne);
     return Q;
 }
 
-/* ══════════════════════════════════════════════════════════════════════
- * debug dump — the tile intermediates of the first 8 events (fixture only)
- * ══════════════════════════════════════════════════════════════════════ */
 int cpu_flat_pwa_gen_debug(
     void *vc, void *vh, const double *coeff, const double *ck_r,
     const double *ck_i, double *out)
@@ -1210,19 +1431,27 @@ int cpu_flat_pwa_gen_debug(
     const int n = (h->ne < CFPG_LANES) ? h->ne : CFPG_LANES;
     cfpg_tile(c, h, t, it, 0, n, ck_r, ck_i, 0, 1, NULL);
     int o = 0;
-    const int cnt[15] = {
-        c->n_ab * 8, c->n_fa * 8, c->n_fa * 8, c->n_fl_u * 8, c->N * 8,
-        c->n_num_u * 8, c->n_num_u * 8, c->n_uslot * 8, c->n_uslot * 8,
-        c->N * 8, c->N * 8, c->N * 8, c->N * 8, c->P * 8, c->P * 8};
-    const double *src[15] = {
+    const int cnt[17] = {
+        c->n_ab * CFPG_LANES, c->n_fa * CFPG_LANES, c->n_fa * CFPG_LANES,
+        c->n_fl_u * CFPG_LANES, c->N * CFPG_LANES,
+        c->n_num_u * CFPG_LANES, c->n_num_u * CFPG_LANES,
+        c->n_uslot * CFPG_LANES, c->n_uslot * CFPG_LANES,
+        c->N * CFPG_LANES, c->N * CFPG_LANES, c->N * CFPG_LANES,
+        c->N * CFPG_LANES, c->P * CFPG_LANES, c->P * CFPG_LANES,
+        c->N * c->cap, c->N * c->cap};
+    const double *src[17] = {
         t + L.ka, t + L.fa_r, t + L.fa_i, t + L.flv, t + L.flw,
         t + L.nuv_r, t + L.nuv_i, t + L.Fu_r, t + L.Fu_i,
-        t + L.den_r, t + L.den_i, t + L.cm_r, t + L.cm_i, t + L.Ar, t + L.Ai};
-    for (int k = 0; k < 15; k++) {
+        t + L.den_r, t + L.den_i, t + L.cm_r, t + L.cm_i, t + L.Ar, t + L.Ai,
+        t + L.seg_vr, t + L.seg_vi};
+    for (int k = 0; k < 17; k++) {
         memcpy(out + o, src[k], sizeof(double) * (size_t)cnt[k]);
         o += cnt[k];
     }
+    memcpy(out + o, t + L.seg_g, sizeof(double) * (size_t)(c->NB * c->cap));
+    o += c->NB * c->cap;
     memcpy(out + o, h->P, sizeof(double) * (size_t)n);
     o += n;
     return o;
 }
+

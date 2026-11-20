@@ -172,7 +172,8 @@ def test_shapes_are_derived_from_the_arrays(cfg):
         assert k.n_proj == np.asarray(kc["matrix_angle"]).shape[1] // k.n_wave
         assert k.n_basis == np.asarray(kc["basis_table"]).shape[0]
         st = k.kernel_stats()
-        assert st["lanes"] == 8 and st["isa"].startswith("avx512f")
+        # 8 LOGICAL lanes in both builds; the ISA is reported by the .so
+        assert st["lanes"] == 8 and st["isa"] in ("avx512f", "avx2")
         assert st["n_wave"] == k.n_wave and st["n_basis"] == k.n_basis
         # the four dedups never GROW a table, and never change n_basis
         assert st["n_fl_u"] <= k.n_wave * k.n_decay
@@ -361,3 +362,102 @@ def test_an_integral_k_config_uses_the_fast_path():
             assert be.kernel.kernel_stats()["general_cos"] is False
         finally:
             be.free()
+
+
+# ── 9. the two BUILDS are bit-identical ────────────────────────────────
+
+def _build_avx2(tmp_path):
+    """Compile the kernel with explicit AVX2+FMA flags (the tree's own build
+    is `-march=native`, i.e. AVX-512 on an AVX-512 host)."""
+    import shutil
+    import subprocess
+
+    import tabpwa.cpu as cpu_pkg
+    gcc = shutil.which("gcc") or shutil.which("cc")
+    if gcc is None:
+        pytest.skip("no C compiler to build the AVX2 variant")
+    src = os.path.join(os.path.dirname(os.path.abspath(cpu_pkg.__file__)),
+                       "kernels_cpu_flat_pwa_gen.c")
+    out = str(tmp_path / "libcpu_flat_pwa_gen_avx2.so")
+    r = subprocess.run([gcc, "-shared", "-fPIC", "-O3", "-mavx2", "-mfma",
+                        "-fopenmp", "-o", out, src, "-lm", "-lmvec"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        r = subprocess.run([gcc, "-shared", "-fPIC", "-O3", "-mavx2", "-mfma",
+                            "-fopenmp", "-o", out, src, "-lm"],
+                           capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip(f"cannot build the AVX2 variant here: {r.stderr[:200]}")
+    return out
+
+
+@pytest.fixture
+def two_builds(tmp_path):
+    """(native kernel factory, avx2 kernel factory), restoring the module."""
+    from tabpwa.backends import cpu_flat_pwa_gen_backend as mod
+    mod._load_lib()
+    ffi, native = mod._ffi, mod._lib
+    avx2 = ffi.dlopen(_build_avx2(tmp_path))
+
+    def make(lib, kernel_config, **kw):
+        mod._lib = lib
+        try:
+            return mod.CPUKernelFlatPwaGen(kernel_config, **kw)
+        finally:
+            mod._lib = native
+
+    yield (lambda kc, **kw: make(native, kc, **kw),
+           lambda kc, **kw: make(avx2, kc, **kw))
+    mod._lib = native
+
+
+@pytest.mark.parametrize("cfg", [QUALIFYING[0], CFG_KM,
+                                 "tests/config_pwa_gen_mb.yml"])
+@pytest.mark.parametrize("rs", [1, 17])
+@pytest.mark.parametrize("norm", [None, 1.3])
+def test_the_two_builds_are_bit_identical(two_builds, cfg, rs, norm):
+    """AVX-512 and AVX2+FMA must produce the SAME fp64 numbers, bit for bit.
+
+    8 LOGICAL lanes in both builds (one zmm, or two ymm halves) means the
+    tile boundaries, the parallel partition, the lane -> event mapping and
+    every reduction's grouping are the same, and `#pragma GCC optimize
+    ("fp-contract=off")` pins the per-group SCALAR rounding — without it the
+    two builds disagree by 1 ulp on Q/dck (measured while porting).  This is
+    an `array_equal` gate, not a tolerance: a 1-ulp drift here would mean the
+    "one algorithm, two builds" claim is false.
+    """
+    mk_nat, mk_avx2 = two_builds
+    _f, kc, params, data = _pair(cfg, rs)
+    kn = mk_nat(kc, resolution_size=rs)
+    ka = mk_avx2(kc, resolution_size=rs)
+    try:
+        hn, ha = kn.load_data(data), ka.load_data(data)
+        Qn, gn, Pn = kn.compute(params, hn, norm=norm)
+        Qa, ga, Pa = ka.compute(params, ha, norm=norm)
+        assert Qn == Qa, f"{cfg} rs={rs} norm={norm}: Q {Qn!r} vs {Qa!r}"
+        assert np.array_equal(Pn, Pa), "P"
+        assert np.array_equal(gn["ck"], ga["ck"]), "dck"
+        assert np.array_equal(gn["coeff"], ga["coeff"]), "dcoeff"
+        if norm is not None:
+            assert kn._last_dnorm == ka._last_dnorm, "dnorm"
+    finally:
+        kn.free()
+        ka.free()
+
+
+def test_the_width_is_a_compile_time_abstraction():
+    """The body is written ONCE against `vpd`; both widths are declared."""
+    import tabpwa.cpu as cpu_pkg
+    src = os.path.join(os.path.dirname(os.path.abspath(cpu_pkg.__file__)),
+                       "kernels_cpu_flat_pwa_gen.c")
+    text = open(src).read()
+    assert "typedef __m512d vpd;" in text          # AVX-512 branch
+    assert "typedef struct { __m256d a, b; } vpd;" in text   # AVX2 branch
+    assert "#elif defined(__AVX2__) && defined(__FMA__)" in text
+    # neither width -> a loud build failure, and no fp32 anywhere
+    assert '#error "cpu_flat_pwa_gen needs AVX2+FMA' in text
+    assert "float" not in text
+    # ONE algorithm: no second copy of the tile body behind an #if
+    assert text.count("static void cfpg_tile(") == 1
+    assert text.count("static inline void cfpg_bin(") == 1
+    assert text.count("static inline vpd cfpg_interp(") == 1

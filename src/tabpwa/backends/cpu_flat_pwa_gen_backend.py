@@ -1,7 +1,8 @@
 """``cpu_flat_pwa_gen`` — the flat ``pwa_gen`` config on the CPU.
 
-C + OpenMP + AVX-512 fp64 (``kernels_cpu_flat_pwa_gen.c``), with the
-**semantics of ``numpy_flat``**: the same ``Q``, ``P``, ``dck``, ``dcoeff``
+C + OpenMP, fp64, AVX-512 when the compiler enables it and AVX2+FMA otherwise
+(``kernels_cpu_flat_pwa_gen.c``: one algorithm, two builds, bit-identical), with
+the **semantics of ``numpy_flat``**: the same ``Q``, ``P``, ``dck``, ``dcoeff``
 and ``dnorm`` — at the fp64 round-off floor, because nothing is fp32 and
 nothing is cached between calls.
 
@@ -78,6 +79,7 @@ void* cpu_flat_pwa_gen_create(
     double,double,int, double,double,int,
     int,int,int,int,int, int,int,int, int,int,int);
 void cpu_flat_pwa_gen_free_ctx(void*);
+const char* cpu_flat_pwa_gen_isa(void);
 void* cpu_flat_pwa_gen_load(void*,const double*,const double*,
     const double*,const double*,const double*,int);
 void cpu_flat_pwa_gen_free(void*);
@@ -86,6 +88,7 @@ double cpu_flat_pwa_gen_compute(void*,void*,
     double,int, double*,double*,double*, double*,int,double*, long long*);
 int cpu_flat_pwa_gen_debug(void*,void*,const double*,const double*,
     const double*,double*);
+
 """)
         _ffi = ffi
     if _lib is None:
@@ -391,8 +394,8 @@ class CPUKernelFlatPwaGen:
         """Shape / dedup / vectorisation facts (one dict, no guesswork)."""
         return {
             "backend": "cpu_flat_pwa_gen",
-            "lanes": 8,
-            "isa": "avx512f (fp64)",
+            "lanes": 8,                     # LOGICAL lanes, both builds
+            "isa": str(_ffi.string(self._lib.cpu_flat_pwa_gen_isa()).decode()),
             "threads": len(os.sched_getaffinity(0)),
             "n_wave": self.n_wave, "n_proj": self.n_proj,
             "n_res": self.n_res, "n_decay": self.n_decay,
