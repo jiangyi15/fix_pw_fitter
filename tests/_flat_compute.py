@@ -95,6 +95,10 @@ FLOORS = {
     # the CACHED cpu leaf is a case-1 copy of the one above, bit-identical to
     # it (gated exactly, in its own file), so it keeps the same floor.
     "cpu_flat_pwa_gen_cached": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
+    # the PRODUCT-cache copy of the cached leaf: same floors as the uncached
+    # kernel (it is NOT bit-identical to the split cache — its own file
+    # reports the <= 16 ulp drift against it)
+    "cpu_flat_pwa_gen_cached2": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
 }
 
 #: the tag vocabulary — DECLARED at registration in ``src/tabpwa/backends``,
