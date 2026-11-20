@@ -64,6 +64,7 @@ the author already knew was incomplete at commit time.
 | CUDA f64 v2 | `cuda_v2`, `cuda64_v2` | Linear interpolation. |
 | CUDA mixed v3 | `cuda_mixed_v3` | Mixed fp32/fp64 v3 variant. |
 | CUDA f32 v2 | `cuda32_v2` | Fastest raw kernel. |
+| flat CPU (C+OpenMP+AVX-512) | `cpu_flat_pwa_gen` | The flat `pwa_gen` config on the CPU: C + OpenMP + 8-lane AVX-512 fp64, events as lanes, `numpy_flat`'s semantics and gradients.  **21.1 Mev/s** on the production shape (data pass, full sample) vs the GPU tile's 36.8 — and ~160x the only other CPU path (`numpy_flat`, 0.13).  No load-time cache: 34.6 % of it is the per-event Catmull-Rom gather the GPU buys with 5.9 GB (`us`), and the fix is a loop swap (table row resident in L1/L2), not a cache. |
 | NumPy | `numpy` | CPU reference implementation (f64). |
 | NumPy PWA | `numpy_pwa` | CPU projection-sum reference implementation (plain `pwa` only; the `pwa_gen` reference is `numpy_flat`). |
 | Integrated PWA | `integrated_pwa` | Gram-matrix norm for the projection-sum PWA + base (default `cuda_v4_pwa`). |

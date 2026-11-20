@@ -83,6 +83,12 @@ FLOORS = {
     "cuda_flat_pwa_gen_s0e2": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0e3": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0e4": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
+    # the CPU leaf is fp64 end to end, so its gap to the reference is the
+    # Catmull-Rom-vs-linear interpolation difference, not accumulation:
+    # MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 -> Q 9.3e-7,
+    # P 3.0e-6, dck 1.4e-6, dcoeff 5.0e-6.  Gated at the s0c numbers
+    # (2e-5 / 4e-5 / 2e-4, rel-OR-abs) — a >5x margin on every quantity.
+    "cpu_flat_pwa_gen": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
 }
 
 #: the tag vocabulary — DECLARED at registration in ``src/tabpwa/backends``,
