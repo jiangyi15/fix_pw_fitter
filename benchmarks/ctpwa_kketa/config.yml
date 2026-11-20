@@ -1,0 +1,94 @@
+# J/psi -> K+ K- eta — the benchmark model of Xiang, Fang & Liu,
+# Chin. Phys. C 51, 013003 (2027), doi:10.1088/1674-1137/aeb254 (CTPWA).
+#
+# From the paper: 3-body J/psi -> K+ K- eta, 10^6 signal events,
+# 5 x 10^6 phase-space events, "16 intermediate resonances ... with 33
+# complex couplings", probing both the K+K- and the K eta subsystems, with
+# two scenarios (resonance masses/widths fixed, and ten of them floating).
+#
+# The paper's exact resonance list is not in its public repo (only a
+# 6-resonance demo ships there), so the 16 below are the PDG states that
+# populate those two subsystems in this mass range; the topology, the event
+# counts and the 33-coupling dimension are the paper's.
+#
+# Data are placeholders: point `data:` at your own ntuple (the four-momenta
+# of K+, K-, eta) to run it.
+amp_model: pwa
+backend:
+  name: auto
+
+data:
+  dat_order: [Kp, Km, eta]
+  data_arr: ./data/data.npz         # kernel format, from make_data.py
+  phsp_arr: ./data/phsp.npz
+  random_z: False
+  center_mmass: True
+  purity: 1.0
+
+decay:
+  # every chain is 2-body + sub-decay (n_decay / n_res must be uniform);
+  # the non-resonant 3-body part is a `model: one` term in R_KK (see particle)
+  jpsi:
+    - [R_KK, eta]                   # K+K- resonances
+    - [Kp, R_Kpeta]                 # K+ eta resonances
+    - [Km, R_Kmeta]                 # K- eta resonances
+  R_KK: [Kp, Km]
+  R_Kpeta: [Kp, eta]
+  R_Kmeta: [Km, eta]
+
+particle:
+  $top: jpsi
+  $finals: [Kp, Km, eta]
+
+  # ── the 16 resonances ────────────────────────────────────────────────
+  R_KK:      [phi1020, f0980, f21270, f01370, f01500, f01710, phi1680]          # 7
+  # K*(892) CANNOT couple to K eta (0.8955 < m_K + m_eta = 1.0415): q0 = 0 and
+  # the amplitude is NaN for every event.  Only states above threshold here.
+  R_Kpeta:   [K1_1270p, K1_1400p, K2st1430p, Kst1680p, K2_1580p,
+              K1460p, Kst1410p, K1830p, Kst1950p]
+  R_Kmeta:   [K1_1270m, K1_1400m, K2st1430m, Kst1680m, K2_1580m,
+              K1460m, Kst1410m, K1830m, Kst1950m]
+
+  jpsi:
+    J: 1
+    P: -1
+    spins: [-1, 1]
+    mass: 3.0969
+
+  Kp:  {J: 0, P: -1, mass: 0.493677}
+  Km:  {J: 0, P: -1, mass: 0.493677}
+  eta: {J: 0, P: -1, mass: 0.547862}
+
+  # K+K- subsystem (parity +, C + for the J=1 state)
+  phi1020: {J: 1, P: -1, mass: 1.019461, width: 0.004249, model: BWR}
+  f0980:   {J: 0, P: +1, mass: 0.990,    width: 0.070,    model: BWR}
+  f21270:  {J: 2, P: +1, mass: 1.2755,   width: 0.1867,   model: BWR}
+  f01370:  {J: 0, P: +1, mass: 1.370,    width: 0.350,    model: BWR}
+  f01500:  {J: 0, P: +1, mass: 1.506,    width: 0.112,    model: BWR}
+  f01710:  {J: 0, P: +1, mass: 1.704,    width: 0.123,    model: BWR}
+  phi1680: {J: 1, P: -1, mass: 1.680,    width: 0.150,    model: BWR}
+
+  # K eta subsystem, one charge state each (same quantum numbers)
+  Kst1950p:   {J: 1, P: -1, mass: 1.950,  width: 0.250,  model: BWR}
+  K1_1270p:   {J: 1, P: +1, mass: 1.270,  width: 0.090,  model: BWR}
+  K1_1400p:   {J: 1, P: +1, mass: 1.400,  width: 0.174,  model: BWR}
+  K2st1430p:  {J: 2, P: +1, mass: 1.4324, width: 0.109,  model: BWR}
+  Kst1680p:   {J: 1, P: -1, mass: 1.718,  width: 0.322,  model: BWR}
+  K2_1580p:   {J: 2, P: -1, mass: 1.580,  width: 0.110,  model: BWR}
+  K1460p:     {J: 0, P: -1, mass: 1.460,  width: 0.260,  model: BWR}
+  Kst1410p:   {J: 1, P: -1, mass: 1.414,  width: 0.232,  model: BWR}
+  K1830p:     {J: 0, P: -1, mass: 1.830,  width: 0.250,  model: BWR}
+
+  Kst1950m:   {J: 1, P: -1, mass: 1.950,  width: 0.250,  model: BWR}
+  K1_1270m:   {J: 1, P: +1, mass: 1.270,  width: 0.090,  model: BWR}
+  K1_1400m:   {J: 1, P: +1, mass: 1.400,  width: 0.174,  model: BWR}
+  K2st1430m:  {J: 2, P: +1, mass: 1.4324, width: 0.109,  model: BWR}
+  Kst1680m:   {J: 1, P: -1, mass: 1.718,  width: 0.322,  model: BWR}
+  K2_1580m:   {J: 2, P: -1, mass: 1.580,  width: 0.110,  model: BWR}
+  K1460m:     {J: 0, P: -1, mass: 1.460,  width: 0.260,  model: BWR}
+  Kst1410m:   {J: 1, P: -1, mass: 1.414,  width: 0.232,  model: BWR}
+  K1830m:     {J: 0, P: -1, mass: 1.830,  width: 0.250,  model: BWR}
+
+# The paper's second scenario floats ten resonance parameters; here that is
+# the constraint layer's job (e.g. a constraint file unfixing them), so the
+# two scenarios are the same config with different fixed/free sets.
