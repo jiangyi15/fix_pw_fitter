@@ -232,7 +232,7 @@ def test_the_suite_does_not_import_torch():
     which is how this file became 31 s alone, 102 s right after
     ``tests/test_fixed_coeff.py`` (same process) and 169 s inside the full
     suite.  The two free-VRAM probes that used it now call ``libcudart``
-    through ``ctypes`` (``tests/_cuda_mem.py``).
+    through ``ctypes`` (``tabpwa.monitor.free_bytes``).
 
     This runs FIRST in this module, so a module-level import elsewhere in the
     file order is what it reports — not a torch import of its own.

@@ -4,13 +4,15 @@
     python mem_shard.py --workers cuda_flat_pwa_gen_s0e2,cpu_flat_pwa_gen_cached \
                         --weights 57,43
 
-Two memories, two sources:
+Two memories, one instrument each:
 
-* **VRAM** — device-wide `cudaMemGetInfo` sampled from a thread (~1 ms), max
-  over the run.  The parent's own CUDA primary context (`torch.cuda.init()`, ~0.15 GiB) is in
-  the baseline and excluded, so this is what the GPU *worker* holds -- but that
-  context is a real device consumer and its exclusion is why the parent process
-  shows up in neither column of the VRAM figure.
+* **VRAM** — device-wide ``nvidia-smi`` sampled OUT OF PROCESS by
+  :mod:`tabpwa.monitor` at 10 ms (MiB granularity), max over the run.  The
+  baseline is taken before ``Fitter(...)``, so it is the card's idle level and
+  the reported number INCLUDES every worker's CUDA context.  The parent never
+  creates one (the `shard` only spawns workers), which is why there is no
+  parent-context term to subtract: `nvidia-smi` is device-wide, so any other
+  process on the card would be included too — run on an idle device.
 * **RAM** — per-process `VmHWM` (kernel high-water mark) for the parent and for
   every spawned worker, via psutil.  The shard's workers are persistent
   processes, so they are still alive when this is read after a `get_nll`.
@@ -18,30 +20,16 @@ Two memories, two sources:
 import argparse
 import os
 import sys
-import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "src"))
 
 import psutil                                                       # noqa: E402
-import torch                                                        # noqa: E402
 
-torch.cuda.init()
-PHASE = ["context"]
-SAMPLES = []
-_STOP = threading.Event()
+from tabpwa.monitor import GPU_FIELDS, create_monitor                # noqa: E402
 
-
-def used_bytes():
-    free, total = torch.cuda.mem_get_info()
-    return total - free
-
-
-def _sampler(interval=0.001):
-    while not _STOP.is_set():
-        SAMPLES.append((PHASE[0], used_bytes()))
-        time.sleep(interval)
+PHASES = ("context", "load", "nll", "resident")
 
 
 def vm_hwm_gib(pid):
@@ -60,21 +48,25 @@ def main():
     ap.add_argument("--config", default=os.path.join(HERE, "config_gen.yml"))
     ap.add_argument("--workers", default="cuda_flat_pwa_gen_s0e2,cpu_flat_pwa_gen_cached")
     ap.add_argument("--weights", default="57,43")
+    ap.add_argument("--device", type=int, default=0)
     ap.add_argument("--repeat", type=int, default=2)
     a = ap.parse_args()
 
-    baseline = used_bytes()
-    th = threading.Thread(target=_sampler, daemon=True)
-    th.start()
+    mon = create_monitor(what=GPU_FIELDS, interval=0.01, device=a.device)
+    mon.wait_ready(5.0)
+    first = mon.get_results().peak("gpu_used")
+    gpu_ok = first is not None
+    baseline = first if first is not None else 0.0
 
     from tabpwa import Fitter
-    PHASE[0] = "context"
     spec = {"name": "shard", "start_method": "spawn",
             "backends": [w.strip() for w in a.workers.split(",")],
             "weights": [float(w) for w in a.weights.split(",")]}
+
+    mon.mark("context")
     f = Fitter(a.config, backend=spec)
 
-    PHASE[0] = "load"
+    mon.mark("load")
     phsp = f.load_dataset("phsp")
     data = f.load_dataset("data")
     f.set_phsp(phsp)
@@ -85,29 +77,36 @@ def main():
           if n.endswith(("_mass", "_width")) and n in f.defaults}
     f.set_fixed(mw)
 
-    PHASE[0] = "nll"
+    mon.mark("nll")
     x0 = f.initial_values(seed=1)
     for _ in range(a.repeat):
         f.get_nll(x0)
 
-    PHASE[0] = "resident"
+    mon.mark("resident")
     time.sleep(0.1)
-    resident = used_bytes()
-    _STOP.set()
-    th.join(timeout=1.0)
+    res = mon.close()
 
-    per = {}
-    for ph, u in SAMPLES:
-        per[ph] = max(per.get(ph, 0), u)
-    peak = max(per.values()) if per else resident
-    g = lambda b: (b - baseline) / 2**30                       # noqa: E731
+    def fmt(v):
+        # `-` for no sample, as Results.summary does.
+        return "    -" if v is None else f"{v:5.2f}"
+
+    if gpu_ok:
+        def gib(mib):
+            return None if mib is None else (mib - baseline) / 1024.0
+
+        per = {p: res.peak("gpu_used", phase=p) for p in PHASES}
+        vals = [v for v in per.values() if v is not None]
+        peak = max(vals) if vals else None
+        vram = (f"VRAM (device-wide, peak) {fmt(gib(peak))} GiB   "
+                f"[context {fmt(gib(per['context']))} | load {fmt(gib(per['load']))} | "
+                f"nll {fmt(gib(per['nll']))}]")
+    else:
+        vram = "VRAM (device-wide, peak)     -  (no parseable nvidia-smi sample)"
 
     me = psutil.Process()
     kids = me.children(recursive=True)
     print(f"workers {a.workers} | weights {a.weights}")
-    print(f"VRAM (device-wide, peak) {g(peak):5.2f} GiB   "
-          f"[context {g(per.get('context', 0)):4.2f} | load {g(per.get('load', 0)):4.2f} | "
-          f"nll {g(per.get('nll', 0)):4.2f}]")
+    print(vram)
     print(f"RAM  parent (VmHWM)      {vm_hwm_gib(me.pid):5.2f} GiB")
     tot = vm_hwm_gib(me.pid)
     for k in kids:

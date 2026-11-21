@@ -1056,6 +1056,55 @@ n_g0 = len(kc["g0_index"])               # = 288
 
 15. **`load_data` must return a per-load handle, never the context**: `Fitter.set_phsp` loads phase space and `set_data` loads data, and **both handles stay alive for the whole fit** (`_compute_norm_batched` integrates over the phase-space one while `get_nll_raw` evaluates the data one).  A kernel whose `cuda_load_data_*` returns its own context (or whose wrapper keeps one mutable `self._handle` and frees it at the top of `load_data`) makes the two the same object, so the second load silently overwrites the first and the norm is integrated over the **data** — while every kernel-level test still passes, because those call `backend.compute` with an explicit handle.  The established kernels `calloc` a `DataHandle2` per load; `tests/test_fitter_norm_handles.py` pins the contract through the `Fitter` (`norm` through the fitter must equal a fresh instance's phase-space integral, and the two handle identities must differ).
 
+## System monitor (`tabpwa.monitor`)
+
+ONE sampling entry point, used by `benchmarks/ctpwa_kketa/mem.py` /
+`mem_shard.py`, the device-memory leak gates and any harness that wants a peak
+or a series:
+
+```python
+with create_monitor(what=("gpu_used", "gpu_total", "hwm"), interval=0.05) as mon:
+    mon.mark("load"); ...; mon.mark("nll")
+res = mon.close()                       # idempotent; get_results() works mid-run too
+res.peak("gpu_used", phase="nll"); res.series("hwm"); res.summary()
+```
+
+**The sampling runs in a SUBPROCESS** — one `nvidia-smi --query-gpu=… -lms N` child
+for the whole run, whose stdout a single parent thread only drains.  A sampling
+THREAD would share the GIL and the CUDA context with the timed region and perturb
+the numbers it reports, which is why it is not one.  The SAMPLER therefore
+**creates no CUDA context** and **never imports `torch`** (see the testing note:
+torch costs every later raw-CUDA call 5.1×); it cannot inflate the memory it
+measures.  The separate `free_bytes()` point probe DOES initialise the primary
+context on its first call — which is exactly why it is not part of the sampler
+and is not used for a peak.  `nvidia-smi` reads the driver, so MiB is the
+granularity — a gate that needs exact BYTES uses `monitor.free_bytes()` /
+`monitor.sync()`, the `libcudart`-via-`ctypes` point probe (the single copy,
+in `src/`; there is no test-side copy).
+
+**`what=` selects the FIELDS and the MECHANISM.**  Any `gpu_*` field starts the
+child and only those columns are requested; a host-only request (`rss`, `hwm`)
+starts no child, no pipe and no thread, so a `cpu_*` benchmark is structurally
+GPU-free and a GPU-less box behaves identically.  `what=()` is legal (timing
+only).  An **unknown** field name raises, listing the valid ones; `peak`/`series`
+of a field that was **not requested** raises with what this monitor does sample —
+which is a different answer from a requested field the box cannot provide
+(`None`).  Collapsing the two is the silent failure this API exists to avoid.
+
+**A memory GATE is written on `free_bytes()` (bytes), never on the sampler.**
+The sampler is MiB-granular by construction (`nvidia-smi`), and a phase peak can
+also catch the neighbouring step's frees because a `mark()` is not a barrier.
+MEASURED: the mask-change leak gate migrated onto `gpu_used` with its 2 MiB bound
+produced a 4 MiB spread and failed inside the suite while passing in isolation —
+a bound at the sampler's quantisation measures the box's quietness, not a leak.
+The rule is: the sampler for a PEAK or a SERIES (a benchmark's resident memory),
+`free_bytes()` for a before/after assertion (a leak gate).
+
+`close()` is safe on the normal path, on an exception and twice over (`terminate`
+→ `wait` → `kill`, plus an `atexit` reaper), because the recipe it replaces —
+`nvidia-smi -lms 100 … & kill %1` — leaves an orphan sampler behind whenever the
+run dies.
+
 ## Testing
 
 Test data is **self-contained under `tests/`**: the test configs
@@ -1092,7 +1141,7 @@ common case — the shared anchor already runs both).
 call in the same process **5.1× slower** (measured 5.71 → 29.38 ms per
 create/load/compute/free cycle) and it never recovers: `test_flat_compute.py` is 31 s
 alone and was 169 s inside the suite.  A free-VRAM probe goes through
-`tests/_cuda_mem.py` (`libcudart` via `ctypes`, exact bytes), and
+`tabpwa.monitor.free_bytes()` (`libcudart` via `ctypes`, exact bytes), and
 `test_the_suite_does_not_import_torch` fails if anything loads it again.  A
 `pytest.importorskip("torch")` probe is worse than useless — it silently SKIPS the
 leak gate it exists for on a box without torch, and costs 140 s where torch is

@@ -29,6 +29,9 @@ Gates:
    fixed-coefficient names, and ``mask_spec.py`` is gone.
 """
 import gc
+import os
+import shutil
+import subprocess
 
 import numpy as np
 import pytest
@@ -38,7 +41,7 @@ from tabpwa.backends import backends_for_model, create_backend
 from tabpwa.backends._fixed_coeff import FixedCoeffBackend, mask_equal
 from tabpwa.fixed_coeff_spec import (mask_from_cols, resolve_fixed_cols,
                                      resolve_mask_and_values)
-import _cuda_mem
+from tabpwa import monitor
 from test_cuda_flat_cache_pwa_gen import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
@@ -444,6 +447,41 @@ def test_free_is_idempotent_and_refuses_stale_handles():
         w.compute(params, h, norm=1.3)
 
 
+def _other_gpu_users():
+    """PIDs holding the device right now, excluding this process.
+
+    ``free_bytes()`` is DEVICE-WIDE: any other process allocating on the card
+    moves the number inside the trace, so this gate would be measuring someone
+    else's work — that is not a wider tolerance to invent, it is a precondition
+    that does not hold.  ``cudaMemGetInfo`` cannot attribute memory to a PID, so
+    the honest check is "no one else is on the card".
+
+    The query is a PRECONDITION, never the oracle: when ``nvidia-smi`` or
+    ``--query-compute-apps`` is unavailable this returns ``[]`` and the gate
+    RUNS — a missing tool must not silently skip a leak gate.
+    """
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    mine = os.getpid()
+    pids = set()
+    for line in out.splitlines():
+        cell = line.split(",")[0].strip()
+        try:
+            pid = int(cell)
+        except ValueError:                  # blank, [N/A], a header
+            continue
+        if pid != mine:
+            pids.add(pid)
+    return sorted(pids)
+
+
 def test_repeated_mask_changes_do_not_grow_device_memory():
     """No MONOTONIC growth across cycles — the shape, not an absolute bound.
 
@@ -459,19 +497,38 @@ def test_repeated_mask_changes_do_not_grow_device_memory():
     allocates/frees it with the context.  A leak would still drift across the
     cycles that share a mask, which is what this checks.
 
-    The probe is ``libcudart`` through ``ctypes`` (``tests/_cuda_mem.py``), NOT
-    ``torch``: importing torch costs every later raw-CUDA call in the process
-    5.1x (measured 5.71 -> 29.38 ms per create/load/compute/free cycle).
+    A GATE IS WRITTEN ON BYTES, NEVER ON THE SAMPLER.  The 2 MiB bound is a
+    real resolution only because the probe is ``cudaMemGetInfo`` in exact
+    BYTES: ``nvidia-smi`` reports whole MiB (a 2 MiB bound then measures the
+    box's quietness) and a per-phase peak can also catch the neighbouring
+    cycle's frees because a ``mark()`` is not a barrier.  The sampler is not
+    used AT ALL here — not even as a visibility guard: its ``nvidia-smi`` is a
+    different oracle from the ``cudaMemGetInfo`` this gate reads, and a
+    container that passes the GPU through without ``nvidia-smi`` in ``PATH``
+    (or with an NVML permission failure) can run this gate perfectly well.  The
+    precondition is :func:`tabpwa.monitor.has_device`, the same ``libcudart``
+    the measurement uses.
+
+    The SECOND precondition is that this process is the card's only user: the
+    oracle is device-wide, so another process's allocations would land in the
+    trace and the gate would report someone else's work as a leak.
     """
-    lib = _cuda_mem.require()
+    MiB = 1024 * 1024
+    if not monitor.has_device():
+        pytest.skip("no CUDA device for the free-bytes probe")
+    others = _other_gpu_users()
+    if others:
+        pytest.skip("another process is using the GPU (pid %s); device-wide "
+                    "free bytes cannot attribute allocations"
+                    % ", ".join(str(p) for p in others))
+
     f, kc, params, data = _fitter()
     w = _wrapper(kc)
     mask_params = params
-    MiB = 1024 * 1024
     vals = []
 
     def probe():
-        """Collect OUR own garbage first, then read the device.
+        """Collect OUR own garbage first, then read the device in exact BYTES.
 
         A context freed by an earlier test file (or by the previous cycle) is
         only reclaimed when its Python object dies, so an uncollected record
@@ -480,8 +537,8 @@ def test_repeated_mask_changes_do_not_grow_device_memory():
         process.
         """
         gc.collect()
-        _cuda_mem.sync(lib)
-        return _cuda_mem.free_bytes(lib)
+        monitor.sync()
+        return monitor.free_bytes()
 
     try:
         probe()                              # settle before the first sample

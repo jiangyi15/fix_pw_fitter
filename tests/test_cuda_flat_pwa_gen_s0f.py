@@ -32,6 +32,10 @@ Gates (this kernel's own; the MASK contract every masked backend shares is
    never returns a tile ``create`` rejects.
 """
 
+import os
+import shutil
+import subprocess
+
 import numpy as np
 import pytest
 
@@ -39,7 +43,7 @@ from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
 from tabpwa.cuda._flat_pwa_gen_s0f import (
     CUDAKernelFlatPwaGenS0F, index_runs, split_waves, wave_plan)
-import _cuda_mem
+from tabpwa import monitor
 from test_cuda_flat_cache_pwa_gen import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
@@ -525,26 +529,77 @@ def test_the_aux_bytes_report_is_the_per_context_formula():
         ref.free()
 
 
+def _other_gpu_users():
+    """PIDs holding the device right now, excluding this process.
+
+    ``free_bytes()`` is DEVICE-WIDE: any other process allocating on the card
+    moves the number inside the trace, so this gate would be measuring someone
+    else's work — that is not a wider tolerance to invent, it is a precondition
+    that does not hold.  ``cudaMemGetInfo`` cannot attribute memory to a PID, so
+    the honest check is "no one else is on the card".
+
+    The query is a PRECONDITION, never the oracle: when ``nvidia-smi`` or
+    ``--query-compute-apps`` is unavailable this returns ``[]`` and the gate
+    RUNS — a missing tool must not silently skip a leak gate.
+    """
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    mine = os.getpid()
+    pids = set()
+    for line in out.splitlines():
+        cell = line.split(",")[0].strip()
+        try:
+            pid = int(cell)
+        except ValueError:                  # blank, [N/A], a header
+            continue
+        if pid != mine:
+            pids.add(pid)
+    return sorted(pids)
+
+
 def test_load_data_does_not_allocate_the_scratch():
     """The split's scratch belongs to the CONTEXT: a load adds no per-handle
     copy (its ``cap``-sized allocation happened at construction).
 
-    The probe is ``libcudart`` through ``ctypes`` (``tests/_cuda_mem.py``), NOT
-    ``torch``: importing torch costs every later raw-CUDA call in the process
-    5.1x (measured 5.71 -> 29.38 ms per create/load/compute/free cycle).
+    The probe is :func:`tabpwa.monitor.free_bytes` (``libcudart`` through
+    ``ctypes``), NOT ``torch`` and NOT a CUDA-runtime initialisation in the
+    monitor: importing torch costs every later raw-CUDA call in the process
+    5.1x (measured 5.71 -> 29.38 ms per create/load/compute/free cycle).  The
+    sampler is not involved: its ``nvidia-smi`` reports MiB, so the bound is in
+    exact BYTES from the module's ``ctypes`` probe, and the ONLY skip is
+    :func:`tabpwa.monitor.has_device` — a GPU passed through without
+    ``nvidia-smi`` in ``PATH`` still runs this gate.
+
+    The oracle is DEVICE-WIDE, so the gate is only meaningful when this process
+    is the card's only user: another process's allocation would be inside the
+    ``base -> after`` window and could mask (or fake) the very leak this checks.
     """
-    lib = _cuda_mem.require()
+    if not monitor.has_device():
+        pytest.skip("no CUDA device for the free-bytes probe")
+    others = _other_gpu_users()
+    if others:
+        pytest.skip("another process is using the GPU (pid %s); device-wide "
+                    "free bytes cannot attribute allocations"
+                    % ", ".join(str(p) for p in others))
     f, kc, ref, gpu = _masked_pair(CFG_IDENT, [5, 6, 7, 8, 9])
     k = gpu.kernel
     aux = k.aux_bytes(0)
     assert aux >= 2 * 1024 * 1024, aux      # MBs, easily visible
     data = _in_grid(kc, 16, seed=5)
     try:
-        _cuda_mem.sync(lib)
-        base = _cuda_mem.free_bytes(lib)
+        monitor.sync()
+        base = monitor.free_bytes()
+        assert base is not None
         h = gpu.load_data(data)             # tiny sample: us/amp are tiny
-        _cuda_mem.sync(lib)
-        after = _cuda_mem.free_bytes(lib)
+        monitor.sync()
+        after = monitor.free_bytes()
         assert base - after < aux // 2, (base, after, aux)
         h.free()
     finally:
