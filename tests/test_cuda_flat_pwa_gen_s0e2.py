@@ -27,8 +27,9 @@ Gates:
 9. **the chunk rule is what the context reports** (never re-derived in Python),
    including the two guards measurement forced: the ``1<<20`` cap and
    "a chunk below one group is raised to one whole group".
-10. **path A and path B agree** — ``rsize`` 1..100 (a group larger than the
-    tile is walked internally, and must still close to ONE log).
+10. **path A and path B agree** — ``rsize`` 2..100 (a group larger than the
+    tile is walked internally, and must still close to ONE log); ``rs = 1`` and
+    ``17`` are the shared anchor's sweep.
 11. **``n_res != 1`` is rejected** with ``cuda_flat_pwa_gen2`` named.
 12. **shared memory** — the context's own report is the launch size, the tile
     arithmetic matches ``cuda_tile_bytes_*``, a wide config still crosses the
@@ -63,8 +64,12 @@ import pytest
 
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
+from tabpwa.cuda._flat_pwa_gen_s0e import CUDAKernelFlatPwaGenS0E
 from tabpwa.cuda._flat_pwa_gen_s0e2 import (
     CUDAKernelFlatPwaGenS0E2, amp_slot_map, index_runs, uslot_map)
+from tabpwa.cuda._flat_pwa_gen_s0e3 import CUDAKernelFlatPwaGenS0E3
+from tabpwa.cuda._flat_pwa_gen_s0e4 import CUDAKernelFlatPwaGenS0E4
+from tabpwa.cuda._flat_pwa_gen_s0e5 import CUDAKernelFlatPwaGenS0E5
 from test_cuda_flat_cache_pwa_gen import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
@@ -437,6 +442,61 @@ def test_the_chunk_rule_is_what_the_context_reports(batch_size, rsize):
 
 
 
+def _budget_bug_kc():
+    """A shape whose 8-event tile does NOT fit the smem budget.
+
+    ``tile_flat`` gives n_wave 80 / n_proj 2; 81 basis rows make the layout
+    bind at te = 7 for rsize 2/4 and at te = 7 for rsize 7 — the exact shape
+    where the budget loop used to land on a non-multiple and ``create``
+    rejected it.
+    """
+    from benchmark_flat_vs_pwa import tile_flat
+    f = Fitter(CFG_KM)
+    f.apply_constrains()
+    kc = dict(tile_flat(f.kernel_config, 80, 2))
+    nw = int(np.asarray(kc["fl_table"]).shape[0])
+    nb = int(np.asarray(kc["basis_table"]).shape[1])
+    n_basis = 81
+    kc["basis_table"] = np.ones((n_basis, nb), np.complex128)
+    kc["basis_m_index"] = np.zeros(n_basis, np.int64)
+    gam = np.zeros((nw, 1, n_basis))
+    for k in range(nw):
+        gam[k, 0, k % n_basis] = 1.0
+    kc["gamma_matrix"] = gam
+    kc["den_names"] = np.asarray([f"b{i}" for i in range(n_basis)])
+    return kc
+
+
+@pytest.mark.parametrize("rs", [2, 4, 7])
+@pytest.mark.parametrize("cls", [CUDAKernelFlatPwaGenS0E2,
+                                 CUDAKernelFlatPwaGenS0E,
+                                 CUDAKernelFlatPwaGenS0E3,
+                                 CUDAKernelFlatPwaGenS0E4,
+                                 CUDAKernelFlatPwaGenS0E5],
+                           ids=["s0e2", "s0e", "s0e3", "s0e4", "s0e5"])
+def test_a_budget_shrunk_tile_still_holds_whole_groups(cls, rs):
+    """`rsize` 2..7 on a wide shape used to be unconstructible.
+
+    `pick_te` shrank the 8-event tile ONE event at a time to fit the
+    shared-memory budget and could return, e.g., 7 for `rsize 4`; `create`
+    then rejected it ("te 7 is not a multiple of rsize 4") and the caller saw
+    only "context creation failed" -- a legal `resolution_size` failing for an
+    internal reason it could neither see nor control.  The picker now floors
+    the shrunk tile to whole groups (a smaller tile only helps the budget;
+    below `rsize` one block owns one group, which is legal).
+
+    Parametrized over EVERY s0e-family kernel (s0e2, s0e, s0e3, s0e4, s0e5):
+    the picker is duplicated in each, s0e/s0e2 diverged once already, and the
+    one-line whole-group floor was pasted into s0e3..s0e5 with no test at all.
+    """
+    k = cls(_budget_bug_kc(), resolution_size=rs)
+    try:
+        assert k.te < 8                 # the budget shrink actually fired
+        assert k.te < rs or k.te % rs == 0, (k.te, rs)
+    finally:
+        k.free()
+
+
 def test_a_group_never_straddles_a_tile_or_a_chunk():
     """``rsize`` larger than the tile, and a chunk holding many groups.
 
@@ -470,7 +530,10 @@ def test_a_group_never_straddles_a_tile_or_a_chunk():
 
 # ── gate 10: path A and path B agree ────────────────────────────────────
 
-RSIZES = (1, 2, 4, 8, 10, 17, 25, 40, 100)
+#: ``rs = 1`` and ``rs = 17`` are the shared anchor's sweep (both norms, every
+#: qualifying fixture); the values below are the ones only this file covers.
+#: Path A is ``rsize <= te`` (here 2/4/8), path B ``rsize > te`` (25/40/100).
+RSIZES = (2, 4, 8, 10, 25, 40, 100)
 
 
 @pytest.mark.parametrize("rs", RSIZES)
@@ -480,8 +543,7 @@ def test_every_resolution_size_matches_numpy_flat(rs):
     kc = f.kernel_config
     x = f.initial_values(seed=1)
     params, _ = f.build_params(x)
-    data = _in_grid(kc, 32, seed=7)
-    data = data if rs == 1 else _replicate(data, rs)
+    data = _replicate(_in_grid(kc, 32, seed=7), rs)
     ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
     gpu = create_backend("cuda_flat_pwa_gen_s0e2", kc, model="pwa_gen",
                          resolution_size=rs)
@@ -570,15 +632,6 @@ def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
     with pytest.raises(ValueError, match="cuda_flat_pwa_gen2"):
         create_backend("cuda_flat_pwa_gen_s0e2", f.kernel_config,
                        model="pwa_gen")
-
-
-def test_every_other_fixture_passes_the_gate():
-    for cfg in QUALIFYING:
-        f = Fitter(cfg)
-        f.apply_constrains()
-        assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 1
-        k = CUDAKernelFlatPwaGenS0E2(f.kernel_config)
-        k.free()
 
 
 # ── gate 12: shared memory ──────────────────────────────────────────────

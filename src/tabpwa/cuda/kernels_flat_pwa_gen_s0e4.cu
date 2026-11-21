@@ -921,6 +921,14 @@ static int gps04_pick_te(int rsize, int W, int P, int N, int NB)
         if (sm <= (size_t)GPS04_SMEM_BUDGET) break;
         te -= 1;
     }
+    /* The budget shrink must not leave a tile that straddles a log-sum group:
+       `create` rejects `te >= rsize` with `te % rsize != 0`, and before this
+       floor the picker could return exactly that (rsize 2..7 on a shape whose
+       8-event tile exceeds the budget), which made a legal `resolution_size`
+       unconstructible with a misleading "context creation failed".  Flooring
+       only shrinks the tile, so the budget stays satisfied; below `rsize` the
+       block owns a single group (path B), which is legal. */
+    if (rsize > 1 && te >= rsize) te -= te % rsize;
     return te < 1 ? 1 : te;
 }
 
