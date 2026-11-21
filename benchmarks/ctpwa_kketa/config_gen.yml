@@ -12,7 +12,7 @@
 #     + non-resonant NR_1(KK), NR_3(KK), NR_5(KK)
 #
 #   K eta sector (J/psi -> K* Kbar, K* -> K eta), same set for K+ and K-:
-#     K_1*(1410) K_1*(1680) K_1*(2380)    3 x 1+
+#     K_1*(1410) K_1*(1680) K_1*(2380)    3 x 1-   (J=1, P=-1)
 #     K_2*(1430) K_2*(1980)               2 x 2+
 #     K_3*(1780)  K_4*(2045)  K_5*(2380)  3-, 4+, 5-
 #     + non-resonant NR_1(K eta), NR_3(K eta)
@@ -38,10 +38,17 @@ data:
 
 decay:
   # every chain is 2-body + sub-decay (n_decay / n_res must be uniform)
+  #
+  # A resonance must recoil against the OPPOSITE-charge kaon: for jpsi -> K+ K- eta
+  # the K+eta resonance is produced with the K-, and vice versa.  Writing
+  # `[Kp, R_Kpeta]` with `R_Kpeta: [Kp, eta]` names K+ twice (and no K-); the
+  # config is accepted, but the event builder's name-keyed leaf walk then counts
+  # K+ once, the top invariant mass collapses to M(K+eta) and the top-vertex q
+  # becomes exactly 0 -- which silently zeroes every wave of that topology.
   jpsi:
     - [R_KK, eta]
-    - [Kp, R_Kpeta]
-    - [Km, R_Kmeta]
+    - [Km, R_Kpeta]        # K+eta resonance recoils against K-
+    - [Kp, R_Kmeta]        # K-eta resonance recoils against K+
   R_KK: [Kp, Km]
   R_Kpeta: [Kp, eta]
   R_Kmeta: [Km, eta]

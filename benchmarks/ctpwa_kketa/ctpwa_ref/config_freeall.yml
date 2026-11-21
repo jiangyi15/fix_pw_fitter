@@ -1,0 +1,74 @@
+# CTPWA (BHXiang/ctpwa) version of the J/psi -> K+ K- eta benchmark model:
+# the same 34 components as benchmarks/ctpwa_kketa/config.yml (this framework),
+# i.e. the paper's fit-figure legend.
+#
+#   11 K+K- resonances (5 x 1--, 5 x 3--, 1 x 5--) + NR1/NR3/NR5
+#    8 K eta resonances (3 x 1-, 2 x 2+, 3-, 4+, 5-)  + NR1/NR3, per charge
+#
+# All masses/widths fixed (`free` empty) = the paper's first column.  For the
+# second column add `free: [0, 1]` on ten of them.
+Particles:
+  Jpsi: {J: 1, P: -1, mass: 3.0969, polarization: ["1", "-1"]}
+  eta:  {J: 0, P: -1, mass: 0.547862}
+  Kp:   {J: 0, P: -1, mass: 0.493677}
+  Km:   {J: 0, P: -1, mass: 0.493677}
+
+Data:
+  order: [Kp, Km, eta]
+  data: [dat, "./data.dat"]
+  phsp: [dat, "./phsp.dat"]
+
+Constraints:
+  maxL: 5          # L = J for the 5-- state; the default 4 would drop it
+  bf_d: 3.0
+
+DecayChains:
+  decay1:
+    Jpsi:
+      - [eta, R_KK]
+      - [Kp, R_Keta]
+      - [Km, R_Keta]
+    R_KK: [Kp, Km]
+    R_Keta:
+      - [Km, eta]
+      - [Kp, eta]
+    intermediates:
+      R_KK:
+        - [J: 1, P: -1]: [phi1020, omega1420, phi1680, X1750, omega2220, NR1_KK]
+        - [J: 3, P: -1]: [omega3_1670, phi3_1850, rho3_1690, rho3_1990, rho3_2250, NR3_KK]
+        - [J: 5, P: -1]: [rho5_2350, NR5_KK]
+      R_Keta:
+        - [J: 1, P: -1]: [Kst1410, Kst1680, Kst2380, NR1_Keta]
+        - [J: 2, P: +1]: [K2st1430, K2st1980]
+        - [J: 3, P: -1]: [K3st1780, NR3_Keta]
+        - [J: 4, P: +1]: [K4st2045]
+        - [J: 5, P: -1]: [K5st2380]
+
+Resonances:
+  # ---- K+K- eta sector ----
+  phi1020:     {J: 1, P: -1, model: BWR, parameters: [1.019461, 0.004249], free: [0, 1]}
+  omega1420:   {J: 1, P: -1, model: BWR, parameters: [1.410, 0.290], free: [0, 1]}
+  phi1680:     {J: 1, P: -1, model: BWR, parameters: [1.680, 0.150], free: [0, 1]}
+  X1750:       {J: 1, P: -1, model: BWR, parameters: [1.750, 0.100], free: [0, 1]}
+  omega2220:   {J: 1, P: -1, model: BWR, parameters: [2.220, 0.200], free: [0, 1]}
+  omega3_1670: {J: 3, P: -1, model: BWR, parameters: [1.667, 0.168], free: [0, 1]}
+  phi3_1850:   {J: 3, P: -1, model: BWR, parameters: [1.854, 0.087], free: [0, 1]}
+  rho3_1690:   {J: 3, P: -1, model: BWR, parameters: [1.690, 0.190], free: [0, 1]}
+  rho3_1990:   {J: 3, P: -1, model: BWR, parameters: [1.988, 0.188], free: [0, 1]}
+  rho3_2250:   {J: 3, P: -1, model: BWR, parameters: [2.247, 0.240], free: [0, 1]}
+  rho5_2350:   {J: 5, P: -1, model: BWR, parameters: [2.350, 0.250], free: [0, 1]}
+  NR1_KK:      {J: 1, P: -1, model: ONE, parameters: []}
+  NR3_KK:      {J: 3, P: -1, model: ONE, parameters: []}
+  NR5_KK:      {J: 5, P: -1, model: ONE, parameters: []}
+
+  # ---- K eta sector (shared by the K+ and K- sub-channels) ----
+  Kst1410:    {J: 1, P: -1, model: BWR, parameters: [1.414, 0.232], free: [0, 1]}
+  Kst1680:    {J: 1, P: -1, model: BWR, parameters: [1.718, 0.322], free: [0, 1]}
+  Kst2380:    {J: 1, P: -1, model: BWR, parameters: [2.380, 0.300], free: [0, 1]}
+  K2st1430:   {J: 2, P: +1, model: BWR, parameters: [1.4324, 0.109], free: [0, 1]}
+  K2st1980:   {J: 2, P: +1, model: BWR, parameters: [1.973, 0.373], free: [0, 1]}
+  K3st1780:   {J: 3, P: -1, model: BWR, parameters: [1.780, 0.159], free: [0, 1]}
+  K4st2045:   {J: 4, P: +1, model: BWR, parameters: [2.045, 0.198], free: [0, 1]}
+  K5st2380:   {J: 5, P: -1, model: BWR, parameters: [2.380, 0.300], free: [0, 1]}
+  NR1_Keta:   {J: 1, P: -1, model: ONE, parameters: []}
+  NR3_Keta:   {J: 3, P: -1, model: ONE, parameters: []}

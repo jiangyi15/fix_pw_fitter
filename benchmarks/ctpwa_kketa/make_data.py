@@ -17,8 +17,9 @@ The phase space is flat (unit weights), which is what a *timing* sample needs;
 `toy_pwa_generate` would be the choice for a model toy, but its rejection
 acceptance on this model is ~0.2 %, i.e. ~5x10^8 candidates for 10^6 events.
 
-The `pwa_gen` config reads the same arrays: both configs share the shape and
-the interpolation grids (asserted here).
+The `pwa_gen` config reads the same arrays.  The grid assertion below is on the
+config THIS script loaded; the two configs happen to share both grids
+(mass [0.9774, 2.6132], q [0, 1.3372]), so run it once per config if in doubt.
 """
 import argparse
 import os
@@ -42,7 +43,13 @@ def main():
     from tabpwa import Fitter
     from tabpwa.pwa_build import generate_pwa_phsp
 
-    f = Fitter(a.config, backend="numpy_pwa")
+    # the reference backend is model-scoped: `numpy_pwa` is registered for
+    # `amp_model: pwa`, `numpy_flat` for `pwa_gen` (asking for the wrong one is a
+    # hard ValueError, so pick it from the config rather than guessing)
+    from tabpwa.config_loader import RawConfig
+    amp = str(RawConfig(a.config).dic.get("amp_model", "pwa"))
+    ref = "numpy_flat" if amp in ("pwa_gen", "pwa_basis") else "numpy_pwa"
+    f = Fitter(a.config, backend=ref)
     kc = f.kernel_config
     model = f.model
     chain = model.full_decay.chains[0]
@@ -57,7 +64,12 @@ def main():
         ev = model.build_event_data(mom, kc)
         ev = {k: np.asarray(v) for k, v in ev.items()}
         ev["weight"] = np.ones(len(mom))
-        ev["bkg"] = np.zeros(len(mom))
+        # `build_event_data` already emits `bkg` (ones).  The loader does NOT
+        # read that key -- `Fitter.load_npz` wants `bkg_raw` and otherwise
+        # defaults to ones -- and a background-free sample cannot carry
+        # `bkg_raw = 0` either (set_data requires N_b > 0).  The background term
+        # is inert because `data.purity: 1.0` zeroes its scale, not because of
+        # anything written here.
         print(f"  {n:,} events: momenta {mom.shape} -> mass {ev['mass'].shape} "
               f"q {ev['q'].shape} angle {ev['angle'].shape} "
               f"({time.perf_counter() - t0:.0f} s)", flush=True)
@@ -85,6 +97,16 @@ def main():
               f"q [{ev['q'].min():.4f}, {ev['q'].max():.4f}]")
         assert m_lo <= ev["mass"].min() and ev["mass"].max() <= m_hi, "mass out of grid"
         assert q_lo <= ev["q"].min() and ev["q"].max() <= q_hi, "q out of grid"
+        # every momentum column must be alive for the whole sample: a topology
+        # whose top vertex resolves to the wrong leaf gives q = 0 for ALL events
+        # of that chain, which silently zeroes its waves (the same-charge trap)
+        med = np.median(ev["q"], axis=0)
+        dead = np.flatnonzero(med <= 0)
+        assert dead.size == 0, (
+            f"{tag}: q column(s) {dead.tolist()} are zero for >=50 % of events -- "
+            f"a decay chain collapsed (check the recoil lepton/kaon names)")
+        print(f"  {tag}: all {ev['q'].shape[1]} q columns alive "
+              f"(min median {med.min():.4g})")
 
     np.savez(os.path.join(a.out, "data.npz"), **data)
     np.savez(os.path.join(a.out, "phsp.npz"), **phsp)
