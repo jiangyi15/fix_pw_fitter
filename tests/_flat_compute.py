@@ -86,6 +86,15 @@ FLOORS = {
     # case-1 copies of s0e2: same floors (FMA re-association + the deduped
     # denominator move the numbers by <= 1 ulp, measured in their own files)
     "cuda_flat_pwa_gen_s0e5": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
+    # the fixed-wave cache kernel is registered MASK-OFF here: with no mask it
+    # runs the PARENT's code path by construction (identity permutation, full
+    # CSR, no cache, `n_fix + k` with `n_fix == 0`), so its exact coefficient
+    # gradient holds and the family's s0e2 floors apply unchanged.  The MASKED
+    # behaviour is the SHARED mask suite, tests/_flat_masked.py (selected by the
+    # `fixed_coeff` tag: a fixed wave's columns are exactly 0 by contract, and
+    # the strict floors below apply to the masked run too); the mask-off
+    # comparison to s0e2 stays in the kernel's own file.
+    "cuda_flat_pwa_gen_s0f": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     # the CPU leaf is fp64 end to end, so its gap to the reference is the
     # Catmull-Rom-vs-linear interpolation difference, not accumulation:
     # MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 -> Q 9.3e-7,
@@ -106,7 +115,10 @@ FLOORS = {
 #:   reference — the NumPy oracle the suite compares against
 #:   delegate  — wraps another backend instead of implementing the math
 #:   n_res1    — REFUSES a multi-BW chain (``n_res != 1`` raises)
-TAG_VOCABULARY = frozenset({"reference", "delegate", "n_res1"})
+#:   fixed_coeff — takes ``fixed_cols`` + ``fixed_values`` and caches the
+#:                 columns a fixed wave reads (the mask suite's selector,
+#:                 ``tests/_flat_masked.py``)
+TAG_VOCABULARY = frozenset({"reference", "delegate", "n_res1", "fixed_coeff"})
 
 
 def backends_to_test():
@@ -203,6 +215,24 @@ def _replicate(data, rs):
     out = {k: np.repeat(np.asarray(v), rs, axis=0) for k, v in data.items()}
     out["weight"] = np.full(len(np.asarray(data["weight"])) * rs, 1.0 / rs)
     return out
+
+
+def test_the_suite_does_not_import_torch():
+    """No test may import torch: it makes every later raw-CUDA call 5.1x slower.
+
+    MEASURED in this process after ``torch.cuda.init()``: one
+    create/load/compute/free cycle goes 5.71 -> 29.38 ms and never recovers,
+    which is how this file became 31 s alone, 102 s right after
+    ``tests/test_fixed_coeff.py`` (same process) and 169 s inside the full
+    suite.  The two free-VRAM probes that used it now call ``libcudart``
+    through ``ctypes`` (``tests/_cuda_mem.py``).
+
+    This runs FIRST in this module, so a module-level import elsewhere in the
+    file order is what it reports — not a torch import of its own.
+    """
+    import sys
+    assert "torch" not in sys.modules, sorted(
+        m for m in sys.modules if m.startswith("torch"))
 
 
 def test_backend_tags_are_declared_metadata():

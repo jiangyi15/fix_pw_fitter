@@ -1283,6 +1283,9 @@ class ConstraintManager:
         # Variable registry (rebuilt on constraint change)
         self._var_registry = None
 
+        # Cache for :meth:`depends_on_free` (cleared by :meth:`_invalidate`)
+        self._free_dep = None
+
         self._rebuild()
 
     # ── public read access ──────────────────────────────────────
@@ -1321,6 +1324,75 @@ class ConstraintManager:
     def free_param_names(self):
         return [n for n in self.var_registry.flat_names
                 if n not in self.fixed_tr.values]
+
+    def is_free(self, name):
+        """Does *name* have a fitted value?  Alias groups are honoured.
+
+        An alias has no x slot of its own — the registry keeps one slot per
+        group — but it resolves to its canonical name's value, so it is free
+        exactly when that canonical name is: ``K3st1780m_mass`` is free when
+        ``K3st1780p_mass`` is, because the two are one parameter.
+        """
+        canon = self.name_res.map.get(name, name)
+        return canon in self.free_param_names()
+
+    def depends_on_free(self, name):
+        """Does the resolved value of *name* depend on a free parameter?
+
+        Answered from the **constraint graph**, not from values: a name is
+        free itself (:meth:`is_free`), or a transform produces it from an
+        input that (transitively) is.  No perturbation sweep, so a name that
+        happens to sit at a stationary point of the likelihood cannot look
+        fixed.
+
+        A transform with no inputs is a constant — it contributes no
+        dependency, which is the ``"one"`` (``FixedValueTransform``) case and
+        every future constant producer.  A name that is neither free nor
+        produced by a transform is a fixed constant in the resolved dict, and
+        an unknown name is treated the same: ``False``.
+
+        Cycle-safe (a name already on the recursion stack answers ``False`` —
+        the only consistent answer for a value derived from itself), and cheap:
+        the recursion is depth-first with memoisation per name, cleared
+        whenever the free set / transforms change.
+        """
+        if self._free_dep is None:
+            self._free_dep = {}
+        try:
+            return self._free_dep[name]
+        except KeyError:
+            pass
+        res = self._depends_on_free(name, set())
+        self._free_dep[name] = res
+        return res
+
+    def _depends_on_free(self, name, seen):
+        """Recursive body of :meth:`depends_on_free` (*seen* is the stack)."""
+        if self.is_free(name):
+            return True
+        if name in seen:
+            return False
+        seen.add(name)
+        for tr in self._dependency_transforms():
+            if name in tr.output_names:
+                if any(self._depends_on_free(i, seen) for i in tr.input_names):
+                    return True
+        return False
+
+    def _dependency_transforms(self):
+        """Transforms whose ``output_names`` are GENERATED from their inputs.
+
+        Only the mass/width and custom stages: those are the stages that
+        derive one parameter from another.  The alias stage is deliberately
+        absent — its ``input_names`` is the whole set of group roots, while an
+        alias resolves to exactly one of them (its own canonical), which
+        :meth:`is_free` already answers; asking it would make every alias free
+        as soon as any group root is.  The in-place stages (scale, blind, the
+        fixed override) generate no dependency either, and a constant producer
+        (no inputs) contributes nothing by construction.
+        """
+        yield from self.mass_width_transforms
+        yield from self.custom_transforms
 
     def initial_values(self, seed=None, use_default=True):
         """Flat starting vector for the free variables.
@@ -1799,6 +1871,7 @@ class ConstraintManager:
 
     def _invalidate(self):
         """Drop anything derived from the current constraint state."""
+        self._free_dep = None
         for fn in list(self._invalidators):
             fn()
 

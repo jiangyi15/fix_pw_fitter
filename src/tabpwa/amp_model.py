@@ -40,6 +40,10 @@ LEGACY_SCALAR_NAMES = ["gamma", "delta_gamma", "delta_m", "A_prod",
 LEGACY_SCALAR_DEFAULTS = {"gamma": 0.0, "delta_gamma": 0.0, "delta_m": 0.506,
                           "A_prod": 0.0, "poqr": 1.0, "poqi": 0.0}
 
+# The two derivations of the fixed coefficient columns (``how=`` selector).
+# Order matters: the first is the DEFAULT (no point needed).
+_COEFF_HOWS = ("transform", "jacobian")
+
 AMPLITUDE_MODELS = {}
 
 
@@ -168,6 +172,66 @@ class AmplitudeModel(BaseModel):
         """
         waves = self.full_decay.get_partial_waves()
         return [(k, k, 1) for k in range(len(waves))]
+
+    def _no_coeff_basis(self):
+        """The one error a model without a flat coefficient basis raises."""
+        raise TypeError(
+            f"{type(self).__name__}: this model has no flat coefficient basis "
+            f"(no 'den_names' in its kernel config), so there are no "
+            f"coefficient columns to mask; fixed coefficient columns are a "
+            f"pwa_gen (pwa_basis) concept — set `amp_model: pwa_gen`")
+
+    @staticmethod
+    def _check_coeff_how(how):
+        """Validate the ``how`` selector shared by both derivations."""
+        if how not in _COEFF_HOWS:
+            raise ValueError(
+                f"fixed_coeff_columns(how={how!r}): unknown derivation; use "
+                f"{_COEFF_HOWS[0]!r} (the symbolic constraint-graph walk, "
+                f"default, no x needed) or {_COEFF_HOWS[1]!r} (the exact "
+                f"per-column Jacobian, needs x)")
+
+    def fixed_coeff_columns(self, cm=None, x=None, how="transform"):
+        """Columns of the flat coefficient vector no free parameter can move.
+
+        Only a model with a FLAT basis denominator has such columns: its kernel
+        config carries ``den_names`` (one coefficient name per ``basis_table``
+        row).  The plain ``pwa`` model fits ``ck`` and states its denominator
+        through ``m0``/``g0``, so it has nothing to mask — hence the error
+        names the model that does own a coefficient basis.
+
+        *cm* is the :class:`~tabpwa.param_constraint.ConstraintManager` the
+        model is fitted with (``Fitter.cm``): the question is about the
+        CONSTRAINT STATE — which names are free — not about the model alone.
+
+        Args:
+            how: ``"transform"`` (default) — walk the constraint graph (free
+                names, alias groups, transform edges); needs no ``x`` and is
+                **conservative**: a transform's outputs are a SET, so a
+                transform with a shared input set marks more columns moving
+                than strictly do, and a genuine constant that no transform
+                produces cannot be seen.  Never the unsafe direction — a
+                column that moves is never masked.  (On a ``kmatrix_n`` model
+                this masks nothing at all when only masses/widths are pinned,
+                because its weights transform declares the numerator
+                couplings.)
+                ``"jacobian"`` — the exact per-COLUMN Jacobian of ``coeff`` at
+                *x*; needs a point and raises a clear error without one.
+        """
+        self._check_coeff_how(how)
+        return self._no_coeff_basis()
+
+    def fixed_coeff_columns_jacobian(self, cm, x, *, exact=True):
+        """``fixed_coeff_columns(cm, x, how="jacobian")`` — thin alias.
+
+        Kept because the FD debugging route (``exact=False``) has no ``how``
+        value: it is not a second derivation, only a noisier way to the same
+        Jacobian.  The two-value API is on :meth:`fixed_coeff_columns`.
+
+        Only a flat-coefficient model has ``coeff`` at all, so this raises the
+        same error as :meth:`fixed_coeff_columns` elsewhere.
+        """
+        return self._no_coeff_basis()
 
     def build_event_data(self, momenta, kernel_config, *, weight=None,
                          bkg=None):
@@ -448,6 +512,181 @@ class PWAGen(PWA):
             pass
         self._pg_kc = kc
         return kc
+
+    def fixed_coeff_columns(self, cm=None, x=None, how="transform"):
+        """The ``fixed_coeff`` backend mask: columns no free parameter moves.
+
+        One entry per column of the flat ``coeff`` vector, i.e. per row of
+        ``basis_table`` — the same index space ``den_names`` names and the
+        kernel's ``fixed_cols`` mask.
+
+        ``how="transform"`` (DEFAULT) reads the constraint graph: a column is
+        fixed exactly when its basis weight does not depend on a free
+        parameter (:meth:`ConstraintManager.depends_on_free`).  ``"one"`` (a
+        constant producer with no inputs) always is, and so is every weight of
+        a resonance whose mass/width is pinned — including the second charge
+        sector's ``_s0``/``_width_t``, which is an ALIAS of the first's
+        parameters, not a separate free slot.  It needs no ``x`` and is
+        **conservative**: a transform declares ``(inputs -> outputs)`` as a
+        SET, so a transform fed by several free parameters keeps ALL of its
+        outputs moving even where only one of them moves a given output, and a
+        genuine constant that no transform produces cannot be seen at all
+        (``kmatrix_n``'s ``{name}_m4`` weight, which is the literal 1).  It is
+        however never unsafe: a column that moves is never masked.
+
+        ``how="jacobian"`` uses the exact per-column Jacobian of ``coeff`` at
+        ``x`` (see :meth:`fixed_coeff_columns_jacobian`), which resolves both
+        of those, at the price of a point: it raises if ``x`` is None.
+
+        KMATRIX CAVEAT for the default: ``kmatrix_n``'s weights transform
+        declares the numerator couplings among its inputs, so pinning only the
+        masses/widths masks NOTHING there — every column depends on a free
+        coupling by declaration.  The ``"jacobian"`` route is exact there
+        (a column's derivative w.r.t. a numerator coupling is zero); on the
+        ``benchmarks/ctpwa_kketa`` ``BWR`` config the two agree exactly.
+
+        This is a PERFORMANCE hint only: a backend that ignores the mask
+        computes the same numbers, just without skipping the fixed block.
+        Hand it over after the constraints are settled::
+
+            cols = f.model.fixed_coeff_columns(f.cm)          # default walk
+            cols = f.model.fixed_coeff_columns(               # exact, needs x
+                f.cm, x=f.initial_values(seed=1), how="jacobian")
+
+        The ``fixed_coeff`` wrapper does the declaration and the VALUES in one
+        call — ``f.backend.set_fixed_coeffs(f, x=f.initial_values(seed=1))``
+        (or ``how="jacobian"``); its ``set_fixed_cols(cols, values)`` needs the
+        values explicitly, because the cache is filled at ``load_data``.
+
+        The model answers for itself (there is no ``Fitter`` wrapper): the flat
+        ``coeff`` axis exists only for this model, so the knowledge stays here.
+        """
+        self._check_coeff_how(how)
+        kc, names = self._coeff_basis(cm)
+        if how == "jacobian":
+            if x is None:
+                raise TypeError(
+                    "PWAGen.fixed_coeff_columns(..., how='jacobian') needs a "
+                    "point: pass x=... (the fitter's starting vector, an "
+                    "iterate, ...); only how='transform' works without one")
+            return self._fixed_coeff_columns_jacobian(cm, x)
+        return [m for m, nm in enumerate(names) if not cm.depends_on_free(nm)]
+
+    def _coeff_basis(self, cm):
+        """Checked ``(kernel_config, den_names)`` of the flat coefficient basis."""
+        kc = self.build_kernel_config()
+        names = kc.get("den_names") or []
+        if not names:
+            # a basis model always has them; fall back to the message that
+            # names pwa_gen rather than returning a silently empty mask
+            return self._no_coeff_basis()
+        if cm is None:
+            raise TypeError(
+                "fixed_coeff_columns(cm=...): the constraint manager is "
+                "required — pass the fitter's (`fitter.cm`)")
+        n_basis = int(np.asarray(kc["basis_table"]).shape[0])
+        if len(names) != n_basis:
+            raise ValueError(
+                f"fixed_coeff_columns: {len(names)} den_names for "
+                f"{n_basis} basis rows — the mask indexes basis rows, so the "
+                f"two lists must be aligned")
+        return kc, names
+
+    def fixed_coeff_columns_jacobian(self, cm, x, *, exact=True, rel=1e-7,
+                                     step=1e-3, n_draws=2, seed=0):
+        """``fixed_coeff_columns(cm, x, how="jacobian")`` — thin alias.
+
+        Kept for the FD debugging lever: ``exact=False`` selects central
+        differences with a relative tolerance (two independent points, union of
+        the columns seen moving) instead of the exact Jacobian, and has no
+        ``how`` value — it is a noisier route to the same answer, not a third
+        derivation.
+
+        ``exact=True`` (default) takes the **exact** Jacobian by running the
+        very transform chain that produces ``coeff`` in reverse: each basis
+        column is seeded as a unit gradient (:class:`FlatKernelParams`' own
+        ``backward`` fans it out to the resolved name) and
+        :meth:`ConstraintManager.full_gradient` chains it to the flat ``x``
+        slots through the transforms' ``backward`` (their exact VJPs).  A
+        column is fixed iff EVERY slot of that gradient is exactly ``0.0`` —
+        no finite differences, no tolerance, so one ``x`` suffices: the
+        derivative is not a difference of values whose step size could hide a
+        zero.  (Only at a point where the derivative vanishes in ALL slots —
+        a stationary point of the column itself — does the question itself
+        become ambiguous; that is a property of the point, not of the step.)
+
+        Why the reverse route rather than ``tabpwa.fwd`` duals: a ``Fwd``
+        cannot reach ``coeff``, because the basis transforms read their
+        declared inputs as plain floats (``PlainBasisWeightsTransform._m0``
+        does ``float(d[name])``), and ``Fwd`` deliberately has no
+        ``__float__``.  Their ``backward`` IS the exact VJP of that same
+        ``forward``, so the transpose of the forward-dual route is available
+        and exact — which is what this uses.  A transform that only inherits
+        ``fd_backward`` contributes a finite-difference row (no basis
+        transform does).
+        """
+        if exact:
+            if x is None:
+                raise TypeError(
+                    "fixed_coeff_columns_jacobian(..., exact=True) needs a "
+                    "point: pass x=...; only how='transform' works without one")
+            return self.fixed_coeff_columns(cm, x, how="jacobian")
+        return self._fixed_coeff_columns_jacobian(cm, x, exact=False, rel=rel,
+                                                  step=step, n_draws=n_draws,
+                                                  seed=seed)
+
+    def _fixed_coeff_columns_jacobian(self, cm, x, *, exact=True, rel=1e-7,
+                                      step=1e-3, n_draws=2, seed=0):
+        """The implementation behind ``how="jacobian"`` (and the FD alias)."""
+        kc, names = self._coeff_basis(cm)
+        tr = self.params_transform_cls(self, kc)
+        if x is None:
+            raise TypeError(
+                "fixed_coeff_columns_jacobian(cm, x): the point x is "
+                "required — pass the fitter's starting vector or an iterate")
+
+        if exact:
+            resolved = cm.flat_resolve(x)
+            params = tr.forward(resolved)
+            coeff = np.asarray(params["coeff"], np.float64).reshape(-1)
+            ck_shape = np.shape(params["ck"])
+            fixed = []
+            for m in range(coeff.size):
+                g = np.zeros(coeff.size, np.float64)
+                g[m] = 1.0
+                grad_res = tr.backward(
+                    {"coeff": g, "ck": np.zeros(ck_shape, np.complex128)},
+                    resolved)
+                gx = np.asarray(cm.full_gradient(grad_res, resolved, x),
+                                np.float64)
+                if not np.any(gx != 0.0):
+                    fixed.append(m)
+            return fixed
+
+        # ── debugging only: central differences, union over independent draws
+        rng = np.random.default_rng(seed)
+        base = np.asarray(x, np.float64)
+        points = [base]
+        while len(points) < max(2, int(n_draws)):
+            points.append(base * (1.0 + 0.1 * rng.standard_normal(base.size)))
+
+        def _coeff(v):
+            return np.asarray(tr.forward(cm.flat_resolve(v))["coeff"],
+                              np.float64).reshape(-1)
+
+        moved = set()
+        for xp in points:
+            for i in range(xp.size):
+                h = step * max(abs(float(xp[i])), 1.0)
+                up, dn = xp.copy(), xp.copy()
+                up[i] += h
+                dn[i] -= h
+                cu, cd = _coeff(up), _coeff(dn)
+                d = (cu - cd) / (2.0 * h)
+                scale = np.maximum(np.abs(cu), np.abs(cd))
+                moved.update(int(m) for m in np.nonzero(
+                    np.abs(d) > rel * np.maximum(scale, 1e-300))[0])
+        return [m for m in range(len(names)) if m not in moved]
 
     def particle_transforms(self):
         """pwa_gen's OWN list: basis transforms and constants — no particle ones.
