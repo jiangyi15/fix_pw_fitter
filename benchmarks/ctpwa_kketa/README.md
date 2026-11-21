@@ -13,16 +13,76 @@ and §6–§9 are the measurements.  Those are reproducible from `make_data.py`
 plus one `bench.py` call per backend; §10 additionally needs `ctpwa_ref/` (their
 framework, built per `ctpwa_ref/BUILD.md`).
 
+**The headline — this framework against CTPWA, by sample size (§10).**  Their
+sources were built here (`ctpwa_ref/BUILD.md`) and run on the same GPU, the same
+model — 34 partial waves, 2 polarizations, per-wave map verified to <1e-6
+(`ctpwa_ref/coupling_map.md`) — and the same data:phase-space ratio.  One
+`get_nll` (value + gradient), parameters moving, min of 3 for ours and 4 for
+theirs (`ctpwa_ref/BUILD.md`):
+
+| data + phsp | CTPWA, x = 76 | ours, x = 76 (`s0g`) | CTPWA, x = 66 | ours, x = 66 (Gram) | CTPWA, x = 104 | ours, x = 104 (`s0f`) |
+|---|---|---|---|---|---|---|
+| 0.6×10⁶ | 26.61 | **9.3** (2.9×) | **1.16** | 1.3 | 92.55 | **13.8** (6.7×) |
+| 1.2×10⁶ | 52.12 | **16.6** (3.1×) | 2.04 | **1.7** | 182.2 | **25.6** (7.1×) |
+| 2.4×10⁶ | — | **31.1** | 3.31 | **2.7** | OOM | **49.0** |
+| 6×10⁶ (the paper's) | — | **74.8** | — | **6.2** | — | 119.0 |
+
+`x` is what floats, not which kernel runs: **66** = every mass/width pinned,
+**76** = the ten named resonance parameters free, **104** = every mass/width
+free.  The kernels are named in parentheses because the choice follows from `x` —
+the Gram path needs `x` = 66 (it zeroes the `m0`/`g0` blocks), and the
+kernels `s0f`/`s0g` cache the waves whose coefficient row `x` cannot move.
+
+The `x` = 104 column quotes `s0f` because it is the kernel the
+all-free shape favours, NOT because it flatters the comparison: there the
+cache engages on only
+7 of 34 waves, so `s0f` is 1.17× the plain tile (13.8 against 16.1 ms) and the
+gap to CTPWA's 92.55 is **6.7× with the cache, 5.7× without**.  The plain tile
+is the conservative reading of that column and the conclusion holds either way.
+
+Every cell is measured: the four `—` and the one `OOM` are all their memory
+wall (their free paths exceed the card above 1.2×10⁶), never a missing run.
+Their all-free column is `vary.py config_freeall.yml` — 38 free resonance
+parameters = our `x` = 104 — re-measured on a fresh `sm_120` build of their
+sources here: 79.84 ms with `theta` repeating, **92.55 ms** with it moving at
+0.6×10⁶, and **182.23 ms** at 1.2×10⁶.  At the paper's size neither of their
+columns fits on this GPU, so no comparison is claimed there — only our
+measured absolute numbers.
+
+The last two columns are the extreme the paper does not run.  At `x` = 104 all
+104 of our parameters float: 54 of the 60 basis columns move and the **7 waves
+whose denominator is a constant** (the non-resonant `ONE` waves) stay
+iteration-invariant, so the cache is not empty and `s0f` gains 1.17–1.19× — while
+theirs costs 92.55 ms against our 13.8 ms, a 6.7× gap that is the largest in the
+table.  The gain tracks the CACHED FRACTION, which is the number to carry away:
+7/34 → 1.19×, 27/34 → 1.49× (`s0f`) / 1.92× (`s0g`), 34/34 → 4.2×
+(141.8 → 33.7).  `s0g` is only 1.07× at `x` = 104 and loses to `s0f` at both
+extremes — its un-staged double `D_k` walk pays only in the mixed middle, which
+is where production sits.
+
+The free column is what the coefficient cache changed: caching the **27 of 34
+waves no free parameter can move** (derived from the constraint state, not
+written by hand; 432 B/event per handle) takes 6×10⁶ from 235.7 ms — the
+previous best, `cuda_v4_pwa_s0e` — to 74.8 ms, 1.9× over the plain per-event
+tile (142.4 ms) and 1.1× over this box's GPU+CPU hybrid (84.0 ms).
+
+What the table shows is the trade: **their fixed column wins the smallest size**
+(1.16 against our 1.3 ms — per-call overhead, ours leads from 1.2×10⁶), while
+**the free column is ours at every size it is measured** (2.9–3.1×).
+
 **Revisions the numbers belong to** — a timing is only meaningful with the code
 it was taken from:
 
 | component | revision |
 |---|---|
-| this framework (`tabpwa`, the `src/` tree) | commit `12288736cba6` on `interp_bw_pwa`; `src/` clean when the runs were made |
+| this framework (`tabpwa`, the `src/` tree) | commit `12288736cba6` on `interp_bw_pwa`; `src/` clean when the runs were made.  The `s0f`/`s0g` rows in §6.1/§6.2 were measured at `c98ed5b` (the commit that adds `cuda_flat_pwa_gen_s0f`/`_s0g`), everything else at `12288736cba6` |
 | CTPWA (`ctpwa_ref/BUILD.md`) | clone at `bad50bd3fd38` (2026-11-20) |
 
 So: `git checkout 12288736cba6` for the framework side, and the pinned clone in
-`ctpwa_ref/BUILD.md` for theirs, before re-running anything here.
+`ctpwa_ref/BUILD.md` for theirs, before re-running anything here.  For the
+`s0f`/`s0g` rows, `git checkout c98ed5b` instead (their harness flag `--mask` is
+in `bench.py`; the two kernels are additive, so nothing else in the table
+changes).
 
 ---
 
@@ -92,8 +152,10 @@ config.yml       the model (`amp_model: pwa`)
 config_gen.yml   the same model as `amp_model: pwa_gen` (flat/basis config)
 make_data.py     samples, built by the framework (generate_pwa_phsp + build_event_data)
 bench.py         one Fitter.get_nll: time, Mev/s, prep breakdown, --shard
-mem.py           peak device memory of one backend (sampling thread) + host RSS
-mem_shard.py     peak VRAM + per-process RAM of a mixed `shard` (psutil VmHWM)
+mem.py           peak device memory of one backend (out-of-process nvidia-smi
+                 sampler, 10 ms) + host RSS
+mem_shard.py     peak device VRAM (out-of-process nvidia-smi) + per-process RAM
+                 of a mixed `shard` (psutil VmHWM)
 check_one.py     one backend, one evaluation: dumps Q/P/nll/grad for comparison
 check_waves.py   one-hot scan: every partial wave alive in the sample (34/34)
 ctpwa_ref/       §10 only: their config (fixed/free), their-sample generator,
@@ -110,10 +172,18 @@ python bench.py --backend cuda_v4_pwa_s0e --free-mw \
 python bench.py --config config_gen.yml --shard cuda_flat_pwa_gen_s0e2,cpu_flat_pwa_gen_cached \
                 --weights 57,43
 
-# peak memory (GPU: 1 ms in-process sampler; CPU: exact VmHWM); the nvidia-smi log
-# is the external cross-check of the device number, not the measurement:
-nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -lms 100 > mon.csv &
-python mem.py --backend cuda_v4_pwa_s0e --repeat 2; kill %1
+# the fixed-coefficient kernels: `fixed_coeff` is the mask's lifecycle, `--base`
+# names the kernel.  `--mask` derives the columns from the constraint state
+# (the same x0 the timing uses), so --fix-mw / --free-mw decide what is cached:
+python bench.py --config config_gen.yml --backend fixed_coeff \
+                --base cuda_flat_pwa_gen_s0g --mask --free-mw \
+    phi1680_mass,phi1680_width,X1750_mass,X1750_width,omega2220_mass,omega2220_width,\
+    K3st1780p_mass,K3st1780p_width,K4st2045p_mass,K4st2045p_width   # 27 fixed / 7 free
+
+# peak memory (GPU: the monitor's out-of-process nvidia-smi sampler at 10 ms,
+# MiB-quantised; CPU: exact VmHWM).  That sampler IS the measurement -- an
+# external nvidia-smi log would be the same instrument, not a cross-check:
+python mem.py --backend cuda_v4_pwa_s0e --repeat 2
 ```
 
 `--fix-mw` pins every mass/width; `--free-mw a,b,…` leaves the named ones free.
@@ -131,6 +201,13 @@ reproduce the analytic reference?
   cuda_v4_pwa             rel dNLL 1.3e-08   rel|dP| 1.1e-07
   cuda_v4_pwa_s0c / s0e   rel dNLL 1.3e-08   rel|dP| 1.1e-07
   cuda_flat_pwa_gen_s0e2  rel dNLL 8.7e-07   rel|dP| 1.4e-05    (fp32 cache floor)
+
+2000 events, MASKED (a wave's whole coeff row declared fixed), vs numpy_flat:
+  cuda_flat_pwa_gen_s0f / s0g   Q 9.2e-07  P 3.3e-06  dck 1.3e-06  dcoeff 7.5e-06
+                                (tests/_flat_masked.py: 5 fixtures x rsize 1/17,
+                                 STRICT _rel, the same floor as the unmasked anchor)
+  full size (27/34 waves cached): both agree with s0e2 to 3.2e-11 relative
+                                (NLL +1040064.591552 against +1040064.591585)
 
 10 resonance params free, gradients vs cuda_v4_pwa:
   2000 events: s0b 1.5e-14 | s0c 1.8e-14 | s0e 2.9e-16
@@ -157,7 +234,9 @@ into two configurations follows the paper's:
 parameter-independent), and **every other kernel is quoted in the free
 configuration**, where it is the only option.  Our per-event kernels cost the
 same either way (freeing masses changes neither the caches nor the per-event
-work), but the free column is where they are used.
+work), but the free column is where they are used — with one exception:
+`s0f`/`s0g` exist to exploit the mask, so they are quoted
+in BOTH columns, and its two columns differ by 2.8x (`s0f`) and 1.8x (`s0g`).
 
 **Method note — the parameters are held between repeats** (`get_nll(x0)` with
 the same `x`), which *is* the fixed column.  `bench.py --vary` perturbs every
@@ -166,7 +245,13 @@ numbers barely move: `s0e` ten free 235.4 → 235.7 ms, CPU 174.1 → 175.5 (bot
 one process), hybrid
 81.9 → 84.0, and `integrated_pwa` (masses pinned, so only the couplings move)
 6.2 → 6.6 ms.  No result depends on the parameters being still, and no quoted
-backend is hiding a value-keyed cache.  The same check against their
+backend is hiding a value-keyed cache.  `s0f`/`s0g` are the ones whose
+cache IS keyed by the parameters, so `--vary` is its sharpest check: `s0f`
+94.7 → 96.0 ms, `s0g` 73.5 → 74.8 (both in one process).  It cannot hide a stale
+cache by construction — the cached columns are the ones the constraint state
+declares fixed, and every call compares their `coeff` against the declared
+values, raising `FIXED_CHANGED` rather than reusing them (a free column that
+moves is recomputed, which is the point).  The same check against their
 implementation is **not** clean — its free column is 9–16 % faster when `theta`
 repeats than when it moves, which is why §10 quotes their numbers at moving
 parameters (`ctpwa_ref/vary.py`).
@@ -176,26 +261,64 @@ parameters (`ctpwa_ref/vary.py`).
 | backend | ms/iter | Mev/s |
 |---|---|---|
 | `integrated_pwa` + `cuda_v4_pwa_cache` (Gram norm + amp cache) | **6.2** | 967 |
+| `cuda_flat_pwa_gen_s0f` — per-event, all 34 waves cached | 33.7 | 178.0 |
+| `cuda_flat_pwa_gen_s0g` — per-event, un-staged, all 34 cached | 40.8 | 147.0 |
 
 The like-for-like row: our `integrated_pwa` + `cuda_v4_pwa_cache` with the
 resonance parameters held.  Its per-iteration cost depends on the **data**
 sample only — measured 1.7 ms at 2x10^5 data events whether the phase space is
 10^6 or 5x10^6, and 6.2 ms at 10^6 data — because the phase-space side is a
 Gram matrix.  With the parameters held, that makes every per-event kernel
-(82-605 ms) the wrong tool.
+(33.7-605 ms) the wrong tool.
+
+The two cached-wave rows are what the mask buys the per-event column: with
+`--fix-mw` every mass/width is pinned, so all 34 waves are iteration-invariant
+and `s0f` caches their whole contribution at load (`Afix = Amp·conj(D)/|D|²`,
+432 B/event per handle).  That takes the per-event cost from 234.5/605 ms to
+33.7 ms — 5.4x away from the Gram path rather than 38x, but still losing, and
+at 178 Mev/s it is the fastest per-event kernel here.  `s0g` (the un-staged
+variant, 40.8 ms) is slower precisely because it stages no per-event scratch:
+it is the MIXED case's kernel, not this one's.
 
 ### 6.2 Resonance parameters free (x = 76)
 
 | backend | ms/iter | Mev/s |
 |---|---|---|
 | `shard` GPU + CPU 57/43 (§9) | **82.0** | 73.2 |
-| `cuda_flat_pwa_gen_s0e2` (per-event tile, rsize=1) | **141.0** | 42.6 |
+| `cuda_flat_pwa_gen_s0g` (un-staged, 27/34 waves cached) | **73.5** | 81.6 |
+| `cuda_flat_pwa_gen_s0f` (split F/T/B, 27/34 waves cached) | 94.7 | 63.4 |
+| `cuda_flat_pwa_gen_s0e2` (per-event tile, rsize=1) | 141.2 | 42.5 |
 | `cpu_flat_pwa_gen_cached` (per-event, CPU 32 thr, rsize=1) | 179.3 | 33.5 |
 | `cpu_flat_pwa_gen_cached2` | 192.3 | 31.2 |
 | `cpu_flat_pwa_gen` | 234.2 | 25.6 |
 | `cuda_v4_pwa_s0e` (best per-event `pwa` kernel) | 234.5 | 25.6 |
 | `cuda_v4_pwa_s0c` | 473.5 | 12.7 |
 | `cuda_v4_pwa` | 605.1 | 9.9 |
+
+The `s0f`/`s0g` rows are the same objective as `s0e2` with the mask derived from
+this column's constraint state: the ten named masses/widths are free, which
+moves 14 of the 60 basis columns, so **27 of the 34 waves have an
+iteration-invariant denominator and are cached at load** (67/88 non-zeros; 432
+B/event per handle).  That is 1.49x (`s0f`) and 1.92x (`s0g`) over the parent at
+`rsize=1`; at `rsize=17` the same comparison is 144.6 -> 92.9 / 72.1 ms, because
+the grouped objective gives the tile more room.  **Convention**: these two rows
+are measured at the **same `x`** (`--vary` off), whereas §10's free-column
+entries — including the header's 74.8 ms at 6×10⁶ — are measured with the
+parameters moving.  The difference is inside the run-to-run spread and barely
+moves the ratios: 1.49× → 1.48× (`s0f`) and 1.92× → 1.90× (`s0g`).  They SUPPLEMENT `s0e2` rather
+than replace it: `s0e2` is the right kernel when few waves are fixed (`s0f`
+mask-off is within ~1 % of it, `s0g` +3 %), and `s0g` is the mixed-case one —
+all-fixed it is 21 % slower than `s0f` (40.8 vs 33.7), which is the §6.1 row.
+
+**The all-free extreme (x = 104)** is the one to keep in mind before quoting
+these as a general speedup: freeing every mass/width moves 54 of the 60 columns
+and leaves **7 waves** invariant (constant denominator — the non-resonant
+`ONE` waves), which is measured at 141.8 -> **119.0** ms for `s0f` (1.19x) and
+132.2 for `s0g` (1.07x).  The cache scales with the FIXED fraction: 7/34 cached
+buys 1.19x, 27/34 buys 1.49x (`s0f`) and 1.92x (`s0g`, where the un-staged pass
+stops paying for the split), 34/34 buys 4.2x (141.8 -> 33.7, the §6.1 row).  `s0g` therefore loses to
+`s0f` at both extremes and wins only in the mixed middle, which is where the
+production configuration sits.
 
 The product cache (`cached2`) is 7 % slower here; its documented
 `n_fa > N·(P−1)` rule makes this shape a tie, so treat `cached` as the default
@@ -209,10 +332,13 @@ combination outright, and underneath it the cache base raises
 fixed m0/g0 only; use cuda_v4_pwa when they float`.  That is why the framework's
 own best number moves 6.2 ms → 234.5 ms between the two columns.
 
-**Takeaway**: at fixed masses the Gram path is **38× cheaper than the per-event
-`pwa` kernels** (6.2 against 234.5–605 ms) and **13× cheaper than the best
-free-column configuration** (82.0 ms, the hybrid).  Where the masses float, the
-free column is 234.5 ms pure GPU, 141.0 ms on the flat tile, 82.0 ms hybrid; §10
+**Takeaway**: at fixed masses the Gram path is **5.4× cheaper than the best
+per-event kernel** (6.2 against 33.7 ms, `s0f` with every wave
+cached), 38× cheaper than the per-event `pwa` kernels it replaces
+(234.5–605 ms), and 11.9× cheaper than the best free-column configuration
+(6.2 against 73.5 ms).  Where the masses float, the free column is 73.5 ms on
+`s0g` (27 of 34 waves cached), 94.7 on `s0f`, 141.2 ms on the
+plain tile, 234.5 ms pure GPU and 82.0 ms for the hybrid; §10
 puts these against their implementation on the same box, where ours leads at the
 paper's size.
 
@@ -250,26 +376,36 @@ defaults to `None`; `set_cache_file` would make it a file read).
 
 ## 8. Memory
 
-Peak over the whole run (sampling thread, `cudaMemGetInfo` at ~1 ms), one
-backend per process, on an **idle device** — the sampler is device-wide, so any
-other GPU process would be included.  The parent's own CUDA context is in the
-baseline and excluded.  Same split as §6: `integrated_pwa` is the fixed
+Peak over the whole run, one backend per process, on an **idle device** — the
+instrument is device-wide `nvidia-smi`, sampled OUT OF PROCESS at 10 ms (MiB
+granularity), so any other GPU process would be included.  It starts before
+`Fitter(...)`, so the baseline is the card's idle level: `context` is the CUDA
+context this backend creates and `PEAK` includes it.  That is the honest
+reading of the card's use, and it is 0.13-0.16 GiB higher than the historical
+"peak (in-process)" numbers below, whose 1 ms in-process `cudaMemGetInfo`
+thread had already created the context before taking its baseline and
+therefore excluded it — a re-run today reproduces the "external max" column,
+not "peak (in-process)".  The current peak is also coarser (10 ms,
+MiB-quantised) than that historical 1 ms probe, so a re-run may differ at the
+sampler's resolution.  Same split as §6: `integrated_pwa` is the fixed
 configuration, every other kernel is listed under the free one.  A footprint is
 a property of the backend's cache, not of the parameter set, so the free rows
 hold at x=66 too.
 
-Two independent confirmations, because "peak" is the one number a coarser
-instrument can only under-report:
+Two things hold the "peak" number honest:
 
 * **host RSS is `VmHWM`**, the kernel's own high-water mark — exact, no sampling.
-* **the device peak was cross-checked from outside**: an `nvidia-smi` log at
-  100 ms taken alongside the largest row (`cuda_v4_pwa_s0e`, below) peaks at
-  **11.09 GiB absolute** against `10.93 GiB + 0.16 GiB` of CUDA context reported
-  here, and the card held 2 MiB before the run — so the sampler is neither
-  optimistic nor picking up another process.  A system monitor is *not* the
-  better instrument for this: at 100 ms it took 50 samples over the whole run,
-  where the in-process thread takes thousands, and a transient allocation is
-  exactly what it would miss.
+* **the device number is the driver's own**: `nvidia-smi` reads what the card
+  reports, so it cannot be optimistic about this process.  The migration is
+  consistent with the old instrument, not a change of measurement: the
+  pre-migration 1 ms in-process `cudaMemGetInfo` peak and a 100 ms
+  `nvidia-smi` log taken alongside the largest row (`cuda_v4_pwa_s0e`, below)
+  agreed — **11.09 GiB absolute** against `10.93 GiB + 0.16 GiB` of CUDA
+  context, with 2 MiB held before the run — so the 10 ms sampler reports the
+  same footprint at its own resolution and is not picking up another process.
+  Its limit is granularity, not accuracy: at 10 ms and 1 MiB a transient
+  allocation shorter than one interval can be under-reported, which is why
+  every B/event figure below is also checked against the allocations.
 
 ### 8.1 Masses/widths fixed (x = 66)
 
@@ -293,7 +429,9 @@ instrument can only under-report:
 and that spread is each kernel's own cache rather than a measurement artefact —
 every row was re-run at full size with an `nvidia-smi` log at 100 ms taken
 alongside, and the external maximum is the in-process peak plus the CUDA context
-(0.13-0.16 GiB) in all five:
+(0.13-0.16 GiB) in all five.  **This table predates the migration**: "peak
+(in-process)" excluded the context and "external max" is that peak plus it; the
+current sampler's `PEAK` lands in the "external max" column.
 
 | backend | peak (in-process) | B/event | external max | what the cache is |
 |---|---|---|---|---|
@@ -367,7 +505,7 @@ its denominator is a basis sum over shared rows.  `us` is also narrower
 to 13 unique wave amplitudes against the `pwa` model's 26.  Its peak is
 **3.11 GiB**: the transient fp64 staging of mass/q/angle (168 B/event) is freed
 chunk by chunk as the caches fill, so it does not add to the 2.79 GiB resident
-footprint — an external 100 ms monitor peaks at 3.27 GiB, which confirms the two
+footprint — a 100 ms `nvidia-smi` log peaks at 3.27 GiB, which confirms the two
 do not overlap.
 
 ## 9. The mixed CPU + GPU configuration
@@ -398,9 +536,12 @@ all 32 cores starve the GPU worker's host-side feeding (92.5 vs 82.0 ms), 8
 cores make the CPU worker too slow (99.2).  An uncached CPU partner is worse at
 every split (125.6 at 50/50, 138.0 at 40/60).
 
-Result: **82.0 ms = 1.72× faster than the GPU tile alone** — the fastest
-per-event configuration measured here, and 3.0× their implementation's fitted
-6×10⁶ number (§10).  It costs both memories at once:
+Result: **82.0 ms = 1.72× faster than the GPU tile alone** — at the time the
+fastest per-event configuration measured here, and 3.0× their implementation's
+fitted 6×10⁶ number (§10).  It is no longer the fastest free-column number: the
+`s0g` reaches **73.5 ms** (§6.2) by removing 27 waves' per-iteration
+work outright instead of splitting the remaining work across two devices.  It
+costs both memories at once:
 
 | split | VRAM | RAM parent | RAM GPU worker | RAM CPU worker | RAM total |
 |---|---|---|---|---|---|
@@ -457,20 +598,48 @@ line in Chinese).
 Every entry below is **measured at that size** on this box (RTX 5070 Ti Laptop 12 GB,
 Ryzen 9 8945HX), except the values marked `fit` (their 6x10^6 numbers, which
 cannot be run here).  Data:phsp is 1:5 as in the paper.
-`free-10` = ten resonance parameters floating; their CPU entry is the **fixed**
-configuration (their free path on CPU was not run).
+`x` = 66 is every mass/width pinned, 76 is the ten named resonance parameters
+floating, 104 is every mass/width floating (38 free resonance parameters on
+their side too); their CPU entry is the **x** = 66 configuration.
+`theirs, CUDA, x=104` was REBUILT and re-measured here per
+`ctpwa_ref/BUILD.md` (all-free = 38 resonance parameters, `ntheta` 38):
+92.55 ms at 0.6×10⁶ — `BUILD.md` had recorded 92.69, i.e. −0.2 % — and
+182.23 ms at 1.2×10⁶, which is new coverage.  The build is validated, not
+assumed: `vary.py config_free.yml` reproduces the documented 26.61 ms as
+26.63.  Their PyPI wheel in the `ctpwa312` env is NOT a substitute — it is
+`cp312` and that env's torch is `2.12.0+cu126`, which has no `sm_120` kernels
+(`no kernel image is available for execution`), so it silently falls back to
+CPU (1338 ms at 0.6×10⁶).  The 2.4×10⁶ OOM is the 38-parameter gradient path,
+not the sample: the same 2.4×10⁶ sample runs all-fixed at 3.31 ms.
 
-| data + phsp | theirs, CUDA, fixed | ours, CUDA, fixed | theirs, CUDA, free-10 | ours, CUDA, free | ours, CPU | theirs, CPU | ours, hybrid |
-|---|---|---|---|---|---|---|---|
-| 1e5 + 5e5 (0.6×10⁶) | 1.16 | 1.3 | 26.61 | 24.2 | **18.8** | 19.17 | **10.2** |
-| 2e5 + 1e6 (1.2×10⁶) | 2.04 | 1.7 | 52.12 | 47.5 | 36.7 | — | **18.4** |
-| 4e5 + 2e6 (2.4×10⁶) | 3.31 | 2.7 | OOM | 94.5 | 70.5 | — | **34.0** |
-| 6e5 + 3e6 (3.6×10⁶) | OOM | 3.6 | — | 141.1 | — | — | — |
-| 1e6 + 5e6 (6×10⁶, the paper's) | OOM (fit 7.6) | **6.2** | — (fit 256) | 235.7 | 177.2 | — | **84.0** |
+| data + phsp | theirs, CUDA, x=66 | ours, CUDA, x=66 | theirs, CUDA, x=76 | ours, CUDA, x=76 | theirs, CUDA, x=104 | ours, CUDA, x=104 (`s0f`) | ours, CPU | theirs, CPU | ours, hybrid |
+|---|---|---|---|---|---|---|---|---|---|
+| 1e5 + 5e5 (0.6×10⁶) | 1.16 | 1.3 | 26.61 | 24.2 | 92.55 | **13.8** | 18.8 | 19.17 | **10.2** |
+| 2e5 + 1e6 (1.2×10⁶) | 2.04 | 1.7 | 52.12 | 47.5 | 182.2 | **25.6** | 36.7 | — | **18.4** |
+| 4e5 + 2e6 (2.4×10⁶) | 3.31 | 2.7 | OOM | 94.5 | OOM | **49.0** | 70.5 | — | **34.0** |
+| 6e5 + 3e6 (3.6×10⁶) | OOM | 3.6 | — | 141.1 | — | **72.5** | — | — | — |
+| 1e6 + 5e6 (6×10⁶, the paper's) | OOM (fit 7.6) | **6.2** | — (fit 256) | 235.7 | — | **119.0** | 177.2 | — | **84.0** |
 
 All columns in ms per `get_nll` (value + gradient); "ours, CPU" and "ours,
 hybrid" are the flat `pwa_gen` family at `rsize=1`, "ours, CUDA, free" is
 `cuda_v4_pwa_s0e`, "ours, CUDA, fixed" is `integrated_pwa` + `cuda_v4_pwa_cache`.
+The free column is the plain per-event kernel: with the coefficient cache (§6.2)
+it becomes **9.3 / 16.6 / 31.1 / 74.8 ms** at 0.6 / 1.2 / 2.4 / 6×10⁶ (27 of 34
+waves cached, varying parameters — the numbers the header quotes).
+
+**All resonance parameters free (`ours, CUDA, x=104`).**  The
+extreme the paper does not run, measured because the coefficient cache is easy to
+dismiss as inert here — it is not.  With no `--fix-mw` / `--free-mw`, `BWR`
+masses and widths are all free, 54 of the 60 basis columns move, and the **7
+waves whose denominator is a constant** (the non-resonant `ONE` waves) stay
+iteration-invariant: 13.8 / 25.6 / 49.0 / 72.5 / 119.0 ms at 0.6 / 1.2 / 2.4 /
+3.6 / 6×10⁶, i.e. 1.17-1.19x over the plain tile.  Theirs costs 92.55 ms at 0.6×10⁶ and 182.23 at 1.2×10⁶ — 6.7× and 7.1× ours —
+and runs out of memory at 2.4×10⁶.  The gain tracks the CACHED FRACTION:
+7/34 → 1.19x, 27/34 → 1.49x (`s0f`) and 1.92x (`s0g`), 34/34 → 4.2x.  It is also
+why `s0g` — which pays an un-staged double `D_k` walk — is only 1.07x at
+x = 104 and loses to `s0f` at both extremes, winning only in the mixed middle
+that production sits in.
+
 Every free-column entry is measured with the **parameters moving** (each call
 gets a different `x`), because that is what a fit does; on our side the same-`x`
 numbers are inside the run-to-run spread (235.4 → 235.7, 81.9 → 84.0 at 6×10⁶;
@@ -483,8 +652,11 @@ reproduces to the same accuracy.  The fixed-column entries were re-taken with th
 harness that synchronises and reports the minimum, which moved the 1.2×10⁶ point
 from 1.78 to 2.04 ms; that one entry we could not reproduce and quote the
 re-measured value.  Their free column cannot go past 1.2×10⁶: the `dF` table is
-`ne · nSL · nFree · 16 B ≈ 33 GB` at 6×10⁶ with ten parameters (and doubles with
-twenty), which is also why the 2.4×10⁶ rung fails.  Their fixed column could not
+`ne · nSL · nFree · 16 B`, but the gradient pass STREAMS it, so that product is
+the per-chunk working set, not the resident footprint — MEASURED peak 4.38 GB at
+0.6×10⁶ and 7.52 GB at 1.2×10⁶ with 38 free, and an OOM at 2.4×10⁶ (peak 11.7 GB
+of 11.5 GB free, in `torch.autograd.grad`).  An earlier version of this file
+quoted ≈33 GB at 6×10⁶ from the product, which is wrong for that reason.  Their fixed column could not
 complete 3.6×10⁶ or 6×10⁶ either — same amplitude-pass failure as §10's full-size
 2-polarization run, not a precheck refusal.
 
@@ -511,10 +683,14 @@ complete 3.6×10⁶ or 6×10⁶ either — same amplitude-pass failure as §10's
   at every rung; what overtakes it is the **flat tile** (141.0 vs 177.2 ms at
   6×10⁶), whose own ladder was not measured.
 * **hybrid** (`shard` 57/43, GPU + CPU): the fastest **free-column**
-  configuration at every size — 10.2 ms against their 26.6 at 0.6×10⁶ (2.6x)
-  and **3.0x their fitted 6×10⁶ number** (84 vs 256 ms), because it is the only
-  configuration that uses both memories.  The fixed column is a different
-  algorithm and stays far faster (1.3-6.2 ms).
+  configuration at every size *when measured*, and still the only one that uses
+  both memories — 10.2 ms against their 26.6 at 0.6×10⁶ (2.6x)
+  and **3.0x their fitted 6×10⁶ number** (84 vs 256 ms).  Since then the
+  `s0g` reaches 73.5 ms at 6×10⁶ (§6.2) by caching the 27
+  iteration-invariant waves; the two are not exclusive (a `s0g` GPU worker plus
+  a CPU worker is the obvious next measurement, and is not claimed here).
+  The fixed column is a different
+  algorithm and stays far faster (6.2-40.8 ms).
 * **initialisation**: 3.0 s (ours, `integrated_pwa`) against 253 s (theirs, a
   linear fit through the measured 151.3/163.2/185.2 s) — 84x, and paid once per
   fit; against the 1.8 s `s0e` initialisation it is 141x.
@@ -522,7 +698,7 @@ complete 3.6×10⁶ or 6×10⁶ either — same amplitude-pass failure as §10's
 **The free column scales differently in the two designs — and their quoted
 numbers carry a fast path.**  Their cost grows with the number of floating
 parameters (the `dF` table is `ne · nSL · nFree · 16 B`, streamed by the gradient
-pass), *and* it depends on whether the parameters actually move: a call that
+pass, so the resident set is a chunk of it and not the product), *and* it depends on whether the parameters actually move: a call that
 repeats the previous `theta` skips work a real fit cannot skip.  Both are
 measured here, at 0.6x10^6, on their CUDA backend:
 
@@ -530,12 +706,14 @@ measured here, at 0.6x10^6, on their CUDA backend:
 floating params      theirs, fixed theta / varying theta   theirs, 6x10^6 (scaled)   ours s0e, 6x10^6
     0                        1.09  /  1.08                         7.6                    235.5
     4                        7.63  /  8.35                        ~80                    235.4
-   10                       23.22  /  26.61                        256                   235.5
+   10                       23.23  /  26.63                        256                   235.5
    20                       46.07  /  53.33                       ~514                   235.4
-   38 (all)                 79.74  /  92.69                       ~893                   235.4
+   38 (all)                 79.84  /  92.55                       ~893                   235.4
 ```
 
-The gap between the two theta columns is **+9 % at four parameters and +16 % at
+Rows 10 and 38 were RE-MEASURED on a fresh `sm_120` build (see §10); rows 4
+and 20 are from the original run and were not re-taken.  The gap between the two
+theta columns is **+9 % at four parameters and +16 % at
 thirty-eight**, i.e. it is not a constant overhead but part of the per-parameter
 work; the 0 row (their fixed algorithm, no `dF` table) is the control and shows
 none of it at the 1 ms level (1.09 / 1.08 here; 1.16 / 1.01 on a re-run, i.e.

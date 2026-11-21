@@ -54,6 +54,13 @@ def main():
     ap.add_argument("--free-mw", default="",
                     help="comma-separated mass/width names to leave FREE "
                          "(implies --fix-mw for the rest)")
+    ap.add_argument("--mask", action="store_true",
+                    help="apply the constraint-derived fixed-column mask to a "
+                         "`fixed_coeff` base (`--backend fixed_coeff --base "
+                         "<kernel>`): the waves no free parameter can move are "
+                         "cached at load.  It is derived from the SAME x0 the "
+                         "timing uses, so --fix-mw / --free-mw decide it, and "
+                         "the printed n_fix says what was cached.")
     args = ap.parse_args()
 
     t0 = time.perf_counter()
@@ -103,6 +110,13 @@ def main():
               if n.endswith(("_mass", "_width")) and n not in keep
               and n in f.defaults}
         f.set_fixed(mw)
+    if args.mask:
+        if not hasattr(f.backend, "set_fixed_coeffs"):
+            ap.error("--mask needs --backend fixed_coeff (--base names the "
+                     "kernel); the delegate is the mask's lifecycle")
+        f.backend.set_fixed_coeffs(f)                # same x0 as the timing
+        if args.base:
+            label = f"{args.base} (masked)"
     x0 = f.initial_values(seed=1)
     t_prep = time.perf_counter()
     t_load = t_prep - t0
@@ -133,9 +147,14 @@ def main():
         nll, _g = f.get_nll(x_cur)
         ts.append(time.perf_counter() - a)
     t = min(ts)
+    mask_note = ""
+    if args.mask:
+        _k = getattr(getattr(f.backend, "base", None), "kernel", None)
+        if getattr(_k, "n_fix", None) is not None:
+            mask_note = f"  [mask n_fix {_k.n_fix} / n_free {_k.n_free}]"
     print(f"{label:28s} x={n_x:3d} ne={ne:>9,} nphsp={nb:>9,}  "
           f"{t*1e3:8.1f} ms/iter  {(ne+nb)/t/1e6:6.2f} Mev/s  NLL={nll:+.6f}"
-          + ("  [vary]" if args.vary else ""),
+          + ("  [vary]" if args.vary else "") + mask_note,
           flush=True)
     print(f"{'':28s} prep: init {t_init - t0:5.1f} | file i/o {t_io - t_init:5.1f} | "
           f"upload+caches {t_upload - t_io:5.1f} | constrain {t_prep - t_upload:5.1f} | "
