@@ -95,6 +95,13 @@ FLOORS = {
     # the strict floors below apply to the masked run too); the mask-off
     # comparison to s0e2 stays in the kernel's own file.
     "cuda_flat_pwa_gen_s0f": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
+    # the UN-STAGED copy of s0f (registered mask-off here, as s0f is): the
+    # only cache is the same fp32 `amp`, and the free block's denominator is
+    # walked instead of staged — fp64 either way.  MEASURED over QUALIFYING at
+    # rsize 1/17 x norm None/1.3: Q 9.2e-7, P 3.4e-6, dck 1.3e-6, dcoeff
+    # 4.7e-6 (dnorm 2.9e-7), i.e. the s0e2 numbers; its masked behaviour is the
+    # same shared suite (tests/_flat_masked.py).
+    "cuda_flat_pwa_gen_s0g": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     # the CPU leaf is fp64 end to end, so its gap to the reference is the
     # Catmull-Rom-vs-linear interpolation difference, not accumulation:
     # MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 -> Q 9.3e-7,
