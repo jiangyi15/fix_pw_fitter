@@ -501,16 +501,6 @@ def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
                        model="pwa_gen")
 
 
-def test_every_other_fixture_passes_the_gate():
-    """5 of 6 fixtures qualify; only ``_mb`` has n_res == 2."""
-    for cfg in QUALIFYING:
-        f = Fitter(cfg)
-        f.apply_constrains()
-        assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 1
-        k = CUDAKernelFlatPwaGenS0C(f.kernel_config)
-        k.free()
-
-
 def test_the_handle_holds_no_interpolation_cache():
     """The point of this backend: the basis interp is NOT cached per event.
 

@@ -3,34 +3,44 @@
 Gates:
 1. **registration** — ``pwa_gen`` scope only, and a case-1 copy (own module,
    own source, own ``.so``, own symbols; gen2 untouched).
-2. **anchor vs ``numpy_flat``** on every ``n_res == 1`` fixture (``_pwa_gen``,
-   ``_km``, ``_ident``, ``_same``, ``_cp``) for ``Q``/``P``/``dck``/``dcoeff``/
-   ``dnorm`` at the float2 cache floor, ``norm=None`` and a scalar norm.
-3. **the sparse-row win is real and pinned per config** — the emitted row
+2. **the sparse-row win is real and pinned per config** — the emitted row
    widths and the ``(ref, run)`` basis-iteration counts for BOTH phase-5 paths,
    so a change in the builder's gamma layout (which would silently move the
    measured ratios) is visible.  Measured per event:
    ``_pwa_gen`` 3→3, ``_km`` 10→10 (dense, 1.00x); ``_ident``/``_same`` 40→20
    per-wave and 40→10 collapsed; ``_cp`` 160→40 per-wave, 160→20 collapsed.
    The fixtures are all dense WITHIN their span, so these numbers are the same
-   whether the list is a span or the true non-zeros — the hole case is gate 6.
-4. **both slot-collapse paths agree** on the numbers (the collapse has real
+   whether the list is a span or the true non-zeros — the hole case is gate 5.
+3. **both slot-collapse paths agree** on the numbers (the collapse has real
    content at one factor — see the module docstring) — forced ON and OFF.
-5. **``dcoeff`` against central differences** — the independent check that the
+4. **``dcoeff`` against central differences** — the independent check that the
    runs (and the ``nz_wave``/``nz_slot`` lists) are the right columns.  A wrong
    run would be self-consistent between two computes and only FD catches it.
-6. **a row WITH HOLES is handled, not refused** — the index list holds only
+   The shared suite runs the same sweep on the auto (collapsed) path; this file
+   pins the forced-OFF path.
+5. **a row WITH HOLES is handled, not refused** — the index list holds only
    the true non-zeros, so a punched hole changes neither ``Q`` nor the
    gradients.  Pinned against a reference whose hole is a genuine zero-weight
    column, i.e. the two must agree exactly rather than "both raise".
-7. **``n_res != 1`` is rejected** with the message naming ``cuda_flat_pwa_gen2``
+6. **``n_res != 1`` is rejected** with the message naming ``cuda_flat_pwa_gen2``
    (``tests/config_pwa_gen_mb.yml``, the only multi-BW fixture).
-8. **``resolution_size``** 1..100 (the grouped path, incl. a group spanning
-   several 8-event tiles) against ``numpy_flat``.
-9. **shared memory** — the context's own report is the launch size, the tile is
+7. **``resolution_size``** 2..100 (the grouped path, incl. a group spanning
+   several 8-event tiles) against ``numpy_flat``; ``rs = 1`` is the shared
+   anchor's sweep.
+8. **shared memory** — the context's own report is the launch size, the tile is
    the documented size and matches gen2's at the same shape, and a wide config
    still crosses the 48 KiB opt-in.
-10. the ``rsize == 1`` path allocates no saved-``A`` buffer.
+9. the ``rsize == 1`` path allocates no saved-``A`` buffer.
+10. the chunk rule (the context's own report, never re-derived in Python) and
+    the ``dA`` scratch's per-handle share.
+
+Chunk independence (multi-chunk == single-chunk) is the shared suite's
+``test_a_multi_chunk_call_equals_a_single_chunk_call``, which sweeps a wider
+batch-size set than this file did.
+
+The anchor vs ``numpy_flat`` over every qualifying fixture and the input/handle
+contract shared by all flat leaves are covered once, registry-driven, in
+``tests/_flat_compute.py``.
 
 
 Test data stays INSIDE both interpolation grids (outside, the tables clamp and
@@ -155,26 +165,6 @@ def test_the_general_kernel_is_not_reused():
 
 
 
-# ── gate 2: the anchor, every qualifying fixture ────────────────────
-
-@pytest.mark.parametrize("cfg", QUALIFYING)
-@pytest.mark.parametrize("norm", [None, 1.3])
-def test_anchor_matches_numpy_flat(cfg, norm):
-    f, ref, gpu, params, data, kc = _pair(cfg)
-    try:
-        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=norm)
-        Qg, gg, Pg = gpu.compute(params, gpu.load_data(data), norm=norm)
-        assert _rel(Pg, Pr) < CACHE_FLOOR_P, "P"
-        assert _rel(Qg, Qr) < CACHE_FLOOR, "Q"
-        assert _rel(gg["ck"], gr["ck"]) < CACHE_FLOOR, "dck"
-        assert _rel(gg["coeff"], gr["coeff"]) < CACHE_FLOOR_COEFF, "dcoeff"
-        if norm is not None:
-            assert _rel(gpu.kernel._last_dnorm, ref._last_dnorm) < CACHE_FLOOR
-    finally:
-        ref.free()
-        gpu.free()
-
-
 # ── gate 3: the run win, pinned per config and per path ─────────────
 
 @pytest.mark.parametrize("cfg", QUALIFYING)
@@ -297,14 +287,15 @@ def test_slot_collapse_on_and_off_agree(cfg, norm):
 # ── gate 4: finite differences (the independent check on the runs) ──
 
 @pytest.mark.parametrize("cfg", [CFG_KM, CFG_IDENT, CFG_CP])
-@pytest.mark.parametrize("collapsed", [False, True])
-def test_coeff_gradient_matches_central_differences(cfg, collapsed):
+def test_coeff_gradient_matches_central_differences(cfg):
     """``dcoeff`` must be ∂Q/∂coeff of THIS kernel's Q, per basis row.
 
     This is the gate that catches a WRONG RUN: a run that included columns the
     factor does not select would still be repeatable (both computes wrong the
-    same way), so only an independent derivative can catch it.  Both phase-5
-    paths are checked, because they use different ``nz`` lists.
+    same way), so only an independent derivative can catch it.  The shared
+    suite runs the same sweep on the DEFAULT (auto) path, which is the
+    collapsed one for these three fixtures — this file pins the FORCED-OFF
+    path, whose ``nz_wave`` list is the other one.
     """
     f = Fitter(cfg)
     f.apply_constrains()
@@ -312,7 +303,7 @@ def test_coeff_gradient_matches_central_differences(cfg, collapsed):
     x = f.initial_values(seed=1)
     params, _ = f.build_params(x)
     data = _in_grid(kc, 48)
-    gpu = CUDAKernelFlatPwaGen1BW(kc, slot_collapse=collapsed)
+    gpu = CUDAKernelFlatPwaGen1BW(kc, slot_collapse=False)
     h = gpu.load_data(data)
     try:
         _Q0, g0, _ = gpu.compute(params, h, norm=None)
@@ -326,34 +317,8 @@ def test_coeff_gradient_matches_central_differences(cfg, collapsed):
             fd = (gpu.compute(pu, h, norm=None)[0]
                   - gpu.compute(pn, h, norm=None)[0]) / (2 * NH)
             assert np.isclose(g0["coeff"][i], fd, rtol=1e-4, atol=1e-8), (
-                f"{cfg} collapsed={collapsed} row {i}: kernel "
+                f"{cfg} collapsed=False row {i}: kernel "
                 f"{g0['coeff'][i]!r} vs FD {fd!r}")
-    finally:
-        gpu.free()
-
-
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_CP])
-def test_ck_gradient_matches_fd(cfg):
-    """``dck`` after the u-merge — the same independent check."""
-    f, _ref, gpu, params, data, kc = _pair(cfg, ne=48)
-    h = gpu.load_data(data)
-    try:
-        ck = np.asarray(params["ck"], np.complex128).copy()
-        _Q0, g0, _ = gpu.compute(params, h, norm=None)
-        for i in range(ck.size):
-            for part in (0, 1):
-                d = np.zeros_like(ck)
-                d[i] = NH if part == 0 else 1j * NH
-                pu, pn = dict(params), dict(params)
-                pu["ck"], pn["ck"] = ck + d, ck - d
-                fd = (gpu.compute(pu, h, norm=None)[0]
-                      - gpu.compute(pn, h, norm=None)[0]) / (2 * NH)
-                # the kernel's dck is the raw Wirtinger half; the real
-                # parameter convention downstream is 2·Re / -2·Im
-                dres = (2.0 * np.real(g0["ck"][i]) if part == 0
-                        else -2.0 * np.imag(g0["ck"][i]))
-                assert np.isclose(dres, fd, rtol=1e-4, atol=1e-8), (
-                    f"ck[{i}] part {part}: {dres!r} vs {fd!r}")
     finally:
         gpu.free()
 
@@ -477,19 +442,11 @@ def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
                        model="pwa_gen")
 
 
-def test_every_other_fixture_passes_the_gate():
-    """5 of 6 fixtures qualify; only ``_mb`` has n_res == 2."""
-    for cfg in QUALIFYING:
-        f = Fitter(cfg)
-        f.apply_constrains()
-        assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 1
-        k = CUDAKernelFlatPwaGen1BW(f.kernel_config)
-        k.free()
-
-
 # ── gate 7: resolution_size (the grouped path) ─────────────────────
 
-RSIZES = (1, 2, 4, 8, 10, 25, 100)
+#: ``rs = 1`` is the shared anchor's sweep (both norms, every qualifying
+#: fixture); the values below are the ones only this file covers.
+RSIZES = (2, 4, 8, 10, 25, 100)
 
 
 @pytest.mark.parametrize("rs", RSIZES)
@@ -627,45 +584,6 @@ def test_the_chunk_rule_is_what_the_context_reports(batch_size, rsize):
         k.free()
 
 
-def test_a_multi_chunk_call_equals_a_single_chunk_call():
-    """Batching is an inner loop: the numbers must not know about it.
-
-    A sample much longer than `cap` has to give the same Q/P/gradients as the
-    same sample in one chunk — bit-for-bit up to fp summation order, which here
-    is exercised both with and without the grouped objective.
-    """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    data = _in_grid(kc, 500, seed=3)
-
-    def run(rs, bs):
-        be = CUDAKernelFlatPwaGen1BW(kc, resolution_size=rs, batch_size=bs)
-        try:
-            h = be.load_data(data)
-            Q, g, P = be.compute(params, h, norm=1.3)
-            h.free()
-            return Q, g["ck"], g["coeff"], float(g["norm"]), np.asarray(P)
-        finally:
-            be.free()
-
-    for rs in (1, 17):
-        base = run(rs, 10 ** 9)             # one chunk
-        for bs in (1000, 5000, 50000):      # many chunks
-            got = run(rs, bs)
-            for name, a, b in (("Q", got[0], base[0]),
-                               ("dck", got[1], base[1]),
-                               ("dcoeff", got[2], base[2]),
-                               ("dnorm", got[3], base[3]),
-                               ("P", got[4], base[4])):
-                a = np.asarray(a).ravel()
-                b = np.asarray(b).ravel()
-                rel = float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
-                assert rel <= 1e-14, f"rsize={rs} batch={bs}: {name} {rel:.2e}"
-
-
 # ── gate 8: shared memory ───────────────────────────────────────────
 
 def _wide_kc(n_wave_target):
@@ -777,57 +695,3 @@ def test_an_over_large_tile_is_refused_not_silently_empty():
     with pytest.raises((RuntimeError, ValueError)):
         CUDAKernelFlatPwaGen1BW(kc)
 
-
-# ── contract ────────────────────────────────────────────────────────
-
-def test_rejects_an_already_deduped_config():
-    from tabpwa.pwa_gen_config import build_from_groups, dedup
-    m = Fitter(CFG_KM).model
-    dd = dedup(build_from_groups(m, n_interp=200))
-    with pytest.raises(ValueError, match="FULL"):
-        CUDAKernelFlatPwaGen1BW(dd)
-
-
-def test_resolution_size_below_one_is_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    with pytest.raises(ValueError, match="resolution_size"):
-        CUDAKernelFlatPwaGen1BW(f.kernel_config, resolution_size=0)
-
-
-def test_wrong_parameter_lengths_are_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGen1BW(kc)
-    h = k.load_data(_in_grid(kc, 8))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        bad = dict(params)
-        bad["ck"] = np.zeros(k.n_wave + 1, complex)
-        with pytest.raises(ValueError, match="n_wave"):
-            k.compute(bad, h, norm=None)
-        bad = dict(params)
-        bad["coeff"] = np.zeros(k.n_basis + 1)
-        with pytest.raises(ValueError, match="n_basis"):
-            k.compute(bad, h, norm=None)
-    finally:
-        k.free()
-
-
-def test_a_freed_handle_is_reported_not_crashed():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGen1BW(kc)
-    h = k.load_data(_in_grid(kc, 8))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        h.free()
-        h.free()                              # idempotent
-        with pytest.raises(RuntimeError, match="already freed"):
-            k.compute(params, h, norm=None)
-    finally:
-        k.free()

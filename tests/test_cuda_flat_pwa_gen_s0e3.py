@@ -491,7 +491,10 @@ def test_a_group_never_straddles_a_tile_or_a_chunk():
 
 # ── gate 10: path A and path B agree ────────────────────────────────────
 
-RSIZES = (1, 2, 4, 8, 10, 17, 25, 40, 100)
+#: ``rs = 1`` and ``rs = 17`` are the shared anchor's sweep (both norms, every
+#: qualifying fixture); the values below are the ones only this file covers.
+#: Path A is ``rsize <= te`` (here 2/4/8), path B ``rsize > te`` (25/40/100).
+RSIZES = (2, 4, 8, 10, 25, 40, 100)
 
 
 @pytest.mark.parametrize("rs", RSIZES)
@@ -501,8 +504,7 @@ def test_every_resolution_size_matches_numpy_flat(rs):
     kc = f.kernel_config
     x = f.initial_values(seed=1)
     params, _ = f.build_params(x)
-    data = _in_grid(kc, 32, seed=7)
-    data = data if rs == 1 else _replicate(data, rs)
+    data = _replicate(_in_grid(kc, 32, seed=7), rs)
     ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
     gpu = create_backend("cuda_flat_pwa_gen_s0e3", kc, model="pwa_gen",
                          resolution_size=rs)
@@ -591,15 +593,6 @@ def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
     with pytest.raises(ValueError, match="cuda_flat_pwa_gen2"):
         create_backend("cuda_flat_pwa_gen_s0e3", f.kernel_config,
                        model="pwa_gen")
-
-
-def test_every_other_fixture_passes_the_gate():
-    for cfg in QUALIFYING:
-        f = Fitter(cfg)
-        f.apply_constrains()
-        assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 1
-        k = CUDAKernelFlatPwaGenS0E3(f.kernel_config)
-        k.free()
 
 
 # ── gate 12: shared memory ──────────────────────────────────────────────

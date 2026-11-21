@@ -27,8 +27,9 @@ Gates:
 9. **the chunk rule is what the context reports** (never re-derived in Python),
    including the two guards measurement forced: the ``1<<20`` cap and
    "a chunk below one group is raised to one whole group".
-10. **path A and path B agree** — ``rsize`` 1..100 (a group larger than the
-    tile is walked internally, and must still close to ONE log).
+10. **path A and path B agree** — ``rsize`` 2..100 (a group larger than the
+    tile is walked internally, and must still close to ONE log); ``rs = 1`` and
+    ``17`` are the shared anchor's sweep.
 11. **``n_res != 1`` is rejected** with ``cuda_flat_pwa_gen2`` named.
 12. **shared memory** — the context's own report is the launch size, the tile
     arithmetic matches ``cuda_tile_bytes_*``, a wide config still crosses the
@@ -458,7 +459,10 @@ def test_a_group_never_straddles_a_tile_or_a_chunk():
 
 # ── gate 10: path A and path B agree ────────────────────────────────────
 
-RSIZES = (1, 2, 4, 8, 10, 17, 25, 40, 100)
+#: ``rs = 1`` and ``rs = 17`` are the shared anchor's sweep (both norms, every
+#: qualifying fixture); the values below are the ones only this file covers.
+#: Path A is ``rsize <= te`` (here 2/4/8), path B ``rsize > te`` (25/40/100).
+RSIZES = (2, 4, 8, 10, 25, 40, 100)
 
 
 @pytest.mark.parametrize("rs", RSIZES)
@@ -468,8 +472,7 @@ def test_every_resolution_size_matches_numpy_flat(rs):
     kc = f.kernel_config
     x = f.initial_values(seed=1)
     params, _ = f.build_params(x)
-    data = _in_grid(kc, 32, seed=7)
-    data = data if rs == 1 else _replicate(data, rs)
+    data = _replicate(_in_grid(kc, 32, seed=7), rs)
     ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
     gpu = create_backend("cuda_flat_pwa_gen_s0e", kc, model="pwa_gen",
                          resolution_size=rs)
@@ -558,15 +561,6 @@ def test_multiple_bws_per_chain_is_rejected_with_the_general_backend_named():
     with pytest.raises(ValueError, match="cuda_flat_pwa_gen2"):
         create_backend("cuda_flat_pwa_gen_s0e", f.kernel_config,
                        model="pwa_gen")
-
-
-def test_every_other_fixture_passes_the_gate():
-    for cfg in QUALIFYING:
-        f = Fitter(cfg)
-        f.apply_constrains()
-        assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 1
-        k = CUDAKernelFlatPwaGenS0E(f.kernel_config)
-        k.free()
 
 
 # ── gate 12: shared memory ──────────────────────────────────────────────

@@ -6,16 +6,17 @@ Gates:
    mass column)``, ``n_basis`` shrinks, and the fold is lossless — the
    per-NAME coefficient gradient totals equal the full-form reference's,
    which is what the basis-weight transform consumes;
-3. **anchor vs ``numpy_flat``** at ``norm=None`` and a scalar norm: ``Q`` /
-   ``P`` / ``ck`` within the float2 amplitude-cache floor (1e-6, measured
-   1e-8);
-4. the **cache is correct**: ``F`` is computed at ``load_data`` and does not
+3. the **cache is correct**: ``F`` is computed at ``load_data`` and does not
    depend on ``ck``/``coeff``, so changing the parameters between two
    computes must give the same answer as a fresh handle;
-5. ``dcoeff`` matches central differences of the kernel's own ``Q`` per NAME;
-6. the shared config builder is untouched — a config still has all its rows,
+4. ``dcoeff`` matches central differences of the kernel's own ``Q`` per NAME;
+5. the shared config builder is untouched — a config still has all its rows,
    and ``dedup`` on it is a separate host pass that this backend does not
    require.
+
+The anchor vs ``numpy_flat`` (``Q``/``P``/``ck``/``coeff``/``dnorm``, both
+norms, rs 1 and 17), the wrong-length parameter guards and the deduped-config
+rejection are covered once, registry-driven, in ``tests/_flat_compute.py``.
 
 Test data stays INSIDE both interpolation grids (outside, the tables clamp
 and CPU/GPU diverge).
@@ -142,24 +143,7 @@ def test_the_fold_lives_in_the_builder_not_the_backend():
         gpu.free()
 
 
-# ── gate 3: anchor ──────────────────────────────────────────────────
-
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_MB])
-@pytest.mark.parametrize("norm", [None, 1.3])
-def test_anchor_matches_numpy_flat(cfg, norm):
-    ref, gpu, params, data, kc = _pair(cfg)
-    try:
-        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=norm)
-        Qc, gc, Pc = gpu.compute(params, gpu.load_data(data), norm=norm)
-        assert _rel(Pc, Pr) < CACHE_FLOOR, "P"
-        assert _rel(Qc, Qr) < CACHE_FLOOR, "Q"
-        assert _rel(gc["ck"], gr["ck"]) < CACHE_FLOOR, "ck"
-        if norm is not None:
-            assert _rel(gpu.kernel._last_dnorm, ref._last_dnorm) < CACHE_FLOOR
-    finally:
-        ref.free()
-        gpu.free()
-
+# ── gate 3: the folded gradient's per-name contract ─────────────────
 
 @pytest.mark.parametrize("cfg", [CFG_KM, CFG_MB])
 def test_coeff_gradient_is_one_entry_per_weight(cfg):
@@ -242,29 +226,6 @@ def test_coeff_gradient_matches_fd_per_name():
     finally:
         ref.free()
         gpu.free()
-
-
-# ── gate 6: contract ────────────────────────────────────────────────
-
-def test_coeff_length_must_match_the_config():
-    ref, gpu, params, data, kc = _pair(CFG_KM, ne=16)
-    h = gpu.load_data(data)
-    try:
-        bad = dict(params)
-        bad["coeff"] = np.zeros(gpu.kernel.n_basis + 1)
-        with pytest.raises(ValueError, match="expected n_basis"):
-            gpu.compute(bad, h, norm=None)
-    finally:
-        ref.free()
-        gpu.free()
-
-
-def test_rejects_an_already_deduped_config():
-    from tabpwa.pwa_gen_config import dedup
-    m = Fitter(CFG_KM).model
-    dd = dedup(build_from_groups(m, n_interp=200))
-    with pytest.raises(ValueError, match="FULL"):
-        CUDAKernelFlatCachePWAGen(dd)
 
 
 # ── gate: large n_wave must cross the shared-memory opt-in boundary ──

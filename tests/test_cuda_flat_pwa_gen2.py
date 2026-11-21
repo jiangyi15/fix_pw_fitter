@@ -2,9 +2,10 @@
 
 Gates:
 1. registration — ``pwa_gen`` scope only;
-2. **anchor vs ``numpy_flat``** on every block/structure fixture (``_km``,
-   ``_mb`` with ``n_res == 2``, ``_ident`` with 2 slots, ``_cp`` with 4) for
-   ``Q``/``P``/``dck``/``dcoeff``/``dnorm`` at the float2 cache floor;
+2. **anchor vs ``numpy_flat`` on ``_mb``** (``n_res == 2``, outside the shared
+   anchor's qualifying set) for ``Q``/``P``/``dck``/``dcoeff``/``dnorm`` at the
+   float2 cache floor.  The ``n_res == 1`` fixtures are covered
+   registry-driven in ``tests/_flat_compute.py``;
 3. **both ``n_slot``-collapse paths agree**: the same config and data forced
    ON and OFF.  The builder never produces ``n_slot == n_wave`` (a chain fixes
    its basis, so its waves share a gamma row), so the "gate would refuse"
@@ -14,12 +15,18 @@ Gates:
 4. **``dcoeff`` against central differences** — the gate that catches a wrong
    collapse (a mis-summed ``dsum`` would still be self-consistent between the
    two paths only if both were wrong the same way; FD is the independent check);
+   pinned here on ``_mb`` and on the forced-OFF path, the two shapes the shared
+   sweep does not reach;
 5. ``resolution_size`` (grouped log-sum) against ``numpy_flat`` at rsize
-   1..100, including change 4's saved-``A`` backward launch;
+   2..100 (``rs = 1`` is the shared anchor's), including change 4's saved-``A``
+   backward launch;
 6. the ``rsize == 1`` path allocates no ``A`` buffer and the grouped one
    allocates exactly ``2·ne·n_proj`` doubles;
 7. the ``n_res == 1`` specialisation really halves the tile, and a wide config
    still crosses the shared-memory opt-in.
+
+The input/handle contract shared by all flat leaves is covered once,
+registry-driven, in ``tests/_flat_compute.py``.
 
 Test data stays INSIDE both interpolation grids (outside, the tables clamp and
 CPU/GPU diverge — see ``test_cuda_flat_cache_pwa_gen._in_grid``).
@@ -139,9 +146,14 @@ def test_the_base_kernel_and_wrapper_are_not_reused():
         b.free()
 
 
-# ── gate 2: the anchor, per block/structure fixture ──────────────────
+# ── gate 2: the anchor on the fixture the shared suite cannot reach ──
+#
+# ``_mb`` (two BWs per chain) is outside the shared anchor's qualifying set
+# (that set is every ``n_res == 1`` fixture), so this is the one anchor this
+# file must keep; the other five are covered registry-driven in
+# ``tests/_flat_compute.py`` (both norms, rs 1 and 17).
 
-@pytest.mark.parametrize("cfg", ALL_CFGS)
+@pytest.mark.parametrize("cfg", [CFG_MB])
 @pytest.mark.parametrize("norm", [None, 1.3])
 def test_anchor_matches_numpy_flat(cfg, norm):
     f, ref, gpu, params, data, kc = _pair(cfg)
@@ -294,13 +306,17 @@ def test_slot_map_is_a_partition_of_identical_gamma_rows():
 
 # ── gate 4: finite differences (the independent check on dcoeff) ─────
 
-@pytest.mark.parametrize("cfg", [CFG_KM, CFG_MB, CFG_CP])
+@pytest.mark.parametrize("cfg", [CFG_MB])
 def test_coeff_gradient_matches_central_differences(cfg):
     """``dcoeff`` must be ∂Q/∂coeff of THIS kernel's Q, per basis row.
 
     Independent of both paths: a wrong ``dsum`` or ``w`` would be caught here
     even if the ON/OFF comparison were blind to it (both could share the bug
     only by construction, which the FD pass rules out).
+
+    ``_mb`` is the fixture the shared sweep cannot reach (a two-BW chain has
+    ``n_res == 2``); the ``n_res == 1`` shapes are covered there over ALL rows
+    (``_km`` 5, ``_ident`` 10, ``_cp`` 20) at both rs 1 and 17.
     """
     f, _ref, gpu, params, data, kc = _pair(cfg, ne=48)
     h = gpu.load_data(data)
@@ -384,7 +400,9 @@ def test_ck_gradient_matches_fd():
 
 # ── gate 5: resolution_size (change 4's grouped path) ───────────────
 
-RSIZES = (1, 2, 4, 8, 10, 25, 100)
+#: ``rs = 1`` is the shared anchor's sweep; the values below are the ones only
+#: this file covers.
+RSIZES = (2, 4, 8, 10, 25, 100)
 
 
 @pytest.mark.parametrize("rs", RSIZES)
@@ -657,40 +675,3 @@ def test_wide_config_crosses_the_shared_memory_optin(n_wave_target):
         f"opt-in) and the error was swallowed")
     assert np.all(np.asarray(P) >= 0.0)
 
-
-# ── contract ────────────────────────────────────────────────────────
-
-def test_rejects_an_already_deduped_config():
-    from tabpwa.pwa_gen_config import build_from_groups, dedup
-    m = Fitter(CFG_KM).model
-    dd = dedup(build_from_groups(m, n_interp=200))
-    with pytest.raises(ValueError, match="FULL"):
-        CUDAKernelFlatPwaGen2(dd)
-
-
-def test_resolution_size_below_one_is_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    with pytest.raises(ValueError, match="resolution_size"):
-        CUDAKernelFlatPwaGen2(f.kernel_config, resolution_size=0)
-
-
-def test_wrong_parameter_lengths_are_rejected():
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    k = CUDAKernelFlatPwaGen2(kc)
-    h = k.load_data(_in_grid(kc, 8))
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    try:
-        bad = dict(params)
-        bad["ck"] = np.zeros(k.n_wave + 1, complex)
-        with pytest.raises(ValueError, match="n_wave"):
-            k.compute(bad, h, norm=None)
-        bad = dict(params)
-        bad["coeff"] = np.zeros(k.n_basis + 1)
-        with pytest.raises(ValueError, match="n_basis"):
-            k.compute(bad, h, norm=None)
-    finally:
-        k.free()
