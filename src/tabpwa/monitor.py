@@ -6,12 +6,10 @@ The GPU numbers come from ONE long-lived ``nvidia-smi`` child::
         --format=csv,noheader,nounits -lms <interval_ms> -i <device>
 
 ``-lms`` emits one CSV line per interval, so the measured process never forks
-per sample and never asks the CUDA runtime anything.  In particular this
-module **never imports ``torch``** (``torch.cuda.init()`` makes every later
-raw-CUDA call in the process 5.1x slower, permanently) and the sampler **never
-calls ``cudaMemGetInfo``** (an in-process probe creates/initialises a context
-and would inflate the very memory it reports).  ``nvidia-smi`` reads the
-driver, so it cannot perturb the number.
+per sample and never asks the CUDA runtime anything: ``nvidia-smi`` reads the
+driver, so it cannot perturb the number it reports.  The sampler in particular
+**never calls ``cudaMemGetInfo``** — an in-process probe creates/initialises a
+context and would inflate the very memory it measures.
 
 **The sampled device is pinned with ``-i <device>``** (``create_monitor``'s
 ``device=`` keyword, default ``0``).  Without ``-i``, ``--query-gpu`` emits one

@@ -13,26 +13,45 @@ chunk invariance (multi-chunk == single-chunk, a chunk boundary does not move
 the fill), handle independence / freed handle, and the input errors.
 
 The list of backends comes from the REGISTRY and its TAGS (``reference`` /
-``delegate`` / ``n_res1``, declared at registration) — not from a name list, so
-a backend registered later is covered automatically and an exclusion is a
-capability, never a silent skip.
+``delegate`` / ``n_res1`` / ``coeff_pinned`` / ``probe``, declared at
+registration) — not from a name list, so a backend registered later is covered
+automatically and an exclusion is a capability, never a silent skip.  The
+RULE is the pure function ``_select(registry, tags_of)``, so it can be proved
+on a synthetic registry; ``coeff_pinned`` (every coefficient declared fixed, so
+``grads["coeff"] == 0`` and a moved ``coeff`` raises) is subtracted exactly
+like ``reference``/``delegate``: the free-coefficient contract below does not
+apply to it, and its own fixture gates the pinned one.  ``probe`` is a
+TEST-SIDE STUB (``test_amp_model``'s ``_model_probe``, ``test_config_backend``'s
+``_kwarg_probe``) registered model-independently, so it lands in every model's
+registry; tagging it is what keeps a stub out of the sweep without writing a
+test module's private name into it.
 
-Local (each variant's own file): dedup/index pins, CSR, tile/smem, launch
-counts, path A/B, the parent A/B, the measured handle, own-module/`.so`/symbols,
-registration, and the sparse-row edge cases.  Tolerances are the ones the
-per-variant files used: the fp32 cache floor is ABSOLUTE, so ``_floor_ok``
-accepts either the relative or the absolute bound.
+``SPECS`` is fixed at import (a parametrisation must be), but the COMPLETENESS
+check is not: ``test_the_live_registry_is_fully_swept`` recomputes the rule
+against ``backends_for_model`` AS IT IS NOW and reports anything registered
+after this module was imported.  A snapshot taken at import cannot — it
+asserts that the suite swept what it happened to see.
+
+Local (the family files): dedup/index pins, CSR, tile/smem, path A/B, the
+parent A/B, this family's own-module/`.so`/symbols, registration, and the
+sparse-row edge cases.  Which file owns which leaf is ``CONFIG_OWNER`` below.
+Tolerances are the ones the per-variant files used: the fp32 cache floor is
+ABSOLUTE, so ``_floor_ok`` accepts either the relative or the absolute bound.
 
 ``test_flat_compute.py`` imports this module so pytest collects the suite under
 ``[<backend name>]`` ids.
 """
+import os
+import shutil
+import subprocess
+
 import numpy as np
 import pytest
 
 from tabpwa import Fitter
 from tabpwa.backends import (backend_tags, backends_for_model,
                              create_backend)
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_grid import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
 CFG_KM = "tests/config_pwa_gen_km.yml"
@@ -93,7 +112,8 @@ FLOORS = {
     # behaviour is the SHARED mask suite, tests/_flat_masked.py (selected by the
     # `fixed_coeff` tag: a fixed wave's columns are exactly 0 by contract, and
     # the strict floors below apply to the masked run too); the mask-off
-    # comparison to s0e2 stays in the kernel's own file.
+    # comparison to s0e2 is tests/_flat_masked.py's
+    # test_with_no_mask_the_numbers_are_the_parent_s0e2.
     "cuda_flat_pwa_gen_s0f": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     # the UN-STAGED copy of s0f (registered mask-off here, as s0f is): the
     # only cache is the same fp32 `amp`, and the free block's denominator is
@@ -125,38 +145,179 @@ FLOORS = {
 #:   fixed_coeff — takes ``fixed_cols`` + ``fixed_values`` and caches the
 #:                 columns a fixed wave reads (the mask suite's selector,
 #:                 ``tests/_flat_masked.py``)
-TAG_VOCABULARY = frozenset({"reference", "delegate", "n_res1", "fixed_coeff"})
+#:   coeff_pinned — every coefficient is PINNED: the whole per-wave amplitude
+#:                 is a load-time cache, ``grads["coeff"] == 0`` by contract and
+#:                 a compute whose ``coeff`` moved RAISES.  Subtracted from this
+#:                 suite like ``reference``/``delegate``: the free-coefficient
+#:                 contract this file tests (FD on ``coeff``, the mask-off
+#:                 anchor, an arbitrary ``params["coeff"]``) is exactly what a
+#:                 pinned kernel refuses to do — its own file gates the pinned
+#:                 contract.
+#:   probe     — a TEST-SIDE STUB, not a backend: ``test_amp_model``'s
+#:                 ``_model_probe`` and ``test_config_backend``'s
+#:                 ``_kwarg_probe`` declare one at module level to exercise
+#:                 ``create_backend``'s kwarg/model injection.  A declared
+#:                 capability, not a name prefix: a stub that leaked into this
+#:                 suite would be swept as if it computed, and excluding it by
+#:                 name here would put a test module's private name into the
+#:                 suite's rule.
+TAG_VOCABULARY = frozenset({"reference", "delegate", "n_res1", "fixed_coeff",
+                            "coeff_pinned", "probe"})
+
+#: tags that REMOVE a name from this suite — by capability, never by name.
+#: `reference`/`delegate`/`coeff_pinned` are not this suite's contract (their
+#: own fixtures gate them) and `probe` is not a backend at all.
+EXCLUDED_TAGS = frozenset({"reference", "delegate", "coeff_pinned", "probe"})
+
+
+def _select(registry, tags_of):
+    """THE RULE, on any registry: names in, ``(tested, excluded)`` out.
+
+    *registry* is a collection of backend names and *tags_of(name)* returns
+    that name's declared tags — so the rule is a PURE function of the two, and
+    can be exercised on a synthetic registry (see
+    ``test_the_rule_excludes_a_probe_and_reports_a_late_backend``) without
+    touching the process-wide one.
+
+    It reads the registry it is GIVEN, never a snapshot: a backend registered
+    after this module was imported is either in the result or absent from it,
+    and the caller's ledger (``_missing_from_suite``) then says so out loud.
+    That is the whole point — a frozen set cannot notice anything.
+    """
+    names = set(registry)
+    excluded = {n for n in names if frozenset(tags_of(n)) & EXCLUDED_TAGS}
+    return sorted(names - excluded), sorted(excluded)
+
+
+def _missing_from_suite(specs, registry, tags_of):
+    """Testable leaves the registry holds that *specs* does not cover.
+
+    *specs* is what the suite actually swept (fixed when the parametrisation
+    was built).  Empty means complete; anything in it was registered after that
+    point and is therefore NOT tested — the condition that must be reported
+    rather than silently tolerated.
+    """
+    tested, _ = _select(registry, tags_of)
+    return sorted(set(tested) - set(specs))
+
+
+def _load_test_module(mod):
+    """Import a sibling test module BY PATH, whatever pytest called it.
+
+    ``tests/`` is a package, so the same file is ``test_x`` under one rootdir
+    and ``tests.test_x`` under another.  Skip if either name is already loaded;
+    otherwise load the file and publish it under its bare name (a second
+    execution would only re-define the same names).
+    """
+    import importlib.util
+    import os
+    import sys
+
+    for key in (mod, f"tests.{mod}"):
+        if key in sys.modules:
+            return sys.modules[key]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), mod + ".py")
+    spec = importlib.util.spec_from_file_location(mod, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(mod, None)
+        raise
+    return module
 
 
 def backends_to_test():
     """Every registered ``pwa_gen`` backend that IMPLEMENTS the function.
 
-    Derived from the registry and its capability tags: references (the oracle)
-    and delegates (a forwarding wrapper — ``auto``/``shard`` — whose own tests
-    pin the forwarding) are subtracted, so no name is written out here and a
-    backend registered later is covered automatically.
+    Derived from the registry and its capability tags: references (the oracle),
+    delegates (a forwarding wrapper — ``auto``/``shard`` — whose own tests pin
+    the forwarding), PINNED-coefficient kernels (``coeff_pinned``: their
+    ``coeff`` cannot move, so the free-coefficient contract below — FD on
+    ``coeff``, the mask-off anchor, an arbitrary ``params["coeff"]`` — does not
+    apply to them) and test-side stubs (``probe``) are subtracted, so no name
+    is written out here and a backend registered later is covered
+    automatically.
     """
     reg = set(backends_for_model("pwa_gen"))
+
+    def tags_of(name):
+        return backend_tags(name, "pwa_gen")
+
+    leaves, _excluded = _select(reg, tags_of)
+    # per-tag views, asserted below: an exclusion must be a DECLARED capability
     ref = set(backends_for_model("pwa_gen", tag="reference"))
     deleg = set(backends_for_model("pwa_gen", tag="delegate"))
+    pinned = set(backends_for_model("pwa_gen", tag="coeff_pinned"))
+    probe = set(backends_for_model("pwa_gen", tag="probe"))
     assert ref and deleg, "the tag vocabulary is not declared at registration"
-    assert ref <= reg and deleg <= reg
-    leaves = reg - ref - deleg
-    assert leaves | ref | deleg == reg, (
+    assert ref <= reg and deleg <= reg and pinned <= reg and probe <= reg
+    # a pinned-coefficient kernel computes, it is not an oracle and it does not
+    # forward: those tags are mutually exclusive, so a subtraction order can
+    # never decide whether a backend is tested
+    assert not pinned & (ref | deleg), sorted(pinned & (ref | deleg))
+    assert set(leaves) | ref | deleg | pinned | probe == reg, (
         "registry names neither tested nor tagged: "
-        f"{sorted(reg - leaves - ref - deleg)}")
+        f"{sorted(reg - set(leaves) - ref - deleg - pinned - probe)}")
     assert not ref & deleg
-    unknown = {t for n in reg for t in backend_tags(n, "pwa_gen")} - TAG_VOCABULARY
+    unknown = {t for n in reg for t in tags_of(n)} - TAG_VOCABULARY
     assert not unknown, f"undeclared tags in the registry: {sorted(unknown)}"
     nres1 = set(backends_for_model("pwa_gen", tag="n_res1"))
-    assert nres1 <= leaves, sorted(nres1 - leaves)
-    return sorted(leaves)
+    assert nres1 <= set(leaves) | pinned, sorted(nres1 - (set(leaves) | pinned))
+    return leaves
 
 
-#: the registry loop — the list is DERIVED, never written out by hand
+#: the registry loop — the list is DERIVED, never written out by hand.
+#: Fixed at import because a parametrisation is; the COMPLETENESS check is not
+#: (``test_the_live_registry_is_fully_swept`` recomputes it live), so a backend
+#: registered after this module is imported fails that check instead of falling
+#: silently outside the suite.
 SPECS = backends_to_test()
+#: WHICH MODULE OWNS EACH LEAF'S CONFIG CONTRACT.  The compute suite above is
+#: registry-driven, so nothing has to be written down for it; the config
+#: contract (accepted layouts, refusals, the layout/objective A/Bs) is
+#: partitioned across the family files, and this map is the rule they check
+#: themselves against.  A leaf registered later lands in NO value here, so the
+#: equality below FAILS instead of the leaf being silently uncovered by every
+#: table — the same round-trip ``_flat_masked``/``_flat_pinned`` apply by tag.
+CONFIG_OWNER = {
+    "cuda_flat_pwa_gen": "test_flat_dedup.py",
+    "cuda_flat_cache_pwa_gen": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen2": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen_1bw": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen_s0c": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen_s0c2": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen_s0e": "test_flat_tile.py",
+    "cuda_flat_pwa_gen_s0e2": "test_flat_tile.py",
+    "cuda_flat_pwa_gen_s0e3": "test_flat_tile.py",
+    "cuda_flat_pwa_gen_s0e4": "test_flat_tile.py",
+    "cuda_flat_pwa_gen_s0e5": "test_flat_tile.py",
+    "cuda_flat_pwa_gen_s0f": "_flat_masked.py",
+    "cuda_flat_pwa_gen_s0g": "_flat_masked.py",
+    "cuda_flat_pwa_gen_ampcache": "_flat_pinned.py",
+    "cuda_flat_pwa_gen_ampcache32": "_flat_pinned.py",
+    "cpu_flat_pwa_gen": "test_cpu_flat_pwa_gen.py",
+    "cpu_flat_pwa_gen_cached": "test_cpu_flat_pwa_gen_cached.py",
+    "cpu_flat_pwa_gen_cached2": "test_cpu_flat_pwa_gen_cached2.py",
+}
+_ALL_LEAVES = set(SPECS) | set(backends_for_model("pwa_gen", tag="coeff_pinned"))
+assert set(CONFIG_OWNER) == _ALL_LEAVES, (
+    "every flat leaf needs a CONFIG contract owner (a register-only addition "
+    "must fail here, not vanish from every family table): missing "
+    f"{sorted(_ALL_LEAVES - set(CONFIG_OWNER))}, stale "
+    f"{sorted(set(CONFIG_OWNER) - _ALL_LEAVES)}")
+
+
+
 #: the multi-BW guard, by tag, so the skip names the capability
 N_RES1 = frozenset(backends_for_model("pwa_gen", tag="n_res1"))
+#: PINNED-coefficient kernels are subtracted from SPECS (their own fixture
+#: gates the free-coefficient contract) but the multi-BW guard is a SHAPE
+#: question, not a contract one: they take a multi-BW chain and are swept by
+#: `test_multi_bw_chain_is_rejected_or_accepted` too.
+PINNED = frozenset(backends_for_model("pwa_gen", tag="coeff_pinned"))
+MULTI_BW_SWEEP = sorted(set(SPECS) | PINNED)
 
 
 def _floor_ok(a, b, rel_bound, abs_bound=CACHE_FLOOR_ABS):
@@ -176,6 +337,64 @@ def _rel(a, b):
     a = np.asarray(a).ravel()
     b = np.asarray(b).ravel()
     return float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
+
+
+def _pid_alive(pid):
+    """Whether ``pid`` exists right now (``PermissionError`` means it does)."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:                 # another user's process: it exists
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def other_gpu_users():
+    """PIDs holding the device right now, excluding this process.
+
+    ``free_bytes()`` is DEVICE-WIDE: any other process allocating on the card
+    moves the number inside a before/after trace, so a byte-level memory gate
+    would be measuring someone else's work — that is not a wider tolerance to
+    invent, it is a precondition that does not hold.  ``cudaMemGetInfo`` cannot
+    attribute memory to a PID, so the honest check is "no one else is on the
+    card".
+
+    ``nvidia-smi --query-compute-apps`` can list a PID whose process has already
+    exited (MEASURED: a call returned a pid that ``ps`` did not know, and ``[]``
+    seconds later), so every entry is checked with ``os.kill(pid, 0)`` before it
+    is reported.  A GHOST is not a user: skipping a valid gate because of one —
+    or failing it — is the false signal this precondition exists to avoid.  A
+    real process may still appear AFTER the query; a gate therefore re-queries
+    after its measurement and treats a changed set as an invalid window rather
+    than asserting on it.
+
+    The query is a PRECONDITION, never the oracle: when ``nvidia-smi`` or
+    ``--query-compute-apps`` is unavailable this returns ``[]`` and the gate
+    RUNS — a missing tool must not silently skip a leak gate.
+    """
+    exe = shutil.which("nvidia-smi")
+    if exe is None:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    mine = os.getpid()
+    pids = set()
+    for line in out.splitlines():
+        cell = line.split(",")[0].strip()
+        try:
+            pid = int(cell)
+        except ValueError:                  # blank, [N/A], a header
+            continue
+        if pid != mine and _pid_alive(pid):
+            pids.add(pid)
+    return sorted(pids)
 
 
 def _gate(name, a, b, which="rel", cfg=None):
@@ -224,32 +443,144 @@ def _replicate(data, rs):
     return out
 
 
-def test_the_suite_does_not_import_torch():
-    """No test may import torch: it makes every later raw-CUDA call 5.1x slower.
-
-    MEASURED in this process after ``torch.cuda.init()``: one
-    create/load/compute/free cycle goes 5.71 -> 29.38 ms and never recovers,
-    which is how this file became 31 s alone, 102 s right after
-    ``tests/test_fixed_coeff.py`` (same process) and 169 s inside the full
-    suite.  The two free-VRAM probes that used it now call ``libcudart``
-    through ``ctypes`` (``tabpwa.monitor.free_bytes``).
-
-    This runs FIRST in this module, so a module-level import elsewhere in the
-    file order is what it reports — not a torch import of its own.
-    """
-    import sys
-    assert "torch" not in sys.modules, sorted(
-        m for m in sys.modules if m.startswith("torch"))
-
-
 def test_backend_tags_are_declared_metadata():
     """Tags are DECLARED at registration — the suite selects on them."""
     assert backend_tags("numpy_flat", "pwa_gen") == frozenset({"reference"})
     assert backend_tags("cuda_flat_pwa_gen_s0c2", "pwa_gen") \
         == frozenset({"n_res1"})
     assert backend_tags("auto", "pwa_gen") == frozenset({"delegate"})
+    # a pinned-coefficient kernel is a LEAF with its own contract, never an
+    # oracle and never a forwarding wrapper.  It carries NO `n_res1`: the
+    # denominator is the product over the factor axis, so a multi-BW chain is
+    # computed by it like any other leaf (the sweep below covers it).
+    assert backend_tags("cuda_flat_pwa_gen_ampcache", "pwa_gen") \
+        == frozenset({"coeff_pinned"})
     # an untagged backend returns an empty frozenset, not None
     assert backend_tags("cuda_v4_pwa", "pwa") == frozenset()
+
+
+def test_the_pinned_tag_is_out_of_this_suite_and_nobody_else_is():
+    """``coeff_pinned`` is subtracted here — and it is the ONLY such backend.
+
+    The pinned tag means "``coeff`` cannot move", which is the opposite of this
+    file's free-coefficient contract, so those kernels are gated by their own
+    fixture.  Anything else that stops appearing here would be a silent skip,
+    which is why the exclusion is asserted by NAME through its tag rather than
+    trusted to the subtraction.
+    """
+    # the LIVE registry, read now: a snapshot taken at import is what let a
+    # backend registered later fall outside the suite unnoticed
+    reg = set(backends_for_model("pwa_gen"))
+    pinned = set(backends_for_model("pwa_gen", tag="coeff_pinned"))
+    assert "coeff_pinned" in TAG_VOCABULARY
+    assert pinned and pinned <= reg
+    assert not pinned & set(backends_for_model("pwa_gen", tag="reference"))
+    assert not pinned & set(backends_for_model("pwa_gen", tag="delegate"))
+    assert not pinned & set(SPECS)          # subtracted, not tested here
+    assert set(SPECS) == reg - set(backends_for_model("pwa_gen",
+                                                     tag="reference")) \
+        - set(backends_for_model("pwa_gen", tag="delegate")) - pinned \
+        - set(backends_for_model("pwa_gen", tag="probe"))
+
+
+def test_the_live_registry_is_fully_swept():
+    """Completeness against the REGISTRY AS IT IS NOW, not at import.
+
+    ``SPECS`` is frozen when the parametrisation is built (a parametrisation
+    must be).  If a backend registers afterwards — a new module imported later
+    in the session, a plugin, a future leaf — that frozen list cannot contain
+    it, and the only honest answer is to SAY SO.  Comparing against the live
+    rule is what makes the two cases distinguishable:
+
+      * registered before this module was imported -> already in ``SPECS``;
+      * registered after -> ``_missing_from_suite`` names it, and this fails.
+
+    A snapshot (``_REG_AT_IMPORT``, deleted) made the check pass in both cases,
+    i.e. it asserted that the suite had swept what it happened to see.
+    """
+    registry = set(backends_for_model("pwa_gen"))
+
+    def tags_of(name):
+        return backend_tags(name, "pwa_gen")
+
+    expected, excluded = _select(registry, tags_of)
+    assert set(SPECS) == set(expected), sorted(set(expected) ^ set(SPECS))
+    assert _missing_from_suite(SPECS, registry, tags_of) == [], (
+        "registered after this module was imported and therefore NOT swept: "
+        f"{_missing_from_suite(SPECS, registry, tags_of)}")
+    # the subtraction is by CAPABILITY: every excluded name carries one
+    # (a `probe` stub is excluded too, and it is not a backend at all)
+    assert set(excluded) == registry - set(expected)
+    assert all(set(tags_of(n)) & EXCLUDED_TAGS for n in excluded)
+
+
+def test_the_probe_tag_is_a_declared_capability():
+    """A test-side stub is TAGGED, not excluded by a name prefix.
+
+    ``test_amp_model`` and ``test_config_backend`` declare stubs at import to
+    exercise ``create_backend``'s kwarg/model injection.  They are
+    model-independent, so they land in EVERY model's registry — including
+    ``pwa_gen``'s — and an untagged one is indistinguishable from a real leaf.
+
+    Loading the two modules is the whole point of the case: they are imported
+    AFTER ``SPECS`` was computed (a sibling file's module object), which is
+    exactly the registry state that a frozen snapshot could not describe.
+    """
+    amps = _load_test_module("test_amp_model")
+    cfgs = _load_test_module("test_config_backend")
+    assert "probe" in TAG_VOCABULARY
+    for name in (amps.MODEL_PROBE, cfgs.KWARG_PROBE):
+        assert backend_tags(name, "pwa_gen") == frozenset({"probe"}), name
+        assert name not in SPECS, name
+        assert name not in backends_to_test(), name
+    # and the LIVE completeness check tolerates them: excluded by capability,
+    # not forgotten — a stub registered after the import is the exact case
+    # that must not read as "missing"
+    registry = set(backends_for_model("pwa_gen"))
+    assert _missing_from_suite(SPECS, registry,
+                               lambda n: backend_tags(n, "pwa_gen")) == []
+
+
+def test_the_rule_excludes_a_probe_and_reports_a_late_backend():
+    """THE PROPERTY, proved on a synthetic registry — not asserted about ours.
+
+    Two failures are possible when a frozen snapshot replaces the live rule,
+    and each is shown here on a registry built by hand:
+
+      (a) a ``probe`` stub is swept as if it were a backend (not excluded);
+      (b) a backend registered LATER is silently outside the suite (not
+          reported).
+
+    The rule is a pure function of ``(registry, tags_of)``, so this needs no
+    registration, no CUDA, and no kernel config.
+    """
+    tags = {
+        "reference_backend": {"reference"},
+        "delegate_backend": {"delegate"},
+        "pinned_kernel": {"coeff_pinned"},
+        "_probe_stub": {"probe"},
+        "a_kernel": set(),          # swept at import
+        "late_backend": set(),      # registered AFTER import, untagged
+    }
+    registry = set(tags)
+    specs_at_import = ["a_kernel"]          # what the suite actually swept
+
+    tested, excluded = _select(registry, tags.__getitem__)
+    # (a) the probe is excluded BY ITS TAG, not by being named "_probe_stub"
+    assert "_probe_stub" in excluded
+    assert "_probe_stub" not in tested
+    # the three not-this-suite capabilities are excluded the same way
+    assert excluded == ["_probe_stub", "delegate_backend", "pinned_kernel",
+                        "reference_backend"]
+    # (b) the late untagged backend IS a candidate — the rule does not hide it
+    assert tested == ["a_kernel", "late_backend"]
+    # ... and against what was swept it is REPORTED, which is the whole point
+    assert _missing_from_suite(specs_at_import, registry, tags.__getitem__) \
+        == ["late_backend"]
+    # once swept, the report is empty (and a probe was never a candidate, so
+    # tagging it excluded is not the same as "forgetting" it)
+    assert _missing_from_suite(specs_at_import + ["late_backend"], registry,
+                               tags.__getitem__) == []
 
 
 @pytest.mark.parametrize("cfg", QUALIFYING)
@@ -598,13 +929,19 @@ def test_norm_none_and_a_scalar_norm_are_different_objectives(name, ):
         ref.free()
 
 
-@pytest.mark.parametrize("name", SPECS)
+@pytest.mark.parametrize("name", MULTI_BW_SWEEP)
 def test_multi_bw_chain_is_rejected_or_accepted(name, ):
-    """`n_res1`-tagged backends guard it; every other leaf takes the chain."""
+    """`n_res1`-tagged backends guard it; every other leaf takes the chain.
+
+    A PINNED-coefficient kernel is swept here as well: the multi-BW question is
+    about the shape of the denominator (a product over the factor axis), which
+    the pinned cache computes like any other leaf.
+    """
     if name in N_RES1:
         pytest.skip(f"{name}: tagged n_res1 — its wrapper REFUSES a multi-BW "
-                    f"chain (n_res != 1 raises), and its own file keeps the "
-                    f"'raises, names cuda_flat_pwa_gen2' gate")
+                    f"chain (n_res != 1 raises, naming cuda_flat_pwa_gen2); "
+                    f"that refusal is gated in the file that owns its config "
+                    f"contract, {CONFIG_OWNER[name]}, not here")
     f = Fitter(CFG_MB)
     f.apply_constrains()
     assert int(np.asarray(f.kernel_config["num_table"]).shape[1]) == 2

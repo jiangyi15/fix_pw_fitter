@@ -30,8 +30,6 @@ Gates:
 """
 import gc
 import os
-import shutil
-import subprocess
 
 import numpy as np
 import pytest
@@ -42,7 +40,8 @@ from tabpwa.backends._fixed_coeff import FixedCoeffBackend, mask_equal
 from tabpwa.fixed_coeff_spec import (mask_from_cols, resolve_fixed_cols,
                                      resolve_mask_and_values)
 from tabpwa import monitor
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_compute import other_gpu_users
+from _flat_grid import _in_grid
 
 CFG_ONE = "tests/config_pwa_gen.yml"
 CFG_KM = "tests/config_pwa_gen_km.yml"
@@ -447,41 +446,6 @@ def test_free_is_idempotent_and_refuses_stale_handles():
         w.compute(params, h, norm=1.3)
 
 
-def _other_gpu_users():
-    """PIDs holding the device right now, excluding this process.
-
-    ``free_bytes()`` is DEVICE-WIDE: any other process allocating on the card
-    moves the number inside the trace, so this gate would be measuring someone
-    else's work — that is not a wider tolerance to invent, it is a precondition
-    that does not hold.  ``cudaMemGetInfo`` cannot attribute memory to a PID, so
-    the honest check is "no one else is on the card".
-
-    The query is a PRECONDITION, never the oracle: when ``nvidia-smi`` or
-    ``--query-compute-apps`` is unavailable this returns ``[]`` and the gate
-    RUNS — a missing tool must not silently skip a leak gate.
-    """
-    exe = shutil.which("nvidia-smi")
-    if exe is None:
-        return []
-    try:
-        out = subprocess.run(
-            [exe, "--query-compute-apps=pid", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    mine = os.getpid()
-    pids = set()
-    for line in out.splitlines():
-        cell = line.split(",")[0].strip()
-        try:
-            pid = int(cell)
-        except ValueError:                  # blank, [N/A], a header
-            continue
-        if pid != mine:
-            pids.add(pid)
-    return sorted(pids)
-
-
 def test_repeated_mask_changes_do_not_grow_device_memory():
     """No MONOTONIC growth across cycles — the shape, not an absolute bound.
 
@@ -516,7 +480,7 @@ def test_repeated_mask_changes_do_not_grow_device_memory():
     MiB = 1024 * 1024
     if not monitor.has_device():
         pytest.skip("no CUDA device for the free-bytes probe")
-    others = _other_gpu_users()
+    others = other_gpu_users()
     if others:
         pytest.skip("another process is using the GPU (pid %s); device-wide "
                     "free bytes cannot attribute allocations"
@@ -647,7 +611,7 @@ def test_the_helper_needs_a_declaration_to_return_anything():
         resolve_fixed_cols(den, names=["no_such_column"])
 
 
-@pytest.mark.skipif(not __import__("os").path.exists(
+@pytest.mark.skipif(not os.path.exists(
     "benchmarks/ctpwa_kketa/config_gen.yml"),
     reason="the CTPWA benchmark config is not present")
 def test_an_alias_map_refuses_a_partial_declaration():

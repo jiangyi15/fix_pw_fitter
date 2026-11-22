@@ -32,7 +32,13 @@ GPU = ("cuda_flat_pwa_gen", "cuda_flat_cache_pwa_gen")
 
 
 def _in_grid(kc, ne, seed=0):
-    """Events strictly inside both interpolation grids (clamping diverges)."""
+    """Events strictly inside both interpolation grids (clamping diverges).
+
+    DELIBERATELY not ``_flat_grid._in_grid``: a benchmark wants a flat weight
+    (``weight=1``) and a fixed background (``bkg=0.01``) so the per-iteration
+    cost is the kernel's, not a random draw's — the sampled mass/q/angle recipe
+    is the same and the test-side copy is what the gates use.
+    """
     rng = np.random.RandomState(seed)
     n_basis = int(np.asarray(kc["basis_table"]).shape[1])
     n_fl = int(np.asarray(kc["fl_table"]).shape[-1])

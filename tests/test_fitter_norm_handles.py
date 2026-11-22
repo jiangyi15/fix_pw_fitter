@@ -38,11 +38,12 @@ def _samples(n, mass, q, weight_total):
 
 
 def _leaf_backends():
-    # ``_``-prefixed names are throwaway probes other test modules register
-    # globally (``_kwarg_probe``, ...); they are not real backends.
+    # test-side stubs are tagged `probe` at registration (``_model_probe``,
+    # ``_kwarg_probe``): a capability, not a ``_``-prefix, so a stub that is
+    # named differently is excluded too.
+    probes = frozenset(backends_for_model("pwa_gen", tag="probe"))
     return sorted(n for n in backends_for_model("pwa_gen")
-                  if n != "default" and n != "shard"
-                  and not n.startswith("_"))
+                  if n != "default" and n != "shard" and n not in probes)
 
 
 def test_reference_backend_gets_the_phase_space_norm():

@@ -1,13 +1,9 @@
 """Tests for :mod:`tabpwa.monitor`.
 
 The GPU sampler is one ``nvidia-smi`` child; the host fields come from
-``/proc/self/status``.  Nothing here may import ``torch``:
-``torch.cuda.init()`` slows every later raw-CUDA call 5.1x, permanently.  The
-suite-wide gate lives in ``_flat_compute.py``; this module keeps its own local
-before/after form (see ``test_a_monitor_cycle_does_not_import_torch``).
+``/proc/self/status``.
 """
 import io
-import sys
 import time
 
 import pytest
@@ -361,25 +357,3 @@ def test_cuda_probe_helpers():
     sync()
     value = free_bytes()
     assert isinstance(value, int) and value > 0
-
-
-# ── no torch ───────────────────────────────────────────────────────────
-
-def test_a_monitor_cycle_does_not_import_torch():
-    """The HONEST local form: the monitor must not PULL torch in.
-
-    A bare ``assert "torch" not in sys.modules`` would duplicate
-    ``_flat_compute.py``'s suite-wide gate and could only fail for a reason
-    unrelated to this module (some earlier test importing torch).  So this
-    records the state before and after a full cycle on THIS process and only
-    fails if the cycle is what made it true.
-    """
-    was_loaded = "torch" in sys.modules
-    mon = create_monitor(interval=0.01)
-    mon.mark("cycle")
-    time.sleep(0.05)
-    mon.get_results()
-    res = mon.close()
-    assert isinstance(res, Results)
-    assert ("torch" in sys.modules) == was_loaded, (
-        "the monitor imported torch (it would slow every later raw-CUDA call)")

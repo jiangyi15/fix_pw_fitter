@@ -30,6 +30,7 @@ import pytest
 
 from tabpwa import Fitter
 from tabpwa.backends import create_backend
+from _flat_grid import _in_grid
 
 CFG_IDENT = "tests/config_pwa_gen_ident.yml"   # n_perm 2, n_cp 1 -> 2 blocks
 CFG_CP = "tests/config_pwa_gen_cp.yml"         # n_perm 2, n_cp 2 -> 4 blocks
@@ -39,28 +40,6 @@ def _model(cfg):
     f = Fitter(cfg)
     f.apply_constrains()
     return f, f.kernel_config
-
-
-def _in_grid(kc, ne, seed=0):
-    """Events strictly inside both interpolation grids, shaped for the config."""
-    rng = np.random.RandomState(seed)
-    n_basis = int(np.asarray(kc["basis_table"]).shape[1])
-    n_fl = int(np.asarray(kc["fl_table"]).shape[-1])
-    m_min, m_del = float(kc["m_min"]), float(kc["m_delta"])
-    q_min, q_del = float(kc["q_min"]), float(kc["q_delta"])
-    n_mass = int(np.max(kc["num_m_index"])) + 1
-    n_q = int(np.max(kc["fl_q_index"])) + 1
-    n_at = int(np.max(kc["angle_index"])) + 1
-    nac = int(np.asarray(kc["angle_k"]).shape[1])
-    return {
-        "mass": m_min + 0.05 * m_del * n_basis
-                + rng.rand(ne, n_mass) * (0.9 * m_del * n_basis),
-        "q": q_min + 0.05 * q_del * n_fl
-             + rng.rand(ne, n_q) * (0.9 * q_del * n_fl),
-        "angle": rng.uniform(-np.pi, np.pi, (ne, n_at, nac)),
-        "weight": 0.5 + rng.rand(ne),
-        "bkg": 0.05 + 0.1 * rng.rand(ne),
-    }
 
 
 def _angle_rows_of_block(kc, sl):

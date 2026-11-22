@@ -370,8 +370,8 @@ class FixedCoeffBackend(ComputeBackend):
             rec.stamp = None if self.mask is None else self.mask.copy()
         return rec
 
-    def compute(self, params, handle, norm=None, return_p=True):
-        rec = self._ensure(handle)
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        rec = self._ensure(data_handle)
         return self.base.compute(params, rec.real, norm=norm,
                                  return_p=return_p)
 

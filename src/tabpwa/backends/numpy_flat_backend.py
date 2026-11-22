@@ -165,8 +165,8 @@ class NumpyFlatBackend(ComputeBackend):
         fr = pos - i0
         return tab[i0] * (1.0 - fr) + tab[i0 + 1] * fr
 
-    def _coeff(self, params):
-        """The coefficient weights, ``(n_basis,)``, one per basis row.
+    def _coeff_block(self, coeff, n_wave, n_res, n_basis):
+        """The coefficient weights broadcast to ``(n_wave, n_res, n_basis)``.
 
         Every basis column belongs to exactly one ``(wave, res)`` factor — the
         builder appends a factor's rows where that factor needs them and never
@@ -174,22 +174,22 @@ class NumpyFlatBackend(ComputeBackend):
         whole parameter block.  ``gamma_matrix`` selects which columns a factor
         reads; it never re-indexes the weights.
         """
-        coeff = np.asarray(params["coeff"], np.float64)
-        n_basis = np.asarray(self.config["basis_table"]).shape[0]
+        coeff = np.asarray(coeff, np.float64)
         if coeff.shape != (n_basis,):
             raise ValueError(
                 f"numpy_flat: coeff has shape {coeff.shape}, expected "
                 f"(n_basis,) = ({n_basis},) — this config is the not-deduped "
                 f"one, so every basis entry carries its own weight")
         return np.broadcast_to(coeff[None, None, :],
-                               (np.asarray(self.config["fl_table"]).shape[0],
-                                np.asarray(self.config["num_table"]).shape[1],
-                                n_basis))
+                               (n_wave, n_res, n_basis))
 
-    # ── compute ─────────────────────────────────────────────────────
-    def compute(self, params, data_handle, norm=None, return_p=True):
+    def _parse(self, d):
+        """Read the config + sample into the arrays the forward chain uses.
+
+        One place derives every count from a SHAPE, so the full and the
+        deduped layouts share the same evaluation (see :meth:`_check_shapes`).
+        """
         c = self.config
-        d = data_handle["data"]
         mass = np.asarray(d["mass"], np.float64)
         mom = np.asarray(d["q"], np.float64)
         ang = np.asarray(d["angle"], np.float64)
@@ -204,13 +204,13 @@ class NumpyFlatBackend(ComputeBackend):
         if fl_tab.ndim == 3:
             fl_tab = fl_tab.reshape(-1, fl_tab.shape[-1])
         fl_idx = np.asarray(c["fl_index"]) if "fl_index" in c \
-            else np.arange(np.asarray(fl_q).size).reshape(np.asarray(fl_q).shape)
+            else np.arange(fl_q.size).reshape(fl_q.shape)
         num_tab = np.asarray(c["num_table"])
         num_m = np.asarray(c["num_m_index"])
         if num_tab.ndim == 3:
             num_tab = num_tab.reshape(-1, num_tab.shape[-1])
         num_idx = np.asarray(c["num_index"]) if "num_index" in c \
-            else np.arange(np.asarray(num_m).size).reshape(np.asarray(num_m).shape)
+            else np.arange(num_m.size).reshape(num_m.shape)
         bas = np.asarray(c["basis_table"])
         bmi = np.asarray(c["basis_m_index"])
         gam = np.asarray(c["gamma_matrix"])
@@ -221,19 +221,37 @@ class NumpyFlatBackend(ComputeBackend):
 
         # counts from the SHAPES of the index arrays (both layouts), never
         # from the table's row count (dedup changes that, the use-count not)
-        n_wave, n_decay = np.asarray(fl_q).shape
-        n_res = np.asarray(num_m).shape[1]
+        n_wave, n_decay = fl_q.shape
+        n_res = num_m.shape[1]
         n_basis = bas.shape[0]
         # p-major columns: p*n_wave + k
         n_proj = max(1, am.shape[1] // n_wave)
-        m0, md = float(c["m_min"]), float(c["m_delta"])
-        q0, qd = float(c["q_min"]), float(c["q_delta"])
+        return dict(mass=mass, mom=mom, ang=ang, ne=ne,
+                    fl_tab=fl_tab, fl_q=fl_q, fl_idx=fl_idx,
+                    num_tab=num_tab, num_m=num_m, num_idx=num_idx,
+                    bas=bas, bmi=bmi, gam=gam, ak=ak, ab=ab, ai=ai, am=am,
+                    n_wave=n_wave, n_decay=n_decay, n_res=n_res,
+                    n_basis=n_basis, n_proj=n_proj,
+                    m0=float(c["m_min"]), md=float(c["m_delta"]),
+                    q0=float(c["q_min"]), qd=float(c["q_delta"]))
 
-        ck = np.asarray(params["ck"], complex)
-        if ck.size != n_wave:
-            raise ValueError(f"numpy_flat: ck has {ck.size} entries, expected "
-                             f"n_wave = {n_wave}")
-        weights = self._coeff(params)
+    def _wave_amplitudes(self, p, coeff):
+        """``fa`` / ``common`` / ``factors`` — THE forward chain.
+
+        ``common[e,k] = fl·num/den`` and ``fa[e,k,p]`` are the two pieces of
+        the per-(event, wave, projection) amplitude that multiplies ``ck_k``:
+
+            A_p(e) = Σ_k ck_k · common[e,k] · fa[e,k,p]
+
+        :meth:`compute` reads this pair and the ``integrated_pwa_gen`` Gram
+        builder reads the same pair, so the norm cannot drift from the
+        reference.
+        """
+        ne = p["ne"]; n_wave = p["n_wave"]; n_res = p["n_res"]
+        n_basis = p["n_basis"]; n_proj = p["n_proj"]
+        mass = p["mass"]; mom = p["mom"]; ang = p["ang"]
+        ak, ab, ai, am = p["ak"], p["ab"], p["ai"], p["am"]
+        weights = self._coeff_block(coeff, n_wave, n_res, n_basis)
 
         # ── fa: (ne, n_wave, n_proj), via the historical matrix_angle ──
         # ka @ matrix_angle is the long-standing idiom; the result is p-major
@@ -253,28 +271,56 @@ class NumpyFlatBackend(ComputeBackend):
         factors = np.zeros((ne, n_wave, max(1, n_res)), np.complex128)
         for k in range(n_wave):
             fl = np.ones(ne)
-            for dec in range(n_decay):
-                q = mom[:, fl_q[k, dec]]
-                row = fl_idx[k, dec]
-                fl *= self._lin(fl_tab[row], q, q0, qd)
+            for dec in range(p["n_decay"]):
+                q = mom[:, p["fl_q"][k, dec]]
+                row = p["fl_idx"][k, dec]
+                fl *= self._lin(p["fl_tab"][row], q, p["q0"], p["qd"])
             num = np.ones(ne, np.complex128)
             for r in range(n_res):
-                xx = mass[:, num_m[k, r]]
-                tab = num_tab[num_idx[k, r]]
-                num *= (self._lin(tab.real, xx, m0, md)
-                        + 1j * self._lin(tab.imag, xx, m0, md))
+                xx = mass[:, p["num_m"][k, r]]
+                tab = p["num_tab"][p["num_idx"][k, r]]
+                num *= (self._lin(tab.real, xx, p["m0"], p["md"])
+                        + 1j * self._lin(tab.imag, xx, p["m0"], p["md"]))
             den = np.ones(ne, np.complex128)
             for r in range(n_res):
                 s = self._den_factor(k, r, mass, weights)
                 factors[:, k, r] = s
                 den *= s
             common[:, k] = fl * num / den
+        return fa, common, factors
+
+    def wave_amplitudes(self, data, coeff):
+        """Per-(event, wave, projection) amplitude factors at fixed ``coeff``.
+
+        Returns ``(common, fa, factors)`` with ``common``/``fa`` the pieces
+        that multiply ``ck`` (see :meth:`_wave_amplitudes`).  This is the
+        public entry the ``integrated_pwa_gen`` Gram is built from.
+        """
+        p = self._parse(data)
+        fa, common, factors = self._wave_amplitudes(p, coeff)
+        return common, fa, factors
+
+    # ── compute ─────────────────────────────────────────────────────
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        d = data_handle["data"]
+        p = self._parse(d)
+        ne = p["ne"]; n_wave = p["n_wave"]; n_res = p["n_res"]
+        n_basis = p["n_basis"]; n_proj = p["n_proj"]
+        mass = p["mass"]; gam = p["gam"]; bmi = p["bmi"]; bas = p["bas"]
+        m0, md = p["m0"], p["md"]
+
+        ck = np.asarray(params["ck"], complex)
+        if ck.size != n_wave:
+            raise ValueError(f"numpy_flat: ck has {ck.size} entries, expected "
+                             f"n_wave = {n_wave}")
+        coeff = np.asarray(params["coeff"], np.float64)
+        fa, common, factors = self._wave_amplitudes(p, coeff)
 
         # ── projection sum ──────────────────────────────────────────
         A = np.zeros((ne, n_proj), np.complex128)
-        for p in range(n_proj):
+        for pp in range(n_proj):
             for k in range(n_wave):
-                A[:, p] += ck[k] * common[:, k] * fa[:, k, p]
+                A[:, pp] += ck[k] * common[:, k] * fa[:, k, pp]
         P_e = np.sum(A.real ** 2 + A.imag ** 2, axis=-1)
 
         weight = np.asarray(d.get("weight", np.ones(ne)), np.float64)
@@ -322,16 +368,16 @@ class NumpyFlatBackend(ComputeBackend):
         for k in range(n_wave):
             # d/dcommon_k, summed over projections
             d_common = np.zeros(ne, np.complex128)
-            for p in range(n_proj):
-                d_common += dQ_dA[:, p] * ck[k] * fa[:, k, p]
+            for pp in range(n_proj):
+                d_common += dQ_dA[:, pp] * ck[k] * fa[:, k, pp]
             # The kernel convention (matching ``numpy_pwa``): the raw
             # Wirtinger half ∂Q/∂ck = Σ_p dQ/dA_p·common_k·fa_pk, with NO
             # factor 2 and NO conjugation.  ``CKProduct.backprop_grad``
             # applies the 2·Re real-parameter convention downstream — adding
             # either here double-counts.
             grad_ck[k] = np.sum(
-                [np.sum(dQ_dA[:, p] * common[:, k] * fa[:, k, p])
-                 for p in range(n_proj)])
+                [np.sum(dQ_dA[:, pp] * common[:, k] * fa[:, k, pp])
+                 for pp in range(n_proj)])
             # common = F / D  =>  dQ/dD = -dQ/dcommon · common / D
             den = np.prod(factors[:, k, :n_res], axis=1)
             dD = -d_common * common[:, k] / den

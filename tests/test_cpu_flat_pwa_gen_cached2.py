@@ -25,22 +25,29 @@ invariance, the input errors) reaches it through the registry — an untagged
   ``n_fa − N·(P−1)`` — the product is smaller exactly when that is positive.
 """
 import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from tabpwa import Fitter
 from tabpwa.backends import backend_tags, backends_for_model, create_backend
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_grid import _in_grid
 
-from _flat_compute import FLOORS, GROUPED, QUALIFYING, SPECS, _replicate, _rel
+from _flat_compute import (CONFIG_OWNER, FLOORS, GROUPED, QUALIFYING, SPECS,
+                           _replicate, _rel)
 
 NAME = "cpu_flat_pwa_gen_cached2"
 SPLIT = "cpu_flat_pwa_gen_cached"
 UNCACHED = "cpu_flat_pwa_gen"
+
+#: the OWNERSHIP rule in ``_flat_compute``: this file owns exactly this leaf's
+#: config contract.  A misdirected owner fails here instead of being covered by
+#: nothing.
+_ME = os.path.basename(__file__)
+_OWNED = {n for n, f in CONFIG_OWNER.items() if f == _ME}
+assert _OWNED == {NAME}, (
+    f"{_ME}'s leaf is out of sync with _flat_compute.CONFIG_OWNER: "
+    f"missing {sorted({NAME} - _OWNED)}, stale {sorted(_OWNED - {NAME})}")
 
 #: filled by the bitwise test — printed by the report test
 REPORT = {}

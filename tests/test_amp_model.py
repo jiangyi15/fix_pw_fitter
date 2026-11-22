@@ -9,6 +9,7 @@ import pytest
 from tabpwa import Fitter
 from tabpwa.amp_model import (AmplitudeModel, PWA, FlavourTagMix,
                               build_amplitude_model, AMPLITUDE_MODELS)
+from tabpwa.backends import create_backend, register_backend
 from tabpwa.kernel_params import (PWAKernelParams, FlavourTagMixKernelParams)
 from tabpwa.config_loader import Config
 
@@ -270,16 +271,25 @@ def test_raw_config_has_no_model():
     assert cl.Config(PWA_CFG).name == "pwa"
 
 
+#: A stub backend, declared at MODULE level and TAGGED `probe`: a test fixture
+#: is a declared capability, not a name prefix — `tests/_flat_compute.py`
+#: subtracts `probe` from its registry-derived sweep, so a stub registered for
+#: one test can never be mistaken for a backend that computes.  Model-independent
+#: (`model=None`), so it lands in every model's registry.
+MODEL_PROBE = "_model_probe"
+
+
+@register_backend(MODEL_PROBE, tags=("probe",))
+class _ModelProbe:
+    """A stub: ``create_backend`` must inject ``model`` and keep the kwargs."""
+
+    def __init__(self, kernel_config, model=None, tag=None):
+        self.model, self.tag = model, tag
+
+
 def test_create_backend_injects_model_into_composer():
     """A backend whose __init__ takes ``model`` receives it (nested default)."""
-    from tabpwa.backends import create_backend, register_backend
-
-    @register_backend("_model_probe")
-    class Probe:
-        def __init__(self, kernel_config, model=None, tag=None):
-            self.model, self.tag = model, tag
-
-    p = create_backend({"name": "_model_probe", "tag": 7}, {}, model="pwa")
+    p = create_backend({"name": MODEL_PROBE, "tag": 7}, {}, model="pwa")
     assert p.model == "pwa" and p.tag == 7
 
 

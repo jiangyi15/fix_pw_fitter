@@ -19,7 +19,7 @@ from tabpwa.backends import create_backend
 from tabpwa.config_loader import RawConfig
 from tabpwa.amp_model import build_amplitude_model
 from tabpwa.pwa_gen_config import drop_unit_factors
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_grid import _in_grid
 
 CFG = "tests/config_skip.yml"
 CFG_ONE = "tests/config_skip_one.yml"

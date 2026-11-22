@@ -32,6 +32,7 @@ import pytest
 
 from tabpwa import Fitter
 from tabpwa.backends import backends_for_model, create_backend
+from _flat_grid import _in_grid
 
 CFG_KM = "tests/config_pwa_gen_km.yml"
 
@@ -43,28 +44,6 @@ def _kc(cfg=CFG_KM):
     f = Fitter(cfg)
     f.apply_constrains()
     return f, f.kernel_config
-
-
-def _in_grid(kc, ne, seed=0):
-    """Events strictly inside BOTH interpolation grids."""
-    rng = np.random.RandomState(seed)
-    n_basis = int(np.asarray(kc["basis_table"]).shape[1])
-    n_fl = int(np.asarray(kc["fl_table"]).shape[-1])
-    m_min, m_del = float(kc["m_min"]), float(kc["m_delta"])
-    q_min, q_del = float(kc["q_min"]), float(kc["q_delta"])
-    n_mass = int(np.max(kc["num_m_index"])) + 1
-    n_q = int(np.max(kc["fl_q_index"])) + 1
-    n_at = int(np.max(kc["angle_index"])) + 1
-    nac = int(np.asarray(kc["angle_k"]).shape[1])
-    return {
-        "mass": m_min + 0.05 * m_del * n_basis
-                + rng.rand(ne, n_mass) * (0.9 * m_del * n_basis),
-        "q": q_min + 0.05 * q_del * n_fl
-             + rng.rand(ne, n_q) * (0.9 * q_del * n_fl),
-        "angle": rng.uniform(-np.pi, np.pi, (ne, n_at, nac)),
-        "weight": 0.5 + rng.rand(ne),
-        "bkg": 0.05 + 0.1 * rng.rand(ne),
-    }
 
 
 def _replicate(data, rs, normalised=True):
@@ -284,24 +263,39 @@ def test_zero_weight_group_is_inert():
 
 #: composers take a nested backend spec, not a kernel config, so they are
 #: not leaf kernels and have no ``resolution_size`` of their own — the inner
-#: spec carries it instead.
-COMPOSERS = frozenset({"shard", "integrated", "integrated_pwa"})
+#: spec carries it instead.  Derived from the ``delegate`` capability tag
+#: rather than a name list, so a delegate registered later cannot be missed
+#: (the numeric sweeps below filter on ``cuda``-prefixed names, which would
+#: hide e.g. ``integrated_pwa_gen``).
+COMPOSERS = frozenset(backends_for_model("pwa_gen", tag="delegate")) \
+    | frozenset({"shard"})
 
 
 def _pwa_gen_backends():
     """Real leaf pwa_gen backends.
 
-    ``default`` is an alias and composers are excluded.  Names starting with
-    ``_`` are also skipped: other test modules register throwaway probes into
-    the GLOBAL registry (``_kwarg_probe``, ``_model_probe``), and a
-    universal registration shows up in every model's set — sweeping the
-    registry blindly would assert against those probes whenever the whole
-    suite runs in one process.
+    ``default`` is an alias and composers are excluded.  Test-side stubs are
+    excluded by their ``probe`` TAG — other test modules register them into the
+    GLOBAL registry (``_kwarg_probe``, ``_model_probe``), and a universal
+    registration shows up in every model's set, so sweeping the registry
+    blindly would assert against those probes whenever the whole suite runs in
+    one process.  A tag, not a ``_`` prefix: the exclusion is the capability the
+    stub declares.
+
+    Kernels tagged ``coeff_pinned`` are excluded too: they take an arbitrary
+    ``resolution_size`` (gate 4 below still constructs every one of them) but
+    their coefficients are PINNED — every wave's amplitude is a load-time
+    cache and ``dcoeff`` is exactly 0 for every column by contract — so the
+    ``dcoeff`` comparison against the free-coefficient reference does not
+    apply to them.  Their own fixture gates the grouped objective on them; the
+    tag is a declared capability, never a name.
     """
+    pinned = set(backends_for_model("pwa_gen", tag="coeff_pinned"))
+    probes = set(backends_for_model("pwa_gen", tag="probe"))
     names = sorted(backends_for_model("pwa_gen"))
     return [n for n in names
-            if n != "default" and n not in COMPOSERS
-            and not n.startswith("_")]
+            if n != "default" and n not in COMPOSERS and n not in pinned
+            and n not in probes]
 
 
 def test_every_pwa_gen_backend_accepts_resolution_size():

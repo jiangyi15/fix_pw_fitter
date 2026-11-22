@@ -266,8 +266,8 @@ class AutoBackend(ComputeBackend):
     def load_data(self, data_np):
         return self._delegate.load_data(data_np)
 
-    def compute(self, params, handle, norm=None, return_p=True):
-        return self._delegate.compute(params, handle, norm=norm,
+    def compute(self, params, data_handle, norm=None, return_p=True):
+        return self._delegate.compute(params, data_handle, norm=norm,
                                       return_p=return_p)
 
     def free(self):

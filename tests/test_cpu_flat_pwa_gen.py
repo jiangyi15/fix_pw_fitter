@@ -19,21 +19,27 @@ file keeps only what is specific to this kernel:
   AVX-512 fp64 build with no fp32 anywhere.
 """
 import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from tabpwa import Fitter
 from tabpwa.backends import backend_tags, backends_for_model, create_backend
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_grid import _in_grid
 
-from _flat_compute import (CFG_KM, FLOORS, GROUPED, QUALIFYING, SPECS, _rel,
-                           _replicate)
+from _flat_compute import (CFG_KM, CONFIG_OWNER, FLOORS, GROUPED, QUALIFYING,
+                           SPECS, _rel, _replicate)
 
 NAME = "cpu_flat_pwa_gen"
+
+#: the OWNERSHIP rule in ``_flat_compute``: this file owns exactly this leaf's
+#: config contract.  A misdirected owner (the name moved to another family file)
+#: fails here instead of being covered by nothing.
+_ME = os.path.basename(__file__)
+_OWNED = {n for n, f in CONFIG_OWNER.items() if f == _ME}
+assert _OWNED == {NAME}, (
+    f"{_ME}'s leaf is out of sync with _flat_compute.CONFIG_OWNER: "
+    f"missing {sorted({NAME} - _OWNED)}, stale {sorted(_OWNED - {NAME})}")
 
 
 def _rel_val(a, b):

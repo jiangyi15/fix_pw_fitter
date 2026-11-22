@@ -1,5 +1,14 @@
 import json
 import os, sys
+
+# ``tests/`` is a package (``tests/__init__.py``), so pytest imports a test
+# module as ``tests.<name>`` and puts the REPO ROOT on ``sys.path`` — which
+# leaves the shared test-side helpers (``_flat_compute``, ``_flat_grid``, …)
+# unimportable when a single file is collected on its own.  The test directory
+# itself must be importable, always, so every file works alone AND in the suite
+# (``__init__.py`` alone only guarantees that when some other file happened to
+# insert it first).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np

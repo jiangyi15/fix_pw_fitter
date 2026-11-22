@@ -38,36 +38,79 @@ Shared (the contract):
 13. an empty sample is the identity (and its cache is READY);
 14. ``get_nll`` end-to-end through the ``fixed_coeff`` wrapper with two live
     handles, and the masked columns contribute EXACTLY nothing to the reduced
-    ``x`` gradient.
+    ``x`` gradient;
+15. **no mask means the parent** — with nothing declared the numbers must be
+    ``cuda_flat_pwa_gen_s0e2``'s, ``P`` EXACTLY (a different oracle from the
+    family floor, so it is a real check of the off switch);
+16. **a group no block can hold** — a ``resolution_size`` larger than the
+    biggest tile must either compute the grouped objective correctly or REFUSE
+    at construction naming a usable alternative, never silently mis-close it;
+17. the per-PARAMETER alias map (one mass moves BOTH charge sectors' columns)
+    and that each caching kernel HAS a case-1 row (the property itself — own
+    module/``.so``/symbols, the parent source byte-identical — is the shared
+    ``tests/_flat_isolation.py``);
+18. the split's scratch belongs to the CONTEXT, not to a handle — a
+    ``load_data`` adds no ``ne``-sized buffer (the measured 336-MB-per-handle
+    regression).  Measured in exact BYTES with :func:`tabpwa.monitor.free_bytes`
+    (the sampler's MiB granularity cannot see it), DIFFERENTIALLY against the
+    parent kernel on a large sample: the legitimate ``us``/``amp`` caches cancel
+    and the documented ``fix_bytes`` cache is subtracted, so only a per-handle
+    buffer is left.  A tiny sample cannot gate this (both loads cost 0 B at 16
+    events); a kernel with no scratch has nothing to allocate and the gate says
+    so explicitly rather than passing vacuously.
+19. **a multi-BW chain is REFUSED** — every kernel here is one BW per chain, so
+    a chain whose amplitude is a PRODUCT of two BWs is rejected at construction
+    and the message names the documented fallback ``cuda_flat_pwa_gen2`` (a
+    bare ``ValueError`` would let the recommendation rot away unnoticed).
 
-Local (each kernel's own file): case-1 isolation, the sha256/verbatim-copy
-pins, ``te``/``smem_bytes``/``tile_bytes``, the launch counts and their
-formulas, the fused branch and its fallback, ``bwd_mode`` / ``split_fixed``
-A/B, ``chunk_plan``, the host plan arithmetic (``wave_plan`` / ``split_waves``
-/ ``index_runs``), the mask-off comparison to ``s0e2``, the ``n_res1``
-refusal and the s0g-only ``rsize > te`` refusal.
+A test here is ``(kernel config, params, sample) -> numbers``, plus the
+refusals and the guard.  It is NOT an audit of which branch ran: the
+``split_counts`` / ``fused_count`` / ``tile_count`` / ``chunk_plan`` / ``te`` /
+``smem_bytes`` reports of a particular kernel are implementation detail, and no
+gate is written on them.  ``aux_bytes`` is the one exception, and only as the
+SIZE the load may not re-allocate (gate 18) — never as a branch report.
 
 ``test_flat_masked.py`` imports this module so pytest collects the suite under
 ``[<backend name>]`` ids.
 """
 import functools
 import importlib
+import json
+import math
+import os
+import subprocess
+import sys
+import warnings
 
 import numpy as np
 import pytest
 
-from tabpwa import Fitter
+from tabpwa import Fitter, monitor
 from tabpwa.backends import (backend_tags, backends_for_model,
                              create_backend)
 from tabpwa.fixed_coeff_spec import MaskNotEngaged
 
-from _flat_compute import (CFG_CP, CFG_IDENT, CFG_KM, CFG_ONE, CFG_SAME,
-                           FLOORS, QUALIFYING, SPECS as LEAVES,
-                           TAG_VOCABULARY, _gate, _rel, _replicate)
-from test_cuda_flat_cache_pwa_gen import _in_grid
+from _flat_compute import (CFG_CP, CFG_IDENT, CFG_KM, CFG_MB, CFG_ONE, CFG_SAME,
+                           CONFIG_OWNER, FLOORS, QUALIFYING, SPECS as LEAVES,
+                           TAG_VOCABULARY, _gate, _rel, _replicate,
+                           other_gpu_users)
+from _flat_grid import _in_grid
+#: the ONE case-1 table; this file only asserts COVERAGE (a ``fixed_coeff``
+#: backend without a row fails at import) — the property runs in
+#: ``test_flat_isolation.py``.
+from _flat_isolation import ISOLATION
 
 WRAP = "fixed_coeff"
 REF = "numpy_flat"
+
+#: the mask-OFF oracle: with nothing declared, a masked kernel must be the
+#: parent's path, i.e. agree with ``cuda_flat_pwa_gen_s0e2``.  ``P`` has one
+#: writer per event, so it is compared EXACTLY; Q/dck/dcoeff/dnorm are
+#: ``atomicAdd``-ordered across blocks, so they are gated at 1e-14 — the
+#: STRICTER of the two figures the old per-kernel fixtures measured (s0f 1e-14,
+#: s0g 1e-13).  Measured on this matrix the worst quantity is 3.3e-15, so the
+#: stricter bound keeps a 3x margin and s0g's looser one is not carried over.
+PARENT_TOL = 1e-14
 
 #: the masks this suite runs.  Each ``(config, columns)`` pair is a REAL
 #: declaration for that fixture: the fixtures' waves each read a contiguous
@@ -78,6 +121,7 @@ REF = "numpy_flat"
 MASKED = [
     (CFG_ONE, [0, 1, 2]),                              # 1 wave, all fixed
     (CFG_KM, [0, 1, 2, 3, 4]),                         # 2 waves, all fixed
+    (CFG_IDENT, list(range(10))),                      # 4 waves, ALL fixed
     (CFG_IDENT, [5, 6, 7, 8, 9]),                      # waves 2,3 fixed / 0,1 free
     (CFG_SAME, [5, 6, 7, 8, 9]),                       # the same, on `_same`
     (CFG_CP, [5, 6, 7, 8, 9, 15, 16, 17, 18, 19]),     # 4 fixed / 4 free, CP blocks
@@ -114,6 +158,18 @@ def backends_to_test():
 
 #: the registry loop — the list is DERIVED, never written out by hand
 SPECS_MASKED = backends_to_test()
+
+#: the OWNERSHIP rule in ``_flat_compute``: this module owns the config contract
+#: of every ``fixed_coeff`` leaf (it is the one that runs the mask contract over
+#: the tag), so the owner map must say exactly that.  A misdirected owner — say
+#: ``cuda_flat_pwa_gen_s0g`` reassigned to another family file — makes this fail
+#: instead of silently leaving the name covered by nothing.
+_ME = os.path.basename(__file__)
+_OWNED = {n for n, f in CONFIG_OWNER.items() if f == _ME}
+assert _OWNED == set(SPECS_MASKED), (
+    f"{_ME}'s backends are out of sync with _flat_compute.CONFIG_OWNER: "
+    f"missing {sorted(set(SPECS_MASKED) - _OWNED)}, "
+    f"stale {sorted(_OWNED - set(SPECS_MASKED))}")
 
 #: the CTPWA benchmark's ten free mass/width parameters (benchmarks/ctpwa_kketa
 #: README §4); every other mass/width is pinned, as ``bench.py --free-mw`` does
@@ -248,7 +304,6 @@ def _ctpwa_facts():
 
 
 def _ctpwa_present():
-    import os
     return os.path.exists(CTPWA_CFG)
 
 
@@ -305,8 +360,49 @@ def test_mask_on_matches_the_reference(name, cfg, cols, rs, norm):
         gpu.free()
 
 
-# ── gate 2: the exact-zero contract ────────────────────────────────────
+# ── gate 1b: the off switch — no mask IS the parent ────────────────────
 
+@pytest.mark.parametrize("name", SPECS_MASKED)
+@pytest.mark.parametrize("cfg", [CFG_ONE, CFG_KM])
+@pytest.mark.parametrize("rs", [1, 17])
+@pytest.mark.parametrize("norm", [None, 1.3])
+def test_with_no_mask_the_numbers_are_the_parent_s0e2(name, cfg, rs, norm):
+    """Declaring nothing must give ``cuda_flat_pwa_gen_s0e2``'s numbers.
+
+    A DIFFERENT oracle from the family floor: not "small compared with the
+    reference", but "this is the parent's own computation".  ``P`` is written
+    once per event, so it is EXACT; the accumulated quantities are
+    ``atomicAdd``-ordered across blocks and are gated at :data:`PARENT_TOL`.
+    """
+    f = Fitter(cfg)
+    f.apply_constrains()
+    kc = f.kernel_config
+    params = _params(f)
+    base = _in_grid(kc, 64, seed=2)
+    data = _replicate(base, rs) if rs > 1 else base
+    parent = create_backend("cuda_flat_pwa_gen_s0e2", kc, model="pwa_gen",
+                            resolution_size=rs)
+    gpu = create_backend(name, kc, model="pwa_gen", resolution_size=rs)
+    ha, hb = parent.load_data(data), gpu.load_data(data)
+    try:
+        assert gpu.kernel.n_fix == 0
+        Qa, ga, Pa = parent.compute(params, ha, norm=norm)
+        Qb, gb, Pb = gpu.compute(params, hb, norm=norm)
+        assert np.array_equal(np.asarray(Pa), np.asarray(Pb)), (
+            "P must be bit-identical to the parent's")
+        for label, y, x in (("Q", Qb, Qa), ("dck", gb["ck"], ga["ck"]),
+                            ("dcoeff", gb["coeff"], ga["coeff"])):
+            assert _rel(y, x) <= PARENT_TOL, f"{label}: {_rel(y, x):.2e}"
+        if norm is not None:
+            assert _rel(gb["norm"], ga["norm"]) <= PARENT_TOL, "dnorm"
+    finally:
+        ha.free()
+        hb.free()
+        parent.free()
+        gpu.free()
+
+
+# ── gate 2: the exact-zero contract ────────────────────────────────────
 @pytest.mark.parametrize("name", SPECS_MASKED)
 @pytest.mark.parametrize("cfg,cols", MASKED, ids=MASK_IDS)
 def test_a_cached_waves_columns_have_an_exactly_zero_coefficient_gradient(
@@ -755,6 +851,91 @@ def test_a_short_final_group_on_the_masked_path_matches_the_reference(
         ref.free()
 
 
+# ── gate 11b: a group no block can hold ────────────────────────────────
+
+@pytest.mark.parametrize("name", SPECS_MASKED)
+def test_a_group_no_block_can_hold_computes_or_names_an_alternative(name):
+    """``resolution_size`` 300 outgrows any tile (at most 256 events a block).
+
+    A kernel that keeps no scratch between a group's events (``s0g``) must
+    REFUSE such a group at construction, naming a backend that CAN walk it;
+    one that keeps the staging (``s0f``) must compute it correctly.  Either
+    answer is a contract — silently mis-closing a group is not.
+    """
+    rs = 300
+    f = Fitter(CFG_IDENT)
+    f.apply_constrains()
+    kc = f.kernel_config
+    params = _params(f)
+    cols = [5, 6, 7, 8, 9]
+    vals = _fv(kc, params, cols)
+    data = _in_grid(kc, 34, seed=5)
+    try:
+        gpu = create_backend(name, kc, model="pwa_gen", resolution_size=rs,
+                             fixed_cols=cols, fixed_values=vals)
+    except ValueError as exc:
+        named = [n for n in sorted(backends_for_model("pwa_gen"))
+                 if n != name and n in str(exc)]
+        assert named, (
+            f"{name} refused a group it cannot hold without naming a working "
+            f"alternative: {exc}")
+        # the MOST SPECIFIC name in the message: ``cuda_flat_pwa_gen`` is a
+        # substring of ``cuda_flat_pwa_gen_s0f`` and is not the alternative
+        alt_name = max(named, key=len)
+        alt = create_backend(alt_name, kc, model="pwa_gen",
+                             resolution_size=rs, fixed_cols=cols,
+                             fixed_values=vals)
+        alt.free()              # the named alternative is usable on this shape
+        return
+    ref = _references(kc, rs)
+    try:
+        Q, g, P = gpu.compute(params, gpu.load_data(data), norm=1.3)
+        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
+        assert _gate(name, P, Pr, "p", cfg=CFG_IDENT), "P"
+        assert _gate(name, Q, Qr, cfg=CFG_IDENT), "Q"
+        assert _gate(name, g["ck"], gr["ck"], "ck", cfg=CFG_IDENT), "dck"
+    finally:
+        ref.free()
+        gpu.free()
+
+
+# ── gate 19: the multi-BW refusal (the shape guard) ────────────────────
+#:
+#: Placed beside gate 11b: both are REFUSALS that must name a usable
+#: alternative.  The ``n_res1`` capability is the ``_flat_compute`` sweep's
+#: skip; the gate itself lives here, with the leaf that owns the config
+#: contract (``CONFIG_OWNER``), so no skip claims coverage elsewhere.
+
+@pytest.mark.parametrize("name", SPECS_MASKED)
+def test_a_multi_bw_chain_is_refused_naming_cuda_flat_pwa_gen2(name):
+    """``n_res == 2`` has no one-BW-per-chain denominator, so refuse it loudly.
+
+    Every backend here is tagged ``n_res1`` (``_flat_compute`` derives the tag
+    from the registry, so a new masked leaf is covered by declaring it).  The
+    multi-BW chain's amplitude is ``bw_{w,0}·bw_{w,1}`` — a product over the
+    factor axis — which these kernels do not walk.  The refusal must happen at
+    CONSTRUCTION, before any device work, and must name the documented
+    fallback ``cuda_flat_pwa_gen2``; asserting only "raises ValueError" would
+    let the recommendation be dropped while the gate stayed green.
+
+    The fixture's shape is asserted FIRST: a gate written on a config that is
+    not multi-BW would pass with the guard never reached.
+    """
+    assert "n_res1" in backend_tags(name, "pwa_gen"), (
+        f"{name} is swept by the multi-BW gate without declaring `n_res1`")
+    f = Fitter(CFG_MB)
+    f.apply_constrains()
+    kc = f.kernel_config
+    assert int(f.model.n_res) == 2, (
+        f"CFG_MB is not a multi-BW chain: model n_res = {f.model.n_res}")
+    assert int(np.asarray(kc["num_table"]).shape[1]) == 2, (
+        "CFG_MB's kernel config must carry two factors per chain, got "
+        f"{np.asarray(kc['num_table']).shape}")
+    with pytest.raises(ValueError, match="cuda_flat_pwa_gen2") as ei:
+        create_backend(name, kc, model="pwa_gen")
+    assert "ONE BW per chain" in str(ei.value), str(ei.value)
+
+
 # ── gate 12: return_p ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize("name", SPECS_MASKED)
@@ -869,6 +1050,191 @@ def test_the_full_fitter_path_with_a_mask(name):
             _f.backend.free()
 
 
+# ── gate 18: the split's scratch is the CONTEXT's, not a handle's ──────
+
+#: The probe is ``cudaMemGetInfo``, and the driver hands out device memory in
+#: 2 MiB granules (MEASURED on this box: one 4 800 000 B ``cudaMalloc`` moves
+#: ``free_bytes`` by exactly 6 291 456 B).  The sample size below is chosen so
+#: the legitimate fixed-wave cache is a WHOLE number of granules, otherwise the
+#: probe's own rounding shows up as a residual: at ``ne = 100 000`` the 4.8 MB
+#: cache rounds to 6 MiB and leaves +1 491 456 B for CORRECT code, which a
+#: 1 MB bound would condemn.  ``fix_bytes(ne) % _ALLOC_QUANTUM == 0`` is
+#: asserted so a mask whose cache does not land on a granule fails loudly here
+#: instead of looking like a leak.
+_ALLOC_QUANTUM = 2 * 1024 * 1024
+#: what a per-handle buffer may add beyond the documented cache.  An
+#: ``ne``-sized per-handle scratch is 7.3–16.8 MB at this sample size, so it is
+#: 7–16x the bound; the legitimate ``us``/``amp`` caches cancel against the
+#: parent's (same kernel code, same flat config, same sample).
+_SCRATCH_BOUND = 1024 * 1024
+
+
+def _parent_backend(name):
+    """The backend a case-1 kernel was copied FROM (``_flat_isolation``)."""
+    src = ISOLATION[name]["parent"]
+    assert src, f"{name} declares no parent, so there is nothing to cancel"
+    stem = src.removeprefix("kernels_").removesuffix(".cu")
+    return "cuda_" + stem
+
+
+#: ONE load, measured in a FRESH process.  A settled pool is not enough: the
+#: measurement runs after thousands of other tests, whose freed blocks the
+#: driver can hand out again, and a single reused 2 MiB block moves the delta by
+#: a whole granule (MEASURED in the full suite: the parent read 25 165 824 B
+#: instead of its 27 262 976 B and the residual was one granule).  A fresh
+#: process has no earlier pool state, so the number is the allocation itself.
+_DELTA_CHILD = r"""
+import json, sys
+sys.path.insert(0, {tests_dir!r})
+import numpy as np
+from tabpwa import Fitter, monitor
+from tabpwa.backends import create_backend
+from _flat_grid import _in_grid
+backend, cfg, ne, seed, cols, masked = json.loads(sys.argv[1])
+f = Fitter(cfg)
+f.apply_constrains()
+kc = f.kernel_config
+kw = {{}}
+if masked:
+    p = f.build_params(f.initial_values(seed=1))[0]
+    n = int(np.asarray(kc["basis_table"]).shape[0])
+    c = np.asarray(p["coeff"], np.float64)
+    v = np.zeros(n, np.float64)
+    v[cols] = c[cols]
+    kw = dict(fixed_cols=list(cols), fixed_values=v)
+data = _in_grid(kc, ne, seed=seed)
+be = create_backend(backend, kc, model="pwa_gen", **kw)
+try:
+    monitor.sync()
+    base = monitor.free_bytes()
+    h = be.load_data(data)
+    monitor.sync()
+    after = monitor.free_bytes()
+    h.free()
+finally:
+    be.free()
+print("DELTA", int(base - after))
+"""
+
+
+def _delta_in_fresh_process(backend, cfg, ne, seed, cols, masked):
+    """``load_data``'s byte cost, measured in a child with an empty pool."""
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(tests_dir)
+    script = _DELTA_CHILD.format(tests_dir=tests_dir)
+    spec = json.dumps([backend, cfg, int(ne), int(seed),
+                       None if cols is None else [int(c) for c in cols],
+                       bool(masked)])
+    try:
+        out = subprocess.run([sys.executable, "-c", script, spec], cwd=root,
+                             capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AssertionError(f"the memory-probe child could not run: {exc}")
+    if out.returncode != 0:
+        raise AssertionError(
+            "the memory-probe child failed:\n" + out.stderr[-3000:])
+    for line in reversed(out.stdout.splitlines()):
+        if line.startswith("DELTA "):
+            return int(line.split()[1])
+    raise AssertionError(
+        "the memory-probe child printed no delta:\n" + out.stdout[-3000:])
+
+
+def _scratch_deltas(backend, parent, cfg, ne, cols):
+    """``(delta masked, delta parent)``, each in its own fresh process."""
+    dm = _delta_in_fresh_process(backend, cfg, ne, 5, cols, True)
+    dp = _delta_in_fresh_process(parent, cfg, ne, 5, None, False)
+    return dm, dp
+
+
+@pytest.mark.parametrize("name", SPECS_MASKED)
+def test_a_load_does_not_allocate_the_split_scratch(name):
+    """A ``load_data`` must not add a per-handle copy of the split's scratch.
+
+    The measured regression this names: the buffers were ``ne``-sized in every
+    handle (336 MB each at 6 M events, 672 MB across the data and phase-space
+    handles).  They are now ONE ``cap``-sized allocation per CONTEXT, made at
+    construction, so loading a sample adds nothing proportional to it.
+
+    The gate is DIFFERENTIAL and it is measured at a large sample, because the
+    obvious form cannot fail.  MEASURED: at 16 events BOTH loads cost 0 B (the
+    legitimate ``us``/``amp`` caches are ~314 B/event, i.e. a few KB, below what
+    the probe resolves), so a per-handle ``ne``-sized scratch of 896–2 048 B
+    there is invisible and only a cap-sized (≥ 2 MB) block could trip it.  At
+    ``ne`` = 131 072 (chosen so ``fix_bytes`` is a whole number of 2 MiB
+    granules):
+
+        delta(masked) 33 554 432 B
+        delta(parent) 27 262 976 B (the same ``us``/``amp`` caches)
+        fix_bytes     6 291 456 B
+        residual              0 B
+
+    and a per-handle ``ne``-sized buffer — MEASURED with a temporary 56 B/event
+    ``cudaMalloc`` in the kernel's ``load_data`` — raises the residual to
+    8 388 608 B and the gate FAILS, which is what makes it a gate.  The
+    subtraction of ``fix_bytes`` is what lets the legitimate cache stay: it is
+    the one thing a masked load is allowed to add.
+
+    The probe is :func:`tabpwa.monitor.free_bytes` (``libcudart`` via
+    ``ctypes``), NOT a sampler: ``nvidia-smi`` reports whole MiB, and this is a
+    few-MB allocation.  The oracle is DEVICE-WIDE, so another process on the card
+    makes the window meaningless — that is the one skip, derived from a
+    precondition rather than from the backend, and it is re-queried AFTER the
+    measurement: a user set that changed mid-window makes the numbers
+    unattributable, so the attempt is retried once and reported as invalid
+    (not asserted) if it moves again.  A kernel that keeps NO scratch (``s0g``)
+    has nothing to allocate; it is asserted to have no ``aux_bytes`` report and
+    skipped with that reason, so the check is never silently vacuous for it.
+    """
+    if not monitor.has_device():
+        pytest.skip("no CUDA device for the free-bytes probe")
+    others = other_gpu_users()
+    if others:
+        pytest.skip("another process is using the GPU (pid %s); device-wide "
+                    "free bytes cannot attribute allocations"
+                    % ", ".join(str(p) for p in others))
+    f, kc, gpu = _masked(name, CFG_IDENT, [5, 6, 7, 8, 9])
+    k = gpu.kernel
+    if not hasattr(k, "aux_bytes"):
+        gpu.free()
+        pytest.skip(f"{name}: no per-context scratch (no aux_bytes) — a load "
+                    "has nothing to allocate")
+    try:
+        aux = k.aux_bytes(0)
+        assert aux >= _ALLOC_QUANTUM, aux   # MBs, easily visible in bytes
+        per_event = 8 * int(k.n_fix) * int(k.n_proj)
+        assert per_event > 0, (k.n_fix, k.n_proj)
+        ne = _ALLOC_QUANTUM // math.gcd(per_event, _ALLOC_QUANTUM)
+        fix = k.fix_bytes(ne)
+        assert fix == per_event * ne, (fix, per_event, ne)
+        assert fix % _ALLOC_QUANTUM == 0, (fix, _ALLOC_QUANTUM)
+    finally:
+        gpu.free()
+    parent = _parent_backend(name)
+    args = (name, parent, CFG_IDENT, ne, [5, 6, 7, 8, 9])
+    for attempt in (1, 2):
+        before = other_gpu_users()
+        if before:
+            pytest.skip("another process joined the GPU (pid %s); device-wide "
+                        "free bytes cannot attribute allocations"
+                        % ", ".join(str(p) for p in before))
+        dm, dp = _scratch_deltas(*args)
+        if other_gpu_users() == before:
+            break
+        warnings.warn(f"{name}: the GPU user set changed during the bytes "
+                      f"measurement (attempt {attempt}); retrying",
+                      RuntimeWarning)
+    else:
+        pytest.skip(f"{name}: the GPU user set could not be held still across "
+                    "two measurement attempts — the deltas are unattributable")
+    residual = dm - dp - fix
+    assert residual < _SCRATCH_BOUND, (
+        f"{name}: loading {ne} events costs {dm:,} B where the parent "
+        f"{parent} costs {dp:,} B; after the legitimate {fix:,} B fixed-wave "
+        f"cache that leaves {residual:,} B of per-handle allocation (an "
+        f"ne-sized scratch is {ne * 56:,}–{ne * 128:,} B here)")
+
+
 # ── the CTPWA mask arithmetic — ONE gate, every masked backend ─────────
 
 @pytest.mark.skipif(not _ctpwa_present(),
@@ -908,3 +1274,44 @@ def test_the_ctpwa_mask_arithmetic_is_the_same_on_every_masked_backend(name):
         assert k.n_nz_fix == n_nz_fix
     finally:
         be.free()
+
+
+@pytest.mark.skipif(not _ctpwa_present(),
+                    reason="the CTPWA benchmark config is not present")
+@pytest.mark.parametrize("free,cols", [
+    # the alias: the K+ mass drives BOTH charge sectors' s0 and width_t
+    ("K3st1780p_mass", [35, 36, 53, 54]),
+    ("K3st1780p_width", [36, 54]),
+])
+def test_an_aliased_parameter_moves_both_charge_sectors(free, cols):
+    """The per-PARAMETER truth the union over the ten names cannot state.
+
+    With only ``K3st1780p_mass`` free, the moving columns include the
+    ``K3st1780m_*`` ones (53, 54) — their names do not share the prefix, so a
+    name mask that fixes ``K3st1780p_s0`` alone would leave a moving column
+    free while the cache believes it is frozen.
+    """
+    f = Fitter(CTPWA_CFG)
+    f.apply_constrains()
+    _pin_other_mw(f, (free,))
+    x = f.initial_values(seed=1)
+    den = [str(n) for n in np.asarray(f.kernel_config["den_names"]).ravel()]
+    per = _moving_by_param(f, x)
+    assert per[free] == cols, (free, per[free])
+    assert [den[i] for i in per[free]] == [den[i] for i in cols]
+    if free == "K3st1780p_mass":
+        # exactly the trap: the p column is NOT enough
+        assert 53 in per[free] and 54 in per[free]
+
+
+# ── provenance: the case-1 row each caching kernel must have ───────────
+#:
+#: ``cuda_flat_pwa_gen_s0g`` is a case-1 copy of ``cuda_flat_pwa_gen_s0f``'s
+#: source, and ``s0f`` is itself a copy of ``s0e2``'s.  That property — own
+#: module/``.so``/symbols, parent byte-identical, every source digest — is ONE
+#: shared table (``tests/_flat_isolation.py``, collected by
+#: ``test_flat_isolation.py``); here only the COVERAGE is asserted, so a
+#: ``fixed_coeff`` backend that arrives without a row fails at import.
+assert set(SPECS_MASKED) <= set(ISOLATION), (
+    "a masked backend must have a case-1 row in _flat_isolation: "
+    f"{sorted(set(SPECS_MASKED) - set(ISOLATION))}")
