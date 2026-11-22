@@ -1,0 +1,126 @@
+# psi(3686) -> phi K+ K- : the benchmark model of
+#   arXiv:2403.09225 (PWACG) — psi(3686) -> phi + R, phi -> K+ K-, R -> K+ K-,
+# i.e. FOUR kaons in TWO identical pairs (K+ K- from the phi, K+ K- from R).
+#
+# Roles in this file:
+#   psi3686  top, J^P = 1^-                     (mass PDG)
+#   phires   = phi(1020), 1^--, ALWAYS the second resonance of the chain,
+#              mass/width FIXED by `--fix-mw` (the paper fixes them)
+#   f0980    = f0(980),    0^++,  KK
+#   f01710   = f0(1710),   0^++,  KK
+#   f21270   = f2(1270),   2^++,  KK
+#   f21525   = f2'(1525),  2^++,  KK
+#   f22550   = f2(2550),   2^++,  KK   (the sixth module; the repo's
+#                         config names it phif2_2340)
+#   f22150   = f2(2150),   2^++,  KK
+# i.e. the paper's six modules = phi + these five R (the phi is one of them and
+# is always present, its mass/width fixed).
+#
+# NO symmetry declaration: this is the MATCHED config.  The reference framework
+# (PWACG) has no identical-particle / CP block expansion — its formalism is one
+# chain set, 24 amplitude components for this model — so declaring
+# `identical_particles: [[Kp1, Kp2], [Km1, Km2]]` here would multiply our wave
+# axis by 4 (n_perm = 2! x 2! identical-particle permutations, `n_blocks = 4`;
+# no `cp_particles` is declared, so n_cp = 1) and time 96 waves
+# against their 24.  That is strictly more physics, and comparing it would make
+# us look 4x slower for doing it.  The symmetrised variant is the documented
+# appendix `config_gen_sym.yml`, never this file.
+#
+# This is the PLAIN `pwa` sibling of `config_gen.yml` — same decay tree, same
+# six resonances, same 24 waves and the same x = 59 — but it is a DIFFERENT
+# MODEL from the reference's, on purpose:
+#   * it drops the phi instead of folding |BW_phi|^2 into the phase-space
+#     weights (`phsp_arr: ./phsp.npz`, unit weights), i.e. the variant this
+#     benchmark's README shows is NOT the same likelihood (gradient cosine
+#     -0.56), and
+#   * it uses the built-in line shapes (`FlatteC`, `BWR`) rather than the
+#     reference's (`extra_amp.py`).
+# So it exists to exercise the plain-`pwa` family on this topology, and no
+# number from it belongs in a comparison with PWACG.
+#
+# `defaults.n_interp` 4000 instead of the global 2000: the KK lineshape grid for
+# the 2^++ modules spans a wide mass range, and the grid check in make_data.py
+# is run against this value (see its "grids:" line).
+amp_model: pwa
+backend:
+  name: auto
+
+defaults:
+  n_interp: 4000
+
+data:
+  dat_order: [Kp1, Km1, Kp2, Km2]
+  data_arr: ./data/data.npz         # kernel format, from make_data.py
+  phsp_arr: ./data/phsp.npz
+  random_z: False
+  center_mmass: True
+  purity: 1.0
+
+decay:
+  # one chain per R; phi is the recoil system in every chain
+  psi3686:
+    - [phires, f0980]
+    - [phires, f22550]
+    - [phires, f01710]
+    - [phires, f21270]
+    - [phires, f21525]
+    - [phires, f22150]
+  phires: [Kp1, Km1]
+  f0980:  [Kp2, Km2]
+  f22550: [Kp2, Km2]
+  f01710: [Kp2, Km2]
+  f21270: [Kp2, Km2]
+  f21525: [Kp2, Km2]
+  f22150: [Kp2, Km2]
+
+particle:
+  $top: psi3686
+  $finals: [Kp1, Km1, Kp2, Km2]
+
+  psi3686:
+    J: 1
+    P: -1
+    spins: [-1, 1]        # TWO polarisations, as the paper's 1/2 sum over mu=1,2
+    mass: 3.6861
+
+  Kp1: {J: 0, P: -1, mass: 0.493677}
+  Km1: {J: 0, P: -1, mass: 0.493677}
+  Kp2: {J: 0, P: -1, mass: 0.493677}
+  Km2: {J: 0, P: -1, mass: 0.493677}
+
+  # ── phi(1020): 1^--, the fixed second resonance of every chain ────────
+  phires: {J: 1, P: -1, mass: 1.019461, width: 0.004249, model: one}
+
+  # ── the five scalar / tensor modules ──────────────────────────────────
+  # masses/widths are the paper's OWN Table 1 (arXiv:2403.09225), not PDG:
+  #   f0(980) 42.89 %  1.022/0.209 | f2(2550) 30.95 % 2.545/0.303
+  #   f2'(1525) 30.27 % 1.522/0.091 | f0(1710) 8.97 % 1.672/0.169
+  #   f2(1270) 3.98 %  1.302/0.189 | f2(2150) 2.52 % 2.150/0.143
+  # f0(980): the SAME axis as the reference -- two channels, pi-pi and K-K,
+  # couplings mapped from its flatte980 (m 0.9794812, g_pipi 0.0124622,
+  # g_kk 0.1067862).  PWACG_flatte980's gamma IS their rho (real on both sides
+  # of threshold), so the map is g_i = g_i^their/m0 — our kernel multiplies the
+  # coupling by m0.  (The built-in FlatteC used by the APPENDIX takes complex
+  # q_i/m instead, which is why its map is 2*g_their/m0.)
+  f0980:
+    J: 0
+    P: +1
+    mass: 0.9794812
+    model: FlatteC
+    mass_list: [[0.13957061, 0.13957061], [0.493677, 0.493677]]
+    g_0: 0.025445      # 2*0.0124622/0.9794812
+    g_1: 0.218055      # 2*0.1067862/0.9794812
+  # the four BW resonances: CONSTANT width, which is exactly their `BW`
+  f22550: {J: 2, P: +1, mass: 2.545, width: 0.303, model: BW}
+  f21525: {J: 2, P: +1, mass: 1.522, width: 0.091, model: BW}
+  f01710: {J: 0, P: +1, mass: 1.672, width: 0.169, model: BW}
+  f22150: {J: 2, P: +1, mass: 2.150, width: 0.143, model: BW}
+  # f2(1270): their `flatte1270` is a RUNNING-width BW with its own q^2.5
+  # polynomial, not a coupled-channel Flatte.  PWACG_flatte1270 reproduces that
+  # b2 form exactly; the APPENDIX's config_gen_sym.yml uses the built-in BWR(L=2)
+  # instead, which is a different width parametrisation.
+  f21270: {J: 2, P: +1, mass: 1.302, width: 0.189, model: BWR}
+
+# BWR masses/widths are FREE by default here (x counts all of them), so
+# bench.py pins them with `--fix-mw` (the paper's scenario: the phi and the
+# module masses/widths fixed, only the couplings float).
