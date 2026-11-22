@@ -68,7 +68,10 @@ CFG_ID = {c: i for c, i in zip(ALL_CFGS, CFG_IDS)}
 KERNELS = {
     "gen": dict(
         name="cuda_flat_pwa_gen",
-        floors=(1e-6, 1e-6, 1e-6),
+        # fp64 and uncached: MEASURED 3.9e-15 / 3.4e-15 / 9.0e-15 against the
+        # reference (the same record as _flat_compute.FLOORS, which this file
+        # may not be looser than)
+        floors=(1e-12, 1e-12, 1e-12),
         multi_bw=True,
         zero_coeff=True,
     ),
@@ -153,10 +156,15 @@ WIDE_BASIS = 40
 REAL_CFG = ("/home/jiangy/github/project94/pwa_workspace/jpsi_eta_pi_pi/"
             "04_model_search/current/config.yml")
 #: MEASURED on `REAL_CFG` (26 waves, 62 basis rows, 48 events, norm 1.3): the
-#: worst of the six leaves against `numpy_flat` is Q 4.7e-6, P 5.7e-4,
-#: ck 6.1e-6, coeff 3.4e-4, dnorm 3.4e-8.  The bound tracks P's dynamic range
-#: on a production config (wider than any fixture), so it is its own number —
-#: never a loosening of the fixtures' floors.
+#: worst of the six leaves against `numpy_flat` is Q 1.45e-7, P 1.60e-5,
+#: ck 4.60e-7, coeff 1.04e-5 (the fp64 leaf alone: 2.6e-16 / 1.8e-15 / 3.4e-15
+#: / 2.5e-15).  The bound tracks P's dynamic range on a production config
+#: (wider than any fixture), so it is its own number — never a loosening of the
+#: fixtures' floors.  It is deliberately LOOSE (96x-6900x against the numbers
+#: above) because this is the wide-range net: it must hold for every leaf on a
+#: shape no fixture has, not pin any one of them.  (It read Q 4.7e-6 /
+#: P 5.7e-4 / ck 6.1e-6 / coeff 3.4e-4 while the reference interpolated
+#: two-point linearly — the chord error was most of it.)
 REAL_FLOOR = (1e-3, 3e-3, 1e-3)
 
 

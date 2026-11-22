@@ -94,17 +94,32 @@ def test_agrees_with_numpy_flat_at_the_floor(cfg, norm, rs):
         cpu.free()
 
 
-def test_the_recorded_floor_is_the_measured_fp64_margin():
-    """The floor is s0c's (2e-5 / 4e-5 / 2e-4), and fp64 clears it by >5x.
+#: The worst agreement this leaf reaches against ``numpy_flat``, per quantity,
+#: over ``QUALIFYING x rsize {1,17} x norm {None, 1.3}``.  RECORDED here so the
+#: floor below is checked against a measurement rather than against nothing:
+#: if a floor is ever tightened below these, this test fails.
+MEASURED_FP64 = {"Q": 1.22e-15, "P": 3.11e-15, "ck": 1.86e-15,
+                 "coeff": 6.09e-15}
 
-    MEASURED over the whole qualifying set (rsize 1/17, norm None/1.3):
-    Q 9.3e-7, P 3.0e-6, dck 1.4e-6, dcoeff 5.0e-6 — the CR-vs-linear
-    interpolation difference against the reference, not an accumulation
-    error (both kernels are fp64).
+
+def test_the_recorded_floor_is_the_measured_fp64_margin():
+    """The floor is 1e-12, and this fp64 kernel clears it by >=160x.
+
+    Plain ``rel`` (``abs_ok`` False) on purpose: with the absolute fallback on,
+    the 1e-4 fallback would be what binds and the 1e-12 would never decide.
+    Both sides were fp64 before this was 1e-12, so what the leaf measured was
+    NOT accumulation: while the reference interpolated the flat tables with
+    two-point LINEAR interpolation the CPU kernel's agreement was
+    Q 9.3e-7 / P 3.0e-6 / dck 1.4e-6 / dcoeff 5.0e-6 — the chord error of the
+    `-m²` row, which is what the old s0c floor (2e-5 / 4e-5 / 2e-4) was sized
+    for.  The reference reads Catmull-Rom now, the difference above is gone,
+    and the floor follows the measurement down.
     """
-    assert FLOORS[NAME] == (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING))
-    assert FLOORS[NAME][2] > 5e-6      # >= the measured coeff worst (5.0e-6)
-    assert FLOORS[NAME][1] > 3e-6      # >= the measured P worst     (3.0e-6)
+    assert FLOORS[NAME] == (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING))
+    assert FLOORS[NAME][0] > 100 * MEASURED_FP64["Q"]
+    assert FLOORS[NAME][1] > 100 * MEASURED_FP64["P"]
+    assert FLOORS[NAME][0] > 100 * MEASURED_FP64["ck"]
+    assert FLOORS[NAME][2] > 100 * MEASURED_FP64["coeff"]
 
 
 # ── 2. the grouped objective, checked against ITS OWN formula ───────────

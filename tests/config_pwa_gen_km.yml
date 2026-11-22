@@ -2,9 +2,13 @@
 # only implementation): one resonance, one partial wave, one projection.
 # Gate B: P and the NLL must equal the direct
 # `Σ g_ls·(P/(1−iρK))·fa·fl` (tests/test_pwa_gen.py).
-# n_interp is raised so the tabulated basis rows reproduce the closed-form
-# rows to ~1e-7 (linear interpolation of the flat tables is the only
-# approximation left in the chain).
+# n_interp is raised so the tabulated rows track the closed-form ones closely.
+# It is no longer a floor: the tables are read with Catmull-Rom (the kernels'
+# scheme), which reproduces the quadratic `-m²` row EXACTLY, so the residue
+# against the direct amplitude is ~1e-12 at this setting and was ~1e-7 when the
+# reference read the tables two-point linearly.  The override is kept because
+# it is still a representation error on the interpolated `num`/`gamma` rows,
+# only a much smaller one.
 amp_model: pwa_gen
 defaults:
   n_interp: 20000

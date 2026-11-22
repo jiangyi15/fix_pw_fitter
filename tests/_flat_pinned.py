@@ -98,12 +98,19 @@ GRAM_NORM = 5e-6
 TABLES = {
     "cuda_flat_pwa_gen_ampcache": {
         # MEASURED over ONE_BW (64 events, seed 0, rsize 17 replication,
-        # norm None and 1.3): Q 9.1e-7, P 3.3e-6, dck 1.3e-6, dnorm 2.9e-7;
-        # the bounds carry a ~3x margin.
+        # norm None and 1.3): Q 1.06e-7, P 4.29e-7, dck 2.82e-7, dnorm 1.07e-8.
+        # They read 9.1e-7 / 3.3e-6 / 1.3e-6 / 2.9e-7 while `numpy_flat`
+        # interpolated the tables two-point LINEARLY — part of that gap was the
+        # oracle's chord, not this kernel.  The bounds are kept where the
+        # original files set them (~3x against the old figures), so they now
+        # carry 18-93x; that headroom is recorded, NOT claimed by a tightened
+        # gate here.
         "make_kernel": CUDAKernelFlatPwaGenAmpCache,
         "floors": (3e-6, 1e-5, 5e-6, 1e-6),
-        # `_mb` (n_res == 2) MEASURED SEPARATELY: Q 6.1e-7, P 1.0e-7,
-        # dck 1.2e-7, dnorm 3.1e-9 (bounds ~3-5x).
+        # `_mb` (n_res == 2) MEASURED SEPARATELY: Q 7.01e-7, P 1.33e-7,
+        # dck 1.53e-7, dnorm 3.96e-9 (bounds 2.5-3.8x).  This vector is the
+        # fp32 CACHE's own floor and barely moved; only the ONE_BW one carried
+        # a visible interpolation share.
         "mb_floors": (2e-6, 5e-7, 5e-7, 1e-8),
         # (step, rtol, atol) — the fp64 kernel's own central difference
         "fd": (1e-6, 1e-4, 1e-8),
@@ -111,16 +118,21 @@ TABLES = {
         "fresh": 1e-14,
     },
     "cuda_flat_pwa_gen_ampcache32": {
-        # MEASURED against fp64 `numpy_flat`: Q 8.9e-7, P 3.3e-6, dck 1.3e-6,
-        # dnorm 2.9e-7 — the parent's own fp32-CACHE floors to within a few
-        # percent (the `float2` cache dominates; the fp32 contraction adds
-        # nothing visible here).
+        # MEASURED against fp64 `numpy_flat`: Q 7.57e-8, P 3.82e-7, dck
+        # 2.86e-7, dnorm 1.29e-8 — the parent's own fp32-CACHE floors to within
+        # ~10 % (the `float2` cache dominates; the fp32 contraction adds nothing
+        # visible here).  The bounds keep the ~3x they were given against the
+        # linear-oracle figures (8.9e-7 / 3.3e-6 / 1.3e-6), so they now carry
+        # 26-40x.
         "make_kernel": CUDAKernelFlatPwaGenAmpCache32,
         "floors": (3e-6, 1e-5, 5e-6, 1e-6),
-        # `_mb` MEASURED SEPARATELY: Q 1.7e-6, P 5.6e-8, dck 1.5e-7,
-        # dnorm 2.3e-9 (bounds ~3-4x).  Its Q floor is the LOOSER of the two
-        # files' — the second rounding is real on the factor product, so
-        # borrowing the fp64 2e-6 here would be a new, unmet gate.
+        # `_mb` MEASURED SEPARATELY: Q 1.62e-6, P 1.06e-7, dck 1.92e-7,
+        # dnorm 4.16e-9 (bounds 3.1x / 1.9x / 2.6x / 2.4x).  Its Q floor is the
+        # LOOSER of the two files' — the second rounding is real on the factor
+        # product, so borrowing the fp64 2e-6 here would be a new, unmet gate.
+        # P is the tight one at 1.9x and it GREW (5.6e-8 -> 1.06e-7) with the
+        # reference change: the cache floor is fp32 rounding, which does not
+        # cancel against a smoother oracle.
         "mb_floors": (5e-6, 2e-7, 5e-7, 1e-8),
         # (step, rtol, atol) — NOT the parent's 1e-6: this kernel's `Q` carries
         # a fixed fp32-contraction offset that varies with `ck`, so at 1e-6 the

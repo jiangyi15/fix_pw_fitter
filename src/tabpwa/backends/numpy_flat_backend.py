@@ -158,12 +158,39 @@ class NumpyFlatBackend(ComputeBackend):
 
     # ── helpers ─────────────────────────────────────────────────────
     @staticmethod
-    def _lin(tab, x, lo, d):
-        """Linear interpolation of a 1-D table at ``x`` (same shape out)."""
+    def _cr(tab, x, lo, d):
+        """Catmull-Rom interpolation of a 1-D table at ``x`` (same shape out).
+
+        The SAME scheme as the kernels — ``gps02_cr1d``/``gps02_interp_real`` in
+        the CUDA flat tiles, ``cfpg_cr_weights``/``cfpg_interp`` in the C/OpenMP
+        kernel — including the edge clamping, so this reference and the kernels
+        read a table the same way.  Same scheme, not same association: this is
+        the CUDA routine's expression exactly (gated against a transcription in
+        ``tests/test_pwa_gen.py``), while the C kernel pre-factors the four
+        weights and so differs by <=1 ulp.
+
+        Two-point linear (what this backend used to do) is NOT exact for a
+        quadratic row such as ``-m²`` — the chord is off by ``Δ²/4`` — and this
+        stencil reproduces one to ~5e-15 in the INTERIOR.  The two EDGE bins are
+        exact for neither: the clamp duplicates a neighbour rather than taking a
+        one-sided tangent.  MEASURED on the ``-m²`` row over the flat config's
+        grid: 8.1e-5 in the first bin, 2.6e-4 in the last, against the chord's
+        7.7e-8 — so at the edges this is LESS accurate than the linear scheme
+        was.  That is the kernels' own behaviour (the point here is parity, not
+        the smaller error), and every fixture keeps its events strictly inside
+        the grid — see ``tests/_flat_grid.py``.
+        """
+        tab = np.asarray(tab)
+        n = tab.size
         pos = (np.asarray(x, np.float64) - lo) / d
-        i0 = np.clip(pos.astype(np.int64), 0, tab.size - 2)
-        fr = pos - i0
-        return tab[i0] * (1.0 - fr) + tab[i0 + 1] * fr
+        b = np.clip(np.floor(pos).astype(np.int64), 0, n - 2)
+        s = np.clip(pos - b, 0.0, 1.0)
+        pm1 = tab[np.maximum(b - 1, 0)]
+        p0 = tab[b]
+        p1 = tab[b + 1]
+        p2 = tab[np.minimum(b + 2, n - 1)]
+        return p0 + 0.5 * s * (-pm1 + p1 + s * (2.0 * pm1 - 5.0 * p0 + 4.0 * p1 - p2
+                                              + s * (-pm1 + 3.0 * p0 - 3.0 * p1 + p2)))
 
     def _coeff_block(self, coeff, n_wave, n_res, n_basis):
         """The coefficient weights broadcast to ``(n_wave, n_res, n_basis)``.
@@ -274,13 +301,13 @@ class NumpyFlatBackend(ComputeBackend):
             for dec in range(p["n_decay"]):
                 q = mom[:, p["fl_q"][k, dec]]
                 row = p["fl_idx"][k, dec]
-                fl *= self._lin(p["fl_tab"][row], q, p["q0"], p["qd"])
+                fl *= self._cr(p["fl_tab"][row], q, p["q0"], p["qd"])
             num = np.ones(ne, np.complex128)
             for r in range(n_res):
                 xx = mass[:, p["num_m"][k, r]]
                 tab = p["num_tab"][p["num_idx"][k, r]]
-                num *= (self._lin(tab.real, xx, p["m0"], p["md"])
-                        + 1j * self._lin(tab.imag, xx, p["m0"], p["md"]))
+                num *= (self._cr(tab.real, xx, p["m0"], p["md"])
+                        + 1j * self._cr(tab.imag, xx, p["m0"], p["md"]))
             den = np.ones(ne, np.complex128)
             for r in range(n_res):
                 s = self._den_factor(k, r, mass, weights)
@@ -396,8 +423,8 @@ class NumpyFlatBackend(ComputeBackend):
                         continue
                     xx = mass[:, bmi[m]]
                     tab = bas[m]
-                    b = (self._lin(tab.real, xx, m0, md)
-                         + 1j * self._lin(tab.imag, xx, m0, md))
+                    b = (self._cr(tab.real, xx, m0, md)
+                         + 1j * self._cr(tab.imag, xx, m0, md))
                     grad_coeff[k, r, m] += 2.0 * np.real(np.sum(ds * w * b))
 
         grads = {"ck": grad_ck, "coeff": grad_coeff}
@@ -456,6 +483,6 @@ class NumpyFlatBackend(ComputeBackend):
             xx = mass[:, bmi[m]]
             tab = bas[m]
             s += w * weights[k, r, m] * (
-                self._lin(tab.real, xx, m0, md)
-                + 1j * self._lin(tab.imag, xx, m0, md))
+                self._cr(tab.real, xx, m0, md)
+                + 1j * self._cr(tab.imag, xx, m0, md))
         return s

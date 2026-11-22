@@ -95,7 +95,7 @@ def _direct_P(f, resolved, data):
     evaluated by the model itself, **not** through the tabulated rows.  The
     kernel's ``basis_table`` / ``num_table`` / ``gamma_matrix`` are therefore
     the only approximation left in the comparison (``numpy_flat``
-    interpolates them linearly, ~1e-7 at ``n_interp`` 20000).
+    interpolates them with Catmull-Rom, the kernels' scheme).
 
     ``Σ_i ck_i·A_i`` over a base wave's numerator rows is ``g_ls·A_model``
     (``ck_i = g_ls·n_i``), so one term remains per base wave.  ``fl``/``fa``
@@ -123,16 +123,23 @@ def _direct_P(f, resolved, data):
         ka[:, a] = np.prod(np.cos(ang[:, ai[a], :] * ak[a] + ab[a]), axis=-1)
     fa = (ka @ am).reshape(ne, n_proj, n_wave).transpose(0, 2, 1)
 
-    # fl: barrier rows, linearly interpolated (the reference backend's rule)
+    # fl: barrier rows, read with the reference backend's scheme — Catmull-Rom
+    # (`numpy_flat._cr`, the same four-point Hermite and edge clamping as the
+    # kernels).  It used to be linear, which made this direct path agree with a
+    # backend that was itself linear; both are now Catmull-Rom.
+    def _cr1d(tab, pos):
+        b = np.clip(np.floor(pos).astype(np.int64), 0, tab.size - 2)
+        ss = np.clip(pos - b, 0.0, 1.0)
+        pm1, p0 = tab[np.maximum(b - 1, 0)], tab[b]
+        p1, p2 = tab[b + 1], tab[np.minimum(b + 2, tab.size - 1)]
+        return p0 + 0.5 * ss * (-pm1 + p1 + ss * (2.0 * pm1 - 5.0 * p0 + 4.0 * p1 - p2
+                                                + ss * (-pm1 + 3.0 * p0 - 3.0 * p1 + p2)))
+
     q0, qd = float(kc["q_min"]), float(kc["q_delta"])
     fl = np.ones((ne, n_wave))
     for k in range(n_wave):
         for dec in range(fl_q.shape[1]):
-            pos = (mom[:, fl_q[k, dec]] - q0) / qd
-            i0 = np.clip(pos.astype(np.int64), 0, fl_tab.shape[-1] - 2)
-            fr = pos - i0
-            fl[:, k] *= (fl_tab[k, dec, i0] * (1 - fr)
-                         + fl_tab[k, dec, i0 + 1] * fr)
+            fl[:, k] *= _cr1d(fl_tab[k, dec], (mom[:, fl_q[k, dec]] - q0) / qd)
 
     # plain g_ls per base wave: the ck combinations minus their numerator heads
     heads = set()
@@ -307,9 +314,20 @@ def test_gate_a_default_basis_matches_plain_pwa():
 def test_gate_b_forward_matches_direct(backend):
     """P, norm and NLL equal the closed-form K-matrix amplitude.
 
-    Only ``numpy_flat`` is registered for the flat config, so this is the
-    kernel-vs-direct check (there is no second backend to compare against).
-    The residual is the table interpolation alone.
+    The reference here is ``numpy_flat`` — the only ``pwa_gen`` leaf that
+    computes the config directly rather than through a kernel; the other
+    registered leaves have their own contract (``tests/_flat_compute.py`` and
+    the per-family files), so this is the config-vs-closed-form check.
+
+    MEASURED (120 events, seed 1): P 9.1e-12, norm 5.1e-13, Q 4.9e-14 against
+    a 1e-10 bound.  The residual is what the tabulated rows can represent of
+    the analytic amplitude: the direct path reads the same ``_cr`` scheme, so
+    the interpolation itself CANCELS between the two sides and a wrong scheme
+    would not show up here — that is
+    ``test_the_reference_interpolation_is_the_kernels_scheme``'s job.  The
+    bound was 1e-6 while the reference read the tables two-point LINEARLY and
+    the chord error of the ``-m²`` row was the residual; it is four orders
+    tighter now (1e-6 -> 1e-10) because that error is gone.
     """
     f = _loaded(CFG_KM, backend)
     x = f.initial_values(seed=1)
@@ -317,18 +335,73 @@ def test_gate_b_forward_matches_direct(backend):
 
     _Q, _g, P = f.backend.compute(params, f._data_holder, norm=None)
     P_dir = _direct_P(f, resolved, f._data_np)
-    assert np.max(np.abs(P - P_dir) / P_dir) < 1e-6
+    assert np.max(np.abs(P - P_dir) / P_dir) < 1e-10
 
     # extended NLL: the same P through the same norm/bkg definition
     norm, _ng = f._compute_norm_batched(params)
     P_phsp = _direct_P(f, resolved, f._phsp_np)
     norm_dir = float(np.sum(f._phsp_np["weight"] * P_phsp))
-    assert abs(norm - norm_dir) / norm_dir < 1e-6
+    assert abs(norm - norm_dir) / norm_dir < 1e-10
 
     Q, grads, P = f.backend.compute(params, f._data_holder, norm=norm)
     w = f._data_np["weight"]
     Q_dir = float(-np.sum(w * np.log(P_dir / norm + f._data_np["bkg"])))
-    assert abs(Q - Q_dir) / abs(Q_dir) < 1e-6
+    assert abs(Q - Q_dir) / abs(Q_dir) < 1e-10
+
+
+def test_the_reference_interpolation_is_the_kernels_scheme():
+    """``numpy_flat._cr`` is ``gps02_interp_real`` — edge clamps included.
+
+    Gate B cannot see the interpolation scheme: its direct path reads the same
+    helper, so a wrong scheme cancels between the two sides.  And no fixture
+    reaches the clamping branches — ``tests/_flat_grid.py`` keeps every sample
+    strictly inside both grids.  So the scheme is pinned HERE, against a direct
+    transcription of the CUDA routine (``kernels_flat_pwa_gen_s0e2.cu``), at
+    the nodes, inside a bin, out of range on BOTH sides, and at the two edge
+    bins where the clamp duplicates a neighbour.
+    """
+    from tabpwa.backends.numpy_flat_backend import NumpyFlatBackend
+
+    def gps02_interp_real(t, x, xmin, xdelta, bins):
+        # `b` clamps to [0, bins-2], `s` to [0, 1], and the edge neighbours
+        # duplicate p0 / p1 (im1 = b when b == 0, i2 = b+1 at the last bin).
+        diff = (x - xmin) / xdelta
+        b = max(0, min(int(np.floor(diff)), bins - 2))
+        ss = max(0.0, min(diff - b, 1.0))
+        im1 = b - 1 if b > 0 else b
+        i2 = b + 2 if b + 2 <= bins - 1 else b + 1
+        pm1, p0, p1, p2 = t[im1], t[b], t[b + 1], t[i2]
+        return p0 + 0.5 * ss * (-pm1 + p1 + ss * (2.0 * pm1 - 5.0 * p0
+                                                 + 4.0 * p1 - p2
+                                                 + ss * (-pm1 + 3.0 * p0
+                                                         - 3.0 * p1 + p2)))
+
+    lo, n = 0.9774, 64
+    d = (3.2024 - 0.9774) / (n - 1)
+    m = lo + np.arange(n) * d
+    probes = [-5.0, -0.5, -1e-9, 0.0, 0.37, 1.0, 3.0, n - 2.0, n - 1.5,
+              n - 1.0, n - 1.0 + 1e-9, n + 37.0]
+    rng = np.random.default_rng(0)
+    for row in (-m ** 2, np.cos(m), rng.normal(size=n)):
+        for pos in probes:
+            x = lo + pos * d
+            assert float(NumpyFlatBackend._cr(row, x, lo, d)) == \
+                gps02_interp_real(row, x, lo, d, n), pos
+
+    # the vectorised call IS that function, not a second implementation
+    xs = lo + np.asarray(probes) * d
+    assert np.array_equal(
+        NumpyFlatBackend._cr(-m ** 2, xs, lo, d),
+        np.asarray([gps02_interp_real(-m ** 2, float(x), lo, d, n)
+                    for x in xs]))
+
+    # non-vacuity: the two-point scheme this replaced differs mid-bin (the
+    # chord of the parabola) and out of range (it EXTRAPOLATES, the clamp
+    # duplicates the end node)
+    chord = 0.5 * (-m[3] ** 2 - m[4] ** 2)
+    assert abs(float(NumpyFlatBackend._cr(-m ** 2, lo + 3.5 * d, lo, d))
+               - chord) > 1e-2 * d * d
+    assert float(NumpyFlatBackend._cr(-m ** 2, lo - 5 * d, lo, d)) == -m[0] ** 2
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

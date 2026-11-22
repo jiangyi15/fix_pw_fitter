@@ -66,10 +66,25 @@ QUALIFYING = [CFG_ONE, CFG_KM, CFG_IDENT, CFG_SAME, CFG_CP]
 # The one load-time cache is the numerator `amp = fa·fl·num` as float2, so
 # agreement with the fp64 `numpy_flat` reference is limited by fp32, not by the
 # algebra.  The floor is therefore a MEASURED per-backend number, never a
-# family maximum: the dense backends reach 1e-6, the tile family 3e-5 on P.
+# family maximum.  Two classes, and the difference is the whole point:
+#
+#   fp64 leaves (`cuda_flat_pwa_gen`, `cpu_flat_pwa_gen{,_cached,_cached2}`)
+#     MEASURE 4e-15 .. 1.2e-14 against the reference — machine precision, i.e.
+#     summation order alone (the last digit moves between runs; two independent
+#     sweeps gave 8.97e-15 and 1.21e-14 worst) — and are gated at 1e-12, a
+#     >=80x margin.
+#     They are NOT cache-bound and must not inherit a cache floor: while the
+#     reference interpolated the tables two-point LINEARLY every leaf measured
+#     1e-6..5e-6, so an fp64 leaf at 1e-6 would hide a defect the reference can
+#     resolve at 1e-14.
+#   fp32-cached leaves (the tile family, `gen2`/`1bw`, `s0c`/`s0c2`, `cache`)
+#     MEASURE Q 4.6e-8 .. 7.0e-7, P 1.2e-7 .. 7.0e-7, coeff 7.8e-7 .. 1.9e-6
+#     and keep their own recorded floors.
+#
 # For `s0c`/`s0c2` the `_ident`/`_cp` fixtures span the widest P dynamic range,
 # so their file also gated the ABSOLUTE error (1e-4) — `abs_ok` records that,
-# and `_floor_ok` is used only for those two.
+# and `_floor_ok` (rel OR abs) is used for those five entries: `s0c`'s pair and
+# the three CPU leaves, as their own files did.
 CACHE_FLOOR_ABS = 1e-4
 NH = 1e-6
 
@@ -78,12 +93,16 @@ NH = 1e-6
 #: or a plain `_rel`, and the CONFIG SET its anchor was measured on.  A
 #: consolidation may not weaken a gate, and the family genuinely differs:
 #:
-#:   * `cuda_flat_pwa_gen` / `cuda_flat_cache_pwa_gen` gated at 1e-6 pure
-#:     `_rel` on KM+MB only (their files never ran `_ident`/`_cp`).  On the
-#:     wider qualifying set these two MEASURE P 2.97e-6 / 3.54e-6 and coeff
-#:     4.97e-6 / 4.70e-6 (rsize 1, widest of rs 1/17 x norm None/1.3), i.e. the
-#:     1e-6 claim is shape-bound — so the record keeps the shapes it was
-#:     measured on instead of inventing a wider claim.
+#:   * `cuda_flat_pwa_gen` / `cuda_flat_cache_pwa_gen` were gated at 1e-6 pure
+#:     `_rel` on KM+MB only (their files never ran `_ident`/`_cp`).  The fp64 one
+#:     now records the FULL qualifying set (<=9.0e-15) at 1e-12 — the 1e-6 it
+#:     used to need was the reference's linear interpolation, not this kernel.
+#:     `cuda_flat_cache_pwa_gen` keeps KM+MB, because on THAT set it MEASURES
+#:     Q 6.39e-07, P 3.14e-07, ck 2.00e-07, coeff 1.66e-06 — a 1.6x margin on Q,
+#:     thin and recorded rather than relaxed (it measures 5.45e-07 with the
+#:     linear oracle, so the tightness is pre-existing, not this change's).
+#:     Its wider-set figures (1.6e-7 / 7.0e-7) are NOT what its floor binds on
+#:     and are quoted only as the shape dependence.
 #:   * `cuda_flat_cache_pwa_gen` never compared the raw `coeff` vector in its
 #:     anchor; its own coeff gate is PER NAME at 1e-4 (the deduped raw vector
 #:     reads 1.8e-6 on KM, which is why 1e-6 would be a NEW, unmet gate).
@@ -93,7 +112,17 @@ NH = 1e-6
 #:   name -> (rel, p, coeff, abs_ok, cfgs)
 FLOORS = {
     "cuda_flat_cache_pwa_gen": (1e-6, 1e-6, 1e-4, False, (CFG_KM, CFG_MB)),
-    "cuda_flat_pwa_gen": (1e-6, 1e-6, 1e-6, False, (CFG_KM, CFG_MB)),
+    # fp64 and uncached: the family's correctness reference.  MEASURED over the
+    # FULL qualifying set: P 3.44e-15, ck 2.41e-15, coeff 8.97e-15,
+    # dnorm 3.53e-16, and Q ~5e-15 — Q and ck come from cross-block atomics, so
+    # they are ORDER-DEPENDENT (5.2e-16 .. 5.9e-15 on one case over ten
+    # repeats), which is why the bound is 1e-12 rather than anything near a
+    # draw.  Margin >=169x (worst observed 5.9e-15), instead of the 1e-6 its
+    # file carried when the oracle itself was the linear interpolation.
+    # The set is WIDE on purpose: with only KM+MB recorded, the other three
+    # fixtures fell back to WIDE (2e-6), i.e. 2e6x looser than this leaf's own
+    # measured agreement.
+    "cuda_flat_pwa_gen": (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen2": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_1bw": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0c": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
@@ -118,23 +147,35 @@ FLOORS = {
     # the UN-STAGED copy of s0f (registered mask-off here, as s0f is): the
     # only cache is the same fp32 `amp`, and the free block's denominator is
     # walked instead of staged — fp64 either way.  MEASURED over QUALIFYING at
-    # rsize 1/17 x norm None/1.3: Q 9.2e-7, P 3.4e-6, dck 1.3e-6, dcoeff
-    # 4.7e-6 (dnorm 2.9e-7), i.e. the s0e2 numbers; its masked behaviour is the
-    # same shared suite (tests/_flat_masked.py).
+    # rsize 1/17 x norm None/1.3: Q 1.20e-7, P 4.28e-7, dck 2.65e-7, dcoeff
+    # 1.94e-6 (dnorm 8.53e-9) — the s0e2 numbers exactly (same fp32 cache, same
+    # free-block arithmetic); its masked behaviour is the same shared suite
+    # (tests/_flat_masked.py).
     "cuda_flat_pwa_gen_s0g": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
-    # the CPU leaf is fp64 end to end, so its gap to the reference is the
-    # Catmull-Rom-vs-linear interpolation difference, not accumulation:
-    # MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 -> Q 9.3e-7,
-    # P 3.0e-6, dck 1.4e-6, dcoeff 5.0e-6.  Gated at the s0c numbers
-    # (2e-5 / 4e-5 / 2e-4, rel-OR-abs) — a >5x margin on every quantity.
-    "cpu_flat_pwa_gen": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
+    # the CPU leaf is fp64 end to end AND reads the tables with the reference's
+    # own Catmull-Rom scheme, so what is left is accumulation order (the C
+    # kernel uses a factored CR weight set, <=1 ulp from the reference's
+    # polynomial): MEASURED over QUALIFYING at rsize 1/17 x norm None/1.3 ->
+    # Q 1.22e-15, P 3.11e-15, dck 1.86e-15, dcoeff 6.09e-15 (dnorm 3.49e-16).
+    # Gated at 1e-12, PLAIN rel (abs_ok False) — >=164x margin on the worst
+    # quantity.  The flag matters: `_floor_ok` is `rel < bound OR worst < 1e-4`,
+    # and with `abs_ok` True the 1e-4 fallback is what binds (|Q| ~ 175 here, so
+    # 1e-4 absolute is 6e-7 relative) — the 1e-12 would have been decorative.
+    # This leaf's ABSOLUTE agreement is 9.2e-14 .. 2.3e-13, six orders under
+    # that fallback, so dropping it changes nothing except making the bound the
+    # one that decides.
+    # It carried the s0c numbers (2e-5 / 4e-5 / 2e-4) while the reference
+    # interpolated linearly and the gap it paid for was that chord: 9.3e-7 /
+    # 3.0e-6 / 1.4e-6 / 5.0e-6.
+    "cpu_flat_pwa_gen": (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING)),
     # the CACHED cpu leaf is a case-1 copy of the one above, bit-identical to
     # it (gated exactly, in its own file), so it keeps the same floor.
-    "cpu_flat_pwa_gen_cached": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
+    "cpu_flat_pwa_gen_cached": (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING)),
     # the PRODUCT-cache copy of the cached leaf: same floors as the uncached
     # kernel (it is NOT bit-identical to the split cache — its own file
-    # reports the <= 16 ulp drift against it)
-    "cpu_flat_pwa_gen_cached2": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
+    # reports the <= 16 ulp drift against it; measured here 1.39e-15 / 3.35e-15
+    # / 6.30e-15, i.e. the same machine-precision band, 186x on this gate)
+    "cpu_flat_pwa_gen_cached2": (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING)),
 }
 
 #: the tag vocabulary — DECLARED at registration in ``src/tabpwa/backends``,
@@ -422,10 +463,13 @@ def _cfgs(name):
 #: measured wide-range floor, never a skip: dropping the case would test the
 #: backend on nothing at all, and lifting its 1e-6 there would be a gate that
 #: cannot pass.  MEASURED over the whole family on ``_ident``/``_cp``,
-#: rsize 1/17, worst of norm 1.3 and norm None: Q 9.3e-7, P 3.5e-6,
-#: ck 1.4e-6, coeff 5.0e-6 — the 2-5x margins below.  Q and ck are the
-#: norm-dependent pair (norm=None is the raw sum, so its gradient is not
-#: divided by the normalisation).
+#: rsize 1/17, worst of norm 1.3 and norm None: Q 1.20e-7, P 4.28e-7,
+#: ck 2.65e-7, coeff 1.94e-6 (the fp32-cached s0e tiles) — the 10-23x margins
+#: below.  It stays at the CACHED family's level on purpose: it must hold for
+#: every leaf, and the fp64 leaves clearing it by 10 orders does not make it
+#: the right bound for the ones that do not.  Q and ck are the norm-dependent
+#: pair (norm=None is the raw sum, so its gradient is not divided by the
+#: normalisation).
 WIDE = {"rel": 2e-6, "p": 1e-5, "ck": 5e-6, "coeff": 2e-5}
 #: The grouped-objective scenario (34 events, seed 5, rsize 17, un-normalised
 #: weights) is its own: MEASURED worst 1.3e-6 across the family -> 4x margin.
