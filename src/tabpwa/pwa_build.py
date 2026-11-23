@@ -24,11 +24,15 @@ factors are still reported for future block expansion.
 Angle layout is the canonical phi-first full 2·n_vertices columns (top J≠0,
 no gauge drop):  [(0,φ),(1,φ),…,(0,θ),(1,θ),…], one event row per event.
 
+Phase space lives here too: :func:`generate_pwa_phsp` is the flat sampler for a
+decay chain, any topology (see its docstring — it dispatches between the
+three-body closed form and the general two-body fold).
+
 The BW / running-width / form-factor tables replicate
 ``Config.build_single_index`` for a single topology block.
 """
 
-import math
+import functools
 
 import numpy as np
 
@@ -51,17 +55,23 @@ def pwa_duplication_factors(cfg):
     return n_id, n_cp, (id_groups, cp_groups)
 
 
-def _two_body_q(M, m1, m2):
-    """Two-body breakup momentum sqrt(λ)/2M (positive if kinematically open)."""
-    x = (M * M - (m1 + m2) ** 2) * (M * M - (m1 - m2) ** 2)
-    return np.sqrt(np.clip(x, 0.0, None)) / (2.0 * M)
-
-
 def _two_body_p(M, m1, m2):
-    """Two-body breakup momentum (scalar/array), 0 below threshold."""
-    return np.sqrt(np.clip(
-        (M * M - (m1 + m2) ** 2) * (M * M - (m1 - m2) ** 2), 0.0, None)) \
-        / (2.0 * M)
+    """Two-body breakup momentum (scalar/array), 0 below threshold.
+
+    A MASSLESS parent has no phase space, and ``0/0`` here would poison every
+    weight that touches it (the three-body grid starts at ``s_min``, which is 0
+    when both sub-daughters are massless — one ``nan`` there made ``wgrid.max()``
+    ``nan`` and the sampler refuse a perfectly physical config).  ``M == 0``
+    therefore returns 0 instead of ``nan``; every other caller is unchanged.
+    """
+    M = np.asarray(M, float)
+    num = np.sqrt(np.clip(
+        (M * M - (m1 + m2) ** 2) * (M * M - (m1 - m2) ** 2), 0.0, None))
+    den = 2.0 * M
+    out = np.zeros(np.broadcast(num, den).shape)
+    ok = den > 0
+    np.divide(num, den, out=out, where=ok)
+    return out if out.shape else float(out)
 
 
 def _boost_vec(p, beta):
@@ -77,9 +87,13 @@ def _boost_vec(p, beta):
     return out
 
 
-def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
-    """Flat 3-body phase space of the chain via the product of two-body
-    decays + an inverse boost chain (same masses as the config).
+def _generate_three_body_phsp(cfg, chain, n_events, seed=None,
+                             weights_out=False):
+    """The closed-form sampler for ``top -> (sub -> a b) + c``.
+
+    Kept as its own function so the shape every existing fixture uses is
+    bit-for-bit what it always was; ``generate_pwa_phsp`` dispatches here for
+    that topology and to the general fold otherwise.
 
     For a decay top(M) -> (sub -> a b) + c the event mass *s* of the sub
     system is sampled with density  p_top(M; s, m_c) · p_sub(s; m_a, m_b)
@@ -98,17 +112,26 @@ def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
     tops_out = [o.name for o in chain.decays[0].outs]
     bachelor = [o for o in tops_out if o not in (sub.core.name,)][0]
 
-    M_top = float(cfg.dic["particle"][chain.decays[0].core.name]["mass"])
-    m_a = float(cfg.dic["particle"][names[0]]["mass"])
-    m_b = float(cfg.dic["particle"][names[1]]["mass"])
-    m_c = float(cfg.dic["particle"][bachelor]["mass"])
+    M_top = _require_mass(cfg, chain.decays[0].core.name)
+    m_a = _require_mass(cfg, names[0])
+    m_b = _require_mass(cfg, names[1])
+    m_c = _require_mass(cfg, bachelor)
 
     s_min = m_a + m_b
     s_max = M_top - m_c
+    if s_max <= s_min:
+        raise ValueError(
+            f"phase space: top mass {M_top:.6g} is at or below the sum of the "
+            f"final masses {s_min + m_c:.6g}; there is no phase space to "
+            f"sample (this generator would loop forever)")
     # ── sample s with weight p_top(s)*p_sub(s) (flat 3-body) by rejection ──
     grid = np.linspace(s_min, s_max, 600)
     wgrid = _two_body_p(np.full_like(grid, M_top), grid, m_c) \
         * _two_body_p(grid, m_a, m_b)
+    if not float(wgrid.max()) > 0:
+        raise ValueError(
+            f"phase space: the three-body weight is zero on the whole mass "
+            f"window [{s_min:.6g}, {s_max:.6g}] — the top is at threshold")
     wmax = float(wgrid.max()) * 1.0001
 
     s = np.empty(n_events)
@@ -163,6 +186,156 @@ def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False):
     return mom
 
 
+def _require_mass(model, name):
+    """The declared mass of ``name`` — with a message that says what is wrong.
+
+    A final MUST have one (it sets the on-shell condition) and so must the
+    TOP (it sets the total energy).  A node between them is never asked for a
+    mass here — the chain is flattened to its finals.
+    """
+    dic = getattr(model, "dic", None) or {}
+    entry = (dic.get("particle") or {}).get(name) or {}
+    if "mass" not in entry:
+        raise KeyError(
+            f"phase space: particle {name!r} has no 'mass' in the config's "
+            f"particle table (a final needs one for its on-shell condition, "
+            f"the top for the total energy)")
+    return float(entry["mass"])
+
+
+def _check_distinct_finals(chain):
+    """Refuse a chain whose final names repeat.
+
+    The momenta are returned as ``{name: 4-vector}`` and the event stack is
+    built by name, so ``top -> pip + pip`` would keep ONE of the two pions and
+    silently produce an event that violates energy-momentum conservation.  The
+    framework's own event builder keys on names too, so this is not a
+    limitation of this function.
+    """
+    finals = [o.name for d in chain.decays for o in d.outs
+              if o.name not in {x.core.name for x in chain.decays}]
+    dup = sorted({n for n in finals if finals.count(n) > 1})
+    if dup:
+        raise ValueError(
+            f"phase space: the chain has repeated final name(s) {dup}; the "
+            f"event arrays are keyed by name, so two daughters with one name "
+            f"cannot both be stored (declare distinct names or drop the "
+            f"identical-particle declaration)")
+
+
+def _chain_is_three_body(chain):
+    """``top -> (sub -> a b) + c`` and nothing deeper — the closed-form shape."""
+    if len(chain.decays) != 2:
+        return False
+    top = chain.decays[0]
+    sub = chain.decays[1]
+    if len(top.outs) != 2 or len(sub.outs) != 2:
+        return False
+    # exactly one top daughter is itself the sub-decay
+    names = {o.name for o in top.outs}
+    return sub.core.name in names
+
+
+def generate_pwa_phsp(cfg, chain, n_events, seed=None, weights_out=False,
+                      batch=200_000, top_p=None):
+    """Flat phase space of ``chain`` — any topology.
+
+    Dispatches on the chain's SHAPE:
+
+    * ``top -> (sub -> a b) + c`` takes :func:`_generate_three_body_phsp`, the
+      closed-form sampler (the shape every fixture uses);
+    * anything else — a ternary/n-ary vertex, a 2+2 cascade, a deeper tree —
+      takes the general two-body fold, which is the topic of this module's
+      header.
+
+    ``cfg`` is an ``AmplitudeModel``/``Config`` — it must expose ``dic`` (the
+    particle table) and ``finals``; a plain dict is NOT accepted.  Returns
+    ``(n_events, n_finals, 4)`` 4-momenta ``(E, px, py, pz)`` in ``cfg.finals``
+    order, in the top rest frame — or in the frame the top's momentum names
+    when ``top_p`` is given (a ``(n, rng) -> (n, 3)`` callable in GeV/c, e.g.
+    :func:`tabpwa.phasespace.fix_beam`; optionally ``(momenta, weights)``).
+
+    The particle MODELS are never consulted — only topology and final masses —
+    so a node with ``model: skip`` needs no case: its invariant mass is a
+    sampled variable like any other internal node's.
+    """
+    _check_distinct_finals(chain)
+    if n_events < 0:
+        raise ValueError(f"phase space: n_events must be >= 0, got {n_events}")
+    if n_events == 0:
+        # both samplers would otherwise mishandle it (the closed form returns
+        # an empty stack, the general path raises a bare "need at least one
+        # array to concatenate")
+        empty = np.empty((0, len(getattr(cfg, "finals", []) or []), 4))
+        return (empty, np.ones(0)) if weights_out else empty
+    if _chain_is_three_body(chain):
+        if top_p is not None:
+            # the closed form is a frozen fast path; do not silently ignore a
+            # requested momentum — route it through the general sampler instead
+            return _generate_general_phsp(cfg, chain, n_events, seed=seed,
+                                          batch=batch, weights_out=weights_out,
+                                          top_p=top_p)
+        return _generate_three_body_phsp(cfg, chain, n_events, seed=seed,
+                                         weights_out=weights_out)
+    return _generate_general_phsp(cfg, chain, n_events, seed=seed,
+                                  batch=batch, weights_out=weights_out,
+                                  top_p=top_p)
+
+
+@functools.lru_cache(maxsize=16)
+def _compiled_phsp(m0, masses):
+    """The compiled topology for ``(m0, daughter masses)`` — parse + ceilings once.
+
+    ``PhaseSpace`` is immutable after ``__init__`` and ``top_p`` is per call, so
+    the key is just the masses; a repeated dataset pays nothing.  MEASURED the
+    fixed cost is 0.2 / 5.7 / 9.6 / 13.7 ms for 3 / 5 / 7 / 9 daughters, up to
+    ~56 % of a 400-event call at n >= 5.
+    """
+    from tabpwa.phasespace import PhaseSpace
+    return PhaseSpace(m0, masses)
+
+
+def _chain_leaves(chain):
+    """The chain's finals in depth-first order."""
+    dmap = {d.core.name: [o.name for o in d.outs] for d in chain.decays}
+    leaves = []
+
+    def collect(name):
+        if name not in dmap:
+            leaves.append(name)
+            return
+        for o in dmap[name]:
+            collect(o)
+
+    collect(chain.decays[0].core.name)
+    return leaves
+
+
+def _generate_general_phsp(model, chain, n_events, seed=None, batch=200_000,
+                          weights_out=False, top_p=None):
+    """The general path: the chain's finals as a flat mass tree, then sample.
+
+    The sampler lives in :mod:`tabpwa.phasespace` and takes only masses, so a
+    ``model: skip`` node needs no case here and the decay grouping is
+    irrelevant to the measure — a flat list of the final masses is the whole
+    input.  This function only maps the chain onto that list and the result
+    back onto ``cfg.finals`` order.
+    """
+    leaves = _chain_leaves(chain)
+    m_top = _require_mass(model, chain.decays[0].core.name)
+    masses = [_require_mass(model, name) for name in leaves]
+    # ``weights_out=True`` would come back as a TUPLE and the zip below would
+    # pair the finals with (momenta, ones) — so never ask the sampler for
+    # weights here.  The sample is unweighted; this adapter adds its own.
+    mom_list = _compiled_phsp(m_top, tuple(masses)).generate(
+        n_events, seed=seed, weights_out=False, batch=batch, top_p=top_p)
+
+    by_name = dict(zip(leaves, mom_list))
+    finals = list(getattr(model, "finals", None) or leaves)
+    out = np.stack([by_name[f] for f in finals], axis=1)
+    if weights_out:
+        return out, np.ones(len(out))
+    return out
 
 
 def _duck_chain_from_struct(cfg, tid):
