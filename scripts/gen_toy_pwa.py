@@ -30,8 +30,11 @@ result).  In both cases the **same** point is written to ``init.json``, so
 
 Flat events are generated and consumed in batches (``--batch-size``), so peak
 memory is O(batch + ndata).  The loop stops as soon as ``--ndata`` are
-accepted; ``--max-count`` (default 1000, ``0`` = unlimited) only guards
-against a runaway loop.
+accepted; ``--max-count`` (default 0 = no cap) is an optional hard cap, and the
+runaway guard is ``--stall-loops`` (consecutive loops that accept NOTHING), so a
+peaked amplitude is never stopped for being slow.  ``--cache-dir DIR`` checkpoints
+every accepted batch and resumes from it (pass the same ``--seed``), which is how
+a long generation survives a wall-clock kill.
 
 ``--seed`` is a master seed: the sub-seeds are ``seed+1+loop`` (proposal
 batches), ``seed+2`` (the parameter point, unused with ``--params``) and
@@ -88,9 +91,21 @@ def main():
                          "--out-phsp; 0 = skip (supply data.phsp in the "
                          "config, or generate it separately)")
     ap.add_argument("--ndata", type=int, default=4000)
-    ap.add_argument("--max-count", type=int, default=1000,
-                    help="guard on the number of loops (0 = unlimited); the "
-                         "loop stops as soon as --ndata are accepted")
+    ap.add_argument("--max-count", type=int, default=0,
+                    help="OPTIONAL hard cap on the number of proposal loops "
+                         "(0 = no cap); the loop stops as soon as --ndata are "
+                         "accepted")
+    ap.add_argument("--stall-loops", type=int, default=1000,
+                    help="runaway guard: raise after this many CONSECUTIVE "
+                         "loops that accept nothing (a peaked amplitude runs as "
+                         "long as it keeps accepting)")
+    ap.add_argument("--cache-dir", default=None,
+                    help="checkpoint the accepted pool here and RESUME from it "
+                         "on the next call (needs an explicit --seed); a "
+                         "wall-clock kill or a crash then loses nothing")
+    ap.add_argument("--verbose", action="store_true",
+                    help="print a line for EVERY loop (the ceiling moves); "
+                         "progress lines are automatic on a terminal")
     ap.add_argument("--batch-size", type=int, default=20000,
                     help="flat phase-space events generated per loop")
     ap.add_argument("--maxp-scale", type=float, default=1.1,
@@ -149,8 +164,9 @@ def main():
     # (one implementation; the script only parses, calls and writes)
     data, stats = toy_pwa_generate(
         f, args.ndata, seed=s, batch_size=batch,
-        maxp_scale=args.maxp_scale, max_loops=max_loops, x0=x0, top_p=beam,
-        maxp=args.maxp, verbose=True)
+        maxp_scale=args.maxp_scale, max_loops=max_loops,
+        stall_loops=args.stall_loops, x0=x0, top_p=beam, maxp=args.maxp,
+        verbose=args.verbose, cache_dir=args.cache_dir)
 
     # ── the norm sample is a SEPARATE call (the toy needs only P and max P) ──
     phsp = f.generate_phsp(args.nph, seed=s, top_p=beam) if args.nph > 0 else None

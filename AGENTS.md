@@ -68,6 +68,24 @@ third-party top-level import in `src/tabpwa` must be declared in
 `onnx` extra, and `import tabpwa` must work with those extras absent.  A new
 import therefore needs a declaration, not just a working environment.
 
+## Documentation
+
+`docs/README.md` indexes every document as a **design** (what should exist and
+why — normative, may describe something unbuilt) or an **implementation** (what
+the tree does: files, API, measurements, gates, limits).  Keep them as SEPARATE
+files: a design change goes in the design first, and the implementation file
+records what was built and any deviation.  If the two disagree, the design is
+the intent and the implementation file is the bug — fix the code or the design,
+not the implementation prose alone.
+
+Live split: `docs/mpi_backend_design.md` / `docs/mpi_backend.md` (+
+`docs/slurm.md` for deployment); `docs/mpi_service_design.md` /
+`docs/mpi_service.md` for the subprocess-held MPI job (the mode that keeps every
+MPI fact out of the package) — DESIGN and implementation, both live;
+`docs/remote_protocol_design.md` is a draft standard with NO implementation.  `docs/likelihood_layer.md` is a design that
+was never built.  `AGENTS.md` stays the architecture reference; `docs/` is for
+the topics that would make it unwieldy.
+
 ## Backend Selection
 
 | Backend | Flag | Note |
@@ -114,13 +132,101 @@ import therefore needs a declaration, not just a working environment.
 
 `cuda` / `cuda64` alias to `cuda_v3`.  GPU `__del__` auto-frees memory — no manual `.free()` needed.
 
-**Backend capability TAGS** — `register_backend(name, model=None, *, tags=())` stores a frozenset per `(model, name)`; `backend_tags(name, model)` reads it back and `backends_for_model(model, tag=...)` filters (a collection means ALL-OF; `tag=None` returns exactly the old frozenset).  The vocabulary is small and DECLARED at the registration, never guessed from a name: `reference` (the NumPy oracle the suite compares against), `delegate` (wraps another backend instead of computing: `auto`, `shard`, `integrated`, `integrated_pwa`), `n_res1` (REFUSES a multi-BW chain — each one verified against its wrapper's guard).  Test code selects by capability, so `tests/_flat_compute.py` derives the `pwa_gen` leaves from the registry and `tag=` instead of a name list, and a backend registered later is covered without editing the suite.
+**Backend capability TAGS** — `register_backend(name, model=None, *, tags=())` stores a frozenset per `(model, name)`; `backend_tags(name, model)` reads it back and `backends_for_model(model, tag=...)` filters (a collection means ALL-OF; `tag=None` returns exactly the old frozenset).  The vocabulary is small and DECLARED at the registration, never guessed from a name: `reference` (the NumPy oracle the suite compares against), `delegate` (wraps another backend instead of computing: `auto`, `shard`, `integrated`, `integrated_pwa`), `external` (needs a process the test did not start: e.g. the `mpi` ranks), `n_res1` (REFUSES a multi-BW chain — each one verified against its wrapper's guard).  Test code selects by capability, so `tests/_flat_compute.py` derives the `pwa_gen` leaves from the registry and `tag=` instead of a name list, and a backend registered later is covered without editing the suite.
 
 **`backend: auto`** is a real, PER-MODEL registered backend and each model's class OWNS its rule — `AutoFlatPwaGenBackend` (`pwa_gen`) and `AutoPWABackend` (`pwa`), both `AutoBackend` subclasses that override `choose(kernel_config)`; there is NO shared selection table and no generic dispatcher (class policy: the policy lives with the model).  A model with no `auto` registration is not eligible and the registry's own `allowed: [...]` error is the answer.  `pwa_gen` checks SHAPE first (`flat_shape(kc)`, mirrored from the s0e wrapper): `n_res != 1` → `cuda_flat_pwa_gen2` (s0e/s0c raise on multi-BW chains), a `tile_bytes(n_wave, n_basis, n_proj)` above the device's shared-memory opt-in → `cuda_flat_pwa_gen_s0c`; then availability: no CUDA → `numpy_flat`, otherwise `cuda_flat_pwa_gen_s0e`.  `pwa` has NO shape fork and no preference order: no CUDA → `numpy_pwa`, otherwise `cuda_v4_pwa` — the model's registered default and the only UNCONDITIONAL member (the cache variant needs fixed m0/g0 and raises otherwise; s0d/s0e/1bw need `n_res == 1`, which `tests/config_pwa.yml` HAS — the kernels divide by `n_wave = P·N`, not by `len(all_comb)` — so those do construct there, and what rules them out is the sample-size ordering `auto` cannot see, plus `cuda_v5_pwa_s0e`'s 8.7 M segfault); `resolution_size > 1` → `cuda_v5_pwa` (`cpu_v5_pwa` without CUDA), because the v4 backend and the NumPy reference have no grouped objective and raise `TypeError` on that kwarg (it is a CONSTRUCTOR kwarg, read from `**kw`), while `pwa_gen` needs no such fork — its whole family takes `resolution_size`.  The choice is AVAILABILITY ONLY — no memory rule and no shared constant, because the sample size is unknown when the backend is built: `cuda_state()` (ONE cached `nvidia-smi --query-gpu=memory.free,memory.total,compute_cap` call, never raises, `nounits` is **MiB** so the values are converted, plus `find_nvcc()` and the `smem_optin_bytes` CC table — sm_70/75 96 KiB, sm_80/86/89/120 99 KiB, sm_90 227 KiB, unknown 96 KiB; a wrong value only costs performance because the s0e `create` still refuses loudly), `flat_shape()` and `tile_bytes()` (`gps0_layout`'s `te·(2W + 5N + 4P + 3) + 4N + 2NB + 3` doubles, `te` from `gps0_pick_te`, an upper bound since the C side may shrink further) are shared FACTS, not a rule; `free_bytes`/`total_bytes` are reported by `describe()` and decide nothing.  Resolution is EAGER in `__init__` from the host state + the kernel config — never from the data: a config may load several datasets and `ne` is unknown when the backend is built — and every call forwards to `self._delegate`, the concrete backend named in `self.chosen`; `describe()` prints `auto -> <chosen> (free …, cc …, n_wave/n_res/n_basis)` and `__getattr__` forwards the delegate's attributes (`resolution_size`, `kernel_stats`, …).  A `choose` result is validated against `backends_for_model(MODEL)` at construction — a stale name raises instead of degrading to another backend.  `config.dic["backend"]` keeps `"auto"`; the concrete delegate is what the wrapper holds, named in `fitter.backend.chosen` and printed by `describe()`.  An optional `n_events` (kwarg, or the config's `data.n_events`) switches the flat rule from availability to a MEASURED ordering: above `LARGE_SAMPLE` (2e5 — where the per-item rate is flat within 2 %, measured 3.1 Mev/s at 2 k rising to 38.9 at 8.7 M) the leaves that already passed the shape guards are ordered by `FLAT_RATE_MEV_S`, keyed by `(cc, n_wave, n_basis, n_proj)` — the rate is a property of the KERNEL CONFIG and the device, not of the event count, so a shape or device that was never measured gets NO ordering (availability stands) and a small or unknown sample keeps today's answer.  Measured on the full 8.7 M sample, Mev/s: `s0e2` 34.0, `s0e` 33.2, `s0e3` 32.7, `1bw` 24.7, `s0c` 18.3, `s0c2` 17.8, `gen2` 6.55 — with their memory side (854, 854, 854, 1146, 446, 446, 1106 B/event): `1bw`/`gen2` are the memory hogs and `s0c` the light one, so speed alone is not enough at larger samples.
 
 **`cuda_flat_pwa_gen_s0c2`** (case-1 copy of `s0c`) fuses the THREE per-chunk feature reductions (`gck_r`, `gck_i`, `gco`) into ONE launch (`grid = dim3(n_chunks, 3)`, buffer by `blockIdx.y`), so a compute is **8 launches → 6** (10 → 8 with the grouped objective).  Bit-identical to s0c (`np.array_equal` on Q/P/dck/dcoeff/dnorm, and a C-level `memcmp` of fused vs the three separate launches) — each slice keeps s0c's block shape, chunking, fold order and atomic, and the slices never share a destination.  MEASURED (idle GPU, interleaved min-of-5): **6.9 % at ne 4000** on the km fixture (129.5 → 121.1 µs at `norm=None`, 225.6 → 210.7 with `norm`), 1.3 % at 20 k, 0.1 % at 50 k, and **0.0 % on the production shape** — `n_basis = 64 > 32` takes the *acc* fallback, which stays as s0c's three launches BY DESIGN (fusing it needs a second fused kernel with `grid = dim3(max_nf, 3)`; that is the scoped follow-up, and the one that would move production).  Two corrections this measurement forced: ncu's 16.25 µs/launch was ~4× the wall-clock cost (~4.2 µs), so the "21 % of the iteration" the profile suggested is really ~8 µs; and s0c is not bit-reproducible against ITSELF at ne 4000 (cross-block `atomicAdd` in the Q reduce and `grad_ck` gives a 3.7e-9 Q spread), so the bitwise gate is at 64 events.  sm_70/sm_120 compile with 0 spills (amp 76/50 registers).  Harness: `tests/benchmark_s0c_variants.py`.
 
 Selection rules for the s0 family: `s0e` is fastest below `ne ≈ 2.7 M` and `1bw` above it, but 1bw's fixed per-call cost is paid every BFGS iteration, so it is a handicap on small samples.  `cuda_v5_pwa_s0e` SEGFAULTS on the 8.7 M-event sample and is not usable for production fits at that size.  Benchmark: `tests/benchmark_flat_vs_pwa.py` (`--rsize` for the grouped objective).
+
+### MPI backend (`mpi`) — co-located ranks, one slice each
+
+`mpi` (`tabpwa/backends/mpi_backend.py`, tag `delegate`, universal) turns N
+processes launched by `mpiexec` into one backend: every rank is a full tabpwa
+process holding ONE contiguous slice (`shard_backend.split_offsets`, weighted
+and `align`-aware), `compute` runs on that slice and the result is reduced —
+`Q`, every gradient block and `grads["norm"]` by `allreduce(SUM)`, the
+per-event `P` by `allgather` ONLY when `return_p` (the fitter never asks; a
+gather instead of an allgather desynchronises a `generate_toy` driven through
+the MPI fitter — measured hang).
+
+Launch/binding: node-local rank (`COMM_TYPE_SHARED`) selects
+`CUDA_VISIBLE_DEVICES` before the local backend is built.  A LAUNCHER-set value
+is respected: empty = hide every device, one entry = this task's own
+(`--gpus-per-task=1`), several entries = a node-level list (`--gres=gpu:N`)
+indexed by the node-local rank (otherwise every rank would sit on device 0).
+`device=None` disables binding, an int binds that device everywhere; a rank
+whose node-local index exceeds the visible GPU count raises naming `-n` and the
+count (a host with no NVIDIA device is left unbound).  Slurm deployment
+(`srun` vs `mpiexec`, PMI/PMIx, `--gpus-per-task`, signals):
+`docs/slurm.md`.  The FIRST build is serialised (rank 0 builds, barrier)
+so N ranks sharing an install do not compile one kernel concurrently.  `shard`
+inside a rank is refused (fork after `MPI_Init` + CUDA), and an `mpi` backend
+inside a `shard` worker is refused through the marker the worker sets.  The
+FIRST `compute` of a process `bcast`s the parameter dict from rank 0 —
+`initial_values()` is unseeded per process, so a file-driven `run_fit --fit`
+would otherwise fit a different point on every rank.  Every rank must call
+`compute` the same number of times (`allreduce` is collective), which is why all
+ranks run the same deterministic fit.  EVERY rank-local failure site (device
+check, build/barrier, `load_data`, the reduction) replays its exception through
+`comm.Abort`, because an unguarded raise hangs the peers in a collective
+(measured 45–60 s versus 1.2 s); an empty slice is refused by name (the `pwa`
+kernels cannot load one, and `split_offsets` can produce one via `align` or
+skewed weights).  The PACKAGE stays transport-agnostic: no module under
+`tabpwa/` knows a rank, a launcher variable or a writer role — the MPI facts
+(rank, size) live inside `mpi_backend` only.  Output ownership is therefore the
+PROGRAM's: `run_fit.py` (a CLI, not the library) asks `fitter.backend.rank` and
+writes on rank 0 only, while a LIBRARY program under `mpiexec` writes once per
+rank and prints N times.  A program that should not deal with rank at all needs
+the driver/worker launch (`docs/mpi_backend_design.md` §11.6), not a
+package-level rank concept.
+
+`local` MUST be ONE concrete kernel (a leaf): a delegate/composer (`auto`,
+`integrated*`, `fixed_coeff`, `shard`, `mpi`) is refused by the `delegate` tag,
+because `auto` may resolve differently per rank and a wrapper's per-handle state
+is not forwarded.  `local=None` resolves the model's `default`.
+
+Sample GENERATION is single-process: `Fitter.generate_toy`/`generate_phsp` drive
+the backend per batch, so on an MPI fitter they are a collective (lockstep, N×
+work).  Generate once with a serial fitter / a file, then `set_phsp`/`set_data`
+the arrays.  Optional extra `tabpwa[mpi]` (mpi4py), imported lazily with the
+extra named.  No rank-aware loader yet: every rank holds the full buffer before
+slicing (`N×` peak) — the tracked follow-up.  Design
+`docs/mpi_backend_design.md`, as built and measured `docs/mpi_backend.md`;
+fixture `tests/test_mpi_backend.py` (14 gates; the SEVEN `mpiexec`
+ones skip without a launcher).
+
+### MPI service (`mpi_service`) — the program runs once, MPI in a child
+
+`mpi_service` (`tabpwa/backends/mpi_service_backend.py`, tags `delegate` +
+`external`) is the DRIVER half of `docs/mpi_service_design.md`: it imports NO
+`mpi4py` and reads no rank.  On the first `load_data` it starts
+`mpiexec -n N python -m tabpwa.mpi_worker --local … --addr <unix-socket>`,
+accepts rank 0 on that socket and talks the frames of `tabpwa/_ipc.py`.
+Stdio cannot carry the protocol (Hydra muxes the child's stdin — measured), and
+a `socketpair` fd is not inherited through the launcher, hence the socket PATH in
+argv.  The worker's loop bcasts each op and calls the ORDINARY `mpi` backend on
+every rank, so slicing, device binding, the build barrier and the reduction exist
+once.  `n_procs` is REQUIRED; `local` is a leaf; the constructor is offline and
+REFUSES to start inside an MPI/scheduler step (that case is `srun` + the
+all-ranks `mpi`).  Lifecycle: lazy start, `shutdown` → `terminate` → `kill`,
+`atexit` reaper, bounded stderr tail appended to errors, socket dir removed.
+`ship` loading only in v1 (the reference path is open); the `N×` transient is
+the same follow-up as the all-ranks mode.  As built: `docs/mpi_service.md`;
+fixture `tests/test_mpi_service.py` (8 gates, incl. "the parent imports no
+mpi4py and has no rank"; only the gates that START a child need a launcher, so
+the boundary rules run on a box without MPI).
+
+### Remote compute (`remote`) — DRAFT STANDARD, not implemented
+
+**STATUS: draft.**  The normative text is `docs/remote_protocol_design.md` (transport,
+content key, endpoints, distribution, open questions).  NO implementation is in
+this tree: a prototype was built and measured during the design review and is
+kept out (stashed) so the standard can be decided first — see §16 of that
+document.  Do not build on it before §14 is decided (the encoding is the
+main question).  For the CO-LOCATED multi-GPU case use the implemented `mpi` backend
+above (`docs/mpi_backend.md`).
 
 ### Forward-mode duals (`tabpwa.fwd`)
 
@@ -473,6 +579,27 @@ per-model defaults — e.g. `cuda_v4_pwa` is also registered as `"default"` for
 `pwa`.  The model knows nothing about backends: `Fitter` asks
 `backends_for_model(model.name)` for the allowed set and
 `create_backend(..., model=model.name)` resolves `"default"` per model.
+
+## Plugins (`plugin:` in the config)
+
+A plugin is a Python MODULE whose import registers what a config names — a
+backend, an amplitude model, a particle model.  The config declares them at the
+top level::
+
+    plugin:
+      - tabpwa_mpi        # would register `mpi` / `mpi_service`
+      - my_lab.models     # registers @register_model / @register_amplitude_model
+
+`Fitter.__init__` imports every entry (also accepted as `plugins:`, and as a
+bare string) immediately after `RawConfig` — BEFORE `build_amplitude_model` and
+before `resolve_backend_spec` — so the registrations are visible to both the
+model builder and the backend resolver, and the calling script needs no
+`import`.  There is no entry-point discovery and none is needed: an explicit
+import is the mechanism.  `tabpwa.plugins.load_plugins(spec, where=…)` is the
+same function for a caller that builds a `BaseModel` directly.  The import is
+idempotent (`sys.modules`); a failure raises `ImportError` naming the plugin and
+the config.  A config is trusted input: importing a plugin executes code,
+exactly as a Python entry point would.
 
 ### JointFitter — simultaneous fit over several configs (`tabpwa/joint_fit.py`)
 
@@ -1034,8 +1161,34 @@ and an undeclared column falls back to `time ~ U(0, TIME_MAX)` /
 The ceiling is in/out: `stats.maxp` comes back and goes in as `maxp=` (it is a
 property of the parameter point and the topology), `maxp_scale < 1` is refused
 (a raise cannot lower a maximum) and the `guess/new` thinning is exact because a
-raise precedes its own batch's acceptance — `_raise_ceiling` is the ONE
-implementation, shared with the background draw.
+raise precedes its own batch's acceptance — `raise_ceiling` is the ONE
+implementation, shared with the background draw and with the time-dependent
+engine (whose `p_max_margin` is a MARGIN, not a fixed bound: a later batch above
+it raises and re-thins, the same rule).
+
+PROGRESS AND PERSISTENCE ARE OPT-IN KNOBS on both engines:
+`progress=True` prints ONE throttled line per second (`ToyProgress`: accepted/
+target, batches, flat tried, efficiency, rate, elapsed, ceiling; `None`, the
+default, is AUTO — on only for a terminal, so a log or a test stays quiet), and
+`cache_dir=` checkpoints to disk and RESUMES: every accepted batch is appended as
+`chunk_NNNNNN.npz` and `state.json` (counters, the ceiling, the RNG state) is
+replaced atomically after it, so a `max_loops`/wall-clock kill loses nothing and
+the next call with the same directory continues the SAME sub-seed stream — the
+resumed sample is bit-identical to an uninterrupted run at that seed (gated).
+A cache belongs to a SIGNATURE (`toy_cache_signature`: engine, target, seed,
+resolved-parameter digest, model name, kernel-config digest), so another point in
+the same directory raises instead of blending two samples; a finished one starts
+over; and `cache_dir` needs an explicit seed because the seed is part of that
+signature.  `ToyCache` is ONE implementation, used by both engines.
+
+THE RUNAWAY GUARD IS A NO-PROGRESS WINDOW, never a total candidate budget:
+`stall_loops` (default 1000 batches) raises when that many CONSECUTIVE batches
+accept nothing, and `max_loops` defaults to `None` (an optional hard cap).  A
+peaked, low-efficiency amplitude runs as long as it keeps accepting — a fixed
+candidate cap (the old 20 M) is wrong for exactly that model — while a dead
+density (a ceiling far above the true maximum, or a zero support) still fails
+in bounded time.  Both engines share the rule: `toy_pwa_generate` and
+`toy_generator.toy_generate`.
 
 THE BACKGROUND COLUMN IS A SHAPE, never a normalisation: `bkg = fbg(events)` in
 the toy (`None` → ones; `fbg=lambda x: np.zeros(...)` for a strict signal-only

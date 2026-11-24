@@ -202,13 +202,18 @@ FLOORS = {
 #:                 suite would be swept as if it computed, and excluding it by
 #:                 name here would put a test module's private name into the
 #:                 suite's rule.
-TAG_VOCABULARY = frozenset({"reference", "delegate", "n_res1", "fixed_coeff",
-                            "coeff_pinned", "probe"})
+#: `external` = the backend needs a process this suite did not start (the
+#: `remote` client / the `mpi` ranks).  It is a subset of `delegate` here, so it
+#: changes no selection — the vocabulary is closed so a NEW tag cannot be added
+#: silently.
+TAG_VOCABULARY = frozenset({"reference", "delegate", "external", "n_res1",
+                            "fixed_coeff", "coeff_pinned", "probe"})
 
 #: tags that REMOVE a name from this suite — by capability, never by name.
 #: `reference`/`delegate`/`coeff_pinned` are not this suite's contract (their
 #: own fixtures gate them) and `probe` is not a backend at all.
-EXCLUDED_TAGS = frozenset({"reference", "delegate", "coeff_pinned", "probe"})
+EXCLUDED_TAGS = frozenset({"reference", "delegate", "external",
+                           "coeff_pinned", "probe"})
 
 
 def _select(registry, tags_of):

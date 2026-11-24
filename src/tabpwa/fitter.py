@@ -118,6 +118,15 @@ class Fitter:
                                      backends_for_model)
 
         self.config = RawConfig(config_file)
+
+        # Config-declared plugins FIRST: they may register the amplitude model,
+        # particle models or backends this config names (see tabpwa.plugins).
+        from tabpwa.plugins import load_plugins
+        declared = self.config.dic.get("plugin", self.config.dic.get("plugins"))
+        if declared is not None:
+            load_plugins(declared,
+                         where=f"config {getattr(self.config, '_config_path', None) or '<dict>'}")
+
         # Fitter is the composition root: it owns the amplitude model.
         self.model = build_amplitude_model(self.config)
 
@@ -650,6 +659,16 @@ class Fitter:
         ``fbg=lambda x: np.zeros(x["mass"].shape[0])``; the default is the flat
         shape a data file uses, which multiplies by ``(1-p)/p`` in ``set_data``
         and therefore contributes nothing at purity 1.
+
+        Extra keyword arguments go to the generator that runs: ``batch_size``,
+        ``maxp_scale``/``p_max_margin``, ``max_loops``, ``stall_loops``,
+        ``progress``, ``cache_dir`` — and, for a model with its own generator,
+        that one's (``compute_batch``).  ``progress=True`` prints throttled live lines
+        while generating; ``None`` (default) means AUTO, on only for a terminal,
+        so a long run shows it is working instead of looking like a hang.
+        ``cache_dir`` checkpoints each accepted batch there and RESUMES from it
+        (an explicit seed is required), so a wall-clock kill does not throw the
+        generated events away.
         """
         if n_events < 1:
             raise ValueError(

@@ -117,6 +117,8 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
     ``("compute", data_id, params, norm, return_p)`` / ``("free", data_id)``;
     ``None`` shuts the worker down.
     """
+    # an MPI rank inside this forked/spawned child would use a broken MPI state
+    os.environ["TABPWA_SHARD_WORKER"] = "1"
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
 

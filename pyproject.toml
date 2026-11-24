@@ -27,6 +27,9 @@ tabpwa = "tabpwa.__main__:main"
 # No `cuda` extra: the CUDA kernels need nvcc (not a pip package) and cffi,
 # which the base install already requires — the CPU kernels load their .so
 # through it as well.
+mpi = [
+    "mpi4py",
+]
 onnx = [
     "onnx",
     "onnxruntime",

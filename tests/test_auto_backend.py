@@ -370,8 +370,9 @@ def test_auto_backend_is_not_swept_into_a_broken_state():
     # test-side stubs are tagged `probe` at registration (a capability, never a
     # name prefix, so a stub named differently is still excluded)
     probes = frozenset(backends_for_model("pwa_gen", tag="probe"))
+    external = frozenset(backends_for_model("pwa_gen", tag="external"))
     for name in names:
-        if name in probes or name == "default":
+        if name in probes or name in external or name == "default":
             continue
         b = create_backend(name, kc, model="pwa_gen")
         try:

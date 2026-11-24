@@ -28,6 +28,8 @@ from . import onnx_backend         # noqa: F401 — register ONNXBackend
 from . import integrated_backend   # noqa: F401 — register IntegratedBackend
 from . import cpu_backend          # noqa: F401 — register CPU backends
 from . import shard_backend        # noqa: F401 — register ShardBackend
+from . import mpi_backend        # noqa: F401 — register MPIBackend
+from . import mpi_service_backend  # noqa: F401 — register MPIServiceBackend
 from . import _fixed_coeff  # noqa: F401 — register fixed_coeff
 from . import numpy_pwa_backend    # noqa: F401 — register NumpyPWABackend
 from . import numpy_flat_backend  # noqa: F401 — register NumpyFlatBackend

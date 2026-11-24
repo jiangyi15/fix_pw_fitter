@@ -176,9 +176,20 @@ def main():
     else:
         x0 = fitter.initial_values(seed=None)
 
+    def _rank():
+        """This process's rank, asked of the BACKEND (the package has no
+        topology concept).  The CLI is the writer's owner: a distributed
+        compute must not have N processes writing one result file."""
+        return int(getattr(getattr(fitter, "backend", None), "rank", 0) or 0)
+
     def _save_init(x, run=None):
-        """Dump a start vector in save_params format (replayable via --init)."""
-        if args.save_init is None:
+        """Dump a start vector in save_params format (replayable via --init).
+
+        The rank test is the CLI's: the PACKAGE has no rank concept and
+        `Fitter.save_params` writes whatever process calls it, so the writer's
+        owner is this guard.
+        """
+        if args.save_init is None or _rank() != 0:
             return
         path = _init_out_path(args.save_init, args.config, run)
         fitter.save_params(x, path)
@@ -262,7 +273,8 @@ def main():
                     ckpt_path = base_save
                     ckpt_dir = os.path.dirname(ckpt_path) if os.path.dirname(ckpt_path) else '.'
                     save_path = os.path.join(ckpt_dir, "checkpoint.json")
-                    fitter.save_params(fitter._last_xk, save_path)
+                    if _rank() == 0:      # one writer, even under mpiexec
+                        fitter.save_params(fitter._last_xk, save_path)
                     print(f"\n  Run {run_id}/{n_runs} interrupted after {dt:.1f}s")
                     print(f"  Checkpoint saved to {save_path}")
                     print(f"  Resume with: --init {save_path}")
@@ -276,17 +288,20 @@ def main():
             if best is None or res.fun < best.fun:
                 best = res
 
-            # per-run save — only when --save-loop is given (or single run)
+            # per-run save — only when --save-loop is given (or single run),
+            # and only on rank 0: N ranks writing one file would race
             if n_runs == 1:
                 rp = base_save
-                fitter.save_params(res, rp)
-                fitter.save_constraints(os.path.splitext(rp)[0]
-                                        + "_constraints.json")
+                if _rank() == 0:
+                    fitter.save_params(res, rp)
+                    fitter.save_constraints(os.path.splitext(rp)[0]
+                                            + "_constraints.json")
             elif args.save_loop:
                 rp = os.path.splitext(base_save)[0] + f"_fit{run_id}.json"
-                fitter.save_params(res, rp)
-                fitter.save_constraints(os.path.splitext(rp)[0]
-                                        + "_constraints.json")
+                if _rank() == 0:
+                    fitter.save_params(res, rp)
+                    fitter.save_constraints(os.path.splitext(rp)[0]
+                                            + "_constraints.json")
             print(f"\n  Run {run_id}/{n_runs}: NLL = {res.fun:.6f}  "
                   f"time = {dt:.2f}s  nfev = {res.nfev}  nit = {res.nit}  "
                   f"success = {res.success}")
@@ -309,12 +324,14 @@ def main():
         for name, val, err in vals_err:
             print(f"    {name:50s} = {val:+.6f} +/- {err:.6f}")
 
-        # Save the best result to the default (single) path
-        fitter.save_params(result, base_save)
-        print(f"  Results saved to {base_save}")
+        # Save the best result to the default (single) path (rank 0 only)
+        if _rank() == 0:
+            fitter.save_params(result, base_save)
+            print(f"  Results saved to {base_save}")
 
-        # Plot post-fit distributions
-        if args.plot:
+        # Plot post-fit distributions (rank 0 only: N processes writing one
+        # PNG is corruption, not parallelism)
+        if args.plot and _rank() == 0:
             fitter.plot(result, prefix=args.plot)
             print(f"  Plots saved to {args.plot}")
 

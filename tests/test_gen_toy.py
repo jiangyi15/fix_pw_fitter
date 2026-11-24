@@ -379,6 +379,110 @@ def test_the_ceiling_is_returned_and_can_be_reused():
     assert abs(s3.maxp - s1.maxp) < 0.5 * s1.maxp
 
 
+def test_the_runaway_guard_is_a_no_progress_window():
+    """A dead pool fails in BOUNDED BATCHES; a progressing one is never capped.
+
+    ``stall_loops`` counts CONSECUTIVE batches with no acceptance, so a peaked
+    model that keeps accepting runs as long as it needs — the old
+    ``max_loops=1000`` total budget (20 M candidates) cut it off.  A ceiling far
+    above the true maximum accepts nothing, so the guard must fire; with
+    ``stall_loops=0`` the guard is off and an explicit ``max_loops`` is the cap.
+    """
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    with pytest.raises(RuntimeError, match="no event accepted for 5 consecutive"):
+        f.generate_toy(x0, 10, seed=1, batch_size=50, stall_loops=5, maxp=1e300)
+    with pytest.raises(RuntimeError, match="accepted only 0 of 10 events"):
+        f.generate_toy(x0, 10, seed=1, batch_size=50, max_loops=3, maxp=1e300)
+    data = f.generate_toy(x0, 200, seed=1, batch_size=100, maxp_scale=1.0)
+    assert len(data["mass"]) == 200
+    with pytest.raises(ValueError, match="stall_loops"):
+        f.generate_toy(x0, 5, seed=1, stall_loops=-1)
+    with pytest.raises(ValueError, match="batch_size"):
+        f.generate_toy(x0, 5, seed=1, batch_size=0)
+
+
+def test_a_cached_run_resumes_exactly(tmp_path):
+    """A killed run continues in the cache dir — and IS the run it interrupted.
+
+    Every accepted batch is a ``chunk_NNNNNN.npz`` and ``state.json`` carries the
+    counters, the ceiling and the RNG state, so restoring them continues the same
+    sub-seed stream: the resumed sample is bit-identical to an uninterrupted run
+    at the same seed.  ``max_loops=2`` here is how a wall-clock kill is imitated
+    — the partial pool is on disk and the state is not marked done.
+    """
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    part_dir = str(tmp_path / "part")
+    with pytest.raises(RuntimeError, match="accepted only"):
+        f.generate_toy(x0, 2000, seed=7, batch_size=100, max_loops=2,
+                       cache_dir=part_dir)
+    assert (tmp_path / "part" / "state.json").exists()
+    resumed = f.generate_toy(x0, 2000, seed=7, batch_size=100,
+                             cache_dir=part_dir)
+    full = f.generate_toy(x0, 2000, seed=7, batch_size=100,
+                          cache_dir=str(tmp_path / "fresh"))
+    assert len(resumed["mass"]) == 2000
+    for k in ("mass", "q", "angle", "weight"):
+        assert np.array_equal(resumed[k], full[k]), k
+
+    # a finished cache is the SAME run (same signature == same sample), so a
+    # second call starts over instead of replaying or blending it
+    again = f.generate_toy(x0, 2000, seed=7, batch_size=100,
+                           cache_dir=part_dir)
+    assert np.array_equal(again["mass"], full["mass"])
+
+
+def test_a_cache_killed_before_its_first_event_resumes(tmp_path):
+    """An empty pool still resumes — the first accepted batch defines the columns.
+
+    A loose ``maxp=`` makes an early batch accept nothing, so ``state.json`` can
+    hold ``have=0`` with no chunk file; the resume must then take its column set
+    from the next batch instead of from an empty dict.
+    """
+    import json
+
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    d = str(tmp_path / "empty")
+    with pytest.raises(RuntimeError, match="accepted only 0 of 40"):
+        f.generate_toy(x0, 40, seed=11, batch_size=1, maxp_scale=10.0,
+                       max_loops=1, cache_dir=d)
+    with open(tmp_path / "empty" / "state.json", encoding="utf-8") as fh:
+        st = json.load(fh)
+    assert st["have"] == 0 and st["n_chunks"] == 0 and not st["done"]
+    data = f.generate_toy(x0, 40, seed=11, batch_size=5, maxp_scale=10.0,
+                          cache_dir=d)
+    assert len(data["mass"]) == 40
+
+
+def test_a_cache_from_another_run_is_refused(tmp_path):
+    """Reusing a directory for a different point would BLEND two samples."""
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    d = str(tmp_path / "cache")
+    f.generate_toy(x0, 30, seed=1, batch_size=200, cache_dir=d)
+    with pytest.raises(ValueError, match="another run"):
+        f.generate_toy(x0, 30, seed=2, batch_size=200, cache_dir=d)
+    with pytest.raises(ValueError, match="another run"):
+        f.generate_toy(x0, 40, seed=1, batch_size=200, cache_dir=d)
+    with pytest.raises(ValueError, match="explicit seed"):
+        f.generate_toy(x0, 30, batch_size=200, cache_dir=str(tmp_path / "x"))
+
+
+def test_progress_reports_a_live_run(capsys):
+    """``progress=`` shows the run is alive; the default is AUTO (off off-tty)."""
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    f.generate_toy(x0, 30, seed=1, batch_size=500)
+    assert "toy:" not in capsys.readouterr().out      # AUTO: not a terminal here
+    f.generate_toy(x0, 30, seed=1, batch_size=500, progress=True)
+    out = capsys.readouterr().out
+    assert "toy: 30/30 accepted" in out and "batches" in out
+    f.generate_toy(x0, 30, seed=1, batch_size=500, progress=False)
+    assert "toy:" not in capsys.readouterr().out
+
+
 def test_generate_toy_works_for_the_polarised_model():
     """A THIRD model shape, generic path: the ρ-matrix PWA.
 
@@ -449,6 +553,58 @@ def test_the_td_toy_generates_at_x0():
     # the OLD route (an already-resolved dict) does move the point: the guard
     moved = _build_params(f, param_dict=f.build_params(x0)[1])["m0"]
     assert not np.allclose(moved, want)
+
+
+def test_the_td_ceiling_is_raised_not_fixed():
+    """A later batch above the calibration max RAISES the TD ceiling.
+
+    The old rule was a FIXED ``1.3·max(calibration)`` bound, and an event above
+    it is accepted with probability 1 instead of P/P_max — silently biased.  With
+    ``p_max_margin=1`` and a 100-event calibration against 1000-event proposal
+    batches a later batch exceeds it, so ``p_max >= max accepted P`` is exactly
+    the invariant the raise buys.
+    """
+    from tabpwa.toy_generator import toy_generate
+
+    f = _fitter(CFG_TD, "numpy")
+    ev = toy_generate(f, 300, seed=3, compute_batch=100, p_max_margin=1.0,
+                      progress=False)
+    assert ev["p_max"] >= float(ev["P"].max()) * (1 - 1e-12)
+    with pytest.raises(ValueError, match="p_max_margin"):
+        toy_generate(f, 5, seed=1, p_max_margin=0.9)
+    with pytest.raises(ValueError, match="compute_batch"):
+        toy_generate(f, 5, seed=1, compute_batch=0)
+
+
+def test_the_td_engine_resumes_from_its_cache(tmp_path):
+    """The time-dependent engine checkpoints the same way, and resumes exactly."""
+    f = _fitter(CFG_TD, "numpy")
+    x0 = f.initial_values(seed=4)
+    d = str(tmp_path / "td")
+    with pytest.raises(RuntimeError, match="accepted only"):
+        f.generate_toy(x0, 500, seed=7, compute_batch=100, max_loops=1,
+                       cache_dir=d)
+    resumed = f.generate_toy(x0, 500, seed=7, compute_batch=100, cache_dir=d)
+    full = f.generate_toy(x0, 500, seed=7, compute_batch=100,
+                          cache_dir=str(tmp_path / "fresh"))
+    assert len(resumed["mass"]) == 500
+    for k in ("mass", "q", "angle", "frac", "time"):
+        assert np.array_equal(resumed[k], full[k]), k
+
+
+def test_the_td_runaway_guard(monkeypatch):
+    """The time-dependent engine stops on NO progress, like the generic one."""
+    from tabpwa.toy_generator import toy_generate
+
+    f = _fitter(CFG_TD, "numpy")
+
+    def dead(params, handle, norm=None, return_p=True):
+        mass = handle["mass"] if isinstance(handle, dict) else handle.mass
+        return 0.0, {}, np.zeros(len(mass))
+
+    monkeypatch.setattr(f.backend, "compute", dead)
+    with pytest.raises(RuntimeError, match="no event accepted for 3 consecutive"):
+        toy_generate(f, 5, seed=1, compute_batch=50, stall_loops=3)
 
 
 def test_the_td_norm_sample_carries_the_sample_law():

@@ -29,6 +29,7 @@ _DIST = {
     "cffi": "cffi",
     "onnx": "onnx",
     "onnxruntime": "onnxruntime",
+    "mpi4py": "mpi4py",
 }
 
 
@@ -125,6 +126,8 @@ def test_optional_backends_are_not_in_the_base_install():
     assert "onnx" not in base and "onnxruntime" not in base
     assert {"onnx", "onnxruntime"} <= extras["onnx"]
     assert "onnxruntime-gpu" in extras["onnx-gpu"]
+    assert "mpi4py" not in base
+    assert "mpi4py" in extras["mpi"]
 
 
 def test_the_package_imports_without_the_optional_backends():

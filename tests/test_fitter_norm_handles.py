@@ -42,8 +42,14 @@ def _leaf_backends():
     # ``_kwarg_probe``): a capability, not a ``_``-prefix, so a stub that is
     # named differently is excluded too.
     probes = frozenset(backends_for_model("pwa_gen", tag="probe"))
+    # `external` = needs a server/launcher in another process (`remote`, `mpi`);
+    # a delegate that forwards IN-process (`auto`, `integrated_pwa_gen`,
+    # `fixed_coeff`) is constructible and belongs in this sweep.  `shard` spawns
+    # its workers from a queue, which is a different lifecycle.
+    external = frozenset(backends_for_model("pwa_gen", tag="external"))
     return sorted(n for n in backends_for_model("pwa_gen")
-                  if n != "default" and n != "shard" and n not in probes)
+                  if n != "default" and n not in probes
+                  and n not in external and n != "shard")
 
 
 def test_reference_backend_gets_the_phase_space_norm():

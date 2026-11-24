@@ -17,6 +17,87 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
 
 ## [Unreleased]
 
+### Added
+
+- Config-declared plugins: a top-level `plugin: [module, …]` (also `plugins:`, or
+  a bare string) makes `Fitter` import those modules right after loading the
+  config — before the amplitude model is built and before the backend is
+  resolved — so a package that registers a backend/model needs no `import` in
+  the calling script and no entry-point machinery.  The import is idempotent; a
+  failure names the plugin and the config.  `tabpwa.plugins.load_plugins` is the
+  same entry for a caller building a `BaseModel` directly.  A config is trusted
+  input (importing a plugin runs code).
+
+- `mpi_service` backend (`tabpwa/backends/mpi_service_backend.py`, tags
+  `delegate`+`external`): the PROGRAM runs once and the MPI job is a CHILD —
+  `mpiexec -n N python -m tabpwa.mpi_worker` started lazily on the first
+  `load_data`, rank 0 driven over a Unix socket (stdio cannot carry it: the
+  launcher muxes the child's stdin).  The worker loop bcasts each op and calls
+  the ORDINARY `mpi` backend on every rank, so slicing, device binding, the
+  build barrier and the reduction exist once.  The driver imports no `mpi4py`
+  and has no rank, so a program writes output once; `n_procs` is required,
+  `local` is a leaf, nesting inside an MPI/Slurm step is refused, and lifecycle
+  is `shutdown`→`terminate`→`kill` with an `atexit` reaper.  `ship` loading in
+  v1.  Design `docs/mpi_service_design.md`, as built `docs/mpi_service.md`;
+  fixture `tests/test_mpi_service.py`.
+
+- `mpi` backend (`tabpwa/backends/mpi_backend.py`, tags `delegate`+`external`): N ranks
+  under `mpiexec`, one contiguous slice each (`split_offsets`, weighted/align-
+  aware), with `Q`, every gradient block and `grads["norm"]` reduced by
+  `allreduce(SUM)`; the per-event `P` is allgathered only when
+  `return_p=True`.  Rank→device binding by node-local rank (a launcher-set
+  `CUDA_VISIBLE_DEVICES` wins; a rank with no GPU raises), the first kernel
+  build serialised across ranks, and `shard` nested inside a rank refused.
+  The package stays transport-agnostic: no rank or launcher logic outside the
+  backend; the CLI (`run_fit.py`) asks the backend's `rank` and writes on
+  rank 0 only.
+  `local` must be one concrete kernel per rank (a delegate/composer is
+  refused by tag); a launcher-set `CUDA_VISIBLE_DEVICES` is respected — one
+  entry is this task's GPU, a node-level list is indexed by the node-local rank
+  (Slurm `--gres=gpu:N`), and an empty value hides every device.  The first compute broadcasts rank 0's parameters (an unseeded
+  `initial_values()` differs per process), a rank with an empty slice or no
+  device aborts the job with its message instead of hanging the peers, and an
+  `mpi` backend inside a `shard` worker is refused.
+  Optional extra `tabpwa[mpi]` (mpi4py, lazy import).  Design:
+  `docs/mpi_backend_design.md`; as built and measured: `docs/mpi_backend.md`;
+  deployment: `docs/slurm.md`; fixture `tests/test_mpi_backend.py`.
+
+### Changed
+
+- `generate_toy`'s runaway guard is now a NO-PROGRESS window, not a total
+  candidate budget: `stall_loops` (default 1000 batches) raises when that many
+  CONSECUTIVE proposal batches accept nothing, so a low-efficiency (peaked)
+  amplitude runs as long as it keeps accepting — the old `max_loops=1000` cut it
+  off after 20 M candidates however healthy the acceptance was.
+  `max_loops` now defaults to `None` (an optional hard cap) and stays
+  available for a caller who wants one.  The time-dependent engine
+  (`toy_generator.toy_generate`) gets the same guard, and its `P_max` estimate
+  is RAISED to `p_max_margin·max(batch P)` when a later batch exceeds it — the
+  accepted pool re-thinned by `old/new` through the shared
+  `toy_pwa.raise_ceiling` — instead of a fixed 1.3-margin ceiling that silently
+  over-accepted events above it.  `p_max_margin < 1` and a non-positive
+  `batch_size`/`compute_batch`/`stall_loops` are refused.
+
+### Added (toy generation)
+
+- `generate_toy(progress=True)` prints one throttled progress line per second
+  (accepted/target, batches, flat tried, efficiency, rate, elapsed, ceiling);
+  the default `None` is AUTO — on only for a terminal, so scripts and logs stay
+  quiet.  Both engines report through the one `toy_pwa.ToyProgress`.
+- `generate_toy(cache_dir=…)` checkpoints the accepted pool to a directory and
+  RESUMES from it: each accepted batch is appended as `chunk_NNNNNN.npz`, and
+  `state.json` (counters, the ceiling, the RNG state) is replaced atomically
+  after it, so a wall-clock kill or a crash does not throw a long generation
+  away — the next call with the same directory continues the same RNG stream,
+  and the resumed sample is bit-identical to an uninterrupted run at that seed.
+  A cache belongs to a signature (engine, target, seed, generating point, model
+  and kernel config), so another run in the same directory raises instead of
+  blending two samples; a finished cache starts over.  `cache_dir` requires an
+  explicit seed.  `ToyCache` is one implementation for both engines.
+  `scripts/gen_toy_pwa.py` exposes it (`--cache-dir`, `--stall-loops`,
+  `--verbose`) and `--max-count` now defaults to `0` (no cap), so the CLI
+  follows the no-progress rule instead of stopping a slow but healthy model.
+
 ## [0.1.0] - 2026-11-24
 
 First version recorded by this changelog.  The framework's earlier development

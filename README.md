@@ -71,6 +71,8 @@ python run_fit.py --fix-mass-width --fit     # Fix masses/widths
 ```python
 from tabpwa import Fitter
 
+# A config may declare `plugin: [tabpwa_mpi, my_lab.models]` — imported before
+# the model is built and the backend resolved (no entry points, no import here).
 # Backend selection via string shortcut (default: model's registered "default")
 fitter = Fitter("config_amp.yml")                         # config backend, else the model's "default" (TD → cuda64/cuda_v3, PWA → cuda_v4_pwa)
 fitter = Fitter("config_amp.yml", backend="numpy")        # explicit override
@@ -141,6 +143,31 @@ config (`data.extra_var.<name>.random`).  The `bkg` column is the background
 SHAPE — `fbg=` on `generate_toy`, `bg=` on the mixture, `bkg=` on the norm,
 uniform by default — while the AMOUNT comes from the config purity in
 `set_data`.
+
+### Multi-GPU with MPI
+
+```bash
+pip install 'tabpwa[mpi]'                                   # mpi4py
+mpiexec -n 4 python run_fit.py --config config_pwa.yml --backend mpi
+```
+
+Every rank is a full tabpwa process holding one contiguous slice; `Q` and the
+gradients are summed with `allreduce`, so a `fit` over N ranks is the same
+objective as a serial one (association ~1e-13).  The node-local rank selects the
+GPU (`CUDA_VISIBLE_DEVICES`); a rank whose index exceeds the visible GPU count
+raises instead of mis-binding (a host with no NVIDIA device leaves the binding
+alone).  The first compute broadcasts rank 0's parameters, so an unseeded
+`initial_values()` cannot give the ranks different starts, and a rank-local
+failure aborts the job instead of hanging it.  Sample generation is single-process: `generate_phsp`/`generate_toy`
+once, then `set_phsp`/`set_data` (an MPI fitter makes those calls collective and
+N× redundant).  Design: `docs/mpi_backend_design.md`, as built and measured:
+`docs/mpi_backend.md`; Slurm (one task per GPU, `srun` vs `mpiexec`,
+`--gpus-per-task`, checkpoints): `docs/slurm.md`.  The SERVICE mode runs the
+program once and keeps every MPI fact in a child (`mpiexec -n N python -m
+tabpwa.mpi_worker`): `backend: {name: mpi_service, local: cuda_v4_pwa, n_procs: 4}`
+— no `mpiexec` on your command line, no rank in your code.  Design
+`docs/mpi_service_design.md`, as built `docs/mpi_service.md`.  For REMOTE heterogeneous
+hosts see the draft standard `docs/remote_protocol_design.md`.
 
 ### Amplitude Fractions
 
