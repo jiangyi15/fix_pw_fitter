@@ -251,9 +251,11 @@ def _toy_fit(n_toy=3000, seed=73, maxiter=400):
     """
     f = Fitter(CFG, backend="cuda_v4_pwa_s0c")
     f.apply_constrains()
-    data, phsp, truth = toy_pwa_generate(f, n_toy, seed=seed, n_phsp=2000,
-                                         batch_size=20000, verbose=False)
-    f.set_phsp(phsp)
+    data, stats = toy_pwa_generate(f, n_toy, seed=seed, batch_size=20000,
+                                   verbose=False)
+    truth = stats.truth
+    # the norm sample is a SEPARATE call (the toy needs only P and its ceiling)
+    f.set_phsp(f.generate_phsp(2000, seed=seed))
     f.set_data(data)
 
     # fit from a perturbed start (the truth generates the data)

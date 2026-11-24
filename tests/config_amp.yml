@@ -5,6 +5,10 @@ data:
     extra_var:
         time:
             default: 1.0
+            random: {dist: uniform, low: 0.0, high: 10.0}
+        frac:
+            default: 0.5
+            random: {dist: choice, a: [0, 1]}
         tag:
             default: 1
         tag1:

@@ -33,9 +33,9 @@ memory is O(batch + ndata).  The loop stops as soon as ``--ndata`` are
 accepted; ``--max-count`` (default 1000, ``0`` = unlimited) only guards
 against a runaway loop.
 
-``--seed`` is a master seed: the sub-seeds are ``seed`` (phsp), ``seed+1``
-(proposal), ``seed+2`` (parameter point, unused with ``--params``) and
-``seed+3`` (event selection).  Omit it and a random master seed is drawn and
+``--seed`` is a master seed: the sub-seeds are ``seed+1+loop`` (proposal
+batches), ``seed+2`` (the parameter point, unused with ``--params``) and
+``seed+3`` (event selection); the norm sample uses ``seed``.  Omit it and a random master seed is drawn and
 printed, so a run can be reproduced with ``--seed <printed>``.
 """
 import argparse
@@ -47,7 +47,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 import numpy as np
 
 from tabpwa import Fitter
-from tabpwa.pwa_build import build_tree_event_data, generate_pwa_phsp
+from tabpwa.phasespace import fix_beam
+from tabpwa.toy_pwa import toy_pwa_generate
 
 
 def _npz(data):
@@ -88,6 +89,14 @@ def main():
                     help="flat phase-space events generated per loop")
     ap.add_argument("--maxp-scale", type=float, default=1.1,
                     help="guess max P = scale * max(batch P)")
+    ap.add_argument("--maxp", type=float, default=None,
+                    help="initial ceiling on P, e.g. the 'max P' printed by a "
+                         "previous run at this parameter point; it is still "
+                         "raised if a batch exceeds it")
+    ap.add_argument("--top-p", nargs=3, type=float, default=None,
+                    metavar=("PX", "PY", "PZ"),
+                    help="the top's momentum in GeV/c (e.g. 0.034 0 0 for the "
+                         "BESIII crossing angle); default: the rest frame")
     ap.add_argument("--out-data", default="data_pwa.npz")
     ap.add_argument("--out-phsp", default="phsp_pwa.npz")
     ap.add_argument("--out-init", default="init_pwa.json")
@@ -101,6 +110,7 @@ def main():
     else:
         s = int(args.seed)
 
+    beam = fix_beam(*args.top_p) if args.top_p else None
     backend_spec = args.backend
     if isinstance(backend_spec, str) and backend_spec.strip().startswith("{"):
         import yaml
@@ -117,108 +127,42 @@ def main():
     # constraints) AND the configured backend for the density computation.
     f = Fitter(args.config, backend=backend_spec)
     f.apply_constrains()
-    model, kc = f.model, f.kernel_config
-    tree = f.decay_tree
-
-    chain = tree.partial_waves()[0][1]
-    byt = {tree.topo_index[ch.topo_id()]: ch
-           for _, ch in tree.partial_waves()}
-
-    # ── normalisation sample (optional; independent of the proposal stream)
-    phsp = None
-    if args.nph > 0:
-        phsp = build_tree_event_data(
-            model, kc, byt,
-            generate_pwa_phsp(model, chain, args.nph, seed=s))
-
     # Parameter point: from --params (save_params JSON), else from the Fitter
     # parameter layer (ck random symmetric start, m0/g0 at config defaults).
     if args.params:
         import json
         with open(args.params) as fh:
-            # free values → x AND fixed values → the constraint layer,
-            # so the toy truth matches the source fit including its
-            # fixed parameters
+            # free values -> x AND fixed values -> the constraint layer, so the
+            # toy truth matches the source fit including its fixed parameters
             x0 = f.load_params(json.load(fh))
         print(f"params      : {args.params}")
     else:
         x0 = f.initial_values(seed=s + 2)
-    params, resolved = f.build_params(x0)
 
-    # ── adaptive accept–reject over a streamed flat phase space ───────────
-    # Guess the maximum P and accept x with probability P(x)/guess.  The
-    # guess starts at scale*max(batch P) and is raised (to scale*max(batch P))
-    # only when a batch exceeds it; the accepted events are then
-    # retrospectively THINNED with probability old_guess/new_guess.  The loop
-    # stops as soon as --ndata are accepted; --max-count only guards a
-    # runaway loop.
-    backend = f.backend
-    rng = np.random.RandomState(s + 3)
-    store = ("mass", "q", "angle", "weight")
-    cols = {k: [] for k in store}
-    have = tried = loops = 0
-    guess = None                               # guess of max P
-    limit = max_loops if max_loops is not None else float("inf")
-    scale = float(args.maxp_scale)
-    print(f"sampling {args.ndata} events: <= {batch}/loop, "
-          f"max loops {max_loops if max_loops else 'inf'}, scale {scale:g}")
-    while have < args.ndata and loops < limit:
-        ev = build_tree_event_data(
-            model, kc, byt,
-            generate_pwa_phsp(model, chain, batch, seed=s + 1 + loops))
-        _, _, P = backend.compute(params, backend.load_data(ev),
-                                  norm=None, return_p=True)
-        if P is None:
-            raise SystemExit("backend compute returned no P")
-        P = np.asarray(P, dtype=float)
-        bmax = float(P.max()) if P.size else 0.0
+    # ── the accept-reject loop lives in toy_pwa.toy_pwa_generate ──────────
+    # (one implementation; the script only parses, calls and writes)
+    data, stats = toy_pwa_generate(
+        f, args.ndata, seed=s, batch_size=batch,
+        maxp_scale=args.maxp_scale, max_loops=max_loops, x0=x0, top_p=beam,
+        maxp=args.maxp, verbose=True)
 
-        if guess is None:
-            guess = scale * bmax
-            print(f"  loop {loops}: guess max P = {guess:.6g}")
-        elif bmax > guess:                        # exceeded -> raise + thin
-            new = scale * bmax
-            before = have
-            if have:                              # keep each with old/new
-                mask = rng.random(have) < (guess / new)
-                for k in store:
-                    cols[k] = [np.concatenate(cols[k])[mask]]
-                have = int(mask.sum())
-            guess = new
-            print(f"  loop {loops}: guess max P -> {guess:.6g} "
-                  f"(kept {have}/{before} = old/new {0 if not before else (have / before):.2f})")
-
-        keep = ((rng.random(batch) * guess <= P) if guess and guess > 0
-                else np.zeros(batch, dtype=bool))
-        tried += batch
-        nk = int(keep.sum())
-        if nk:
-            idx = np.flatnonzero(keep)[:args.ndata - have]
-            for k in store:
-                cols[k].append(ev[k][idx])
-            have += len(idx)
-        loops += 1
-    if have < args.ndata:
-        raise SystemExit(
-            f"accepted only {have} of {args.ndata} events in {loops} loops "
-            f"({tried} tried); raise --max-count or --batch-size")
-    data = {k: np.concatenate(cols[k]) for k in store}
-    print(f"accepted {have} events in {loops} loops "
-          f"({have}/{tried} = {have / max(1, tried):.1%}, "
-          f"guess max P = {guess:.6g})")
+    # ── the norm sample is a SEPARATE call (the toy needs only P and max P) ──
+    phsp = f.generate_phsp(args.nph, seed=s, top_p=beam) if args.nph > 0 else None
 
     np.savez(args.out_data, **_npz(data))
     if phsp is not None:
         np.savez(args.out_phsp, **_npz(phsp))
-        print(f"wrote {args.out_data} ({have} events), "
-              f"{args.out_phsp} ({args.nph} events)")
+        print(f"wrote {args.out_data} ({len(data['mass'])} events), "
+              f"{args.out_phsp} ({len(phsp['mass'])} events)")
     else:
-        print(f"wrote {args.out_data} ({have} events); "
+        print(f"wrote {args.out_data} ({len(data['mass'])} events); "
               f"no phsp (--nph 0)")
 
     # ── start point for run_fit --init, same source as the generated data ─
-    f.save_params(x0, args.out_init)
+    f.save_params(stats.truth, args.out_init)
     print(f"wrote {args.out_init} (start point = generating point)")
+    print(f"max P       : {stats.maxp:.6g}   "
+          f"(reuse with --maxp {stats.maxp:.6g})")
 
 
 if __name__ == "__main__":

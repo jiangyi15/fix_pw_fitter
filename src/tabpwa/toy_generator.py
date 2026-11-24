@@ -10,10 +10,11 @@ Pipeline::
        calibration batch)
 
 The accepted events are distributed like the model amplitude squared,
-i.e. a "signal MC" sample of the configured decay model.  By default
-the decay time follows the PDG B⁰ exponential
-(τ = 1.519 ps → Γ = 0.658 ps⁻¹) and the tagging fraction is a random
-B⁰ / B̄⁰ tag ∈ {0, 1}.
+i.e. a "signal MC" sample of the configured decay model.  By default the
+decay time is UNIFORM on ``[0, 10]`` ps (:data:`TIME_MAX`, a toy window, not a
+lifetime) and the tagging fraction is a choice of {0, 1} per event
+(B⁰ / B̄⁰).  Both come from ``data.extra_var`` (``random: {dist: …}``); a config that wants
+the PDG exponential lifetime declares ``{dist: exponential, scale: 1.519}``.
 
 Usage::
 
@@ -38,32 +39,59 @@ TAU_B0_PDG = 1.519
 GAMMA_B0_PDG = 1.0 / TAU_B0_PDG
 
 
-def _make_frac_time(n, frac, time, rng):
-    """Per-event tagging fraction and decay time for a batch.
+#: The toy's decay-time window (ps): ``time="uniform"`` draws U(0, TIME_MAX).
+TIME_MAX = 10.0
 
-    *frac* = ``"random"`` → {0, 1} (B⁰ / B̄⁰ tag); *time* = ``"exp"`` →
-    exponential with the PDG B⁰ width.  Scalars/arrays are passed
-    through (broadcast to length *n*).
+
+def draw_extra(n, rng, spec=None, default=0.0):
+    """Values for ONE extra variable, from its config ``random:`` spec.
+
+    ``spec`` is the declaration in ``data.extra_var.<name>.random`` and is a
+    NUMPY call, not a private mini-language::
+
+        random: {dist: uniform, low: 0, high: 10}
+        random: {dist: choice, a: [0, 1]}
+        random: {dist: exponential, scale: 1.519}
+        random: {dist: standard_normal}          # no extra arguments
+
+    i.e. ``getattr(rng, spec["dist"])(size=n, **{the rest})``.  A bare string is
+    read as ``{dist: <string>}``; ``None``/absent falls back to the ``default``
+    (a constant, which is what a config declaring only ``default:`` means).
     """
-    if frac == "random":
-        frac_a = rng.choice([0.0, 1.0], size=n)
-    elif frac is None:
-        frac_a = np.full(n, 0.5)
-    else:
-        frac_a = np.asarray(frac, dtype=float)
-        frac_a = np.full(n, float(frac_a)) if frac_a.ndim == 0 else frac_a
-    if time == "exp":
-        time_a = rng.exponential(TAU_B0_PDG, size=n)
-    elif time is None:
-        time_a = np.zeros(n)
-    else:
-        time_a = np.asarray(time, dtype=float)
-        time_a = np.full(n, float(time_a)) if time_a.ndim == 0 else time_a
-    return frac_a, time_a
+    if spec is None or spec == "":
+        return np.full(n, float(default))
+    if isinstance(spec, str):
+        spec = {"dist": spec}
+    if not isinstance(spec, dict) or "dist" not in spec:
+        raise ValueError(
+            f"toy: extra_var random spec {spec!r} must be a mapping with a "
+            f"'dist' key naming a numpy RandomState method")
+    kwargs = {k: v for k, v in spec.items() if k != "dist"}
+    fn = getattr(rng, str(spec["dist"]), None)
+    if fn is None or not callable(fn):
+        raise ValueError(
+            f"toy: extra_var random spec {spec['dist']!r} is not a numpy "
+            f"RandomState method (e.g. uniform / choice / exponential / "
+            f"standard_normal)")
+    try:
+        return np.asarray(fn(size=n, **kwargs), float)
+    except TypeError as exc:
+        raise ValueError(
+            f"toy: extra_var random spec {spec!r} rejected by numpy: {exc}")
 
 
-def _build_params(fitter, fit_result=None, param_dict=None):
-    """Kernel params from a fit result, a resolved dict, or defaults."""
+def _build_params(fitter, fit_result=None, param_dict=None, x0=None):
+    """Kernel params from a flat ``x0``, a fit result, a resolved dict, or defaults.
+
+    ``x0`` is the FLAT parameter vector and goes through ``Fitter.build_params``
+    exactly as a fit does, so a toy is generated at the point the caller asked
+    for.  (A ``param_dict`` is a RESOLVED dict and is re-resolved by the
+    constraint manager, which is why passing an already resolved one moved the
+    point by ~2x on the masses.)
+    """
+    if x0 is not None:
+        params, _ = fitter.build_params(x0)
+        return params
     if fit_result is not None:
         params, _ = fitter.build_params(fit_result.x)
         return params
@@ -81,7 +109,7 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
                  seed=None, oversample=20, compute_batch=50000,
                  p_max_margin=1.3,
                  m_B=M_B_MESON, m_pi=M_PION,
-                 frac="random", time="exp"):
+                 frac=None, time=None, x0=None):
     """Generate *n_events* B → 4π events distributed like |A|².
 
     Parameters
@@ -110,11 +138,19 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
         amplitude; a larger margin costs acceptance efficiency.
     m_B, m_pi : float
         B and pion masses for the flat phase-space generation.
-    frac, time : "random" | "exp" | array-like
-        Tagging fraction and decay time written into the data arrays.
-        Default ``frac="random"`` → {0, 1} (B⁰ / B̄⁰ tag);
-        ``time="exp"`` → exponential with the PDG B⁰ width
-        Γ = 1/τ = 1/1.519 ps⁻¹.  Scalars/arrays pass through.
+    frac, time : float, optional
+        OVERRIDES for the two extra variables.  By default they come from the
+        config's declaration, one entry per column::
+
+            data:
+              extra_var:
+                time: {default: 1.0, random: "uniform(0, 10)"}
+                frac: {default: 0.5, random: "choice(0, 1)"}
+
+        — the same declaration a background sample is filled from, so the law is
+        defined once, for the SAMPLE.  ``random:`` accepts
+        ``uniform(a, b)``, ``choice(v, ...)``, ``const(v)``, ``exp(mean)``; a
+        column declared with only ``default:`` is a constant.
 
     Returns
     -------
@@ -124,12 +160,31 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
         P       : (n,) the model probability |A|² per accepted event
         n_flat  : total flat phase-space events generated
     """
-    params = _build_params(fitter, fit_result, param_dict)
-    rng = np.random.default_rng(seed)
+    params = _build_params(fitter, fit_result, param_dict, x0=x0)
+    rng = np.random.RandomState(seed)
+
+    def _override(val, n, name):
+        arr = np.asarray(val, float)
+        if arr.size == 1:
+            return np.full(n, float(arr))
+        if arr.size == n:
+            return arr
+        raise ValueError(
+            f"toy: the {name}= override has {arr.size} values for a batch of "
+            f"{n}; give a scalar, or declare the law in data.extra_var.{name}")
 
     def get_P(momenta):
         n = len(momenta)
-        frac_a, time_a = _make_frac_time(n, frac, time, rng)
+        extra = fitter.model.mixing_inputs(n, rng)
+        frac_a, time_a = extra.get("frac"), extra.get("time")
+        if frac_a is None:                       # a model without extra columns
+            frac_a = np.full(n, 0.5)
+        if time_a is None:
+            time_a = np.zeros(n)
+        if frac is not None:                     # explicit override (scalar)
+            frac_a = _override(frac, n, "frac")
+        if time is not None:
+            time_a = _override(time, n, "time")
         data = momenta_to_data(momenta, frac=frac_a, time=time_a)
         data = dict(data)
         data["angle"] = data.pop("angles")       # kernel expects "angle"
@@ -156,7 +211,7 @@ def toy_generate(fitter, n_events, fit_result=None, param_dict=None,
     while got < n_events:
         batch_n = min(compute_batch, max(n_events - got, 1000))
         batch = generate_b4pi(batch_n, m_B=m_B, m_pi=m_pi,
-                              seed=rng.integers(0, 2 ** 31))
+                              seed=rng.randint(0, 2 ** 31))
         data, P = get_P(batch["momenta"])
         n_flat += len(P)
         u = rng.uniform(0.0, P_max, len(P))

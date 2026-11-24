@@ -14,31 +14,44 @@ import pytest
 
 from tabpwa import Fitter
 from tabpwa.toy_generator import (
-    toy_generate, _build_params, _make_frac_time,
-    TAU_B0_PDG, GAMMA_B0_PDG,
+    TAU_B0_PDG, TIME_MAX, GAMMA_B0_PDG, _build_params, draw_extra,
+    toy_generate,
 )
 
 
 class TestHelpers:
-    def test_frac_random_binary(self):
-        """frac='random' is a binary {0, 1} tag."""
-        rng = np.random.default_rng(1)
-        frac, _ = _make_frac_time(20000, "random", None, rng)
-        assert set(np.unique(frac)) <= {0.0, 1.0}
-        assert 0.45 < frac.mean() < 0.55
+    def test_draw_extra_is_a_numpy_call(self):
+        """``random:`` IS ``np.random.<dist>(size=n, **kwargs)``."""
+        rng = np.random.default_rng(6)
+        u = draw_extra(5000, rng, {"dist": "uniform", "low": 2.0, "high": 3.0})
+        assert u.min() >= 2.0 and u.max() <= 3.0
+        c = draw_extra(20000, rng, {"dist": "choice", "a": [0.0, 1.0]})
+        assert set(np.unique(c)) == {0.0, 1.0}
+        assert 0.45 < c.mean() < 0.55
+        n = draw_extra(5000, rng, {"dist": "standard_normal"})
+        assert abs(n.mean()) < 0.1 and abs(n.std() - 1.0) < 0.1
+        assert np.all(draw_extra(4, rng, None, default=7.0) == 7.0)
 
-    def test_time_exp(self):
-        """time='exp' is exponential with the PDG B0 width."""
-        rng = np.random.default_rng(2)
-        _, time = _make_frac_time(50000, None, "exp", rng)
-        assert time.min() >= 0
-        assert abs(time.mean() - TAU_B0_PDG) < 0.1 * TAU_B0_PDG
+    def test_draw_extra_window_and_lifetime(self):
+        """The two laws the configs use: U(0, TIME_MAX) and the PDG exponential."""
+        rng = np.random.default_rng(4)
+        t = draw_extra(200_000, rng,
+                       {"dist": "uniform", "low": 0.0, "high": TIME_MAX})
+        assert t.min() >= 0.0 and t.max() <= TIME_MAX
+        assert abs(t.mean() - TIME_MAX / 2) < 0.05
+        e = draw_extra(50_000, rng,
+                       {"dist": "exponential", "scale": TAU_B0_PDG})
+        assert e.min() >= 0.0
+        assert abs(e.mean() - TAU_B0_PDG) < 0.1 * TAU_B0_PDG
 
-    def test_scalar_passthrough(self):
-        rng = np.random.default_rng(3)
-        frac, time = _make_frac_time(10, 0.3, 2.0, rng)
-        assert np.all(frac == 0.3)
-        assert np.all(time == 2.0)
+    def test_draw_extra_refusals(self):
+        rng = np.random.default_rng(7)
+        with pytest.raises(ValueError, match="RandomState method"):
+            draw_extra(4, rng, {"dist": "not_a_distribution"})
+        with pytest.raises(ValueError, match="rejected by numpy"):
+            draw_extra(4, rng, {"dist": "uniform", "nope": 1})
+        with pytest.raises(ValueError, match="'dist' key"):
+            draw_extra(4, rng, {"low": 0.0, "high": 1.0})
 
     def test_build_params_nonzero(self):
         """Defaults produce a non-trivial amplitude (ck != 0)."""

@@ -33,6 +33,9 @@ Usage:
 import time
 import warnings
 
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 
 from .fit_result import FitResult
@@ -63,6 +66,21 @@ def _cov_return(G, hess_inv, values, return_cov):
     if return_cov:
         return values, cov
     return values, np.sqrt(np.maximum(np.diag(cov), 0.0))
+
+
+@dataclass(frozen=True)
+class PhspStats:
+    """What one ``generate_phsp`` call produced — the norm sample's provenance.
+
+    Returned beside the buffer so the two generators read the same way
+    (``data, toy = f.generate_toy(...)``, ``phsp, norm = f.generate_phsp(...)``);
+    ``top_p`` is the frame the sample was generated in (``None`` = rest frame).
+    """
+
+    n_events: int
+    n_finals: int
+    seed: Optional[int] = None
+    top_p: Optional[object] = None
 
 
 class Fitter:
@@ -535,6 +553,22 @@ class Fitter:
 
     _load_momenta_conf = load_momenta_conf   # backward-compatible alias
 
+    def config_purity(self):
+        """The purity ``set_data`` uses: top-level, then ``data.purity``/``bg_frac``.
+
+        ONE reader for both ``set_data`` and ``generate_toy_bg``, so a toy is
+        generated at the purity the fit will assume.  A configured ``0.0`` stays
+        0: a pure-background SAMPLE can be generated, but ``set_data`` divides by
+        the purity (``(1-p)/p``), so such a sample cannot be fitted — use
+        ``p > 0`` for a study.
+        """
+        dic = self.config.dic or {}
+        purity = dic.get("purity")
+        if purity is None:
+            data = dic.get("data") or {}
+            purity = data.get("purity", data.get("bg_frac", 1.0))
+        return 1.0 if purity is None else float(purity)
+
     def set_data(self, data):
         """Set data (real events) for negative log-likelihood.
 
@@ -553,11 +587,7 @@ class Fitter:
                   'weight', 'bkg' (optional).
         """
         # Read purity from config (default 1 → pure signal, no background)
-        purity = self.config.dic.get('purity')
-        if purity is None:
-            purity = self.config.dic.get('data', {}).get('purity',
-                     self.config.dic.get('data', {}).get('bg_frac', 1.0))
-        self._purity = 1.0 if purity is None else float(purity)
+        self._purity = self.config_purity()
 
         # Copy data and scale bkg — ONE formula for every purity:
         #   bkg_scaled = raw * (1-p)/p/N_b ,  log_purity_const = -log(p)·Σw
@@ -579,6 +609,154 @@ class Fitter:
 
         self._data_np = data
         self._data_holder = self.backend.load_data(data)
+
+    def generate_toy(self, x0, n_events, *, seed=None, top_p=None, maxp=None,
+                     stats=False, **kw):
+        """A toy dataset distributed like ``|A|²`` at the parameter point ``x0``.
+
+        Returns ``data`` (the event buffer :meth:`set_data` takes), or
+        ``(data, stats)`` with ``stats=True`` — a
+        :class:`tabpwa.toy_pwa.ToyStats` carrying the truth, the ceiling and the
+        run's counts.  Feed the ceiling back as ``maxp=stats.maxp`` for the next
+        toy at the SAME point, which skips the first-batch estimate::
+
+            x0 = f.initial_values(seed=1)
+            data, stats = f.generate_toy(x0, 4000, seed=7, stats=True)
+            f.set_phsp(phsp)          # from generate_pwa_phsp, or the config
+            f.set_data(data)
+            more = f.generate_toy(x0, 4000, seed=8, maxp=stats.maxp)
+
+        No norm sample is produced here: the accept-reject needs only ``P`` and
+        its ceiling, so the normalisation integral is a separate call
+        (:func:`tabpwa.pwa_build.generate_pwa_phsp` → ``set_phsp``).
+
+        The density is this fitter's own parameter layer and backend, so
+        constraints and defaults apply exactly as in a fit, and the flat
+        proposal comes from the config's masses (any topology).  ``top_p`` is
+        the top's momentum for the generator (e.g. ``phasespace.fix_beam``).
+
+        WHICH generator is the MODEL's choice (``model.toy_generator()``): the
+        default is the generic accept-reject of
+        :func:`tabpwa.toy_pwa.toy_pwa_generate`, and a model needing extra
+        per-event inputs supplies its own — the time-dependent model does, for
+        ``frac``/``time``, and refuses ``top_p``/``maxp`` because it builds its
+        own phase space.
+        """
+        if n_events < 1:
+            raise ValueError(
+                f"generate_toy: n_events must be >= 1, got {n_events!r}")
+        if maxp is not None and not (np.isfinite(maxp) and maxp > 0):
+            raise ValueError(
+                f"generate_toy: maxp must be a positive finite ceiling, got {maxp!r}")
+        generate = self.model.toy_generator()
+        if generate is not None:
+            data, st = generate(self, n_events, seed=seed, x0=x0, top_p=top_p,
+                                maxp=maxp, **kw)
+        else:
+            from tabpwa.toy_pwa import toy_pwa_generate
+            data, st = toy_pwa_generate(
+                self, n_events, seed=seed, x0=x0, top_p=top_p, maxp=maxp, **kw)
+        # a SIGNAL-ONLY toy has no background: the builders fill bkg = 1 (a data
+        # file's default) or 0; either way the sample itself must say 0, or a fit
+        # at a config purity < 1 adds a flat background that is not there
+        data = dict(data)
+        data["bkg"] = np.zeros(len(data["mass"]))
+        return (data, st) if stats else data
+
+    def generate_toy_bg(self, x0, n_data, *, purity=None, bg=None, seed=None,
+                        top_p=None, maxp=None, stats=False, **kw):
+        """Toy data from the MIXTURE ``p·P/norm + (1-p)·b(x)/N_b`` (Poisson counts).
+
+        ``n_sig ~ Poisson(n_data·p)`` from the model and
+        ``n_bg ~ Poisson(n_data·(1-p))`` from ``bg`` over flat phase space;
+        ``purity`` defaults to :meth:`config_purity` — the very value
+        ``set_data`` will use (top-level, then ``data.purity``/``bg_frac``) — and
+        ``bg=None`` means a UNIFORM background.  If you pass an explicit
+        ``purity`` that differs from that, the FIT is still run at the config's
+        value, so set it there too.
+
+        The ``bkg`` column is additive at EVERY event in this likelihood, so it is
+        set to ``b(x)`` on signal events too; the norm sample is a separate call
+        that must carry the same column::
+
+            data, st = f.generate_toy_bg(x0, 4000, purity=0.8, bg=b, stats=True)
+            f.set_phsp(f.generate_phsp(40_000, seed=8, bkg=b))   # same column
+            f.set_data(data)
+
+        See :func:`tabpwa.toy_pwa.generate_toy_bg`.
+        """
+        if purity is None:
+            purity = self.config_purity()
+        from tabpwa.toy_pwa import generate_toy_bg
+        return generate_toy_bg(self, x0, n_data, purity=purity, bg=bg,
+                               seed=seed, top_p=top_p, maxp=maxp,
+                               stats=stats, **kw)
+
+    def generate_phsp(self, n_events, *, seed=None, top_p=None, bkg=None,
+                      momenta=False, stats=False):
+        """Flat phase space for this fitter's topology — ready for ``set_phsp``.
+
+        ``f.set_phsp(f.generate_phsp(40_000, seed=8))`` is the whole norm setup:
+
+            data, toy = f.generate_toy(x0, 4000, seed=7)   # the toy: P + ceiling
+            phsp, norm = f.generate_phsp(40_000, seed=8)   # the norm: separate
+            f.set_phsp(phsp)
+            f.set_data(data)
+
+        The sample is TOPOLOGY-INDEPENDENT — flat phase space depends only on the
+        final masses, and every chain of one decay carries the same finals — so
+        the first chain is the representative.
+
+        Returns the sample (the event buffer :meth:`set_phsp` takes, or with
+        ``momenta=True`` the raw ``(n_events, n_finals, 4)`` array in the model's
+        final order), or ``(sample, stats)`` with ``stats=True`` — a
+        :class:`PhspStats` with the size, the seed and the frame, mirroring
+        :meth:`generate_toy`.
+
+        ``top_p`` is the top's momentum (e.g. ``phasespace.fix_beam``); use the
+        one the data were generated with when you want the two in one frame
+        (the norm integral is Lorentz invariant, but ``N_b`` and the rows are
+        per-event quantities, so matching the frame is the safe choice).
+
+        ``bkg`` is the background SHAPE ``b(event_buffer) -> values``; the
+        sample's ``bkg`` column becomes ``b(x)`` (UNIFORM, i.e. ones, when it is
+        ``None``), which is what makes ``N_b`` its phase-space mean.  Pass the SAME
+        function the toy used (:func:`generate_toy_bg`), otherwise the fit is
+        mis-normalised.  The column is set here rather than left to the model's
+        builder because a signal-MC builder writes ``bkg = 0`` there, which would
+        leave ``N_b = 0``.
+        """
+        from tabpwa.pwa_build import generate_pwa_phsp
+
+        if bkg is not None and momenta:
+            raise ValueError(
+                "generate_phsp: bkg= describes the EVENT BUFFER, so it cannot "
+                "be combined with momenta=True")
+        chain = self.decay_tree.partial_waves()[0][1]
+        mom = generate_pwa_phsp(self.model, chain, n_events, seed=seed,
+                                top_p=top_p)
+        st = PhspStats(n_events=int(n_events), n_finals=int(mom.shape[1]),
+                       seed=None if seed is None else int(seed), top_p=top_p)
+        if momenta:
+            sample = mom
+        else:
+            # the SAME per-event law as the toy ({} for every model without
+            # extra columns): a TD norm evaluated at the builder's defaults
+            # (frac 0.5, time 0) is a 4.7 %-wrong integral
+            rng = np.random.RandomState(0 if seed is None else int(seed) + 1)
+            sample = self.model.build_event_data(
+                mom, self.kernel_config,
+                **self.model.mixing_inputs(int(n_events), rng))
+        # The norm sample's ``bkg`` column is the background SHAPE: `N_b` is its
+        # phase-space mean, so it must be the same function the data carry —
+        # UNIFORM by default.  (A signal-MC builder may fill 0 there, which would
+        # make N_b = 0 and `set_data` refuse.)
+        if not momenta:                     # the buffer is a dict, not an array
+            from tabpwa.toy_pwa import bkg_values
+            sample = dict(sample)
+            sample["bkg"] = bkg_values(sample, bkg) if bkg is not None \
+                else np.ones(len(sample["mass"]))
+        return (sample, st) if stats else sample
 
     def set_phsp(self, phsp):
         """Set phase-space data for normalization integral.

@@ -233,6 +233,39 @@ class AmplitudeModel(BaseModel):
         """
         return self._no_coeff_basis()
 
+    def mixing_inputs(self, n, rng):
+        """Extra per-event INPUTS a GENERATED event needs — ``{}`` by default.
+
+        The VALUES are not the model's business: ``frac``/``time``/``time_max``
+        define how the SAMPLE is made (see :func:`tabpwa.toy_generator.
+        toy_generate`), and the generator applies that same law to every event it
+        produces, signal or background.  A model that consumes such inputs
+        declares them here so a builder call can be completed::
+
+            extra = model.mixing_inputs(n, rng)
+            rows  = model.build_event_data(momenta, kc, **extra)
+
+        MEASURED/defined for ``flavour_tag_mix``: ``frac`` ∈ {0, 1} and
+        ``time ~ U(0, time_max)``; every other model returns ``{}`` (its rows need
+        nothing beyond the momenta).
+        """
+        return {}
+
+    def toy_generator(self):
+        """The toy-data path for THIS model: ``None`` or a callable.
+
+        ``None`` (the default) means the GENERIC accept-reject generator
+        (:func:`tabpwa.toy_pwa.toy_pwa_generate`), which needs only this model's
+        event builder, the fitter's parameter layer and its backend — so it
+        covers every model whose rows come from :meth:`build_event_data`.
+
+        A model needing extra per-event inputs returns its own generator
+        ``fn(fitter, n_events, *, seed=None, x0=None, **kw) -> (data, ToyStats)``
+        instead.  The caller (:meth:`Fitter.generate_toy`) asks this and does
+        not test model names.
+        """
+        return None
+
     def build_event_data(self, momenta, kernel_config, *, weight=None,
                          bkg=None):
         """Build kernel-ready event arrays for this model.
@@ -1047,6 +1080,79 @@ class FlavourTagMix(AmplitudeModel):
     default_scalar_defaults = dict(LEGACY_SCALAR_DEFAULTS)
     params_transform_cls = FlavourTagMixKernelParams
 
+    #: Columns this model reads beyond mass/q/angle — each declared in
+    #: ``data.extra_var.<name>`` (``random:`` for a toy, ``default:`` otherwise).
+    extra_columns = ("frac", "time")
+
+    def mixing_inputs(self, n, rng):
+        """Values for :attr:`extra_columns`, from the config's ``data.extra_var``.
+
+        The LAW lives in the config, one entry per column::
+
+            data:
+              extra_var:
+                time: {default: 1.0, random: {dist: uniform, low: 0, high: 10}}
+                frac: {default: 0.5, random: {dist: choice, a: [0, 1]}}
+
+        ``random:`` is a NUMPY CALL — ``{dist: <RandomState method>, **kwargs}``,
+        evaluated as ``getattr(rng, dist)(size=n, **kwargs)`` — so the toy does
+        not carry a second definition of the law, and a signal and a background
+        filled from the same declaration carry it by construction.  An undeclared
+        column falls back to the documented default (``time ~ U(0, TIME_MAX)``,
+        ``frac`` a choice of {0, 1}).
+        """
+        from tabpwa.toy_generator import TIME_MAX, draw_extra
+        rng = np.random.RandomState() if rng is None else rng
+        declared = ((self.dic.get("data") or {}).get("extra_var") or {})
+        out = {}
+        for name in self.extra_columns:
+            entry = declared.get(name)
+            if entry is None:
+                entry = {}
+            elif not isinstance(entry, dict):
+                raise ValueError(
+                    f"data.extra_var.{name} must be a mapping with 'default' "
+                    f"and/or 'random', got {entry!r}")
+            default = entry.get("default")
+            spec = entry.get("random")
+            if spec is None and default is None:      # keep the toy usable
+                spec = ({"dist": "uniform", "low": 0.0, "high": TIME_MAX}
+                        if name == "time" else {"dist": "choice", "a": [0, 1]})
+                default = 0.0
+            try:
+                out[name] = draw_extra(n, rng, spec,
+                                       0.0 if default is None else default)
+            except ValueError as exc:
+                raise ValueError(f"data.extra_var.{name}: {exc}") from exc
+        return out
+
+    def toy_generator(self):
+        """The TD toy path: ``toy_generator.toy_generate``, for ``frac``/``time``.
+
+        It builds its own 4π phase space, so there is no reusable P ceiling and no
+        ``top_p`` knob; both are refused rather than silently dropped.  The
+        signal+background combiner handles it too, via
+        :meth:`build_event_data` + :meth:`mixing_inputs`.
+        """
+        def generate(fitter, n_events, *, seed=None, x0=None, top_p=None,
+                     maxp=None, **kw):
+            if top_p is not None or maxp is not None:
+                raise ValueError(
+                    "generate_toy: the time-dependent model builds its own 4pi "
+                    "phase space, so top_p/maxp do not apply — use "
+                    "toy_generator.toy_generate for its extra options")
+            from tabpwa.toy_generator import toy_generate
+            from tabpwa.toy_pwa import ToyStats
+            if "batch_size" in kw:              # the generic name for this knob
+                kw.setdefault("compute_batch", kw.pop("batch_size"))
+            ev = toy_generate(fitter, n_events, seed=seed, x0=x0, **kw)
+            n_acc, n_flat = len(ev["momenta"]), int(ev.get("n_flat", 0))
+            return ev["data"], ToyStats(
+                seed=-1 if seed is None else int(seed), n_events=n_acc,
+                tried=n_flat, acceptance=n_acc / max(1, n_flat),
+                truth=np.asarray(x0, float))
+        return generate
+
     def build_event_data(self, momenta, kernel_config, *, weight=None,
                          bkg=None, frac=None, time=None, chunk=None):
         """TD event-data fill, tree-general.
@@ -1075,7 +1181,10 @@ class FlavourTagMix(AmplitudeModel):
 
             w = np.ones(n) if weight is None else np.asarray(weight,
                                                             dtype=float)
-            d = momenta_to_data(momenta, weight=w)
+            # frac/time are per-event INPUTS of this model; the legacy fill
+            # accepted them and they were silently dropped here (the toy's
+            # signal path passes real ones, the background's too)
+            d = momenta_to_data(momenta, weight=w, frac=frac, time=time)
             return {
                 "mass": d["mass"].reshape(n, -1),
                 "q": d["q"].reshape(n, -1),
