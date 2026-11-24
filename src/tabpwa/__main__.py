@@ -8,6 +8,7 @@ Examples::
     python -m tabpwa plot_pwa_groups results.json --config config_pwa.yml
     python -m tabpwa gen_toy_pwa --config config_pwa.yml
     python -m tabpwa --list
+    python -m tabpwa --version
 
 Resolution order for *command*:
     1. a repository/scripts script  ``<root>/scripts/<command>.py``
@@ -22,6 +23,8 @@ import argparse
 import os
 import runpy
 import sys
+
+from ._version import __version__
 
 try:  # repo layout: tabpwa package under <repo>/src
     _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -79,6 +82,8 @@ def main(argv=None):
     parser.add_argument("command", nargs="?", help="script name, e.g. run_fit")
     parser.add_argument("--list", action="store_true", dest="list_",
                         help="list available commands")
+    parser.add_argument("--version", action="version",
+                        version=f"tabpwa {__version__}")
     # -h/--help is intentionally NOT a known option here: when a command is
     # given it must stay in *rest* and be forwarded to the target script
     # (e.g. `python -m tabpwa run_fit --help` -> run_fit's own usage).

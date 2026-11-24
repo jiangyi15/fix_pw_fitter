@@ -35,6 +35,39 @@ say what is missing, and wait — do not "checkpoint" it as a commit.  A
 follow-up fix commit is for problems *discovered later*, never for work
 the author already knew was incomplete at commit time.
 
+## Versioning & changelog
+
+The version has ONE source: `src/tabpwa/_version.py` (`__version__`).
+`pyproject.toml` reads it (`[tool.setuptools.dynamic]`), and
+`tabpwa.__version__` / `python -m tabpwa --version` /
+`python run_fit.py --version` report it.  Do not state the current number
+anywhere else, docs included — the changelog's dated `## [X.Y.Z]` headings are
+the historical record, not a source.  `tests/test_version.py` fails if a surface
+drifts or if the `[project]` table grows a second copy.
+
+`CHANGELOG.md` (Keep a Changelog; SemVer, and at 0.x a minor bump may break the
+API) is where a change is announced:
+
+- a user-visible change — behaviour, API, CLI, a numerical result, a file
+  format — adds a bullet under `## [Unreleased]` in the SAME commit;
+- a release moves that block under `## [X.Y.Z] - YYYY-MM-DD`, bumps
+  `_version.py` and tags `vX.Y.Z`, all in one commit;
+- build it from a CLEAN tree (`rm -rf build src/*.egg-info`): setuptools reuses
+  `build/lib`, so a package-data glob removed from `pyproject.toml` still ships
+  files an earlier build copied there (measured: 42 stale `.hash` files in the
+  wheel until `build/` was removed);
+- internal refactors and test-only changes need no entry, but a doc that names
+  a version does (it is a surface).
+
+`tests/test_version.py` also requires a dated heading for the current version,
+so a bump without a release note fails the suite.
+
+Dependency declarations are audited by `tests/test_packaging.py`: every
+third-party top-level import in `src/tabpwa` must be declared in
+`pyproject.toml` (base or an extra), `onnx`/`onnxruntime` must stay in the
+`onnx` extra, and `import tabpwa` must work with those extras absent.  A new
+import therefore needs a declaration, not just a working environment.
+
 ## Backend Selection
 
 | Backend | Flag | Note |
@@ -276,6 +309,16 @@ picking `integrated` for a PWA config fails fast at backend selection with
 the registered list.
 
 ### CUDA Build
+
+**Packaging: sources, never binaries.**  The wheel and the sdist carry
+`cuda/*.cu` / `cpu/*.c` and no `.so` and no `.hash`.  The build key hashes the
+SOURCE and the target arch + nvcc identity, so a prebuilt binary cannot be
+validated on another machine (`ensure` refuses without a matching hash) and the
+wheel is `py3-none-any`, which cannot legally hold an arch-specific library; a
+`.hash` without its `.so` is never consulted.  Prebuilt binaries are the
+AppImage's job (`appimag/build.sh` fat-builds `sm_70,sm_75,sm_86,sm_89`); a pip
+prebuilt channel would need separate platform wheels and a key that does not
+include the builder's nvcc.
 
 Kernels auto-build on import — `.so` is rebuilt automatically when its build
 key changes (source, **target arch**, tag, nvcc version, schema — SHA-256).

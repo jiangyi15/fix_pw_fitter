@@ -13,7 +13,7 @@ import argparse
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from tabpwa import Fitter
+from tabpwa import Fitter, __version__
 
 
 def _init_out_path(save_init, config, run=None):
@@ -32,6 +32,8 @@ def _init_out_path(save_init, config, run=None):
 
 def main():
     parser = argparse.ArgumentParser(description="NLL computation with tabpwa")
+    parser.add_argument("--version", action="version",
+                        version=f"tabpwa {__version__}")
     parser.add_argument("--debug", action="store_true", help="Use 1K data / 10K phsp")
     parser.add_argument("--backend", default=None,
                         help='Compute backend: a name like "cuda_v3", '

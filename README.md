@@ -41,7 +41,8 @@ pip install "tabpwa[onnx-gpu] @ git+ssh://git@github.com/jiangyi15/fix_pw_fitter
 
 # Install in development mode (local)
 pip install -e .
-# CUDA builds automatically on first use (requires nvcc)
+# CUDA kernels compile on first use from the packaged .cu sources (nvcc
+# required; the AppImage bundles them prebuilt, the wheel never ships a .so)
 # ONNX Runtime: pip install onnxruntime onnx  (GPU: onnxruntime-gpu)
 ```
 

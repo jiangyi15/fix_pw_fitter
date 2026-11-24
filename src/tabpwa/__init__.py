@@ -8,6 +8,8 @@ Provides a complete pipeline for partial wave amplitude analysis:
   - Global Fitter class for optimizer-ready NLL computation
 """
 
+from ._version import __version__
+
 from .config_loader import Config
 from .numpy_kernel import NumpyKernel
 from .param_constraint import (
@@ -38,6 +40,7 @@ from .bw_form_factor import (
 from . import build_defaults
 
 __all__ = [
+    "__version__",
     "Config",
     "NumpyKernel",
     "CUDAKernel",

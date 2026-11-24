@@ -4,23 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "TabPWA"
-version = "0.1.0"
 description = "Amplitude analysis fitting framework with tabulated/interpolated kernels, TFPWA-compatible"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "pyyaml",
-    "cffi",
-    "sympy",
-    "scipy",
-    "matplotlib",
+    # floors are the APIs this tree actually uses (np.random.default_rng and
+    # SeedSequence are 1.17; scipy.optimize.root_scalar is 0.19; the rest are
+    # older), not a tested matrix: pip resolves per interpreter anyway.
+    "numpy>=1.17",
+    "pyyaml>=5.1",
+    "cffi>=1.12",
+    "sympy>=1.6",
+    "scipy>=1.5",
+    "matplotlib>=3.3",
 ]
-dynamic = []
+dynamic = ["version"]
+
+[project.scripts]
+tabpwa = "tabpwa.__main__:main"
 
 [project.optional-dependencies]
-cuda = [
-    "cffi",
-]
+# No `cuda` extra: the CUDA kernels need nvcc (not a pip package) and cffi,
+# which the base install already requires — the CPU kernels load their .so
+# through it as well.
 onnx = [
     "onnx",
     "onnxruntime",
@@ -34,9 +40,16 @@ dev = [
     "pytest-xdist",
 ]
 
+[tool.setuptools.dynamic]
+version = {attr = "tabpwa._version.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["tabpwa*"]
 
 [tool.setuptools.package-data]
-tabpwa = ["cuda/*.cu", "cuda/*.cuh", "cuda/*.hash", "cpu/*.c"]
+# SOURCES only, never a built .so or a .hash: the binary is keyed by target
+# arch + nvcc identity (so another machine cannot reuse it), the wheel tag is
+# py3-none-any, and the .hash is per-install bookkeeping.  Prebuilt binaries
+# are the AppImage's job (appimag/build.sh fat-builds sm_70/75/86/89).
+tabpwa = ["cuda/*.cu", "cuda/*.cuh", "cpu/*.c"]

@@ -26,7 +26,12 @@ class _ONNXBackendBase(ComputeBackend):
     def __init__(self, kernel_config=None, model_path=None,
                  norm_model_path="pwa_forward_norm.onnx",
                  batch_size=8192, providers=None):
-        import onnxruntime as ort
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:      # a bare ModuleNotFoundError names neither
+            raise RuntimeError(         # the extra nor the fix
+                "the ONNX backends need onnxruntime, which is not installed: "
+                "pip install 'tabpwa[onnx]' (CPU) or 'tabpwa[onnx-gpu]'") from exc
         if providers is None:
             providers = ['CPUExecutionProvider']
         if kernel_config is not None:
