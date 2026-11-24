@@ -611,7 +611,7 @@ class Fitter:
         self._data_holder = self.backend.load_data(data)
 
     def generate_toy(self, x0, n_events, *, seed=None, top_p=None, maxp=None,
-                     stats=False, **kw):
+                     fbg=None, stats=False, **kw):
         """A toy dataset distributed like ``|A|²`` at the parameter point ``x0``.
 
         Returns ``data`` (the event buffer :meth:`set_data` takes), or
@@ -641,6 +641,15 @@ class Fitter:
         per-event inputs supplies its own — the time-dependent model does, for
         ``frac``/``time``, and refuses ``top_p``/``maxp`` because it builds its
         own phase space.
+
+        ``fbg`` is the background SHAPE ``fbg(event_buffer) -> values``: the
+        returned ``bkg`` column becomes ``fbg(events)``, UNIFORM (ones) when it is
+        ``None`` — the same quantity :meth:`generate_phsp` takes as ``bkg`` and
+        :meth:`generate_toy_bg` as ``bg``, so a toy and its norm sample can be
+        given the same function.  A strict signal-only column is
+        ``fbg=lambda x: np.zeros(x["mass"].shape[0])``; the default is the flat
+        shape a data file uses, which multiplies by ``(1-p)/p`` in ``set_data``
+        and therefore contributes nothing at purity 1.
         """
         if n_events < 1:
             raise ValueError(
@@ -656,11 +665,12 @@ class Fitter:
             from tabpwa.toy_pwa import toy_pwa_generate
             data, st = toy_pwa_generate(
                 self, n_events, seed=seed, x0=x0, top_p=top_p, maxp=maxp, **kw)
-        # a SIGNAL-ONLY toy has no background: the builders fill bkg = 1 (a data
-        # file's default) or 0; either way the sample itself must say 0, or a fit
-        # at a config purity < 1 adds a flat background that is not there
+        # The background SHAPE is the caller's (fbg), not a builder's habit: one
+        # evaluation here covers both the generic engine and a model's own
+        # generator, and ``fbg=None`` is the uniform column ``N_b`` expects.
+        from tabpwa.toy_pwa import bkg_values
         data = dict(data)
-        data["bkg"] = np.zeros(len(data["mass"]))
+        data["bkg"] = bkg_values(data, fbg)
         return (data, st) if stats else data
 
     def generate_toy_bg(self, x0, n_data, *, purity=None, bg=None, seed=None,
@@ -682,6 +692,10 @@ class Fitter:
             data, st = f.generate_toy_bg(x0, 4000, purity=0.8, bg=b, stats=True)
             f.set_phsp(f.generate_phsp(40_000, seed=8, bkg=b))   # same column
             f.set_data(data)
+
+        ``generate_toy(fbg=…)`` takes the SAME shape function for a signal-only
+        sample; in both cases the background AMOUNT is the config purity, applied
+        by :meth:`set_data`.
 
         See :func:`tabpwa.toy_pwa.generate_toy_bg`.
         """
@@ -721,7 +735,8 @@ class Fitter:
         ``bkg`` is the background SHAPE ``b(event_buffer) -> values``; the
         sample's ``bkg`` column becomes ``b(x)`` (UNIFORM, i.e. ones, when it is
         ``None``), which is what makes ``N_b`` its phase-space mean.  Pass the SAME
-        function the toy used (:func:`generate_toy_bg`), otherwise the fit is
+        function the toy used — ``generate_toy(fbg=…)`` for a signal-only sample,
+        ``generate_toy_bg(bg=…)`` for a mixture — otherwise the fit is
         mis-normalised.  The column is set here rather than left to the model's
         builder because a signal-MC builder writes ``bkg = 0`` there, which would
         leave ``N_b = 0``.
@@ -754,8 +769,7 @@ class Fitter:
         if not momenta:                     # the buffer is a dict, not an array
             from tabpwa.toy_pwa import bkg_values
             sample = dict(sample)
-            sample["bkg"] = bkg_values(sample, bkg) if bkg is not None \
-                else np.ones(len(sample["mass"]))
+            sample["bkg"] = bkg_values(sample, bkg)      # None -> uniform ones
         return (sample, st) if stats else sample
 
     def set_phsp(self, phsp):

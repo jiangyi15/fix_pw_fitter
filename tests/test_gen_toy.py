@@ -5,15 +5,21 @@ Four models, one signature: ``pwa``, the basis model ``pwa_gen``, the
 supplies its own generator through ``AmplitudeModel.toy_generator()`` because it
 needs the ``frac``/``time`` columns.
 
-The toy returns ``(data, stats)``: ``data`` is what :meth:`Fitter.set_data`
-takes and ``stats`` carries the truth, the acceptance ceiling and the counts.
-NO norm sample is produced — generation needs only ``P`` and its ceiling — so a
-toy study is::
+The toy returns ``data`` (``(data, stats)`` with ``stats=True``): the buffer
+:meth:`Fitter.set_data` takes, and the truth, the acceptance ceiling and the
+counts.  NO norm sample is produced — generation needs only ``P`` and its
+ceiling — so a toy study is::
 
     x0 = f.initial_values(seed=1)
-    data = f.generate_toy(x0, 4000, seed=7)
-    f.set_phsp(f.generate_phsp(40_000, seed=7))   # the norm: SEPARATE
+    data = f.generate_toy(x0, 4000, seed=7)          # bkg = ones (uniform)
+    f.set_phsp(f.generate_phsp(40_000, seed=7))      # the norm: SEPARATE
     f.set_data(data)
+
+The ``bkg`` column is the background SHAPE, not its amount: the toy takes it from
+``fbg`` and the norm from ``bkg`` (both uniform by default, both evaluated by
+``toy_pwa.bkg_values``), and ``set_data`` applies ``(1-p)/p/N_b`` from the config
+purity.  So a config with purity < 1 must be given the SAME function on both
+calls, or the fit is mis-normalised.
 """
 
 import numpy as np
@@ -50,6 +56,45 @@ def test_generate_toy_returns_settable_buffers():
     f.set_data(data)
     nll, grad = f.get_nll(x0)
     assert np.isfinite(nll) and np.isfinite(np.asarray(grad)).all()
+
+
+def test_the_toy_bkg_column_comes_from_fbg():
+    """``bkg = fbg(events)`` — UNIFORM (ones) by default, the norm's shape.
+
+    The column is the background SHAPE, the same argument ``generate_phsp`` takes
+    as ``bkg``; the AMOUNT comes from the config purity in ``set_data``.  A strict
+    signal-only column is ``fbg=zeros``, and such a sample is purity-invariant
+    apart from ``-log(p)·Σw``.
+    """
+    f = _fitter(CFG_PWA, "numpy_pwa")
+    x0 = f.initial_values(seed=1)
+    data, _ = f.generate_toy(x0, 200, seed=5, stats=True)
+    assert np.all(data["bkg"] == 1.0)                    # uniform default
+
+    def shape(x):
+        return 1.0 + 0.5 * np.cos(x["mass"][:, 0])
+
+    graded = f.generate_toy(x0, 200, seed=5, fbg=shape)
+    assert np.allclose(graded["bkg"], shape(graded))
+    phsp = f.generate_phsp(150, seed=11, bkg=shape)      # the same function
+    assert np.allclose(phsp["bkg"], shape(phsp))
+
+    sig = f.generate_toy(x0, 200, seed=5,
+                         fbg=lambda x: np.zeros(len(x["mass"])))
+    assert np.all(sig["bkg"] == 0.0)
+
+    def nll_at(purity):
+        g = _fitter(CFG_PWA, "numpy_pwa")
+        g.config.dic["data"]["purity"] = purity
+        g.set_phsp(g.generate_phsp(300, seed=11))
+        g.set_data(sig)
+        return g.get_nll(x0)
+
+    q1, g1 = nll_at(1.0)
+    q9, g9 = nll_at(0.9)
+    n = len(sig["mass"])
+    assert abs((q9 - q1) + np.log(0.9) * n) < 1e-8 * max(1.0, abs(q1))
+    assert np.allclose(g9, g1, atol=1e-9)
 
 
 def test_generate_toy_bg_splits_the_counts_poisson():

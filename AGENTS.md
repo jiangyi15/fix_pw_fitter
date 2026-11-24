@@ -959,6 +959,55 @@ Fitter.get_nll_raw(params):
   - IntegratedBackend → Gram path (O(n²) matmul from cached matrices)
   - Other backends → full forward pass (batched internally, `return_p=False` just skips P).
 
+### Toy data (`Fitter.generate_toy`) — the sample's law, its ceiling, its norm
+
+THREE entry points, each producing only its own sample:
+`generate_toy(x0, n, *, seed, top_p, maxp, fbg, stats)`,
+`generate_toy_bg(x0, n, *, purity, bg, …)` (the mixture) and
+`generate_phsp(n, *, seed, top_p, bkg, momenta, stats)` (the norm).  There is no
+`n_phsp` inside the toy: accept–reject needs only `P` and a ceiling (a constant
+factor cancels), so the normalisation integral is a separate call.  The toy's
+rows are the MODEL's whole event buffer (mass/q/angle/weight plus whatever the
+model adds), never a fixed key set.
+
+WHICH generator runs is the model's: `AmplitudeModel.toy_generator()` returns
+`None` for the generic accept–reject (`tabpwa/toy_pwa.py`, which needs only
+`build_event_data`, the parameter layer and a backend), and `FlavourTagMix`
+returns its own for `frac`/`time` (it refuses `top_p`/`maxp`, building its own
+phase space).  A hook is called with the FLAT `x0` and must go through
+`build_params`; handing it an already-RESOLVED dict re-resolves it through the
+constraint manager and moves the generating point (~2× on the masses) while
+`ToyStats.truth` still reports `x0`.
+
+The per-event law lives in the CONFIG, once: `data.extra_var.<name>.random` is a
+NUMPY call `{dist: <RandomState method>, **kwargs}` (`uniform`, `choice`,
+`exponential`, …), and `AmplitudeModel.mixing_inputs(n, rng)` fills the columns
+the model declares in `extra_columns`, so the toy signal and a background drawn
+from the same declaration carry the same law.  `default:` alone is a constant,
+and an undeclared column falls back to `time ~ U(0, TIME_MAX)` /
+`frac ∈ {0, 1}`.  Both sides evaluate it with a `RandomState` (a numpy call on a
+`Generator` would accept a different method set).
+
+The ceiling is in/out: `stats.maxp` comes back and goes in as `maxp=` (it is a
+property of the parameter point and the topology), `maxp_scale < 1` is refused
+(a raise cannot lower a maximum) and the `guess/new` thinning is exact because a
+raise precedes its own batch's acceptance — `_raise_ceiling` is the ONE
+implementation, shared with the background draw.
+
+THE BACKGROUND COLUMN IS A SHAPE, never a normalisation: `bkg = fbg(events)` in
+the toy (`None` → ones; `fbg=lambda x: np.zeros(...)` for a strict signal-only
+column), `bg(...)` in the mixture and `bkg(...)` in the norm — one evaluator,
+`toy_pwa.bkg_values` (uniform for `None`; refuses a wrong length, non-finite or
+negative values).  The AMOUNT is `set_data`'s: `bkg_scaled = (1-p)/p · bkg / N_b`
+with `N_b` the norm sample's mean, so the norm must be built with the SAME
+function.  Counts are two Poisson draws (`n·p`, `n·(1-p)`); an EMPTY draw raises
+rather than returning a buffer with no `mass`; `purity` defaults to
+`config_purity()` (top-level → `data.purity` → `data.bg_frac`), and `p = 0` is
+generation-only because `set_data` divides by it.
+
+Tests: `tests/test_gen_toy.py` (every model shape, the TD law, the ceiling, the
+refusals) and `tests/test_toy_generator.py` (the `draw_extra` vocabulary).
+
 ### Likelihood layer (design — not implemented)
 
 The `norm → Q` pipeline above is currently hard-coded in

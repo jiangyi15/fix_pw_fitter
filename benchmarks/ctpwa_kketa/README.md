@@ -765,8 +765,8 @@ their analytic Hessian (0.35 s / 1.6 s) has no counterpart here.
 * **The sample is flat 3-body phase space** (unit weights), built by the
   framework's own generator and event builder — the *timing* is comparable
   (same size, topology, per-iteration work), the NLL value is not physical.  A
-  model toy would need `toy_pwa_generate`, whose rejection acceptance here is
-  ~0.2 % (~5×10⁸ candidates for 10⁶ events).
+  model toy would need `Fitter.generate_toy` (engine `toy_pwa_generate`), whose
+  rejection acceptance here is ~0.2 % (~5×10⁸ candidates for 10⁶ events).
 * **No analytic Hessian**, so the Hessian row of their table is not reproduced;
   `get_nll` (value + gradient) is the comparable quantity.
 * Masses/widths are PDG values; the paper's fit results differ slightly and do

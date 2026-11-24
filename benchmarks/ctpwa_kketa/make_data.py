@@ -14,8 +14,9 @@ Two steps, both framework code — no hand-written kinematics:
    to be laid out the way the kernels index them.
 
 The phase space is flat (unit weights), which is what a *timing* sample needs;
-`toy_pwa_generate` would be the choice for a model toy, but its rejection
-acceptance on this model is ~0.2 %, i.e. ~5x10^8 candidates for 10^6 events.
+`Fitter.generate_toy` (the accept-reject engine `toy_pwa_generate`) would be the
+choice for a model toy, but its rejection acceptance on this model is ~0.2 %,
+i.e. ~5x10^8 candidates for 10^6 events.
 
 The `pwa_gen` config reads the same arrays.  The grid assertion below is on the
 config THIS script loaded; the two configs happen to share both grids

@@ -1,15 +1,26 @@
-"""Pure-PWA toy data: accept-reject sampling of the model density.
+"""Toy data from a fitted model: accept–reject on ``|A|²``, plus the mixture.
 
-The core of ``scripts/gen_toy_pwa.py`` as a reusable function: stream
-flat phase space (the config masses, two-body product + inverse boost
-chain), accept with probability ``P(x)/guess`` — the guess of the
-maximum P starts at ``maxp_scale · max(batch P)`` and is raised (with
-retrospective thinning of the already-accepted events) only when a
-batch exceeds it — and stop as soon as ``n_data`` are accepted.
+MODEL-GENERAL despite the module name: every function here takes its rows from
+the model's own event builder, so the same code serves ``pwa``, ``pwa_gen``,
+``polarised_pwa`` and the time-dependent model.
 
-The density uses the **Fitter parameter layer** (constraints/defaults
-via ``initial_values``/``build_params``) and the fitter's configured
-backend — never the raw kernel directly.
+``toy_pwa_generate`` is the engine: stream flat phase space (the config masses,
+two-body product + inverse boost chain), accept with probability
+``P(x)/guess`` — the guess of the maximum ``P`` starts at
+``maxp_scale · max(batch P)`` and is raised (with retrospective thinning of the
+already-accepted pool) only when a batch exceeds it — and stop as soon as
+``n_data`` are accepted.  The density uses the **Fitter parameter layer**
+(constraints/defaults via ``initial_values``/``build_params``) and the fitter's
+configured backend, never the raw kernel.
+
+``generate_toy_bg`` combines that with a background drawn from flat phase space
+and accepted on ``b(x)``; ``bkg_values`` is the ONE evaluator of the shape
+(``b(x)`` per event, UNIFORM when the function is ``None``), shared with the norm
+sample so ``N_b`` is the mean of the same function.
+
+The user-facing entry points are ``Fitter.generate_toy``,
+``Fitter.generate_toy_bg`` and ``Fitter.generate_phsp``;
+``scripts/gen_toy_pwa.py`` is the CLI over the engine.
 """
 
 from dataclasses import dataclass
@@ -89,6 +100,12 @@ def toy_pwa_generate(fitter, n_data, seed=None, batch_size=20000,
         ``(data, stats)`` — the kernel-format data dict and a :class:`ToyStats`
         carrying the truth, the ceiling actually used (feed it back as
         ``maxp=stats.maxp``) and the run's counts.
+
+    The returned buffer is the MODEL's own layout; its ``bkg`` column is
+    whatever that model's builder writes (a data file's flat shape, or ``0`` for
+    a signal-MC fill), so the background SHAPE is not this function's business:
+    ``Fitter.generate_toy(fbg=…)`` sets it, in one evaluation that also covers a
+    model's own generator.
 
     NO norm sample: the accept-reject needs only ``P`` and its ceiling (a
     constant factor cancels), so the normalisation integral is the FIT's
@@ -240,7 +257,10 @@ def generate_toy_bg(fitter, x0, n_data, *, purity=None, bg=None, seed=None,
     purity.
 
     ``bg`` is called on the EVENT BUFFER (the same dict the fit consumes), so it
-    can be any function of ``mass``/``q``/``angle``.
+    can be any function of ``mass``/``q``/``angle`` — and, for a time-dependent
+    model, of ``frac``/``time``.  ``Fitter.generate_toy(fbg=…)`` takes the SAME
+    function for a signal-only sample (uniform by default): one quantity, the
+    background shape, under the name each entry point inherited.
     """
     if n_data < 1:
         raise ValueError(

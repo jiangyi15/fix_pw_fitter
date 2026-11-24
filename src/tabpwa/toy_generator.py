@@ -10,11 +10,14 @@ Pipeline::
        calibration batch)
 
 The accepted events are distributed like the model amplitude squared,
-i.e. a "signal MC" sample of the configured decay model.  By default the
-decay time is UNIFORM on ``[0, 10]`` ps (:data:`TIME_MAX`, a toy window, not a
-lifetime) and the tagging fraction is a choice of {0, 1} per event
-(B⁰ / B̄⁰).  Both come from ``data.extra_var`` (``random: {dist: …}``); a config that wants
-the PDG exponential lifetime declares ``{dist: exponential, scale: 1.519}``.
+i.e. a "signal MC" sample of the configured decay model.  The decay time and the
+tagging fraction are the SAMPLE's law and come from ``data.extra_var``
+(``random: {dist: …, **kwargs}``, one numpy call per column); an UNDECLARED
+column falls back to a uniform time on ``[0, 10]`` ps (:data:`TIME_MAX`, a toy
+window, not a lifetime) and a tagging fraction that is a choice of {0, 1}
+(B⁰ / B̄⁰).  A config that wants the PDG lifetime declares
+``{dist: exponential, scale: 1.519}``, and one that wants a constant declares
+``{default: 1.0}``.
 
 Usage::
 
@@ -39,7 +42,7 @@ TAU_B0_PDG = 1.519
 GAMMA_B0_PDG = 1.0 / TAU_B0_PDG
 
 
-#: The toy's decay-time window (ps): ``time="uniform"`` draws U(0, TIME_MAX).
+#: The fallback decay-time window (ps): an undeclared ``time`` draws U(0, TIME_MAX).
 TIME_MAX = 10.0
 
 

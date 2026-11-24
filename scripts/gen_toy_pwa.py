@@ -37,6 +37,12 @@ against a runaway loop.
 batches), ``seed+2`` (the parameter point, unused with ``--params``) and
 ``seed+3`` (event selection); the norm sample uses ``seed``.  Omit it and a random master seed is drawn and
 printed, so a run can be reproduced with ``--seed <printed>``.
+
+The written file is a PURE-SIGNAL sample with no ``bkg`` column (the loader
+fills the uniform shape), so fit it at purity 1.  For a signal+background toy,
+or for a background-shaped ``bkg`` column, call the library instead:
+``Fitter.generate_toy(fbg=…)`` / ``Fitter.generate_toy_bg(bg=…)`` and
+``Fitter.generate_phsp(bkg=…)`` with the same function.
 """
 import argparse
 import os

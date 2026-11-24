@@ -110,6 +110,37 @@ err = fitter.cal_uncertainties(my_observable, param_names, result)
 fitter.plot(result, prefix="plots/")
 ```
 
+### Toy data
+
+```python
+import numpy as np
+
+x0 = fitter.initial_values(seed=1)
+data = fitter.generate_toy(x0, 4000, seed=7)        # events distributed like |A|²
+phsp = fitter.generate_phsp(40_000, seed=7)         # the norm: a SEPARATE sample
+fitter.set_phsp(phsp)
+fitter.set_data(data)
+
+# Signal + background: n_sig ~ Poisson(n·p), n_bg ~ Poisson(n·(1-p)) with p
+# from the config (`data.purity`; purity 1 means all signal).  The background
+# is flat phase space accepted on bg(x).
+def my_bg(ev):                                   # any non-negative shape
+    return 1.0 + 0.5 * np.cos(ev["mass"][:, 0])
+
+data, st = fitter.generate_toy_bg(x0, 4000, bg=my_bg, stats=True)
+fitter.set_phsp(fitter.generate_phsp(40_000, seed=8, bkg=my_bg))  # SAME shape
+fitter.set_data(data)
+```
+
+`stats=True` returns `(data, stats)`; `stats.maxp` is the acceptance ceiling and
+can be fed back as `maxp=stats.maxp` for the next toy at the same point.  The
+rows are the MODEL's whole event buffer, so a model with extra per-event inputs
+(the time-dependent `frac`/`time`) is covered by declaring their law once in the
+config (`data.extra_var.<name>.random`).  The `bkg` column is the background
+SHAPE — `fbg=` on `generate_toy`, `bg=` on the mixture, `bkg=` on the norm,
+uniform by default — while the AMOUNT comes from the config purity in
+`set_data`.
+
 ### Amplitude Fractions
 
 ```python
