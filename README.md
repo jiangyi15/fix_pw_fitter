@@ -88,7 +88,7 @@ fitter.set_fixed({"B->..._g_ls_0r": 1.0, "B->..._g_ls_0i": 0.0})
 fitter.set_same([["a_par", "b_par"]])
 fitter.set_scale({"a_par": -1})
 
-# Boundary ranges (arctan transform, bijective)
+# Boundary ranges (sine transform: y = bias + k·sin(x/k), flat at the edge)
 fitter.set_range("gamma", -0.3, 0.3)
 
 # Flat parameter vector
@@ -98,6 +98,18 @@ nll, grad = fitter.get_nll(x)
 # BFGS fit with Hessian
 result = fitter.fit(x)
 uncertainties = fitter.get_uncertainties(result)  # {name: (val, err)}
+
+# ... or ask for the matrix that was used, to hand it to a result that has none
+unc, result.hess_inv = fitter.get_uncertainties(
+    result, use_cached=False, return_hess_inv=True)
+
+# A parameter near a range edge: take the curvature in the BOUNDED value, so the
+# sigma is the physical one instead of a delta method that dies with dy/dx.
+# bounded_errors=True stores it as its OWN file (never instead of the x matrix),
+# which get_uncertainties then reuses without recomputing
+fitter.save_params(result, "results.json", bounded_errors=True)
+unc = fitter.get_uncertainties(fitter.load_results("results.json"),
+                               space="bounded")
 
 # Save / load results (auto-saves error_matrix.npy alongside JSON)
 fitter.save_params(result, "results.json")
@@ -503,7 +515,11 @@ All backends validated against a **3-point central-difference numerical referenc
 | ONNX f32 | 1e-4 to 3e-4 | 2e-4 to 5e-4 |
 
 ONNX f32 precision (~1e-4) is limited by float32 vs the float64 numerical reference.
-Bound transforms use bijective arctan (not sin) for exact save/restore roundtrip.
+Bound transforms use a sine, `y = bias + k*sin(x/k)` (the MINUIT-style map), with
+`x` unclamped: the edge is the FINITE `x = ±k*pi/2`, where `dy/dx = 0` and the
+value turns around, so a binding range still has a proper minimum there and the
+inverse is the principal branch (the old arctan needed `x ~ 1e15` to reach an
+edge, and its `dy/dx` decayed like `1/x²`).
 
 ## Requirements
 

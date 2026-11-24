@@ -174,21 +174,28 @@ class JointFitter:
                     f"shared fixed {name!r} was RELEASED by this config "
                     f"(no longer fixed in the joint cm)")
 
-        now_bounds = self.cm.bounds.to_dict()
+        # the LIVE transforms, not the serialised dict: a one-sided bound is
+        # stored with a `None` side (0.3, null), and `float(None)` used to crash
+        # here (the open side is +-inf on the transform)
+        now_bounds = {n: (self.cm.bounds[n].a, self.cm.bounds[n].b)
+                      for n in self.cm.bounds}
         for name, spec in prev_bounds.items():
             if name not in now_bounds:
                 continue
-            lo1 = float(now_bounds[name]["low"])
-            hi1 = float(now_bounds[name]["high"])
-            lo = max(float(spec["low"]), lo1)
-            hi = min(float(spec["high"]), hi1)
+            lo1, hi1 = now_bounds[name]
+            prev_lo = -np.inf if spec["low"] is None else float(spec["low"])
+            prev_hi = np.inf if spec["high"] is None else float(spec["high"])
+            lo = max(prev_lo, lo1)
+            hi = min(prev_hi, hi1)
             if (lo, hi) == (lo1, hi1):
                 continue
             if lo >= hi:
                 self._warn(
                     f"bounds of shared {name!r} are disjoint "
-                    f"([{spec['low']:.4g}, {spec['high']:.4g}] vs "
+                    f"([{prev_lo:.4g}, {prev_hi:.4g}] vs "
                     f"[{lo1:.4g}, {hi1:.4g}]); keeping the latest window")
+            elif lo == -np.inf and hi == np.inf:
+                self.cm.unset_range(name)      # the intersection is no bound
             else:
                 self.cm.set_range(name, lo, hi)
                 self._warn(

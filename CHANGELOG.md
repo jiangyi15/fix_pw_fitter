@@ -62,22 +62,6 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `docs/mpi_backend_design.md`; as built and measured: `docs/mpi_backend.md`;
   deployment: `docs/slurm.md`; fixture `tests/test_mpi_backend.py`.
 
-### Changed
-
-- `generate_toy`'s runaway guard is now a NO-PROGRESS window, not a total
-  candidate budget: `stall_loops` (default 1000 batches) raises when that many
-  CONSECUTIVE proposal batches accept nothing, so a low-efficiency (peaked)
-  amplitude runs as long as it keeps accepting — the old `max_loops=1000` cut it
-  off after 20 M candidates however healthy the acceptance was.
-  `max_loops` now defaults to `None` (an optional hard cap) and stays
-  available for a caller who wants one.  The time-dependent engine
-  (`toy_generator.toy_generate`) gets the same guard, and its `P_max` estimate
-  is RAISED to `p_max_margin·max(batch P)` when a later batch exceeds it — the
-  accepted pool re-thinned by `old/new` through the shared
-  `toy_pwa.raise_ceiling` — instead of a fixed 1.3-margin ceiling that silently
-  over-accepted events above it.  `p_max_margin < 1` and a non-positive
-  `batch_size`/`compute_batch`/`stall_loops` are refused.
-
 ### Added (toy generation)
 
 - `generate_toy(progress=True)` prints one throttled progress line per second
@@ -97,6 +81,142 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `scripts/gen_toy_pwa.py` exposes it (`--cache-dir`, `--stall-loops`,
   `--verbose`) and `--max-count` now defaults to `0` (no cap), so the CLI
   follows the no-progress rule instead of stopping a slow but healthy model.
+
+### Added (bounds diagnostics)
+
+- `Fitter.boundary_report(result)` lists the free slots sitting ON a range edge,
+  and `fit()` / `get_uncertainties()` emit a `RuntimeWarning` naming them: a
+  binding soft range has no sigma (the transform's limit, not the model's:
+  `dy/dx = 0` at the wall, so the delta sigma collapses and `H_xx` there is set
+  by the pull), while the location and every other parameter stay correct
+  because the bound map is per-slot diagonal.  "At the boundary" is
+  `value ≈ a|b` within `1e-3` of the width (`Fitter.WALL_TOL`) — the sine puts
+  the edge at a finite `x` and the fit converges onto it, where the arctan
+  needed `x ~ 1e15` and its `1e15`-scale comparison.  Nothing is
+  repaired silently: widen/remove the range and refit, or use the profile.
+
+### Added (uncertainties)
+
+- The constraint pipeline takes a START CUT, the mirror of `stop_after`:
+  `cm.resolve` / `cm.flat_resolve` / `cm.full_gradient` and
+  `Fitter.build_params` / `get_nll` accept `start_after`, where
+  `start_after="bounds"` means the input IS the bounded value — so the bounded
+  frame is a first-class variable and `get_nll(y, start_after="bounds")` returns
+  `dNLL/dy`.  `compute_numerical_hessian(space="bounded")` is now that ordinary
+  engine (one `fd_hess` with per-slot steps) instead of a hand-rolled
+  `dNLL/dx·dx/dy` loop; `start_after` is part of the `build_params` cache key,
+  a `y` call does not overwrite `_last_xk`, and an out-of-range `y` raises.
+
+- `get_uncertainties(..., return_hess_inv=True)` also returns the inverse
+  Hessian that was USED, as `(uncertainties, hess_inv)` — the `(N, N)` matrix in
+  the same `x` space `fit_result.x` lives in, so a result that carries none (a
+  constrained SLSQP fit, a JSON saved without its error matrix) can be given one
+  back with `res.hess_inv = …` and then work with `save_params`,
+  `cal_uncertainties_multi`, `fwd` and `profile_scan`.
+- `compute_numerical_hessian(space="bounded")` / `get_uncertainties(
+  space="bounded", use_cached=False)` take the curvature in the AFTER-BOUNDS
+  value of each free slot instead of the optimizer variable, which is what makes
+  a parameter near its range edge report a physical sigma: the arctan bound has
+  `dy/dx -> 0` at the edge, so the x-space route is mis-scaled and singular
+  (measured `cond(H_x) = 1.1e11` and a 154x error at a converged optimum 0.025 %
+  inside the range, against a physical sigma that does not move with the
+  distance to the edge; measured 21× at 0.01 % inside a soft range, 1.000 at
+  mid-range).  `return_hess_inv=True` follows the SPACE: with
+  `space='bounded'` it returns the after-bounds covariance, which belongs in
+  `res.hess_inv_bounded` (the attribute the bounded route reads back), never in
+  `res.hess_inv` — that one is chained through `dx` and is a different matrix.
+  It is stored as its OWN file —
+  `save_params(..., bounded_errors=True)` writes
+  `*_error_matrix_bounded.npy` beside the x-space `*_error_matrix.npy`,
+  `load_results` restores it as `res.hess_inv_bounded`, and
+  `get_uncertainties(space="bounded")` then reuses it instead of paying the
+  `2·N` gradient evaluations.  The JSON now records the frame of every block
+  (`error_frame: "value_bounded"`, `hess_inv_frame: "x"`,
+  `hess_inv_bounded_frame` when the second file exists), because the `error`
+  dict and the matrix were always in different frames and nothing said so.
+  `save_hessian(..., space="bounded")` saves the physical one standalone.
+
+### Changed
+
+- Bounds are now the SINE transform, `y = bias + k·sin(x/k)` on
+  `|x| ≤ k·π/2` (the map MINUIT and every stepping minimizer of that family
+  uses), replacing the arctan: the edge is the FINITE `x = ±k·π/2` instead of
+  `tan(π/2)/c ≈ 1e15`, `dy/dx = cos(x/k)` decays linearly there instead of like
+  `1/x²` (measured `9.9e-12` → `2.0e-3` at `y = b − 1e-6·w`, `w = 0.5`), and a
+  `default` sitting on an edge no longer inverts to a start where the gradient is
+  `1e-32`.  `x` is NEVER clamped: the plain sine is periodic, and at the edge
+  `y' = 0`, `y'' = -1/k`, so `F = NLL(y(x))` has `F'' = |g_y|/k > 0` — a binding
+  soft range converges to a PROPER, unique minimum at the edge (measured
+  `x* = 7.4539` vs branch end `7.4524`, `y* - b = -2.3e-7`, `H_xx = +0.129`)
+  instead of being pinned by a flat region (`dNLL/dx = 0` on a half-line,
+  non-unique minimiser, `H_xx = 0`).  `inverse` is the principal branch, so the
+  PHYSICAL value stays single-valued while the optimizer coordinate does not; a
+  σ still does not exist at a binding edge (the profile likelihood is the answer),
+  which is what `fit()` now reports instead of letting `success=True` speak.
+  `initial_values` draws a bounded slot's random start ON the branch (rescaled
+  from `U(-π,π)`), so narrowing `var_range` no longer pushes every start onto the
+  wall (measured before: `|x|`-spread covering 0.003 % of a width-0.1 range).
+  The old `boundary.BoundTransform` behaviour is gone, not selectable.
+- ONE-SIDED bounds: `set_range(name, lo, None)` / `var_range: {name: [lo, null]}`
+  (and the `None, hi` mirror) use the same `boundary.BoundTransform` with
+  `kind="lower"`/`"upper"`, the unit-scaled `y = lo + sqrt(x²+1) − 1` on `x ≥ 0`
+  (mirror on `x ≤ 0`).  No
+  per-parameter scale — that would make the optimizer's step unit depend on the
+  parameter — so `|x| ≈ 1` is the quadratic region everywhere and `dy/dx → 1` in
+  the bulk.  The open side is `±inf` internally (the step/clip code is unchanged)
+  and `null` in the saved JSON.
+
+- `generate_toy`'s runaway guard is now a NO-PROGRESS window, not a total
+  candidate budget: `stall_loops` (default 1000 batches) raises when that many
+  CONSECUTIVE proposal batches accept nothing, so a low-efficiency (peaked)
+  amplitude runs as long as it keeps accepting — the old `max_loops=1000` cut it
+  off after 20 M candidates however healthy the acceptance was.
+  `max_loops` now defaults to `None` (an optional hard cap) and stays
+  available for a caller who wants one.  The time-dependent engine
+  (`toy_generator.toy_generate`) gets the same guard, and its `P_max` estimate
+  is RAISED to `p_max_margin·max(batch P)` when a later batch exceeds it — the
+  accepted pool re-thinned by `old/new` through the shared
+  `toy_pwa.raise_ceiling` — instead of a fixed 1.3-margin ceiling that silently
+  over-accepted events above it.  `p_max_margin < 1` and a non-positive
+  `batch_size`/`compute_batch`/`stall_loops` are refused.
+
+### Fixed
+
+- `fd_hess` divided a Hessian COLUMN by the step of its ROW
+  (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
+  space="bounded")` was wrong on the off-diagonals once the bounded values had
+  different magnitudes (measured `max|H−A| = 0.79`, ~6 % on the sigmas;
+  `2.5e-10` after the fix).  Invisible with the scalar `eps` every other caller
+  uses.  Gated by a NON-DIAGONAL SPD reference with two bounded slots of
+  different magnitude — a diagonal reference cannot see it.
+- `JointFitter` crashed (`float(None)`) on a config with a one-sided bound: it
+  intersected the SERIALISED bounds dict; it now uses the live transforms
+  (`±inf` for an open side), and an intersection with no bound unsets it.
+- `load_results` loaded `*_error_matrix_bounded.npy` by file existence alone, so
+  a stale matrix from an earlier save (or another run's shape) was adopted
+  silently; it now requires the JSON frame tag AND the `(N,N)` shape, and
+  `save_params` removes a bounded file it is not writing.
+- A non-PSD curvature matrix no longer produces silent `NaN` sigmas:
+  `_params_from_fit` uses `sqrt(|diag|)` and warns, naming a negative slot.
+- `profile_scan` warns and clips the first step when it exceeds a bounded
+  parameter's branch — the signature of a Hessian passed where the covariance is
+  expected (or of a wall), both of which fold the scan.
+
+- `bounds:` in a config raised `KeyError: 'height'` — it read `sb["height"]`
+  instead of `sb["high"]`; both `bounds:` and `var_range:` now also accept
+  `null` for an open side.
+
+- `get_uncertainties(use_cached=False)` ALWAYS computes the numerical Hessian
+  now.  The guard was `not use_cached and hasattr(fit_result, 'hess_inv')`, so a
+  result without the attribute (a plain scipy `OptimizeResult`, exactly the
+  SLSQP case) fell back to the cached route and reported 0.0 for every
+  parameter — measured 4/4 zeros before, the true matrix now.
+- A scipy result from `method="L-BFGS-B"` is usable: its `hess_inv` is a
+  `LbfgsInvHessProduct` LinearOperator (it has no `toarray`), which made
+  `FitResult`'s `np.asarray` raise `TypeError` AFTER the fit had converged.
+  `tabpwa.fit_result.as_matrix` densifies it by the operator's own action on the
+  identity, and every consumer (`save_params`, `save_hessian`, `profile`,
+  `cal_uncertainties*`) goes through it.
 
 ## [0.1.0] - 2026-11-24
 

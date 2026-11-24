@@ -100,9 +100,10 @@ def fd_hess(grad, x0, eps=1e-5):
     """
     x0 = np.asarray(x0, float)
     n = len(x0)
+    eps = np.broadcast_to(np.asarray(eps, float), (n,))   # per-slot steps allowed
     H = np.zeros((n, n))
     for j in range(n):
-        xp = x0.copy(); xp[j] += eps
-        xm = x0.copy(); xm[j] -= eps
-        H[:, j] = (np.asarray(grad(xp)) - np.asarray(grad(xm))) / (2.0 * eps)
+        xp = x0.copy(); xp[j] += eps[j]
+        xm = x0.copy(); xm[j] -= eps[j]
+        H[:, j] = (np.asarray(grad(xp)) - np.asarray(grad(xm))) / (2.0 * eps[j])
     return 0.5 * (H + H.T)                    # symmetrize

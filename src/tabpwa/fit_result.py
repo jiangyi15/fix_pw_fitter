@@ -12,6 +12,29 @@ shape a name, sane defaults and constructors.
 import numpy as np
 
 
+def as_matrix(m):
+    """Densify an error matrix; ``None`` stays ``None``.
+
+    A scipy result may carry a LINEAR OPERATOR rather than an array: BFGS
+    returns the dense ``Hk``, but L-BFGS-B returns a ``LbfgsInvHessProduct``,
+    which has NO ``toarray`` and makes ``np.asarray`` raise ``TypeError`` (so a
+    fit with ``method="L-BFGS-B"`` died in ``FitResult`` after converging).
+    Every consumer (``np.diag``, ``@``, ``np.save``) wants the matrix, so the
+    conversion lives here once and ``FitResult.hess_inv`` is always an ndarray:
+    a real operator is densified by its own ACTION on the identity (exact for
+    the operator, ``N`` mat-vecs).
+    """
+    if m is None:
+        return None
+    toarray = getattr(m, "toarray", None)
+    if callable(toarray):
+        return np.asarray(toarray(), dtype=float)
+    shape = getattr(m, "shape", None)
+    if shape is not None and len(shape) == 2 and callable(getattr(m, "matmat", None)):
+        return np.asarray(m.matmat(np.eye(int(shape[1]))), dtype=float)
+    return np.asarray(m, dtype=float)
+
+
 class FitResult:
     """Base container for fit results.
 
@@ -35,8 +58,7 @@ class FitResult:
         self.jac = jac
         self.success = success
         self.message = message
-        self.hess_inv = (None if hess_inv is None
-                         else np.asarray(hess_inv, dtype=float))
+        self.hess_inv = as_matrix(hess_inv)
         for key, value in extra.items():
             setattr(self, key, value)
 

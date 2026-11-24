@@ -816,8 +816,11 @@ def test_the_fitted_mass_enters_the_basis_weights():
     to the config value (measured dQ/dm = -6.9e4 against a true -77.6).
     """
     d = _cfg(CFG_BASIS)
+    # width2 INSIDE the model's own var_range ([0.01, 4.00868]): a default below
+    # the lower edge would start the fit pinned to the wall (dNLL/dx = 0 there by
+    # construction), which makes any FD check meaningless rather than wrong
     d["particle"]["k2"].update({"model": "RhoOmegaGS",
-                                "mass2": 0.78266, "width2": 0.00868})
+                                "mass2": 0.78266, "width2": 0.05})
     f = _loaded(d, n_phsp=120, n_data=60)
     names = f.free_param_names()
     # the four physical parameters, NOT the eight couplings they produce

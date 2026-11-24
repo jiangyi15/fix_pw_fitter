@@ -149,3 +149,26 @@ def test_fit_returns_fitresult(tmp_path):
     r = f.load_results(path)
     assert isinstance(r, FitResult)
     assert np.allclose(r.x, res.x)
+
+
+def test_an_lbfgsb_result_is_densified():
+    """L-BFGS-B hands back a LinearOperator; ``hess_inv`` must be the MATRIX.
+
+    ``np.asarray(LbfgsInvHessProduct, dtype=float)`` raises ``TypeError``, so a
+    fit with ``method="L-BFGS-B"`` died in ``FitResult`` AFTER the optimiser had
+    converged.  The densified matrix is the operator's own representation (its
+    action on a vector is unchanged), not a reinterpretation of it.
+    """
+    from scipy.optimize import minimize
+    A = np.array([[4.0, 1.0], [1.0, 3.0]])
+    r = minimize(lambda x: (float(x @ A @ x), 2 * A @ x), [1.0, -2.0],
+                 jac=True, method="L-BFGS-B")
+    # the operator, as scipy returns it: shaped and mat-vec only, no toarray
+    assert not isinstance(r.hess_inv, np.ndarray)
+    assert hasattr(r.hess_inv, "matvec") and r.hess_inv.shape == (2, 2)
+    res = FitResult.from_result(r)
+    assert isinstance(res.hess_inv, np.ndarray)
+    assert res.hess_inv.shape == (2, 2)
+    assert np.allclose(res.hess_inv, r.hess_inv @ np.eye(2))
+    v = np.array([0.3, -1.7])
+    assert np.allclose(res.hess_inv @ v, r.hess_inv @ v)

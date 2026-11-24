@@ -363,6 +363,213 @@ def test_fit_with_constraint():
         "Uncertainties should be 0.0 for constrained fit (no Hessian)"
 
 
+def test_get_uncertainties_can_return_its_hess_inv(monkeypatch):
+    """``return_hess_inv=True`` gives the matrix that was USED.
+
+    The point is to hand a Hessian back to a result that has none (an SLSQP fit,
+    a JSON saved without its error matrix): ``unc, res.hess_inv = …`` then makes
+    a later ``save_params``/``cal_uncertainties_multi`` work.  The numerical
+    route must run whenever ``use_cached=False`` — including for a result with
+    NO ``hess_inv`` attribute, which used to fall through to the cached branch
+    and report zeros.  The NLL is replaced by a QUADRATIC so the finite-difference
+    Hessian is exact and the check needs no data or GPU.
+    """
+    import numpy as np
+    from types import SimpleNamespace
+
+    fitter = Fitter(CONFIG_FILE, backend="numpy")
+    fitter.apply_constrains()
+    x0 = fitter.initial_values(seed=42)
+    n = len(x0)
+    A = np.diag(np.linspace(2.0, 4.0, n))
+    monkeypatch.setattr(fitter, "get_nll",
+                        lambda z: (0.5 * float(z @ A @ z), A @ z))
+
+    cached = np.eye(n) * 0.1
+    fake = SimpleNamespace(x=x0, hess_inv=cached)
+    unc, h = fitter.get_uncertainties(fake, return_hess_inv=True)
+    assert np.array_equal(h, cached)
+    assert unc == fitter.get_uncertainties(fake)            # default unchanged
+    raw = fitter.get_uncertainties(fake, return_bounded=False)
+    assert np.allclose([e for _, e in raw.values()], np.sqrt(0.1))
+
+    # the numerical route REPLACES a stored matrix with the one at x
+    unc_fd, h_fd = fitter.get_uncertainties(fake, use_cached=False,
+                                            return_bounded=False,
+                                            return_hess_inv=True)
+    assert np.allclose(h_fd, np.linalg.inv(A), rtol=1e-6)
+    assert np.allclose(h_fd, h_fd.T)
+    assert np.allclose([e for _, e in unc_fd.values()],
+                       np.sqrt(np.diag(np.linalg.inv(A))), rtol=1e-6)
+
+    # a result carrying NO hess_inv at all gets the same matrix, not zeros
+    bare = SimpleNamespace(x=x0)
+    unc_bare, h_bare = fitter.get_uncertainties(bare, use_cached=False,
+                                               return_bounded=False,
+                                               return_hess_inv=True)
+    assert h_bare is not None and np.allclose(h_bare, h_fd)
+    assert np.allclose([e for _, e in unc_bare.values()],
+                       [e for _, e in unc_fd.values()], rtol=1e-10)
+    # ... and the CACHED route on that result is explicit about having nothing
+    zeros, none = fitter.get_uncertainties(bare, return_hess_inv=True)
+    assert none is None
+    assert all(e == 0.0 for _, e in zeros.values())
+
+
+def test_the_bounded_hessian_is_the_physical_curvature(monkeypatch):
+    """``space="bounded"`` differences the after-bounds value, not ``x``.
+
+    The map ``x -> y`` saturates at a range edge (``dy/dx -> 0``), so an NLL that
+    is a plain quadratic in the PHYSICAL value ``y`` has ``H_x = J A J`` with
+    ``J ~ 1e-7`` there: the x-space Hessian is ~1e-14·A, its inverse is
+    numerical noise, and the delta method ``sigma_y = |dy/dx|·sigma_x`` stops
+    tracking the truth.  The bounded Hessian returns ``A`` at ANY distance from
+    the centre — that is the point of taking the differences in ``y``.  The NLL
+    is a quadratic in ``y`` so the truth is known exactly.
+    """
+    import numpy as np
+
+    fitter = Fitter(CONFIG_FILE, backend="numpy")
+    fitter.apply_constrains()
+    x0 = fitter.initial_values(seed=42)
+    names = list(fitter.cm.var_registry.flat_names)
+    n, j = len(names), 2
+    # bound slot j around its RAW value: x_j = 0 is then the range centre
+    y_min = float(fitter.cm.from_flat(x0)[names[j]])
+    fitter.set_range(names[j], y_min - 0.5, y_min + 0.5)
+    bt = fitter.cm.bounds[names[j]]
+    x_mid = x0.copy()
+    x_mid[j] = 0.0
+
+    def to_y(z):
+        raw = fitter.cm.from_flat(np.asarray(z, float))
+        return np.array([fitter.cm.bounds[nm].forward(raw[nm])
+                         if nm in fitter.cm.bounds else raw[nm]
+                         for nm in names], float)
+
+    def dydx(z):
+        raw = fitter.cm.from_flat(np.asarray(z, float))
+        return np.array([fitter.cm.bounds[nm].grad(raw[nm])   # EACH slot's own
+                         if nm in fitter.cm.bounds else 1.0   # range: the config
+                         for nm in names])                    # may bound others
+
+    y_ref = to_y(x_mid)                    # the quadratic's minimum: d = 0 here
+    A = np.diag(np.linspace(2.0, 4.0, n))
+
+    def nll(z, start_after=None):
+        # faithful to the contract: with the bounds stage skipped, z IS the
+        # bounded value and the gradient is dNLL/dy — so a caller that forgets
+        # the cut gets the x-space reading of a y vector and the test fails
+        if start_after == "bounds":
+            d = z - y_ref
+            return 0.5 * float(d @ A @ d), A @ d
+        d = to_y(z) - y_ref
+        return 0.5 * float(d @ A @ d), (A @ d) * dydx(z)
+
+    monkeypatch.setattr(fitter, "get_nll", nll)
+
+    # at the centre (J = 1, d = 0) both frames agree — the delta method is exact
+    H_b = fitter.compute_numerical_hessian(x_mid, space="bounded")
+    assert np.allclose(H_b, A, rtol=1e-6, atol=1e-8)
+    H_x = fitter.compute_numerical_hessian(x_mid)
+    Fake = type("R", (), {"x": x_mid, "hess_inv": np.linalg.inv(H_x)})
+    unc_x = fitter.get_uncertainties(Fake())
+    unc_b = fitter.get_uncertainties(type("R", (), {"x": x_mid})(),
+                                     use_cached=False, space="bounded")
+    assert np.allclose([e for _, e in unc_b.values()],
+                       [e for _, e in unc_x.values()], rtol=1e-6)
+
+    # 0.01 % from the upper edge the bounded sigma is UNCHANGED ...
+    x_edge = x0.copy()
+    x_edge[j] = bt.inverse(y_min + 0.4999)
+    H_edge = fitter.compute_numerical_hessian(x_edge, space="bounded")
+    assert np.allclose(H_edge, A, rtol=1e-6, atol=1e-8)
+    unc_edge = fitter.get_uncertainties(type("R", (), {"x": x_edge})(),
+                                        use_cached=False, space="bounded",
+                                        return_bounded=True)   # no dy/dx after
+    assert unc_edge[names[j]][1] == pytest.approx(1.0 / np.sqrt(A[j, j]),
+                                                  rel=1e-6)
+    assert unc_edge[names[j]][1] == pytest.approx(unc_b[names[j]][1], rel=1e-6)
+
+    # ... while the x-space route collapses there (measured 154x at a real
+    # optimum; here J ~ 1e-7 makes even the x Hessian noise)
+    H_x_edge = fitter.compute_numerical_hessian(x_edge)
+    sigma_x = np.sqrt(np.abs(np.diag(np.linalg.inv(H_x_edge))))[j]
+    delta = abs(dydx(x_edge)[j]) * sigma_x
+    assert not np.isclose(delta, unc_edge[names[j]][1], rtol=0.5), delta
+
+    # the matrix it returns follows the SPACE, and lands in the matching
+    # attribute: hess_inv_bounded is what space='bounded' later reads back
+    holder = type("R", (), {"x": x_edge})()
+    unc_h, h_y = fitter.get_uncertainties(holder, use_cached=False,
+                                         space="bounded",
+                                         return_hess_inv=True)
+    assert np.allclose(h_y, np.linalg.inv(A), rtol=1e-6)   # it is the INVERSE
+    holder.hess_inv_bounded = h_y
+    assert np.allclose([e for _, e in
+                        fitter.get_uncertainties(holder, space="bounded").values()],
+                       [e for _, e in unc_h.values()], rtol=1e-12)
+    # nothing stored and use_cached=True: it says how to get one
+    with pytest.raises(ValueError, match="no STORED matrix"):
+        fitter.get_uncertainties(type("R", (), {"x": x_mid})(), space="bounded")
+
+
+def test_the_bounded_matrix_lives_in_its_own_file(tmp_path, monkeypatch):
+    """Two frames, two files, tagged — so a reader can never mix them.
+
+    ``save_params(..., bounded_errors=True)`` writes
+    ``*_error_matrix_bounded.npy`` BESIDE ``*_error_matrix.npy`` (never instead
+    of it), the JSON records which frame each block is in, ``load_results``
+    restores both, and ``get_uncertainties(space='bounded')`` then reuses the
+    stored covariance instead of paying the ``2·N`` gradient evaluations again.
+    """
+    import json
+    import numpy as np
+
+    from tabpwa import FitResult
+
+    fitter = Fitter(CONFIG_FILE, backend="numpy")
+    fitter.apply_constrains()
+    x0 = fitter.initial_values(seed=42)
+    n = len(x0)
+    name = fitter.cm.var_registry.flat_names[2]
+    y_c = float(fitter.cm.from_flat(x0)[name])
+    fitter.set_range(name, y_c - 0.5, y_c + 0.5)
+    x0 = x0.copy()
+    x0[fitter.cm.var_registry.flat_names.index(name)] = 0.0   # branch centre
+    # the bounded matrix is computed from the NLL, so a (tiny) sample is needed
+    fitter.set_phsp(fitter.generate_phsp(20, seed=1))
+    fitter.set_data(fitter.generate_toy(x0, 15, seed=2))
+
+    res = FitResult.from_x(x0)
+    res.hess_inv = np.eye(n) * 0.2
+    path = str(tmp_path / "fit.json")
+    fitter.save_params(res, path, bounded_errors=True)
+
+    assert (tmp_path / "fit_error_matrix.npy").exists()
+    assert (tmp_path / "fit_error_matrix_bounded.npy").exists()
+    with open(path) as fh:
+        saved = json.load(fh)
+    assert saved["error_frame"] == "value_bounded"     # the error dict
+    assert saved["hess_inv_frame"] == "x"              # _error_matrix.npy
+    assert saved["hess_inv_bounded_frame"] == "value_bounded"
+
+    fresh = fitter.get_uncertainties(res, use_cached=False, space="bounded")
+    back = fitter.load_results(path)
+    assert np.array_equal(back.hess_inv, np.eye(n) * 0.2)
+    assert back.hess_inv_bounded.shape == (n, n)
+    # the stored one is REUSED: recomputation is made impossible here
+    def boom(*a, **k):
+        raise AssertionError("recomputed the bounded Hessian")
+    monkeypatch.setattr(fitter, "compute_numerical_hessian", boom)
+    cached = fitter.get_uncertainties(back, space="bounded")
+    got = np.array([cached[k][1] for k in cached])
+    want = np.array([fresh[k][1] for k in fresh])
+    # bit-identical (same matrix, same inverse, same sqrt), NaN where the
+    # random-point Hessian has a negative diagonal
+    assert np.array_equal(got, want, equal_nan=True)
+
+
 def test_gradients_nonzero():
     """All gradient components should be non-zero for random initial params."""
     fitter = setup_fitter()
@@ -862,3 +1069,64 @@ if __name__ == "__main__":
     test_full_interactive_workflow()
     print("✓ test_full_interactive_workflow")
     print("\nAll constraint API tests passed!")
+
+
+def test_the_bounded_hessian_keeps_its_off_diagonals(monkeypatch):
+    """Each column divides by ITS OWN step — a non-diagonal reference is required.
+
+    ``fd_hess`` builds ``H[:, j]`` from the derivative w.r.t. ``x_j``, so the
+    divisor is ``2·eps[j]``.  A per-slot step array (what ``space="bounded"``
+    passes) exposes a row/column mix-up only on the OFF-diagonals, and a diagonal
+    reference cannot see it (its off-diagonals are zero either way).  Here the
+    reference is a random SPD matrix and the two bounded slots sit at values of
+    different magnitude, so their steps differ ~5x — the exact configuration that
+    was wrong before.
+    """
+    import numpy as np
+
+    from tabpwa import Fitter
+
+    f = Fitter("tests/config_pwa.yml", backend="numpy_pwa")
+    f.apply_constrains()
+    names = list(f.cm.var_registry.flat_names)
+    n = len(names)
+    x = f.initial_values(seed=3)
+    f.set_range(names[0], 4.0, 6.0)          # y = 5.0  -> step eps*5
+    f.set_range(names[1], 0.1, 0.3)          # y = 0.2  -> step eps*1
+    b0, b1 = f.cm.bounds[names[0]], f.cm.bounds[names[1]]
+    x = x.copy()
+    x[0] = float(b0.inverse(5.0))
+    x[1] = float(b1.inverse(0.2))
+
+    rng = np.random.default_rng(3)
+    M = rng.normal(size=(n, n))
+    A = M @ M.T + n * np.eye(n)              # SPD, genuinely non-diagonal
+    assert not np.allclose(A, np.diag(np.diag(A)))
+
+    def to_y(z):
+        raw = f.cm.from_flat(np.asarray(z, float))
+        return np.array([f.cm.bounds[nm].forward(raw[nm])
+                         if nm in f.cm.bounds else raw[nm] for nm in names])
+
+    def dydx(z):
+        raw = f.cm.from_flat(np.asarray(z, float))
+        return np.array([f.cm.bounds[nm].grad(raw[nm])
+                         if nm in f.cm.bounds else 1.0 for nm in names])
+
+    y_ref = to_y(x)
+
+    def nll(z, start_after=None):
+        y = np.asarray(z, float) if start_after == "bounds" else to_y(z)
+        d = y - y_ref
+        g = A @ d
+        return 0.5 * float(d @ A @ d), (g if start_after == "bounds"
+                                        else g * dydx(z))
+
+    monkeypatch.setattr(f, "get_nll", nll)
+    H = f.compute_numerical_hessian(x, space="bounded")
+    H = 0.5 * (H + H.T)
+    assert np.allclose(H, A, rtol=1e-6, atol=1e-8), \
+        f"max|H-A| = {np.abs(H - A).max():.3g}"
+    # the marginal sigmas (A is non-diagonal: sqrt(diag(A^-1)), not 1/sqrt(A_jj))
+    assert np.allclose(np.sqrt(np.diag(np.linalg.inv(H))),
+                       np.sqrt(np.diag(np.linalg.inv(A))), rtol=1e-5)

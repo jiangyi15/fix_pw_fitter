@@ -303,15 +303,17 @@ class Fitter:
         """
         self.cm.set_free(name)
 
-    def set_range(self, name, lo, hi):
-        """Bound a parameter via bijective arctan transform.  *Additive*.
+    def set_range(self, name, lo, hi=None):
+        """Bound a parameter (see `boundary`).  *Additive*.
 
+        ``(lo, hi)`` → the two-sided sine; ``hi=None`` → a one-sided LOWER bound
+        (``sqrt(x²+1) − 1``, unit-scaled); ``lo=None`` → the upper mirror.
         Delegates to :attr:`cm` (no dirty flags touched).
         """
         self.cm.set_range(name, lo, hi)
 
     def unset_range(self, name):
-        """Remove the arctan bound on *name*.
+        """Remove the bound on *name*.
 
         Delegates to :attr:`cm`.
         """
@@ -847,7 +849,8 @@ class Fitter:
         """Starting guess for all free variables.
 
         Parameters with a physical default start at that default (via the
-        bounds inverse); the rest (ck, ...) are random ``U(-π, π)``.
+        bounds inverse); the rest (ck, ...) are random ``U(-π, π)``, rescaled
+        onto the transform's branch for a bounded slot.
         ``use_default`` is an optional knob (default True) for an all-random
         start when set to False.
 
@@ -1082,7 +1085,7 @@ class Fitter:
 
     # ── unified pipeline (forward + backward) ─────────────────────
 
-    def build_params(self, x):
+    def build_params(self, x, start_after=None):
         """Full forward pipeline: flat ``x`` → kernel params dict.
 
         Returns ``(params, resolved)`` where *resolved* is the **model
@@ -1112,14 +1115,26 @@ class Fitter:
             cm.add_invalidator(self._drop_params_cache)
             self._params_cache_wired = True
 
+        if start_after == "bounds":
+            # the input IS the bounded value: it must lie inside its range, or
+            # the pipeline would carry an out-of-range physical value
+            for i, name in enumerate(cm.var_registry.flat_names):
+                if name in cm.bounds:
+                    bt = cm.bounds[name]
+                    if not (bt.a <= x[i] <= bt.b):
+                        raise ValueError(
+                            f"build_params(start_after='bounds'): {name}={x[i]!r} "
+                            f"is outside its range [{bt.a!r}, {bt.b!r}] — the "
+                            f"bounded frame is stored as a physical value and "
+                            f"cannot be extrapolated past the wall")
         cache = getattr(self, "_params_cache", None)
-        if cache is not None and cache[0].shape == x.shape \
-                and np.array_equal(cache[0], x):
+        if cache is not None and cache[3] == start_after \
+                and cache[0].shape == x.shape and np.array_equal(cache[0], x):
             return cache[1], cache[2]
 
-        resolved = cm.flat_resolve(x)
+        resolved = cm.flat_resolve(x, start_after=start_after)
         params = self._kernel_builder.forward(resolved)
-        self._params_cache = (x.copy(), params, resolved)
+        self._params_cache = (x.copy(), params, resolved, start_after)
         return params, resolved
 
     def _drop_params_cache(self):
@@ -1144,7 +1159,7 @@ class Fitter:
         return self.cm.blind_result(
             self.build_params(np.asarray(x, dtype=float).ravel())[1])
 
-    def _flat_gradient(self, grad_dict, resolved, x):
+    def _flat_gradient(self, grad_dict, resolved, x, start_after=None):
         """Full backward pipeline: per-name grads → flat gradient.
 
         Args:
@@ -1155,7 +1170,8 @@ class Fitter:
         Returns:
             Flat gradient array with the same shape as *x*.
         """
-        grad_flat = self.cm.full_gradient(grad_dict, resolved, x)
+        grad_flat = self.cm.full_gradient(grad_dict, resolved, x,
+                                          start_after=start_after)
 
         # Zero fixed slots
         for slot_name in self._fixed_slots:
@@ -1197,7 +1213,7 @@ class Fitter:
 
         return np.stack(rows), kept_names
 
-    def get_nll(self, x, m0=None, g0=None):
+    def get_nll(self, x, m0=None, g0=None, start_after=None):
         """Compute NLL and gradient w.r.t. the flat variable vector.
 
         Pipeline::
@@ -1210,12 +1226,21 @@ class Fitter:
 
         Args:
             x: flat variable vector (length = ``free_param_names()``).
+            start_after: ``None`` (an ``x`` vector, the optimizer frame) or
+                ``'bounds'`` (the input is the BOUNDED value ``y`` of each free
+                slot, and the returned gradient is ``dNLL/dy``).  See
+                :meth:`ConstraintManager.resolve`; used by
+                :meth:`compute_numerical_hessian(space='bounded')`.
 
         Returns:
-            ``(nll, grad_x)`` where ``grad_x`` has the same shape as ``x``.
+            ``(nll, grad)`` where ``grad`` has the same shape as ``x`` and is
+            ``dNLL/dx`` (``start_after=None``) or ``dNLL/dy`` (``'bounds'``).
         """
-        self._last_xk = x.copy()
-        params, resolved = self.build_params(x)
+        if start_after is None:
+            # the interrupt checkpoint stores an x vector; a bounded one must
+            # never land there
+            self._last_xk = x.copy()
+        params, resolved = self.build_params(x, start_after=start_after)
         nll, total_grads = self.get_nll_raw(params)
         grad_dict = self._kernel_builder.backward(total_grads, resolved)
 
@@ -1225,7 +1250,8 @@ class Fitter:
             for name, g in prior.gradients(resolved).items():
                 grad_dict[name] = grad_dict.get(name, 0.0) + g
 
-        grad_flat = self._flat_gradient(grad_dict, resolved, x)
+        grad_flat = self._flat_gradient(grad_dict, resolved, x,
+                                        start_after=start_after)
         return nll, grad_flat
 
     # ------------------------------------------------------------------
@@ -1234,15 +1260,17 @@ class Fitter:
     def _profile_setup(self, result, param, kw):
         """Common prolog for profile()/profile_scan(): result →
         (x0, h_inv, idx), popping h_inv / h_inv_fd out of *kw*."""
-        from .fit_result import FitResult
-        if not isinstance(result, FitResult):
-            result = FitResult.from_x(result)
+        from .fit_result import FitResult, as_matrix
+        if isinstance(result, np.ndarray):
+            result = FitResult.from_x(result)      # a flat vector, not a result
+        elif not isinstance(result, FitResult):
+            result = FitResult.from_result(result)
         x0 = np.asarray(result.x, float)
         h_inv = kw.pop("h_inv", None)
         if h_inv is not None:
-            h_inv = np.asarray(h_inv, float)
+            h_inv = as_matrix(h_inv)
         elif result.hess_inv is not None:
-            h_inv = np.asarray(result.hess_inv, float)
+            h_inv = as_matrix(result.hess_inv)
         elif not kw.get("h_inv_fd", False):
             raise ValueError(
                 "profile needs hess_inv — run fit() with the BFGS method "
@@ -1379,7 +1407,9 @@ class Fitter:
 
         Bound transforms (set via set_range) are applied automatically
         inside get_nll(), so the optimizer sees unbounded values.
-        To get uncertainties in the bounded space, use BoundTransform.trans_err.
+        To get uncertainties in the after-bounds space use
+        :meth:`get_uncertainties` with ``space='bounded'`` (the physical
+        curvature), not ``BoundTransform.trans_err`` alone.
 
         For constrained fits (f(x) = 0), use :meth:`fit_constrained`.
 
@@ -1453,7 +1483,9 @@ class Fitter:
             callback=combined_cb,
             **kwargs
         )
-        return FitResult.from_result(result)
+        res = FitResult.from_result(result)
+        self._warn_at_boundary(self.boundary_report(res), "fit")
+        return res
 
     def fit_constrained(self, x0=None, maxiter=1000, ftol=1e-5, callback=None,
                         disp=True, constraints=None, **kwargs):
@@ -1491,7 +1523,8 @@ class Fitter:
                         callback=callback, disp=disp, method='SLSQP',
                         constraints=constraints, **kwargs)
 
-    def _params_from_fit(self, fit_result, return_bounded=True, hess_inv=None):
+    def _params_from_fit(self, fit_result, return_bounded=True, hess_inv=None,
+                         error_propagation=True):
         """Build dicts of parameter values and errors from a fit result.
 
         When *hess_inv* is not available (e.g. constrained SLSQP fit),
@@ -1504,6 +1537,10 @@ class Fitter:
                             if False, return raw unbounded optimizer values.
             hess_inv: optional inverse Hessian. If None, tries
                       ``fit_result.hess_inv``.
+            error_propagation: if True (default) the errors go through the
+                      BOUND Jacobian (they are x-space sigmas); False keeps them
+                      as given, for a matrix that is ALREADY in the after-bounds
+                      frame (:meth:`compute_numerical_hessian` ``space='bounded'``).
 
         Note:
             with ``return_bounded=True`` the *values* go through the bound
@@ -1521,15 +1558,29 @@ class Fitter:
                          (empty dict if hess_inv unavailable).
         """
 
+        from tabpwa.fit_result import as_matrix
+
         x_best = fit_result.x
         if hess_inv is None:
             hess_inv = getattr(fit_result, 'hess_inv', None)
+        hess_inv = as_matrix(hess_inv)
         if hess_inv is None:
             names = self.cm.var_registry.flat_names
             values = {name: float(x_best[i]) for i, name in enumerate(names)}
             return values, {}
         names = self.cm.var_registry.flat_names
-        raw_errors = np.sqrt(np.diag(hess_inv))
+        diag = np.diag(hess_inv)
+        if np.any(diag < 0.0):
+            # a curvature matrix that is not positive definite cannot give a
+            # sigma: report |.| and say so instead of a silent NaN
+            import warnings
+            bad = [nm for nm, d in zip(names, diag) if d < 0.0]
+            warnings.warn(
+                f"uncertainties: the curvature matrix is not positive definite "
+                f"({len(bad)} negative diagonal entries, e.g. {bad[0]!r}); the "
+                f"sigmas are sqrt(|diag|) and must not be quoted as errors",
+                RuntimeWarning, stacklevel=3)
+        raw_errors = np.sqrt(np.abs(diag))
 
         values = {}
         errors = {}
@@ -1539,11 +1590,15 @@ class Fitter:
             errors[name] = raw_errors[i]
 
         if return_bounded:
-            self.cm.apply_bound_dict(values, errors)
-
+            if error_propagation:
+                self.cm.apply_bound_dict(values, errors)
+            else:
+                self.cm.apply_bound_dict(values)     # values only: dy/dx is
+                                                     # already in the errors
         return values, errors
 
-    def get_uncertainties(self, fit_result, return_bounded=True, use_cached=True):
+    def get_uncertainties(self, fit_result, return_bounded=True, use_cached=True,
+                          return_hess_inv=False, space="x"):
         """Compute parameter uncertainties from a fit result.
 
         Uses the inverse Hessian from the fit, or computes a numerical
@@ -1556,37 +1611,213 @@ class Fitter:
         them reports the sigma of its pre-transform value (see the note in
         :meth:`save_params`).
 
-        For constrained fits (SLSQP), *use_cached* is ignored — the
-        Hessian is not available, and no uncertainties are returned.
+        For constrained fits (SLSQP) no Hessian is returned by the optimizer, so
+        the cached route reports zeros; ``use_cached=False`` computes the
+        numerical one and does report sigmas (an x-space curvature, valid where
+        the constraints do not bite).
 
         Args:
             fit_result: OptimizeResult from ``fit()`` method.
             return_bounded: if True (default), returns values and errors
                             in the physical (bounded) space.
                             if False, returns raw unbounded optimizer values.
-            use_cached: if True (default), use ``fit_result.hess_inv``.
-                        if False, compute numerical Hessian from
-                        ``fit_result.x`` via :meth:`compute_numerical_hessian`.
+            use_cached: if True (default), use the STORED matrix of the chosen
+                        frame — ``fit_result.hess_inv`` (x) or
+                        ``fit_result.hess_inv_bounded`` (after bounds, restored
+                        by :meth:`load_results` from
+                        ``*_error_matrix_bounded.npy``); a bounded request with
+                        nothing stored raises and says how to get one.  If
+                        False, ALWAYS compute the numerical Hessian from
+                        ``fit_result.x`` (via :meth:`compute_numerical_hessian`)
+                        — including for a result that carries no Hessian at all,
+                        which used to fall back to the cached route and report
+                        zeros.
+            return_hess_inv: also return the matrix that was USED, as a
+                        ``(uncertainties, hess_inv)`` pair — the frame follows
+                        *space*, and so must the ATTRIBUTE it is stored in:
+
+                        ``space='x'`` → the ``(N, N)`` inverse Hessian in the
+                        unbounded ``x`` space (where ``fit_result.x``,
+                        ``fwd``/``cal_uncertainties_multi`` and ``hess_inv`` all
+                        live), so a result that has none — an SLSQP fit, a JSON
+                        saved without its error matrix — can be given one::
+
+                            unc, res.hess_inv = fitter.get_uncertainties(
+                                res, use_cached=False, return_hess_inv=True)
+
+                        ``space='bounded'`` → the after-bounds COVARIANCE, which
+                        belongs in ``res.hess_inv_bounded`` (the attribute
+                        :meth:`load_results` fills from
+                        ``*_error_matrix_bounded.npy``, so the pair round-trips
+                        and ``space='bounded'`` reuses it)::
+
+                            unc, res.hess_inv_bounded = fitter.get_uncertainties(
+                                res, use_cached=False, space='bounded',
+                                return_hess_inv=True)
+
+                        Assigning it to ``res.hess_inv`` would be wrong — that
+                        object is chained through ``dx`` by ``fwd``/``profile``
+                        and is a different matrix.
+
+                        ``None`` when no matrix exists (x route, none stored).
+            space: which frame the CURVATURE is taken in.
+                        ``'x'`` (default) — the optimizer frame: the fit's
+                        ``hess_inv`` or its numerical equivalent, with the
+                        ``dy/dx`` bound scaling applied to the errors.
+                        ``'bounded'`` — the after-bounds value of each free slot
+                        (what ``return_bounded=True`` reports), differenced
+                        directly: the physical curvature, no delta-method scaling.
+                        Use it for a parameter sitting near or at its range edge,
+                        where ``dy/dx -> 0`` makes the x route both mis-scaled
+                        and singular (MEASURED 154x at a converged optimum
+                        0.025 % inside the range).  It reads
+                        ``fit_result.hess_inv_bounded`` when one is stored (a
+                        ``save_params(..., bounded_errors=True)`` round-trip) and
+                        otherwise needs ``use_cached=False``.  With
+                        ``return_hess_inv`` it returns that covariance, which
+                        belongs in ``res.hess_inv_bounded`` — never in
+                        ``res.hess_inv``, which ``fwd``/``cal_uncertainties``
+                        chain through ``dx``.
 
         Returns:
-            dict of {slot_name: (value, error)} for every free parameter.
-            Errors are 0.0 if Hessian is not available.
+            dict of {slot_name: (value, error)} for every free parameter —
+            ``(dict, hess_inv)`` when *return_hess_inv* is set.  Errors are 0.0
+            if no Hessian is available.
         """
-        if not use_cached and hasattr(fit_result, 'hess_inv'):
-            import numpy as np
-            H = self.compute_numerical_hessian(fit_result.x)
-            hess_inv = np.linalg.inv(H)
-            values, errors = self._params_from_fit(fit_result, return_bounded,
-                                                    hess_inv=hess_inv)
+        import numpy as np
+
+        from tabpwa.fit_result import as_matrix
+        self._warn_at_boundary(self.boundary_report(fit_result),
+                              "get_uncertainties")
+        if space not in ("x", "bounded"):
+            raise ValueError(
+                f"get_uncertainties: space={space!r} — use 'x' (the optimizer "
+                f"frame, the fit's own hess_inv) or 'bounded' (the after-bounds "
+                f"values, differenced directly)")
+        if space == "bounded":
+            if use_cached:
+                hess_inv = as_matrix(
+                    getattr(fit_result, 'hess_inv_bounded', None))
+                if hess_inv is None:
+                    raise ValueError(
+                        "get_uncertainties: space='bounded' has no STORED "
+                        "matrix on this result — save one with "
+                        "save_params(..., bounded_errors=True) and "
+                        "load_results, or pass use_cached=False "
+                        f"({2 * len(fit_result.x)} gradient evaluations)")
+            else:
+                hess_inv = np.linalg.inv(
+                    self.compute_numerical_hessian(fit_result.x,
+                                                   space="bounded"))
+            values, errors = self._params_from_fit(
+                fit_result, return_bounded, hess_inv=hess_inv,
+                error_propagation=False)       # dy/dx is already in the errors
+            out = {name: (values[name], errors.get(name, 0.0))
+                   for name in values}
+            return (out, hess_inv) if return_hess_inv else out
+
+        if use_cached:
+            hess_inv = as_matrix(getattr(fit_result, 'hess_inv', None))
         else:
-            values, errors = self._params_from_fit(fit_result, return_bounded)
+            hess_inv = np.linalg.inv(self.compute_numerical_hessian(fit_result.x))
+        values, errors = self._params_from_fit(fit_result, return_bounded,
+                                               hess_inv=hess_inv)
         # Report frame: _params_from_fit returns the after-bounds values,
         # which (with a blind transform between bounds and fixed) are the
         # blinded report values — no extra shift needed.  Errors are
         # unaffected (constant shift).
-        return {name: (values[name], errors.get(name, 0.0)) for name in values}
+        out = {name: (values[name], errors.get(name, 0.0)) for name in values}
+        return (out, hess_inv) if return_hess_inv else out
 
-    def compute_numerical_hessian(self, x, eps=1e-5):
+    # ── a soft range that BINDS ──────────────────────────────────────
+    #: share of a range width that counts as "on the wall": the delta-method
+    #: sigma is already ~7x wrong at 1e-3 of the span (measured 0.15x the
+    #: bounded one), so the report and the bounded-Hessian refusal share it
+    WALL_TOL = 1e-3
+
+    #: ...and the tighter, purely GEOMETRIC share below which a bounded Hessian
+    #: has no room for a centred step at all (1e-6 of the width)
+    _HESS_WALL_TOL = 1e-6
+
+    def boundary_report(self, result, tol=None):
+        """Free slots sitting ON a range edge — the soft range is binding.
+
+        The sine transform maps a value past the edge to EXACTLY the edge (no
+        ``tan(pi/2)/c`` precision problem), so "at the boundary" is an equality,
+        not a large number: a fit whose data pull a parameter outside its range
+        lands on the wall, where ``dNLL/dx = 0`` by construction.  That is not a
+        stationary point of the model: the reported sigma does not exist there
+        (the transform's limit, not the model's) — the location and every OTHER
+        parameter are still correct.
+
+        Args:
+            result: a fit result (``.x``) or a flat vector.
+            tol: share of the range width counted as "on the edge"
+                (default :attr:`WALL_TOL`).
+
+        Returns:
+            ``[(name, value, low, high), …]``, one entry per bound slot whose
+            bounded value is within ``tol·(high−low)`` of an edge (an open side
+            is ``±inf`` and never triggers it).
+        """
+        tol = self.WALL_TOL if tol is None else float(tol)
+        x = np.asarray(getattr(result, "x", result), dtype=float).ravel()
+        raw = self.cm.from_flat(x)
+        out = []
+        for name in self.cm.var_registry.flat_names:
+            if name not in self.cm.bounds:
+                continue
+            bt = self.cm.bounds[name]
+            val = float(bt(raw[name]))
+            span = bt.b - bt.a
+            eps = tol * span if np.isfinite(span) else tol * max(1.0, abs(val))
+            if val <= bt.a + eps or val >= bt.b - eps:
+                out.append((name, val, bt.a, bt.b))
+        return out
+
+    @staticmethod
+    def _warn_at_boundary(blocked, where):
+        """One ``RuntimeWarning`` naming every parameter pinned to a range edge."""
+        if not blocked:
+            return
+        import warnings
+        parts = ", ".join(
+            f"{n}={v:.6g} at {'low' if v - lo <= hi - v else 'high'}"
+            f" ({lo:g}..{hi:g})" if np.isfinite(hi - lo) else f"{n}={v:.6g}"
+            for n, v, lo, hi in blocked)
+        warnings.warn(
+            f"{where}: {len(blocked)} parameter(s) sit ON a range edge "
+            f"[{parts}] — the range BINDS, so no sigma is defined for them: "
+            f"the transform's limit, not the model's (dy/dx = 0 at the edge, so "
+            f"the delta sigma collapses and H_xx there is set by the pull).  "
+            f"Widen/remove that range and refit, or read a one-sided interval "
+            f"from the profile likelihood.",
+            RuntimeWarning, stacklevel=3)
+
+    # ── frames for a numerical curvature ─────────────────────────────
+    def _bounded_coords(self, x):
+        """The AFTER-BOUNDS value of every free slot, and ``dx/dy`` per slot.
+
+        The optimizer variable ``x`` is unbounded; ``y = bound(x)`` is the
+        physical value the report frame carries (``flat_resolve(stop_after=
+        'bounds')``).  Unbounded slots have ``y = x`` and ``dy/dx = 1``.
+        """
+        import numpy as np
+
+        names = self.cm.var_registry.flat_names
+        raw = self.cm.from_flat(np.asarray(x, float))
+        y = np.empty(len(names))
+        dxdy = np.ones(len(names))
+        for i, name in enumerate(names):
+            bt = self.cm.bounds[name] if name in self.cm.bounds else None
+            if bt is None:
+                y[i] = raw[name]
+            else:
+                y[i] = bt.forward(raw[name])
+                dxdy[i] = 1.0 / bt.grad(raw[name])
+        return y, dxdy
+
+    def compute_numerical_hessian(self, x, eps=1e-5, space="x"):
         """Numerical Hessian via 2-point gradient difference.
 
         For each parameter *j*, perturbs ``x[j] ± eps``, evaluates the
@@ -1604,15 +1835,78 @@ class Fitter:
             H = fitter.compute_numerical_hessian(result.x)
             result.hess_inv = np.linalg.inv(H)
 
+        ``space='bounded'`` differences the AFTER-BOUNDS value ``y = bound(x)``
+        of every free slot instead (``y`` is what
+        ``get_uncertainties(return_bounded=True)`` reports).  That matrix is the
+        PHYSICAL curvature: ``inv(H)`` is the covariance of the after-bounds
+        values directly, and no ``dy/dx`` scaling is applied afterwards.  It is
+        the ORDINARY engine on another variable — ``fd_hess`` over
+        ``get_nll(y, start_after='bounds')``, whose pipeline skips the bounds
+        stage so the flat vector IS ``y`` and its gradient is ``dNLL/dy`` — not
+        a matrix transformed from the x-space one.  It matters because the chain
+        from ``y`` to ``x`` is not linear: ``dy/dx → 0`` at a range edge, so the
+        x-space route is both mis-scaled and numerically singular there.  MEASURED on a parameter pinned 0.025 % inside its range at a
+        converged optimum: ``cond(H_x) = 1.1e11``, the delta method gives
+        ``σ_y = 0.044`` while the bounded Hessian gives ``6.81`` — a factor 154,
+        and the x-space number moves with the distance to the edge while the
+        physical one does not.  Each column here differences
+        ``dNLL/dy = (dNLL/dx)·(dx/dy)``, so the ``d²x/dy²`` term is included,
+        and the step is taken in ``y`` units (clipped to a quarter of the way to
+        each edge — a parameter sitting exactly ON a bound has no finite step and
+        raises; a one-sided interval is the profile likelihood's job).
+
         Args:
             x: flat parameter vector at the minimum (``result.x``).
-            eps: finite-difference step (default 1e-5).
+            eps: finite-difference step (default 1e-5; in ``x`` units for
+                 ``space='x'``, in ``y`` units for ``space='bounded'``).
+            space: ``'x'`` (the optimizer frame, the default) or ``'bounded'``
+                 (each free slot's after-bounds value).
 
         Returns:
-            ``(N, N)`` ndarray — the symmetric Hessian matrix d²(NLL)/dx².
+            ``(N, N)`` ndarray — the symmetric Hessian d²(NLL)/dx²
+            (``space='x'``) or d²(NLL)/dy² (``space='bounded'``).
         """
+        import numpy as np
+
         from .numerics import fd_hess
-        return fd_hess(lambda z: self.get_nll(z)[1], x, eps=eps)
+        if space == "x":
+            return fd_hess(lambda z: self.get_nll(z)[1], x, eps=eps)
+        if space != "bounded":
+            raise ValueError(
+                f"compute_numerical_hessian: space={space!r} — use 'x' (the "
+                f"optimizer frame) or 'bounded' (after-bounds values)")
+
+        y0, _dxdy = self._bounded_coords(np.asarray(x, float))
+        names = self.cm.var_registry.flat_names
+        steps = np.empty(len(y0))
+        for k, name in enumerate(names):
+            h0 = eps * max(abs(y0[k]), 1.0)
+            h = h0
+            if name in self.cm.bounds:
+                bt = self.cm.bounds[name]
+                span = bt.b - bt.a
+                # GEOMETRY first: within _HESS_WALL_TOL of an edge there is no
+                # trustworthy curvature (the delta sigma is ~7x off at 1e-3 of
+                # the span, and the centred step may not fit at all)
+                if np.isfinite(span) and (
+                        y0[k] - bt.a <= self._HESS_WALL_TOL * span
+                        or bt.b - y0[k] <= self._HESS_WALL_TOL * span):
+                    raise ValueError(
+                        f"compute_numerical_hessian: {name}={y0[k]:.17g} sits "
+                        f"ON its bound (within {self._HESS_WALL_TOL:g} of the range "
+                        f"width of [{bt.a:g}, {bt.b:g}]) — no sigma is defined "
+                        f"there; widen the range, free the parameter, or read a "
+                        f"one-sided interval from the profile likelihood")
+                h = min(h, 0.25 * (y0[k] - bt.a), 0.25 * (bt.b - y0[k]))
+                if not h > 1e-3 * h0:          # second line of defence
+                    raise ValueError(
+                        f"compute_numerical_hessian: {name} has no room for a "
+                        f"step at {y0[k]:.17g} in [{bt.a:g}, {bt.b:g}]")
+            steps[k] = h
+        # ONE engine, another variable: the pipeline with the bounds stage
+        # skipped turns y into the flat vector, so its gradient is dNLL/dy
+        return fd_hess(lambda y: self.get_nll(y, start_after="bounds")[1],
+                       y0, eps=steps)
 
     # ------------------------------------------------------------------
     # Plotting
@@ -1790,7 +2084,8 @@ class Fitter:
     # ------------------------------------------------------------------
     # JSON export (matching archive/w_pw_cfit5_td6_fix29.py format)
     # ------------------------------------------------------------------
-    def save_params(self, fit_result, filepath, grad_scale=1.0):
+    def save_params(self, fit_result, filepath, grad_scale=1.0,
+                    bounded_errors=False):
         """Save fit results to JSON file matching archive pw_cfit5_td6_fix29.py format.
 
         *fit_result* can be:
@@ -1822,6 +2117,19 @@ class Fitter:
         ``config_amp`` fixture, i.e. two orders of magnitude).  Both factors are
         available from ``cm.full_gradient``; ``_params_from_fit`` is where the
         bounded pairing is produced.
+
+        Two error matrices, two FRAMES, two files.  ``*_error_matrix.npy`` is
+        the x-space ``hess_inv`` (what ``fwd``/``profile``/``cal_uncertainties``
+        chain through); ``bounded_errors=True`` additionally writes
+        ``*_error_matrix_bounded.npy``, the after-bounds covariance
+        (:meth:`compute_numerical_hessian` ``space='bounded'``, ``2·N`` gradient
+        evaluations), which is the one that stays right for a parameter near a
+        range edge.  The JSON says which is which: ``error_frame`` (the ``error``
+        dict, ``"value_bounded"``), ``hess_inv_frame`` (``"x"``) and, when the
+        second file exists, ``hess_inv_bounded_frame``.  ``load_results``
+        restores both (``res.hess_inv`` / ``res.hess_inv_bounded``) and
+        ``get_uncertainties(space='bounded')`` reuses the stored one instead of
+        recomputing.
 
         Handles bound transforms, fixed params, same-param aliases,
         scale params, and time parameter defaults automatically.
@@ -1878,7 +2186,10 @@ class Fitter:
         else:
             bounded_values, errors = {}, {}
 
-        out = {"value": {}, "error": {}, "value_bounded": {}}
+        out = {"value": {}, "error": {}, "value_bounded": {},
+               # which frame each block is in; the two matrices are SEPARATE
+               # files and must never be read as each other
+               "error_frame": "value_bounded", "hess_inv_frame": "x"}
         # Store physical values for all resolved keys (canon + alias)
         for name, val in resolved.items():
             out["value"][name] = float(val)
@@ -1953,20 +2264,68 @@ class Fitter:
             np.save(err_path, fit_result.hess_inv)
             print(f"✓ Saved error matrix to {err_path}")
 
+        # ... and, opt-in, the AFTER-BOUNDS covariance as its OWN file: it is a
+        # different frame, so it can never overwrite or be mistaken for the one
+        # above (a file name is the tag a reader actually sees)
+        b_path = (os.path.splitext(filepath)[0]
+                  + "_error_matrix_bounded.npy")
+        cov = None
+        if bounded_errors:
+            import warnings
+            x_best = np.asarray(res.x, float)
+            try:
+                H = self.compute_numerical_hessian(x_best, space="bounded")
+            except ValueError as exc:
+                # a fit parked ON a soft range edge has no interior curvature to
+                # difference: keep the result file and say so instead of failing
+                warnings.warn(f"save_params: no bounded error matrix — {exc}",
+                              RuntimeWarning, stacklevel=2)
+                H = None
+            if H is not None:
+                try:
+                    cov = np.linalg.inv(H)
+                except np.linalg.LinAlgError:
+                    warnings.warn(
+                        "save_params: the bounded Hessian is singular — no "
+                        "bounded error matrix written", RuntimeWarning,
+                        stacklevel=2)
+        if cov is not None:
+            np.save(b_path, cov)
+            out["hess_inv_bounded_frame"] = "value_bounded"
+            with open(filepath, 'w') as f:
+                json.dump(out, f, indent=2)
+            print(f"✓ Saved bounded error matrix to {b_path}")
+        elif os.path.exists(b_path):
+            # this JSON carries no tag for it, so a file left by an earlier save
+            # is STALE: remove it rather than let load_results find it by name
+            os.remove(b_path)
+
         return out
 
     # ------------------------------------------------------------------
     # Convenience / utility
-    def save_hessian(self, fit_result, filepath):
+    def save_hessian(self, fit_result, filepath, space="x"):
         """Save the inverse Hessian to a ``.npy`` file.
 
         Args:
             fit_result: OptimizeResult from ``fit()`` (must have
                         ``.hess_inv``).
             filepath: output path (convention: ``*.npy``).
+            space: ``'x'`` (default) saves ``fit_result.hess_inv``;
+                   ``'bounded'`` saves the after-bounds covariance instead,
+                   computed from ``fit_result.x`` (``2·N`` gradient
+                   evaluations — a different frame, so use a different file).
         """
         import numpy as np
-        hess_inv = getattr(fit_result, 'hess_inv', None)
+        from tabpwa.fit_result import as_matrix
+        if space == "bounded":
+            H = self.compute_numerical_hessian(fit_result.x, space="bounded")
+            np.save(filepath, np.linalg.inv(H))
+            return
+        if space != "x":
+            raise ValueError(
+                f"save_hessian: space={space!r} — use 'x' or 'bounded'")
+        hess_inv = as_matrix(getattr(fit_result, 'hess_inv', None))
         if hess_inv is None:
             raise ValueError("fit_result has no hess_inv")
         np.save(filepath, hess_inv)
@@ -2002,8 +2361,31 @@ class Fitter:
             auto_path = os.path.splitext(json_path)[0] + "_error_matrix.npy"
             if os.path.exists(auto_path):
                 hessian_path = auto_path
+        n_slots = len(res.x)
+        def _checked(path, tag):
+            """Load a matrix only if the JSON SAYS it belongs to this result."""
+            if tag not in data:
+                return None
+            m = np.load(path)
+            if m.shape != (n_slots, n_slots):
+                raise ValueError(
+                    f"load_results: {os.path.basename(path)} is "
+                    f"{m.shape} for {n_slots} free parameters — it belongs to "
+                    f"another run (the JSON says {tag!r} but the shape disagrees)")
+            return m
+
         if hessian_path:
-            res.hess_inv = np.load(hessian_path)
+            res.hess_inv = _checked(hessian_path, "hess_inv_frame")
+        # the after-bounds covariance is a SEPARATE file, restored separately
+        # (its own attribute: it must never be read as the x-space matrix).  The
+        # JSON tag is the proof it belongs to THIS result: a stale file from an
+        # earlier save with the same stem is not one.
+        auto_bounded = (os.path.splitext(json_path)[0]
+                        + "_error_matrix_bounded.npy")
+        if os.path.exists(auto_bounded):
+            m = _checked(auto_bounded, "hess_inv_bounded_frame")
+            if m is not None:
+                res.hess_inv_bounded = m
         return res
 
     def save_constraints(self, filepath):
@@ -2123,7 +2505,8 @@ class Fitter:
             and *uncertainty* is the 1σ error propagated from the fit.
         """
         x0 = fit_result.x
-        hess_inv = getattr(fit_result, 'hess_inv', None)
+        from tabpwa.fit_result import as_matrix
+        hess_inv = as_matrix(getattr(fit_result, 'hess_inv', None))
         resolved = self.build_params(x0)[1]      # model frame, see below
 
         names = [n for n in param_names if n in resolved]
@@ -2443,8 +2826,10 @@ class Fitter:
         """
         import numpy as np
 
+        from tabpwa.fit_result import as_matrix
+
         x0 = fit_result.x
-        hess_inv = getattr(fit_result, 'hess_inv', None)
+        hess_inv = as_matrix(getattr(fit_result, 'hess_inv', None))
         # model frame: the point the kernel computes at (see fd_jacobian)
         resolved = self.build_params(x0)[1]
         names = [n for n in param_names if n in resolved]
@@ -2504,8 +2889,10 @@ class Fitter:
         """
         import numpy as np
 
+        from tabpwa.fit_result import as_matrix
+
         x0 = fit_result.x
-        hess_inv = getattr(fit_result, 'hess_inv', None)
+        hess_inv = as_matrix(getattr(fit_result, 'hess_inv', None))
         # model frame (see cal_uncertainties_multi)
         resolved = self.build_params(x0)[1]
         names = [n for n in param_names if n in resolved]

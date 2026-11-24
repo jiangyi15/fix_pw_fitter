@@ -1,8 +1,10 @@
 """
 boundary — Variable bound transformations for optimization.
 
-Maps unbounded optimizer variables to bounded physical ranges using a
-smooth, bijective arctan transform.
+Maps the optimizer variable onto a bounded physical range with a SINE,
+``y = bias + k*sin(x/k)`` on the branch ``|x| <= k*pi/2`` — the transform
+MINUIT and every stepping minimizer of that family uses, and the one that keeps
+the edge reachable at a FINITE ``x``.
 
 The :class:`Boundary` class bundles a collection of named BoundTransforms
 and provides dict-level apply / gradient-correction / save-load methods.
@@ -12,89 +14,125 @@ import numpy as np
 
 
 class BoundTransform:
-    """Transform unbounded variables to a bounded [a, b] range.
-    
-    Uses: y = bias + k*(2/π)*arctan(x*π/(2*k))
-    where k = (b-a)/2, bias = (b+a)/2.
-    
-    This is BIJECTIVE over all real numbers (unlike sin which wraps).
-    Forward: (-∞, +∞) → (a, b)  smooth, monotonic.
-    Inverse: (a, b) → (-∞, +∞)  exact, no periodicity.
-    Gradient at x=0 is 1 (same scaling as the original sin transform).
-    
-    trans_err propagates covariance through the transform.
+    """ONE bound map, for a two-sided range or a one-sided (half-line) bound.
+
+    The shape is chosen by which sides are given and stated by ``kind`` — but
+    every consumer uses the same four methods (``forward``, ``grad``,
+    ``inverse``, ``draw_start``), so no caller has to test the kind:
+
+    ``kind == "range"`` (``lo`` and ``hi``)
+        ``y = bias + k·sin(x/k)``, ``k = (hi-lo)/2``, ``bias = (lo+hi)/2``.
+        ``dy/dx = cos(x/k)``, ``dy/dx(0) = 1``; the range is reached at the
+        FINITE ``x = ±kπ/2`` and ``inverse`` is the PRINCIPAL branch.  ``x`` is
+        NOT clamped: at the edge ``y' = 0`` and ``y'' = -1/k``, so for a fit
+        pulled outwards (``g_y < 0``) ``F = NLL(y(x))`` has
+        ``F'' = |g_y|/k > 0`` — a proper, unique, PD minimum AT the edge.  A
+        clamp would instead pin everything past the edge to one value
+        (``dNLL/dx = 0`` on a half-line, a non-unique minimiser, ``H_xx = 0``).
+
+    ``kind == "lower"`` (``hi=None``)
+        ``y = lo + sqrt(x²+1) - 1`` on the branch ``x ≥ 0``; ``dy/dx =
+        x/sqrt(x²+1)`` (0 at the wall ``x = 0``, → 1 far from it, so a parameter
+        that wants to be large is not compressed).  NO scale: a per-parameter
+        scale would move the point where the map becomes linear, i.e. make the
+        optimizer's step unit parameter-dependent, which ``gtol``/``eps`` assume
+        is fixed.  ``kind == "upper"`` (``lo=None``) is the mirror
+        ``y = hi - sqrt(x²+1) + 1`` on ``x ≤ 0``.
+
+    The OPEN side is ``±inf`` in ``a``/``b``, so code that clips a value or a
+    step inside the range needs no special case, and ``to_dict`` writes ``null``.
+    A degenerate range (``lo == hi``) is a constant map with ``grad = 0``.
     """
 
-    def __init__(self, a, b):
-        self.a = float(min(a, b))
-        self.b = float(max(a, b))
-        self.k = (self.b - self.a) / 2.0
-        self.bias = (self.b + self.a) / 2.0
-        self._c = np.pi / (2.0 * (self.b - self.a)) * 2.0  # π/(2*k)
-        # Actually: c = π / (2*k)
-        # But k = (b-a)/2, so 2*k = b-a
-        # c = π / (b-a)
+    def __init__(self, lo, hi=None):
+        if lo is None and hi is None:
+            raise ValueError("bound: give lo, hi, or one of them (None = open)")
+        self.lo = None if lo is None else float(lo)
+        self.hi = None if hi is None else float(hi)
+        self.k = self.bias = None
+        if self.lo is not None and self.hi is not None:
+            self.kind = "range"
+            self.a = float(min(self.lo, self.hi))
+            self.b = float(max(self.lo, self.hi))
+            self.lo, self.hi = self.a, self.b
+            self.k = (self.b - self.a) / 2.0
+            self.bias = (self.b + self.a) / 2.0
+        elif self.hi is None:
+            self.kind = "lower"
+            self.a, self.b = self.lo, float("inf")
+        else:
+            self.kind = "upper"
+            self.a, self.b = float("-inf"), self.hi
 
+    # ── the map ───────────────────────────────────────────────────────
     def forward(self, x):
-        """Unbounded x -> bounded y in (a, b). Bijective over all x."""
-        c = np.pi / (self.b - self.a)
-        return self.bias + (self.b - self.a) / np.pi * np.arctan(x * c)
+        """Optimizer variable -> the bounded value (single-valued, smooth)."""
+        if self.kind == "range":
+            if self.k == 0.0:
+                return (self.bias if np.isscalar(x)
+                        else self.bias + 0.0 * np.asarray(x, float))
+            return self.bias + self.k * np.sin(np.asarray(x, float) / self.k)
+        if self.kind == "lower":
+            t = np.maximum(x, 0.0)
+            return self.lo + np.sqrt(t * t + 1.0) - 1.0
+        t = np.maximum(-np.asarray(x, dtype=float), 0.0)
+        return self.hi - np.sqrt(t * t + 1.0) + 1.0
 
     def __call__(self, x):
         return self.forward(x)
 
     def grad(self, x):
-        """Gradient dy/dx at x (for chain rule in gradient backprop)."""
-        c = np.pi / (self.b - self.a)
-        return 1.0 / (1.0 + (x * c) ** 2)
+        """``dy/dx`` — signed (past a sine edge it is negative: the value turns)."""
+        if self.kind == "range":
+            if self.k == 0.0:
+                return (0.0 if np.isscalar(x)
+                        else 0.0 * np.asarray(x, float))
+            return np.cos(np.asarray(x, float) / self.k)
+        if self.kind == "lower":
+            t = np.maximum(x, 0.0)
+        else:
+            t = np.maximum(-np.asarray(x, dtype=float), 0.0)
+        return t / np.sqrt(t * t + 1.0)
 
     def jacobian(self, x):
         """Alias for grad (consistent naming)."""
         return self.grad(x)
 
     def inverse(self, y):
-        """Bounded y in (a, b) -> unbounded x. Exact inverse."""
-        c = np.pi / (self.b - self.a)
-        yc = np.clip(y, self.a, self.b)
-        return np.tan((yc - self.bias) * c) / c
+        """Bounded value -> the branch's optimizer variable (finite at the edge)."""
+        if self.kind == "range":
+            if self.k == 0.0:
+                return 0.0 if np.isscalar(y) else 0.0 * np.asarray(y, float)
+            t = (np.clip(y, self.a, self.b) - self.bias) / self.k
+            return self.k * np.arcsin(np.clip(t, -1.0, 1.0))
+        if self.kind == "lower":
+            t = np.maximum(np.maximum(y, self.lo) - self.lo + 1.0, 1.0)
+            return np.sqrt(t * t - 1.0)
+        t = np.maximum(self.hi - np.minimum(y, self.hi) + 1.0, 1.0)
+        return -np.sqrt(t * t - 1.0)
+
+    def draw_start(self, u):
+        """A random start ON the branch, from ``u`` uniform on ``[-1, 1]``.
+
+        The draw is made in optimizer space; using it raw would put most starts
+        on the far side of an edge (a zero gradient), so each shape maps it onto
+        its own branch.  ONE call site, no kind test (see
+        :meth:`ConstraintManager.initial_values`).
+        """
+        if self.kind == "range":
+            return u * (self.k * np.pi / 2.0)
+        if self.kind == "lower":
+            return np.abs(u)
+        return -np.abs(u)
 
     def trans_err(self, x, error):
-        """Propagate error through the transform.
-        
-        Args:
-            x: unbounded variable value.
-            error: standard deviation (or error) on x.
-        
-        Returns:
-            error on y (bounded value) = |grad(x)| * error
-        """
+        """Propagate an UNBOUNDED error: ``|dy/dx| * error`` at *x*."""
         return np.abs(self.grad(x)) * error
 
     def to_dict(self):
-        """Serialize to JSON-compatible dict."""
-        return {"low": self.a, "high": self.b}
+        """Serialize to a JSON-compatible dict (``None`` = an open side)."""
+        return {"low": self.lo, "high": self.hi}
 
-
-# Commonly used bounds for time-dependent amplitude parameters
-TIME_PARAM_BOUNDS = {
-    "delta_m":       [0.3, 0.8],
-    "delta_gamma":  [-0.3, 0.3],
-    "A_prod":       [-0.5, 0.5],
-    "gamma":        [-0.3, 0.3],
-}
-
-# Fixed default values (used when parameters are not free)
-TIME_PARAM_DEFAULTS = {
-    "gamma":        0.0,
-    "delta_m":      0.506,
-    "delta_gamma":  0.0,
-    "poqr":         1.0,
-    "poqi":         0.0,
-    "A_prod":       0.0,
-}
-
-
-# ── Boundary collection ────────────────────────────────────────────
 
 class Boundary:
     """Collection of named BoundTransform instances.
@@ -108,20 +146,31 @@ class Boundary:
 
     # ── modify ────────────────────────────────────────────────────
 
-    def set(self, name, lo, hi):
-        """Store a bound by name (no registry lookup)."""
-        self._tfm[name] = BoundTransform(lo, hi)
+    def set(self, name, lo=None, hi=None):
+        """Store a bound by name (no registry lookup).
+
+        ``(lo, hi)`` both given → the two-sided sine; ``hi is None`` → a
+        one-sided LOWER bound; ``lo is None`` → the upper mirror.  Both ``None``
+        is not a bound and raises.
+        """
+        try:
+            self._tfm[name] = BoundTransform(lo, hi)
+        except ValueError as exc:
+            raise ValueError(f"bound {name!r}: {exc}") from None
 
     def unset(self, name):
         """Remove a bound by name."""
         self._tfm.pop(name, None)
 
     def update(self, items):
-        """Bulk set from {name: (lo, hi)} or {name: {low, high}}."""
+        """Bulk set from {name: (lo, hi)} or {name: {low, high}}.
+
+        Either entry may be ``None`` (JSON ``null``) for an OPEN side.
+        """
         for name, spec in items.items():
             lo = spec[0] if isinstance(spec, (list, tuple)) else spec["low"]
             hi = spec[1] if isinstance(spec, (list, tuple)) else spec["high"]
-            self._tfm[name] = BoundTransform(lo, hi)
+            self.set(name, lo, hi)
 
     # ── apply ─────────────────────────────────────────────────────
 

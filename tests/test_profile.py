@@ -322,8 +322,9 @@ def test_profile_matches_bruteforce():
 
 
 def test_profile_width_vs_bruteforce():
-    """The width profile is genuinely non-parabolic (the running-width
-    BW stiffens the + side): the ratio drifts off 1 with |Δ| and the
+    """The width profile is genuinely non-parabolic: measured in the PHYSICAL
+    frame (`dy` through the bound map, `S_yy` from the bounded Hessian) the ratio
+    drifts off 1 with |Δ| — +0.905 / −1.109 at the outermost point — and the
     corrected points still match the brute force there."""
     f, res, _truth = _toy_fit()
     try:
@@ -337,12 +338,31 @@ def test_profile_width_vs_bruteforce():
         clo, chi = prof.crossing(1.0)
         assert chi is not None and clo is not None, \
             "the scan did not reach ΔQ = 1"
+        # measure the deviation in the PHYSICAL frame: prof.delta is a step in
+        # the optimizer variable and the width carries a (sine) range, so an
+        # x-space ratio mixes the map's own curvature into the physics
+        bt = f.cm.bounds["MI1m_width"] if "MI1m_width" in f.cm.bounds else None
         pd = np.asarray(prof.delta)
-        ratios = (np.asarray(prof.q) - prof.q_min) / (pd * pd / (2.0 * Sii))
-        ip = int(np.argmax(pd))
-        assert ratios[ip] > 1.02, (
-            f"width profile + side ratio {ratios[ip]:.3f} — expected the "
-            "non-parabolic stiffening")
+        if bt is not None:
+            Sii = np.linalg.inv(f.compute_numerical_hessian(
+                x_hat, space="bounded"))[idx, idx]
+            dy = np.array([float(bt(x_hat[idx] + d)) - float(bt(x_hat[idx]))
+                           for d in pd])
+        else:
+            dy = pd
+        with np.errstate(invalid="ignore"):      # the anchor has dy = 0
+            ratios = ((np.asarray(prof.q) - prof.q_min)
+                      / (dy * dy / (2.0 * Sii)))
+        ip, im = int(np.argmax(pd)), int(np.argmin(pd))
+        # MEASURED at |delta| = 0.041: +0.905 / -1.109 — the running width
+        # SOFTENS the + side and STIFFENS the - side; a parabolic profile would
+        # give 1.000 on both.  A BAND, not "not equal": a folded scan (a step
+        # past the bound's branch) or sqrt(curvature) instead of a sigma lands
+        # far outside it, and the brute-force cross-check below the real gate.
+        assert 0.85 < ratios[ip] < 0.98, (
+            f"width profile + side ratio {ratios[ip]:.3f} — expected ~0.905")
+        assert 1.05 < ratios[im] < 1.20, (
+            f"width profile - side ratio {ratios[im]:.3f} — expected ~1.109")
 
         from scipy.optimize import minimize as _minimize
         mask = np.ones(len(x_hat), bool)

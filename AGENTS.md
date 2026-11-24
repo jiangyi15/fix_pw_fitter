@@ -316,6 +316,86 @@ holds aliases (`rhoB_width` is `rhoA_width`), bounded values
 into the `fwd_names()` vector drops 198 of 349 gradient names and gives
 `sigma` 0.00759 instead of the true 0.003813.
 
+**Bounds come in three SHAPES, and the shape is what the transform is.**
+`set_range(name, lo, hi)` (config `var_range: {name: [lo, hi]}`) is the
+two-sided sine; `set_range(name, lo, None)` / `[lo, null]` is a one-sided LOWER
+bound, `set_range(name, None, hi)` the upper mirror, both with the UNIT-SCALED
+map `y = lo + sqrt(x²+1) − 1` (branch `x ≥ 0`; upper: `y = hi − sqrt(x²+1) + 1`
+on `x ≤ 0`).  No per-parameter `scale` exists and none may be added: a scale
+would move the point where the map becomes linear, i.e. make the optimizer's
+step unit parameter-dependent, which is what `gtol`/`eps` assume is fixed —
+without it `|x| ≈ 1` is the quadratic region for every parameter and
+`dy/dx → 1` in the bulk, so a parameter that wants to be large is not compressed
+at all (the two-sided sine cannot do that: its branch is `±kπ/2`, half the range
+width).  The open side is carried as `±inf` in `a`/`b`, so the code that clips a
+value or a step inside a range needs no special case, and the saved JSON writes
+`null`.  `cm.initial_values` draws a bounded slot ON the branch (rescaled from
+`U(-π,π)`; `|u|/π` for a half-line), and a `default` outside its range WARNS: the
+start would be pinned to the wall, where `dNLL/dx = 0` by construction, so the
+fit would "converge" at iteration 0 (`boundary.py`).
+
+A BINDING soft range is REPORTED, not repaired: the edge of the sine IS the
+bound and it sits at a FINITE `x = ±kπ/2` (the arctan needed `1e15`), so
+"at the boundary" is `value ≈ a|b` within a share of the width —
+`Fitter.WALL_TOL = 1e-3`, since the delta σ is already ~7× wrong there —
+`Fitter.boundary_report(result)` lists those slots with their edge, and
+`fit()` / `get_uncertainties()` raise a `RuntimeWarning` naming them.  No sigma
+exists at a wall — the transform's limit, not the model's: `dy/dx = 0` at the
+edge, so the delta σ collapses and `H_xx` there (`= |g_y|/k`) is set by the pull,
+not by the likelihood — while the LOCATION and every OTHER parameter stay
+correct, because the bound map is per-slot diagonal.  The map is the PLAIN sine
+(`x` is never clamped): at the edge `y' = 0`, `y'' = −1/k`, so `F = NLL(y(x))`
+has `F'' = |g_y|/k > 0` and the edge is a proper, unique, positively curved
+minimum in `x` — MEASURED on a binding range: `x* = 7.4539` against the branch
+end `7.4524`, `y* − b = −2.3e-7`, `H_xx = +0.129`, converged.  A clamp would pin
+everything past the edge to one value (`dNLL/dx = 0` on a half-line, a
+non-unique minimiser, `H_xx = 0`) — the failure this shape avoids, and the reason
+the fit is not "pinned" at the edge.  The remedy for a binding range is to
+widen/remove it and refit, or to read a one-sided interval from the profile
+likelihood; the code warns rather than masking a sub-block.
+
+**Two curvature frames, and only one of them is `hess_inv`.**
+`compute_numerical_hessian(x)` defaults to `space='x'` (the optimizer frame:
+`inv` of it is the `hess_inv` that `fwd`/`cal_uncertainties`/`profile` chain
+through `dx`), and `space='bounded'` differences the AFTER-BOUNDS value
+`y = bound(x)` of every free slot instead — `d²NLL/dy²`, with the step taken in
+`y` units and clipped inside the range.  It is not a transformed matrix: the
+pipeline takes a START CUT, `cm.resolve(..., start_after='bounds')` /
+`cm.full_gradient(..., start_after='bounds')` (the mirror of `stop_after`), so
+`Fitter.get_nll(y, start_after='bounds')` returns `dNLL/dy` directly and the
+shared `fd_hess` (per-slot steps) produces the matrix.  The `d²x/dy²` term comes
+out of that by construction; `start_after` is part of the `build_params` cache
+key, `get_nll` does not let a `y` call overwrite `_last_xk` (the interrupt
+checkpoint is an x vector), and an out-of-range `y` raises instead of being
+extrapolated.
+`get_uncertainties(space='bounded', use_cached=False)` inverts THAT and reports
+the physical sigmas directly (no `|dy/dx|` scaling), which is the only route
+that survives a parameter near or at a range edge: there `dy/dx → 0`, so the
+x-space route is mis-scaled and drops the `g·d²x/dy²` term.  Measured on the
+sine bound (range width 9.49, branch `±7.45`): at mid-range the two frames agree
+exactly (ratio 1.000); 1 % from the edge the delta σ is 0.41× the bounded one,
+0.1 % → 0.15×, 0.01 % → 0.048× (0.056 against 1.17).  The sine also keeps
+`cond(H_x)` sane (1.8e2 there, against 1.1e11 for the arctan it replaced).  A
+BINDING soft range converges ONTO the edge (`x* = 7.4539` against the branch end
+`7.4524`, `y* − b = −2.3e-7`, `H_xx = +0.129` — PD, because `F'' = |g_y|/k`), but
+no σ is defined there: `dy/dx = 0`, so the delta σ collapses and the bounded
+route refuses within `_HESS_WALL_TOL = 1e-6` of the width, naming the profile
+likelihood as the one-sided answer.  A
+bounded-space matrix is returned under its OWN name —
+`unc, res.hess_inv_bounded = get_uncertainties(..., return_hess_inv=True,
+space='bounded')`, the attribute that `space='bounded'` reads back (assigning it
+to `res.hess_inv` is wrong: that one is chained through `dx`); it is also
+persisted as its OWN file — `save_params(..., bounded_errors=True)` writes
+`*_error_matrix_bounded.npy` BESIDE the x-space `*_error_matrix.npy` (a file name
+is the tag a reader sees), `load_results` restores it as
+`res.hess_inv_bounded`, and `get_uncertainties(space='bounded')` reuses it
+instead of recomputing (`use_cached=False` forces the `2·N` evaluations).  The
+JSON states the frame of every block — `error_frame: "value_bounded"`,
+`hess_inv_frame: "x"`, `hess_inv_bounded_frame` when the second file exists —
+because the `error` dict was ALWAYS after-bounds while the matrix was x, and
+nothing said so.  A parameter sitting exactly ON a bound has no finite step and
+raises — a one-sided interval is the profile likelihood's job.
+
 `Fitter.fwd_of(value, grad_dict, resolved=None, x=None)` is that single
 assembly point, and **requires** the point: no fallback to `_last_xk` (a stale
 `x` chains to the wrong gradient while the value stays identical, so nothing

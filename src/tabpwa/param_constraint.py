@@ -1401,15 +1401,41 @@ class ConstraintManager:
         backward compatibility) slots whose name has a physical default
         (``cm.defaults``) start at that default, mapped to the unbounded
         optimizer variable through the bounds inverse (identity if the name
-        is not bounded).  Names without a default — notably ck — stay random
-        ``U(-π, π)``.  Pass ``use_default=False`` for an all-random start.
+        is not bounded; the edge maps to the finite branch end).  Names without
+        a default — notably ck — stay random ``U(-π, π)``, RESCALED onto the
+        transform's branch ``|x| <= k*π/2`` for a bounded slot: drawing that
+        slot's x on the full ``U(-π, π)`` would put most starts on the flat
+        region past the edge.  Pass ``use_default=False`` for an all-random
+        start.
         """
         x = self.var_registry.build_initial(seed=seed)
+        # A bounded slot is drawn on the transform's BRANCH: ``U(-pi, pi)`` in
+        # optimizer space spends much of its mass past an edge (75 % at a
+        # width-0.5 range), where the gradient is ~0 and the start is useless.
+        # ``draw_start`` maps the same draw onto the branch, uniform in x.
+        for i, name in enumerate(self.var_registry.flat_names):
+            if name in self.bounds:
+                # ONE interface: each shape maps the draw onto its own branch
+                # (uniform in x, so |dy/dx| stays away from 0)
+                x[i] = self.bounds[name].draw_start(x[i] / np.pi)
         if use_default:
+            import warnings
             for i, name in enumerate(self.var_registry.flat_names):
                 if name in self._defaults:
-                    x[i] = self.bounds.inverse(name,
-                                               float(self._defaults[name]))
+                    val = float(self._defaults[name])
+                    x[i] = self.bounds.inverse(name, val)
+                    if name in self.bounds:
+                        bt = self.bounds[name]
+                        if not (bt.a <= val <= bt.b):
+                            # a start on the wall has dNLL/dx = 0 by
+                            # construction (the transform is flat there), so the
+                            # fit would "converge" at iteration 0 — the default
+                            # and the range disagree, which is a CONFIG error
+                            warnings.warn(
+                                f"initial_values: default {name}={val:g} is "
+                                f"outside its range [{bt.a:g}, {bt.b:g}]; the "
+                                f"start is pinned to the edge, where the "
+                                f"gradient is zero", RuntimeWarning, stacklevel=2)
         return x
 
     # ── modifiers ──────────────────────────────────────────────
@@ -1582,7 +1608,9 @@ class ConstraintManager:
         self.fixed_tr.values.pop(name, None)
         self._rebuild()
 
-    def set_range(self, name, lo, hi):
+    def set_range(self, name, lo, hi=None):
+        """Bound *name*: ``(lo, hi)`` both given → two-sided sine; ``hi=None`` →
+        a one-sided LOWER bound; ``lo=None`` → the upper mirror."""
         self.bounds.set(name, lo, hi)
         self._rebuild()
 
@@ -1617,7 +1645,7 @@ class ConstraintManager:
         """First stage: flat array → raw dict (name→value, no constraints)."""
         return self._var_registry.to_dict(x)
 
-    def flat_resolve(self, x, stop_after=None):
+    def flat_resolve(self, x, stop_after=None, start_after=None):
         """Flat array → resolved dict, with defaults for completeness.
 
         The blind shift is applied between bounds and fixed, so the full
@@ -1631,9 +1659,38 @@ class ConstraintManager:
                        ``'scale'``, ``'transforms'``, ``'custom'``, or
                        ``None`` for full pipeline.
         """
-        return self.resolve(self.from_flat(x), stop_after=stop_after)
+        return self.resolve(self.from_flat(x), stop_after=stop_after,
+                            start_after=start_after)
 
-    def resolve(self, raw_dict, stop_after=None):
+    #: the forward pipeline, in order; ``start_after``/``stop_after`` index it
+    STAGES = ("bounds", "blind", "fixed", "same", "scale", "transforms",
+              "custom")
+
+    def _apply_stage(self, name, d):
+        """Run ONE forward stage of the pipeline on *d*."""
+        if name == "bounds":
+            self.bounds.apply(d)
+        elif name == "blind":
+            for tr in self.blind_transforms:
+                d = tr.apply_forward(d)
+        elif name == "fixed":
+            d = self.fixed_tr.apply(d)
+        elif name == "same":
+            d = self.name_res.apply(d)
+        elif name == "scale":
+            for tr in self.scale_transforms:
+                d = tr.apply_forward(d)
+        elif name == "transforms":
+            for tr in self.mass_width_transforms:
+                d = tr.apply_forward(d)
+        elif name == "custom":
+            for tr in self.custom_transforms:
+                d = tr.apply_forward(d)
+        else:                                   # pragma: no cover - validated
+            raise ValueError(f"unknown pipeline stage {name!r}")
+        return d
+
+    def resolve(self, raw_dict, stop_after=None, start_after=None):
         """Full forward pipeline: bounds → blind → fixed → same → scale → mass/width → custom.
 
         First applies bound transforms (unbounded → bounded), then the
@@ -1651,39 +1708,33 @@ class ConstraintManager:
         are the **report frame**: the real values hidden behind an unknown
         bias, shown to and saved for the analyst.
 
+        The two cuts select a WINDOW of the pipeline: ``start_after`` drops the
+        head, ``stop_after`` the tail.  ``start_after='bounds'`` therefore means
+        "the input is ALREADY the bounded value" — the entry point for working
+        in the bounded frame (:meth:`Fitter.get_nll` with
+        ``start_after='bounds'`` gives ``dNLL/dy``, the physical curvature's
+        gradient).  Defaults are merged only when the pipeline runs to its end
+        (``stop_after=None``), as before.
+
         Args:
             stop_after: ``'bounds'``, ``'blind'``, ``'fixed'``, ``'same'``,
                        ``'scale'``, ``'transforms'`` (all transforms but
                        no defaults), ``'custom'``, or ``None`` for full
                        pipeline.
+            start_after: the same names, or ``None`` (start at the beginning).
         """
+        stages = self.STAGES
+        i0 = 0 if start_after is None else stages.index(start_after) + 1
+        i1 = len(stages) if stop_after is None else stages.index(stop_after) + 1
+        if i1 < i0 or (i1 == i0 and stop_after is not None):
+            raise ValueError(
+                f"resolve: empty stage window (start_after={start_after!r}, "
+                f"stop_after={stop_after!r})")
         d = dict(raw_dict)
-        self.bounds.apply(d)                     # unbounded → bounded
-        if stop_after == 'bounds':
+        for name in stages[i0:i1]:
+            d = self._apply_stage(name, d)
+        if stop_after is not None:              # a cut: no defaults, as before
             return d
-        for tr in self.blind_transforms:
-            d = tr.apply_forward(d)              # blind: shift after bounds
-        if stop_after == 'blind':
-            return d
-        d = self.fixed_tr.apply(d)
-        if stop_after == 'fixed':
-            return d
-        d = self.name_res.apply(d)
-        if stop_after == 'same':
-            return d
-        for tr in self.scale_transforms:
-            d = tr.apply_forward(d)
-        if stop_after == 'scale':
-            return d
-        for tr in self.mass_width_transforms:
-            d = tr.apply_forward(d)
-        if stop_after == 'transforms':
-            return d
-        for tr in self.custom_transforms:
-            d = tr.apply_forward(d)
-        if stop_after == 'custom':
-            return d
-        # Merge defaults at the end of the full pipeline
         full = dict(self._defaults)
         full.update(d)
         return full
@@ -1780,15 +1831,25 @@ class ConstraintManager:
             d[name] = self.bounds.inverse(name, d[name])
         return d
 
-    def full_gradient(self, grad_resolved, resolved, x):
+    def full_gradient(self, grad_resolved, resolved, x, start_after=None):
         """Backprop through pipeline: chain_gradient → flat → bound correction.
 
-        Returns flat gradient w.r.t. unbounded optimizer variables.
+        Returns flat gradient w.r.t. unbounded optimizer variables — or, with
+        ``start_after='bounds'``, w.r.t. the BOUNDED values (the bound Jacobian
+        is the stage being skipped, so nothing multiplies by ``dy/dx``).  That
+        is the gradient a curvature taken in the after-bounds frame needs.
         """
+        if start_after not in (None, "bounds"):
+            raise ValueError(
+                f"full_gradient: start_after={start_after!r} — only None or "
+                f"'bounds' is meaningful (a deeper cut changes the chain, not "
+                f"the metric)")
         raw = self.from_flat(x)
         grad_raw = self.chain_gradient(grad_resolved, resolved, raw)
         grad_flat = self._var_registry.flat_gradient(x, grad_raw)
-        self.bounds.correct_gradient(grad_flat, x, self._var_registry.flat_names, raw)
+        if start_after != "bounds":
+            self.bounds.correct_gradient(grad_flat, x,
+                                         self._var_registry.flat_names, raw)
         return grad_flat
 
     def apply_bound_dict(self, d, errors=None):
@@ -1850,8 +1911,9 @@ class ConstraintManager:
         pass through unchanged.  (The blind shift is a constant, so its
         backward is the identity.)
         """
-        grad = grad_resolved
-        for tr in reversed(self.custom_transforms):
+        grad = dict(grad_resolved)          # never mutate the caller's dict:
+        for tr in reversed(self.custom_transforms):   # apply_backward replaces
+                                                      # entries in place
             grad = tr.apply_backward(grad)
         for tr in reversed(self.mass_width_transforms):
             grad = tr.apply_backward(grad)

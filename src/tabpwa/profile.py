@@ -165,6 +165,27 @@ def profile_scan(fitter, x0, h_inv, idx, delta_q=0.5,
     pred = S[:, idx] / Sii
     d0 = 0.5 * np.sqrt(2.0 * delta_q * abs(Sii))
 
+    # a bounded parameter has a BRANCH: past it the sine turns around, so a scan
+    # step larger than k*pi/2 is a fold, not a profile — and a step of
+    # sqrt(curvature) instead of sqrt(variance) is what a Hessian passed as
+    # h_inv looks like (Sii = d2NLL/dx2, not sigma^2)
+    _cm = getattr(fitter, "cm", None)
+    if _cm is not None:
+        _nm = _cm.var_registry.flat_names[idx]
+        _bt = _cm.bounds[_nm] if _nm in _cm.bounds else None
+        if _bt is not None and _bt.kind == "range" and _bt.k > 0.0:
+            branch = _bt.k * np.pi / 2.0
+            if d0 > branch:
+                import warnings
+                warnings.warn(
+                    f"profile_scan: the first step {d0:.4g} for {_nm!r} exceeds "
+                    f"its bound's branch {branch:.4g} — h_inv is the COVARIANCE "
+                    f"(inv of the Hessian); a Hessian passed for it gives "
+                    f"sqrt(curvature) instead of a sigma, and near a wall an "
+                    f"x-space scan folds.  Clipping the step to half the branch.",
+                    RuntimeWarning, stacklevel=2)
+                d0 = 0.5 * branch
+
     mask = np.ones(n, bool)
     mask[idx] = False
     S_nn = S[np.ix_(mask, mask)]

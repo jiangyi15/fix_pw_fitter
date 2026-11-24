@@ -360,8 +360,12 @@ def test_cm_resolve_stop_after_bounds():
     """stop_after='bounds' applies bounds but no further transforms."""
     cm = _make_cm_with_constraints()
     d = cm.resolve({'x': 10.0, 'y': 2.0}, stop_after='bounds')
-    # x has range [-5, 5]; bounds smoothly maps unbounded → bounded
-    assert d['x'] > -5 and d['x'] < 5, f"x={d['x']} should be within [-5,5]"
+    # x has range [-5, 5]; the sine bound maps ONTO the closed interval, so a
+    # raw value far past its branch lands exactly ON the edge (no tan
+    # asymptote); an in-branch value stays strictly inside
+    assert -5 <= d['x'] <= 5, f"x={d['x']} should be within [-5,5]"
+    d2 = cm.resolve({'x': 0.5, 'y': 2.0}, stop_after='bounds')
+    assert -5 < d2['x'] < 5
     assert d['y'] == 2.0  # no scale yet
     assert 'z' not in d   # not in input, not aliased yet
 
