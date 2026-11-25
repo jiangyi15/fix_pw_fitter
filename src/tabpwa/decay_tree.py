@@ -44,13 +44,6 @@ class Particle:
         return self.name
 
 
-def s_range(l1, l2):
-    a = l1
-    while a < l2:
-        yield a
-        a += 1
-
-
 class Decay:
     def __init__(self, core, outs, **kwargs):
         self.core = core
@@ -60,20 +53,37 @@ class Decay:
             setattr(self, k, v)
 
     def get_ls_list(self):
-        ja = self.core.J
-        jb = self.outs[0].J
-        jc = self.outs[1].J
+        """``[(l, s)]`` for this vertex — ``s`` may be half-integral.
+
+        The spins are read through :func:`~tabpwa.helicity_angle.to_spin`, so
+        ``J: "1/2"`` works: ``s`` steps by 1 from ``|jb-jc|`` (a half-integer
+        when the daughters' spins differ by an odd number of halves) and the
+        ORBITAL ``l`` is an integer in ``[ceil|ja-s|, floor(ja+s)]``.  For
+        integer spins every bound is integral and the list is exactly the old
+        ``range(int|ja-s|, int(ja+s)+1)``.
+        """
+        from tabpwa.helicity_angle import to_spin
+
+        ja = to_spin(self.core.J)
+        jb = to_spin(self.outs[0].J)
+        jc = to_spin(self.outs[1].J)
         pa = getattr(self.core, "P", None)
         pb = getattr(self.outs[0], "P", None)
         pc = getattr(self.outs[1], "P", None)
         ls_list = []
-        for s in s_range(abs(jb - jc), jb + jc + 1):
-            for l in range(int(abs(ja - s)), int(ja + s) + 1):
+        s = abs(jb - jc)
+        while s <= jb + jc:
+            lo = math.ceil(float(abs(ja - s)))
+            hi = math.floor(float(ja + s))
+            for l in range(lo, hi + 1):
                 if not getattr(self, "p_break", False):
                     if (pa is not None and pb is not None and pc is not None):
                         if l % 2 == (1 if pa * pb * pc == 1 else 0):
                             continue
-                ls_list.append((l, s))
+                # keep INTEGRAL s as an int: the wave names are built from
+                # these tuples and a shipped config's metadata must not move
+                ls_list.append((l, int(s) if s.denominator == 1 else s))
+            s += 1
         return ls_list
 
     def get_ls_names(self):
@@ -101,8 +111,7 @@ class DecayChain:
 
     def get_ls_combination(self):
         ls_lists = [i.get_ls_list() for i in self.decays]
-        ret = list(itertools.product(*ls_lists))
-        return ret
+        return list(itertools.product(*ls_lists))
 
     def get_gls_combination(self):
         ls_lists = [i.get_ls_names() for i in self.decays]
@@ -167,10 +176,33 @@ class DecayGroup:
         return iter(self.chains)
 
     def get_partial_waves(self):
+        """``[((ls, ...), chain), ...]`` for every admissible wave.
+
+        A SINGLE chain may admit none — a declared vertex can violate angular
+        momentum (a spin-1/2 core decaying to two scalars needs ``l = 1/2``),
+        and the declaration-only tree still builds, which
+        ``tests/test_decay_tree.py`` pins.  A config where NO chain admits a
+        wave is unusable, and that used to surface as
+        ``ValueError: need at least one array to stack`` from
+        ``build_from_groups``: it is refused HERE, naming the vertex.
+        """
         ret = []
+        dead = []
         for i in self.chains:
-            for j in i.get_ls_combination():
+            combos = i.get_ls_combination()
+            if not combos:
+                for d in i.decays:
+                    if not d.get_ls_list():
+                        dead.append(str(d))
+                        break
+            for j in combos:
                 ret.append((j, i))
+        if not ret and dead:
+            raise ValueError(
+                f"no admissible partial wave: decay {dead[0]} has no allowed "
+                f"(l, s) combination — check the spins and parities of the "
+                f"vertex (a HALF-INTEGER core decaying to two spin-0 daughters "
+                f"has s=0 and needs l=1/2, which does not exist)")
         return ret
 
     def get_partial_waves_params(self):

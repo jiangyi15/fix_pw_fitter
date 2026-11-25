@@ -234,6 +234,23 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
 
 ### Fixed
 
+- HALF-INTEGER spins (`J: "1/2"`, `J: 0.5`) were unusable: `_spin_state_count`
+  did `int(2*J)` on the raw config value (`ValueError: invalid literal for
+  int()`), `_helicity_top_states` did `int(J)`, and `Decay.get_ls_list`
+  subtracted the raw values (`TypeError: unsupported operand type(s)`).  All
+  three read the spin through `helicity_angle.to_spin`, so a fractional `J`
+  works: `s` steps in halves from `|jb-jc|`, the ORBITAL `l` stays an integer
+  in `[ceil|ja-s|, floor(ja+s)]`, and the helicity list is `2J+1` values for
+  the top AND for every final (one helper, `_helicity_states`; the per-final
+  list used to enumerate `-2J … +2J`, i.e. `4J+1`, which agreed with `2J+1`
+  only while every final was spin-0).  A config in which NO chain admits a
+  wave — a spin-1/2 core decaying to two scalars needs `l = 1/2`, which does
+  not exist — is now refused by name at that vertex instead of surfacing as
+  `ValueError: need at least one array to stack` from `build_from_groups`; a
+  single dead chain beside live ones still builds (the declaration-only tree
+  tolerates it, as `tests/test_decay_tree.py` pins).
+  Fixture `tests/config_pwa_gen_spin_half.yml` (`1/2 -> 1/2 0 0`: top 1/2,
+  finals 1/2, 0, 0), gates `tests/test_spin_half.py`.
 - A HOPELESS toy background was diagnosed after ~33 s: the all-zero check
   samples a 1e6-event budget in batches, the batch was pinned at
   `max(64, 4·(n_bg−have))`, and `build_event_data` costs 55 µs/event at 64 vs

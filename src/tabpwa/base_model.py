@@ -173,13 +173,22 @@ class BaseModel:
         self.angle_formula_mode = self._compute_angle_formula()
 
     def _spin_state_count(self, name):
+        """``2J+1`` states of one particle, or ``len(spins)`` when declared.
+
+        ``J`` is read through :func:`~tabpwa.helicity_angle.to_spin`, so a
+        HALF-INTEGER spin is spelled the way the rest of the tree spells it
+        (``J: "1/2"`` or ``0.5``); ``int(2*J)+1`` on the raw value did
+        ``2 * "1/2"`` and raised ``ValueError: invalid literal for int()`` on
+        any config with a fractional top or final.
+        """
         d = self.dic.get("particle", {}).get(name)
         if not isinstance(d, dict):
             return 1
         spins = d.get("spins")
         if spins is not None:
             return max(1, len(list(spins)))
-        return int(2 * d.get("J", 0)) + 1
+        from tabpwa.helicity_angle import to_spin
+        return max(1, int(2 * to_spin(d.get("J", 0))) + 1)
 
     def _compute_n_proj(self):
         """Projection count: explicit ``n_proj`` else external spin states."""
@@ -326,6 +335,23 @@ class BaseModel:
 
 
 
+    @staticmethod
+    def _helicity_states(J):
+        """``-J, -J+1, …, +J`` — ``2J+1`` values, halves included.
+
+        ONE definition for the top and for every final: a spin-J particle has
+        ``2J+1`` helicities whether J is an integer or a half-integer, so a
+        fractional ``J: "1/2"`` gives ``[-1/2, +1/2]`` and ``J: 2`` gives
+        ``[-2, …, +2]``.  (The per-final list used to enumerate ``-2J … +2J``,
+        i.e. ``4J+1`` values — harmless while every shipped final is spin-0,
+        wrong the moment one is not.)
+        """
+        from tabpwa.helicity_angle import to_spin
+
+        J = to_spin(J)              # idempotent, so a Fraction passes through
+        n2 = int(2 * J)
+        return [to_spin(-J + k) for k in range(n2 + 1)]
+
     def _helicity_top_states(self):
         """External top-helicity projection states (single for a J=0 top)."""
         if getattr(self, "angle_formula_mode", "helicity") != "helicity":
@@ -335,10 +361,7 @@ class BaseModel:
         spins = top_d.get("spins")
         if spins is not None:
             return [to_spin(x) for x in spins]
-        J = top_d.get("J", 0)
-        if int(J) == 0:
-            return [to_spin(0)]
-        return [to_spin(m) for m in range(-int(J), int(J) + 1)]
+        return self._helicity_states(top_d.get("J", 0))
 
     def _final_names(self):
         """Final-state particle names in canonical (config $finals) order."""
@@ -361,10 +384,7 @@ class BaseModel:
             if sp is not None:
                 per_fin.append([to_spin(x) for x in sp])
             else:
-                j = to_spin(d.get("J", 0))
-                j2 = int(2 * j)
-                per_fin.append([to_spin(Fraction(v, 1))
-                                for v in range(-j2, j2 + 1)])
+                per_fin.append(self._helicity_states(d.get("J", 0)))
         import itertools
         out = []
         for lt in tops:

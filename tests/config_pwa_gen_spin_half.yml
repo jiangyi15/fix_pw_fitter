@@ -1,0 +1,55 @@
+# pwa_gen with a HALF-INTEGER top: `1/2 -> 1/2 0 0`.
+#
+# The three FINALS carry spins 1/2, 0, 0, which is the shape this fixture
+# exists for:
+#
+#     top(1/2) -> res(1/2) + eta(0)
+#     res(1/2) -> N(1/2)  + pip(0)
+#
+# so every vertex is a spin-1/2 core whose daughters' spins differ by one half
+# (`s = 1/2`, `l = 1` from the parity product -1) — the LS enumeration has to
+# step in halves, the helicity list of the top and of `N` is `[-1/2, +1/2]`,
+# and the projection count is `2 x 2 = 4`, not `2J_top+1 = 2`.
+#
+# MASSES ARE REAL: the top (2.20) sits above the `N + pip + eta` threshold
+# (1.6254) and the resonance (1.20) above `N + pip` (1.0776) — a topology below
+# threshold has no phase space and the mass grid collapses.
+#
+# The LITERAL reading — `res(1/2) -> a(0) + b(0)` — cannot exist: `s = 0` and
+# `|ja - s| = 1/2` is not an integer, so the vertex has NO allowed (l, s)
+# combination.  `tests/test_spin_half.py` pins that refusal by name, because
+# the failure used to surface as `ValueError: need at least one array to stack`
+# from `build_from_groups`.
+amp_model: pwa_gen
+data:
+  dat_order: [N, pip, eta]
+decay:
+  top:
+    - [res, eta]
+  res: [N, pip]
+particle:
+  $top: top
+  $finals: [N, pip, eta]
+  res: [k2]
+  top:
+    J: 1/2
+    P: -1
+    mass: 2.20
+  N:
+    J: 1/2
+    P: -1
+    mass: 0.938
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  k2:
+    J: 1/2
+    P: -1
+    mass: 1.20
+    width: 0.10
+    model: basis
