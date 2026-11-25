@@ -73,7 +73,7 @@ def _group_sum(P, weight, bkg, norm, rs):
         S = float(np.sum(w * (p / norm + b)))
         W = float(np.sum(w))
         Pb = float(np.sum(w * p))
-        if W > 0.0:
+        if abs(W) > 1e-12:            # the kernel rule: |W_g| > eps, sign used
             Q += -W * np.log(S / W)
             dn += W * Pb / (S * norm * norm)
     return float(Q), float(dn)
@@ -241,6 +241,68 @@ def test_grouped_gradients_match_central_differences():
     b.free()
 
 
+def test_a_group_uses_the_SIGN_of_its_total_weight():
+    """`W_g < 0` is COMPUTED: `Q(-w) = -Q(w)` and `dQ/dP(-w) = -dQ/dP(w)`.
+
+    The grouped term is `-W_g·log(S_g/W_g)`, which has no `W_g > 0`
+    restriction: with every weight negative both `W_g` and `S_g` flip, the
+    ratio `S_g/W_g` is still the group's mean pdf, and the term changes sign
+    with the total weight.  MEASURED before the guard was corrected: a
+    uniform-negative group at `rsize = 2` returned `Q = 0` (dropped) where the
+    per-event objective at `rsize = 1` gave `-5.14`.
+    """
+    f, kc = _kc()
+    params, _ = f.build_params(f.initial_values(seed=1))
+    data = _in_grid(kc, 8, seed=6)
+    w = np.array(data["weight"], float)
+    rs = 2
+    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
+    try:
+        Qp, gp, Pp = ref.compute(params, ref.load_data({**data, "weight": w}),
+                                 norm=1.3)
+        Qn, gn, Pn = ref.compute(params, ref.load_data({**data, "weight": -w}),
+                                 norm=1.3)
+        assert Qn != 0.0, "a uniform-negative group was dropped"
+        assert Qn == pytest.approx(-Qp, rel=1e-12), "Q sign symmetry"
+        assert np.allclose(np.asarray(gn["ck"]), -np.asarray(gp["ck"]),
+                           rtol=1e-12), "dck sign symmetry"
+        assert np.allclose(np.asarray(gn["coeff"]), -np.asarray(gp["coeff"]),
+                           rtol=1e-12), "dcoeff sign symmetry"
+        assert np.array_equal(np.asarray(Pp), np.asarray(Pn)), "P is per event"
+    finally:
+        ref.free()
+
+
+def test_a_cancelling_group_is_inert_at_the_epsilon():
+    """A total that only LOOKS zero (1e-17 per event) is inert, not a huge log.
+
+    `W_g != 0` would take `log(S_g/W_g)` of a ratio built from cancellation
+    noise; the guard is an ABSOLUTE epsilon (1e-12), so the group contributes
+    nothing and matches the same sample with the group removed.
+    """
+    f, kc = _kc()
+    params, _ = f.build_params(f.initial_values(seed=1))
+    rs = 2
+    data = _in_grid(kc, 8, seed=6)
+    w = np.full(len(data["weight"]), 1e-17)      # total 2e-17 per group
+    # the assertion is FINITENESS, not a delta: dropping and computing a
+    # 2e-17 group differ by ~4e-17, far below any tolerance.  A drop is
+    # finite; a computed one divides by a 2e-17 total.
+    tiny = {**data, "weight": w}
+    keep = np.arange(rs, len(w))
+    sub = {k: np.asarray(v)[keep] for k, v in tiny.items()}
+    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
+    try:
+        Qa, ga, _ = ref.compute(params, ref.load_data(tiny), norm=1.3)
+        Qb, gb, _ = ref.compute(params, ref.load_data(sub), norm=1.3)
+        assert np.isfinite(Qa), "a 2e-17 group produced inf/NaN"
+        assert Qa == pytest.approx(Qb, rel=0, abs=1e-14)
+        assert np.allclose(np.asarray(ga["ck"]), np.asarray(gb["ck"]),
+                           rtol=0, atol=1e-14)
+    finally:
+        ref.free()
+
+
 # ── gate 4: every registered backend takes the kwarg ───────────────
 
 #: composers take a nested backend spec, not a kernel config, so they are
@@ -291,6 +353,55 @@ def _all_leaf_backends():
     probes = set(backends_for_model("pwa_gen", tag="probe"))
     return [n for n in sorted(backends_for_model("pwa_gen"))
             if n != "default" and n not in COMPOSERS and n not in probes]
+
+
+@pytest.mark.parametrize("rs", [1, 17])
+@pytest.mark.parametrize("name", [n for n in _all_leaf_backends()
+                                 if n != "numpy_flat"] or ["<none>"])
+def test_a_negative_weight_sample_is_the_signed_objective(name, rs):
+    """The SIGN of the weight is used on EVERY leaf, at `rs = 1` AND `rs > 1`.
+
+    `rs = 1` is the per-event NLL `-Σ w·log(pdf)`, which keeps a negative
+    weight; `rs > 1` groups on the TOTAL weight, whose sign enters
+    `-W_g·log(S_g/W_g)`.  Both were guarded `W > 0` in several kernels, so a
+    negative sample was silently dropped — at `rs = 1` for `ampcache`,
+    `ampcache32`, `s0g` and `s0f`'s fused branch (MEASURED: `Q(-w) = 0` where
+    every correct leaf gave `-6.6395575203`), and at `rs > 1` for a
+    uniform-negative group.  The sample here is ALL negative, so every group is,
+    and the comparison is against the reference on the same negated sample.
+    """
+    from _flat_models import tol_for
+    if name == "<none>":
+        pytest.skip("no pwa_gen backend registered in this build")
+    f, kc = _kc()
+    params, _ = f.build_params(f.initial_values(seed=1))
+    base = _in_grid(kc, 64, seed=7)
+    data = _replicate(base, rs) if rs > 1 else base
+    data = {**data, "weight": -np.asarray(data["weight"], float)}
+    tol = max(tol_for(name), 1e-6)          # rs=17 groups are fp32-cached here
+    ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=rs)
+    gpu = create_backend(name, kc, model="pwa_gen", resolution_size=rs)
+    try:
+        Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
+        Qg, gg, Pg = gpu.compute(params, gpu.load_data(data), norm=1.3)
+        assert Qr != 0.0, "the reference dropped a negative sample"
+        assert Qg != 0.0, f"{name} rs={rs} dropped a negative sample"
+        assert np.isfinite(Qr) and np.isfinite(Qg), f"{name} rs={rs} Q"
+        assert _rel(Qg, Qr) <= tol, f"{name} rs={rs} Q"
+        assert _rel(Pg, Pr) <= tol, f"{name} rs={rs} P"
+        assert _rel(gg["ck"], gr["ck"]) <= tol, f"{name} rs={rs} dck"
+        if name in set(backends_for_model("pwa_gen", tag="coeff_pinned")):
+            # a pinned leaf cannot move `coeff`: 0 by contract, on both signs
+            assert np.all(np.asarray(gg["coeff"]) == 0.0), f"{name} dcoeff"
+        else:
+            assert _rel(gg["coeff"], gr["coeff"]) <= tol, \
+                f"{name} rs={rs} dcoeff"
+        assert _dnorm_of(gpu) == pytest.approx(_dnorm_of(ref), abs=0,
+                                               rel=tol), \
+            f"{name} rs={rs} dnorm"
+    finally:
+        ref.free()
+        gpu.free()
 
 
 @pytest.mark.parametrize("name", _all_leaf_backends() or ["<none>"])

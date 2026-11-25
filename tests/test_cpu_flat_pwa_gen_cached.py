@@ -131,7 +131,7 @@ def test_grouped_objective_is_the_group_total_weight_form(cfg):
                              np.zeros(pad)]).reshape(ng, rs)
         W = wg.sum(axis=1)
         S = (wg * (pg / norm + bg)).sum(axis=1)
-        safe = W > 0
+        safe = abs(W) > 1e-12
         expect = -np.sum(W[safe] * np.log(S[safe] / W[safe]))
         assert abs(Q - expect) <= 1e-12 * max(abs(expect), 1.0)
         # ... and it is NOT the per-event log (a Jensen shift)

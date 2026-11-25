@@ -273,6 +273,38 @@ def test_s0cw_zero_weight_group_inert(pwa_small):
         k.free()
 
 
+def test_s0cw_a_negative_group_total_is_computed(pwa_small):
+    """`W_g < 0` is COMPUTED, not dropped: `Q(-w) = -Q(w)`.
+
+    The term is `-W_g·log((Pb_g/norm + Bb_g)/W_g)`, which has no `W_g > 0`
+    restriction: flipping every weight flips `W_g` and the summed pdf, so the
+    ratio is the same mean pdf and the term changes sign with the total.  The
+    guard is `|W_g| > 1e-12` (a numerically-zero total is inert); before it,
+    `W_g > 0` dropped a uniform-negative group entirely.
+    """
+    from tabpwa.cuda._v5_pwa_s0cw import CUDAKernelV5PWAS0CW as KS0CW
+    _cfg, kc, data, phsp, params, _p = pwa_small
+    rs = 10
+    w = np.ones(data["mass"].shape[0])
+    k = _make(KS0CW, kc, resolution_size=rs)
+    h = k.load_data(dict(data, weight=w))
+    hp = k.load_data(phsp)
+    try:
+        norm = float(k.compute(params, hp, norm=None)[0])
+        Qp, gp, _ = k.compute(params, h, norm=norm)
+        Qn, gn, _ = k.compute(params, k.load_data(dict(data, weight=-w)),
+                              norm=norm)
+        assert Qn != 0.0, "a uniform-negative sample was dropped"
+        assert Qn == pytest.approx(-Qp, rel=1e-9), "Q sign symmetry"
+        for key in ("ck", "m0", "g0"):
+            assert np.allclose(np.asarray(gn[key]), -np.asarray(gp[key]),
+                               rtol=1e-9), key
+    finally:
+        h.free()
+        hp.free()
+        k.free()
+
+
 def test_s0cw_deterministic(pwa_small):
     """The same compute twice gives the identical Q/grads (bitwise)."""
     from tabpwa.cuda._v5_pwa_s0cw import CUDAKernelV5PWAS0CW as KS0CW

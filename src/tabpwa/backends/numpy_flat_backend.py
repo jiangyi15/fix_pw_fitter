@@ -54,8 +54,11 @@ class NumpyFlatBackend(ComputeBackend):
     * ``> 1`` — the grouped log-sum, one log per group of consecutive events
       with the group's TOTAL weight, ``Q = -Σ_g W_g·log(S_g/W_g)`` where
       ``S_g = Σ_{e∈g} w_e·(P_e/norm + bkg_e)`` and ``W_g = Σ_{e∈g} w_e``.
-      A zero-weight group is inert; the last group is short when ``ne`` is
-      not a multiple of ``resolution_size``.
+      A group whose total weight is 0 to within 1e-12 is inert; a NEGATIVE
+      total is computed (``S_g`` is negative too for a uniform-sign group, so
+      the ratio is still a pdf), and the weights need not share a sign.  The
+      last group is short when ``ne`` is not a multiple of
+      ``resolution_size``.
 
     ``P`` is the per-event intensity in BOTH modes — grouping changes the
     objective, never the per-event quantity.
@@ -375,8 +378,15 @@ class NumpyFlatBackend(ComputeBackend):
             b_g = np.concatenate([bv, np.zeros(pad)]).reshape(ng, rs)
             W_g = w_g.sum(axis=1)
             S_g = (w_g * (p_g / norm + b_g)).sum(axis=1)
-            safe = W_g > 0.0
-            # a zero-weight group is inert: log() of it is skipped, not -inf
+            # AVAILABLE when the total weight is non-zero against an ABSOLUTE
+            # epsilon (a group whose weights cancel can sum to a few 1e-17 that
+            # is not exactly 0, and `W != 0` would take a log of a meaningless
+            # ratio).  The SIGN of W_g is part of the formula below, so a
+            # negative total is computed rather than dropped, and the weights of
+            # a group need not share a sign — a signed (sWeight) bin is a
+            # legitimate group, and its mean pdf must then come out positive.
+            safe = np.abs(W_g) > 1e-12
+            # a numerically-zero group is inert: log() of it is skipped
             Q = float(-np.sum(np.where(
                 safe,
                 W_g * np.log(np.where(safe, S_g, 1.0)
@@ -446,7 +456,9 @@ class NumpyFlatBackend(ComputeBackend):
                 W_g = w_g.sum(axis=1)
                 S_g = (w_g * (p_g / norm + b_g)).sum(axis=1)
                 Pb_g = (w_g * p_g).sum(axis=1)
-                safe = W_g > 0.0
+                # the SAME mask as Q above: dnorm must be the derivative of the
+                # objective this function returns, for a negative total too
+                safe = np.abs(W_g) > 1e-12
                 self._last_dnorm = float(np.sum(np.where(
                     safe, W_g * Pb_g / (np.where(safe, S_g, 1.0) * norm * norm),
                     0.0)))

@@ -53,33 +53,33 @@ from _flat_grid import CFG_KM
 #: change the kernel it copies, and a kernel is never edited in place.
 SOURCE_SHA256 = {
     "kernels_flat_pwa_gen_s0e.cu":
-        "ff15fc9116676b0fe39ec7891df4a4188e62bf4c616b1f0c5b86b210011d3962",
+        "29ecf5b37490240877b11d464de8df84b7dd95c62ff0999bac3ebea761d5c34e",
     "kernels_flat_pwa_gen_s0e2.cu":
-        "2e93919448341cbeec0f89620a34be2471cd9b0840bec12ab2d6781da341acb4",
+        "8043687a357c70ad053c35d0172e397d409feca14f82e55007593750029baa5e",
     "kernels_flat_pwa_gen_s0e3.cu":
-        "ef881f2330120b249f9594e9aa2fa140fb58d49e352e05de4bb3eeadd5c27116",
+        "479d967a5fc55412d82081019bbccaa44405e01b7dbf4ed904862b4a98007796",
     "kernels_flat_pwa_gen_s0e4.cu":
-        "7d1976c5b1343dc280429b17bbc46373f8b8f0feb3916fe103390c9dfaccf995",
+        "89f7be0181ec9c56461ae568b8ead6d9bbcd88550fd4f474e3817df1751aa22a",
     "kernels_flat_pwa_gen_s0e5.cu":
-        "0abc4f5c3641fc87e38cea2dda37b7a7cd5a7cf6d9f69da4372fe9b497463090",
+        "0a7e20c4d1133e984c89276ba8168157bc1f7bd72507976ca284e93a22b704d1",
     "kernels_flat_pwa_gen_s0c.cu":
-        "527685463c9616d1b233ea8c04f8f7f4680222524710d41f55a42dbf41d64040",
+        "93eb5f8b58bf84420d394c8f98158499d8e00c1fcda36e0fa43b8e668c99add5",
     "kernels_flat_pwa_gen_s0c2.cu":
-        "57e4300fef34d202fb261f86e346a4efa7ad45e2604b6a4a9fa84f2349643dde",
+        "759952f30ab7c26da0aa9e1e386a38db43195240a49e1ffcb2430dc22d674e73",
     "kernels_flat_pwa_gen_s0f.cu":
-        "a108ba867b1ce1375066812c69b3d613293bdd4020dade35545650146d4e7744",
+        "f8e757b06387df98a962211b64c7ac5e155f40069a225bbdf6a4b078655a8e14",
     "kernels_flat_pwa_gen_s0g.cu":
-        "7308ca87a126dfe7b2578b484a7d57d2708d2c2073c15042864771fe491df6a5",
+        "9902b65cc19bc50552fa30af17174ee1f6540f209ed95a6ec16e4b0b13164d2b",
     "kernels_flat_pwa_gen_ampcache.cu":
-        "a2b53fa491f7180f58665b82c0835b1803fead5401514716cc8c165ae9efd69a",
+        "ca9b486141dd5b0c7545255556d4ff61c7b9a2b899b13fc227a789b19a8f9297",
     "kernels_flat_pwa_gen_ampcache32.cu":
-        "3bbbb5ce2afd9f7477e4ccf3b10b692d2d89509dcc7703b6112498c40d7bc8a3",
+        "bbc75ef510c24526794bce7bbeac5e66522f0846b945533c53d3d4288dfe58a7",
     # the parent of `cuda_flat_pwa_gen_fslot` (no row of its own: gen2 predates
     # the rule, see NO_ISOLATION) — a copy may not edit what it copies from
     "kernels_flat_pwa_gen2.cu":
-        "bd8274595645eabba01270bb571f1e19c12dd3370c4cd1701e5eec779009541d",
+        "137391316d581f33ed9e9526bb33c596454716eb73e8c668852eeca5681bfe6f",
     "kernels_flat_pwa_gen_fslot.cu":
-        "66a976995e459f340ad4931f032945d00f5afc69de7f389a7dbba54c5322e24c",
+        "9439109829826849ef16ecda1fc6665d5ba0b8f3531bd8a2594e025752d92595",
 }
 
 #: name -> the source this kernel was copied FROM (``None`` = the family's

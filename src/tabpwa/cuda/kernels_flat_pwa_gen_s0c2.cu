@@ -192,6 +192,17 @@
 #include <cstring>
 #include <cmath>
 
+/* A group is AVAILABLE when its total weight is non-zero — judged against
+ * an ABSOLUTE epsilon, because a group whose weights cancel can sum to a
+ * few 1e-17 that is not exactly 0, and `W != 0` would then take a log of a
+ * meaningless ratio.  The SIGN of W_g is part of the formula
+ * (`-W_g·log(S_g/W_g)`), so a negative total is computed, not dropped, and
+ * the weights of a group need NOT share a sign (a signed sWeight bin is a
+ * legitimate group: its mean pdf must then come out positive). */
+/* The W each guard tests is the GROUP TOTAL (a double), not a tile's
+ * `int W = n_proj * n_wave` that shares the scope in the tile kernels. */
+#define GP_GROUP_EPS 1e-12
+
 using complex = thrust::complex<double>;
 
 #define GSC2_BLOCK        256       /* threads per block                     */
@@ -635,7 +646,7 @@ __global__ void gsc2_grp_nll_kernel(
     for (int g = tid; g < n_groups; g += blockDim.x) {
         double Pb = grpP[g], Bb = grpB[g];
         double w = grpW[g];
-        if (w > 0.0) {              /* a zero-weight group is inert */
+        if (fabs(w) > GP_GROUP_EPS) {              /* a zero-weight group is inert */
             q += -w * log((Pb / norm + Bb) / w);
             dn += w * Pb / (norm * (Pb + Bb * norm));
         }
@@ -667,7 +678,7 @@ __global__ void gsc2_grp_scale_kernel(
      * this and never publishes a scale; this one has to say it too, or
      * every dQ/dP of such a group is NaN. */
     double W = gW[g];
-    double c = (W > 0.0)
+    double c = (fabs(W) > GP_GROUP_EPS)
              ? -W / (Pb + norm * gB[g])
              : 0.0;
     double w = weight[e] * c;

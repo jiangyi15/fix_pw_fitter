@@ -162,6 +162,8 @@
 #include <immintrin.h>
 #include <dlfcn.h>
 
+#define GP_GROUP_EPS 1e-12
+
 /*: the per-group SCALAR arithmetic (S/Pb/W, `scale`, `dqp`) must round the
  *  same way in both builds.  GCC contracts `a*b + c` into an FMA under
  *  `-ffp-contract=fast` (the default), but WHICH scalar loops it contracts
@@ -1493,7 +1495,9 @@ double cpu_flat_pwa_gen_cached_compute(
                     Pb += we * pe;
                     W += we;
                 }
-                const int safe = (W > 0.0);
+                /* a numerically-zero total is inert; a NEGATIVE total is
+                 * computed (its sign is part of -W·log(S/W)) */
+                const int safe = (fabs(W) > GP_GROUP_EPS);
                 if (safe) {
                     Q -= W * log(S / W);
                     Dn += W * Pb / (S * norm * norm);

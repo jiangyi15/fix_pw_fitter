@@ -123,6 +123,15 @@
 #include <cstdio>
 #include <cmath>
 
+/* A group is AVAILABLE when its total weight is non-zero — judged against
+ * an ABSOLUTE epsilon, because a group whose weights cancel can sum to a
+ * few 1e-17 that is not exactly 0, and `W != 0` would then take a log of a
+ * meaningless ratio.  The SIGN of W_g is part of the formula
+ * (`-W_g·log(S_g/W_g)`), so a negative total is computed, not dropped, and
+ * the weights of a group need NOT share a sign (a signed sWeight bin is a
+ * legitimate group: its mean pdf must then come out positive). */
+#define GP_GROUP_EPS 1e-12
+
 using complex = thrust::complex<double>;
 
 // ── Named constants ──
@@ -576,7 +585,7 @@ __global__ void grp_nll_kernel_v5s0cw(
     for (int g = tid; g < n_groups; g += blockDim.x) {
         double Pb = grpP[g], Bb = grpB[g];
         double w = grpW[g];
-        if (w > 0.0) {
+        if (fabs(w) > GP_GROUP_EPS) {
             q += -w * log((Pb / norm + Bb) / w);
             dn += w * Pb / (norm * (Pb + Bb * norm));
         }
@@ -611,7 +620,7 @@ __global__ void grp_scale_kernel_v5s0cw(
      * its group sum is 0 as well, so -W/S is 0/0: the scale must be 0 or
      * every dQ/dP of that group is NaN. */
     double W = gW[g];
-    double c = (W > 0.0)
+    double c = (fabs(W) > GP_GROUP_EPS)
              ? -W / (Pb + norm * gB[g])
              : 0.0;
     double w = weight[e] * c;

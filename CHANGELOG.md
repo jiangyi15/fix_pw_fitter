@@ -267,6 +267,20 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `task_queue.get()`.  One consequence: a NESTED `shard` (a shard worker
   hosting another shard pool, which used to run) is now REFUSED by name, since
   daemonic processes may not start children — use one flat `backends` list.
+- A group whose total weight is NEGATIVE was silently dropped by the grouped
+  log-sum: the guard asked `W_g > 0`, so a uniform-negative group — which is
+  well defined (`S_g/W_g` is still the mean pdf) — contributed nothing, while
+  the per-event objective at `resolution_size = 1` kept it (on an 8-event fixture, `Q = -6.6396` against `0`).  The guard is now `|W_g| > 1e-12`: an absolute epsilon, so a total that
+  only LOOKS zero (1e-17 of cancellation) stays inert instead of taking a log
+  of noise, and the sign of `W_g` enters `-W_g·log(S_g/W_g)` as the formula
+  says (`Q(-w) = -Q(w)`, `dQ/dP(-w) = -dQ/dP(w)`).  The mask covers the
+  division, so no `w/W_g` is ever formed for an inert group.  Weights no longer
+  need to share a sign — a signed (sWeight) bin is a legitimate group, and its
+  mean pdf must then come out positive.  This is the group-TOTAL-weight form:
+  the `pwa_gen` leaves and `cuda_v5_pwa_s0cw`.  The `-Σ log(S_g)` v5 kernels
+  (`cuda_v5_pwa`, `_s0`, `_s0c`, `_s0d`, `cpu_pwa_v5`) are the group-normalised
+  form and are UNCHANGED — a negative group there is `log` of a negative number
+  (NaN), so a signed sample needs a group-total backend.
 - A zero-weight group returned `NaN` gradients on `cuda_flat_pwa_gen_s0c`,
   `cuda_flat_pwa_gen_s0c2` and `cuda_v5_pwa_s0cw` (`dck`, `dm0`, `dg0`, and
   `dcoeff` on the flat pair): the objective declares such a group inert

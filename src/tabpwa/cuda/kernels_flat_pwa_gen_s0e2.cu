@@ -234,6 +234,17 @@
 #include <cstring>
 #include <cmath>
 
+/* A group is AVAILABLE when its total weight is non-zero — judged against
+ * an ABSOLUTE epsilon, because a group whose weights cancel can sum to a
+ * few 1e-17 that is not exactly 0, and `W != 0` would then take a log of a
+ * meaningless ratio.  The SIGN of W_g is part of the formula
+ * (`-W_g·log(S_g/W_g)`), so a negative total is computed, not dropped, and
+ * the weights of a group need NOT share a sign (a signed sWeight bin is a
+ * legitimate group: its mean pdf must then come out positive). */
+/* The W each guard tests is the GROUP TOTAL (a double), not a tile's
+ * `int W = n_proj * n_wave` that shares the scope in the tile kernels. */
+#define GP_GROUP_EPS 1e-12
+
 #define GPS02_BLOCK       256      /* threads per block (multiple of 32) */
 /* Launch bounds: the SECOND parameter is a REGISTER BUDGET choice, not a
  * correctness one.  Measured on sm_120: 5 blocks/SM => <=51 registers, which
@@ -684,7 +695,7 @@ __global__ void GPS02_TILE_BOUNDS gps02_tile_kernel(
                     W += weight[ce0 + e];
                 }
                 if (use_norm) {
-                    if (W > 0.0) {              /* a zero-weight group is inert */
+                    if (fabs(W) > GP_GROUP_EPS) {              /* a zero-weight group is inert */
                         s_sc[g] = -W / S;
                         atomicAdd(Q_acc, -W * log(S / W));
                         atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
@@ -800,7 +811,7 @@ __global__ void GPS02_TILE_BOUNDS gps02_tile_kernel(
         if (tid == 0) {
             const double S = s_tot[0], WP = s_tot[1], W = s_tot[2];
             if (use_norm) {
-                if (W > 0.0) {
+                if (fabs(W) > GP_GROUP_EPS) {
                     atomicAdd(Q_acc, -W * log(S / W));
                     atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
                     s_sc[0] = -W / S;

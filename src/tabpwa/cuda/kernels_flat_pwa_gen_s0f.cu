@@ -62,7 +62,7 @@
  *
  * `n_fix == 0` is the identity permutation and no cache at all, so the kernel
  * executes the parent's code path unchanged — pinned by `np.array_equal`
- * against `cuda_flat_pwa_gen_s0e2` in `tests/test_cuda_flat_pwa_gen_s0f.py`
+ * against `cuda_flat_pwa_gen_s0e2` in `tests/_flat_masked.py`
  * (Q, P, dck, dcoeff, dnorm).
  *
  * ── memory ──────────────────────────────────────────────────────────────
@@ -93,6 +93,17 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+
+/* A group is AVAILABLE when its total weight is non-zero — judged against
+ * an ABSOLUTE epsilon, because a group whose weights cancel can sum to a
+ * few 1e-17 that is not exactly 0, and `W != 0` would then take a log of a
+ * meaningless ratio.  The SIGN of W_g is part of the formula
+ * (`-W_g·log(S_g/W_g)`), so a negative total is computed, not dropped, and
+ * the weights of a group need NOT share a sign (a signed sWeight bin is a
+ * legitimate group: its mean pdf must then come out positive). */
+/* The W each guard tests is the GROUP TOTAL (a double), not a tile's
+ * `int W = n_proj * n_wave` that shares the scope in the tile kernels. */
+#define GP_GROUP_EPS 1e-12
 
 #define GPS0F_BLOCK       256      /* threads per block (multiple of 32) */
 /* Launch bounds: the SECOND parameter is a REGISTER BUDGET choice, not a
@@ -730,7 +741,7 @@ __global__ void GPS0F_TILE_BOUNDS gps0f_tile_kernel(
             for (int e = tid; e < ev; e += nt) {
                 const double wv = weight[e0 + e];
                 if (use_norm) {
-                    if (wv > 0.0) {
+                    if (fabs(wv) > GP_GROUP_EPS) {
                         s_sc[e] = -wv / s_q[e];
                         atomicAdd(Q_acc, -wv * log(s_q[e] / wv));
                         atomicAdd(dnorm_acc, wv * (wv * s_pe[e])
@@ -769,7 +780,7 @@ __global__ void GPS0F_TILE_BOUNDS gps0f_tile_kernel(
                     W += weight[e0 + e];
                 }
                 if (use_norm) {
-                    if (W > 0.0) {
+                    if (fabs(W) > GP_GROUP_EPS) {
                         s_sc[g] = -W / S;
                         atomicAdd(Q_acc, -W * log(S / W));
                         atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
@@ -981,7 +992,7 @@ __global__ void GPS0F_TILE_BOUNDS gps0f_tile_kernel(
                     W += weight[ce0 + e];
                 }
                 if (use_norm) {
-                    if (W > 0.0) {              /* a zero-weight group is inert */
+                    if (fabs(W) > GP_GROUP_EPS) {              /* a zero-weight group is inert */
                         s_sc[g] = -W / S;
                         atomicAdd(Q_acc, -W * log(S / W));
                         atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
@@ -1132,7 +1143,7 @@ __global__ void GPS0F_TILE_BOUNDS gps0f_tile_kernel(
         if (tid == 0) {
             const double S = s_tot[0], WP = s_tot[1], W = s_tot[2];
             if (use_norm) {
-                if (W > 0.0) {
+                if (fabs(W) > GP_GROUP_EPS) {
                     atomicAdd(Q_acc, -W * log(S / W));
                     atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
                     s_sc[0] = -W / S;

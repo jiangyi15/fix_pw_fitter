@@ -147,6 +147,17 @@
 #include <cstring>
 #include <cmath>
 
+/* A group is AVAILABLE when its total weight is non-zero — judged against
+ * an ABSOLUTE epsilon, because a group whose weights cancel can sum to a
+ * few 1e-17 that is not exactly 0, and `W != 0` would then take a log of a
+ * meaningless ratio.  The SIGN of W_g is part of the formula
+ * (`-W_g·log(S_g/W_g)`), so a negative total is computed, not dropped, and
+ * the weights of a group need NOT share a sign (a signed sWeight bin is a
+ * legitimate group: its mean pdf must then come out positive). */
+/* The W each guard tests is the GROUP TOTAL (a double), not a tile's
+ * `int W = n_proj * n_wave` that shares the scope in the tile kernels. */
+#define GP_GROUP_EPS 1e-12
+
 #define GPS0A32_BLOCK       256      /* threads per block (multiple of 32) */
 /* Launch bounds: the SECOND parameter is a REGISTER BUDGET choice, not a
  * correctness one.  The same per-arch reasoning as s0f/s0g applies (a fat
@@ -858,7 +869,7 @@ __global__ void GPS0A32_TILE_BOUNDS gps0a32_tile_kernel(
         if (tid == 0) {
             const double S = s_tot[0], WP = s_tot[1], W = s_tot[2];
             if (use_norm) {
-                if (W > 0.0) {
+                if (fabs(W) > GP_GROUP_EPS) {
                     atomicAdd(Q_acc, -W * log(S / W));
                     atomicAdd(dnorm_acc, W * WP / (S * norm * norm));
                     s_sc[0] = -W / S;
@@ -912,7 +923,7 @@ __global__ void GPS0A32_TILE_BOUNDS gps0a32_tile_kernel(
                 s_q[e] = q;
                 P_dev[ge] = Pe;
                 if (use_norm) {
-                    if (wv > 0.0) {
+                    if (fabs(wv) > GP_GROUP_EPS) {
                         s_sc[e] = -wv / q;
                         atomicAdd(Q_acc, -wv * log(q / wv));
                         atomicAdd(dnorm_acc, wv * (wv * Pe)
@@ -963,7 +974,7 @@ __global__ void GPS0A32_TILE_BOUNDS gps0a32_tile_kernel(
                     W += weight[e0 + e];
                 }
                 if (use_norm) {
-                    if (W > 0.0) {              /* a zero-weight group is inert */
+                    if (fabs(W) > GP_GROUP_EPS) {              /* a zero-weight group is inert */
                         s_sc[g] = -W / S;
                         atomicAdd(Q_acc, -W * log(S / W));
                         atomicAdd(dnorm_acc, W * WP / (S * norm * norm));

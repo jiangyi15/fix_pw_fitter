@@ -653,12 +653,12 @@ per-kernel fixture), or claim the copy is made "under its own new symbol names"
 RENAMING").  Editing such a comment would change the source digest the case-1
 table pins, i.e. it would break the very guard that proves the kernel was not
 touched, so the stale text stays: read it as provenance, not as a rule.
-`kernels_flat_pwa_gen_s0f.cu` still carries it (it cites the deleted
-`tests/test_cuda_flat_pwa_gen_s0f.py`) and is the one to leave alone: its digest
-IS in the case-1 table.  `kernels_flat_pwa_gen.cu` had the same stale text but
-has NO pin (it is the parent, not a copy), so it is corrected — along with
-`kernels_flat_pwa_gen_s0c.cu` / `_s0c2.cu`, whose digest moved for the
-zero-weight repair anyway.
+Every file that carried it has now been corrected as its digest moved anyway
+(`s0c`/`s0c2` with the zero-weight repair, `s0f`/`cache`/`gen2`/`1bw`/`fslot`
+with the group-weight mask, and `kernels_flat_pwa_gen.cu`, which has no pin at
+all — it is the parent, not a copy).  No stale text is left in a frozen kernel;
+`kernels_v5_pwa_s0cw.cu` is edited for the same repair and is pinned by NO
+digest — its contract is gated numerically by `tests/test_pwa_v5_s0cw.py`.
 
 ## Amplitude models
 
@@ -939,6 +939,17 @@ dnorm  = Σ_g W_g·Pb_g/(S_g·norm²)      Pb_g = Σ_{e∈g} w_e·P_e
 ```
 
 `resolution_size = 1` is exactly the per-event NLL `-Σ w·log(P/norm + bkg)`.
+A group is AVAILABLE when `|W_g| > 1e-12` — an ABSOLUTE epsilon, because a
+group whose weights cancel can sum to a few 1e-17 that is not exactly `0` — and
+the mask covers the ratio `S_g/W_g` — the only division by the TOTAL — so a
+numerically-zero total never divides (the scale `-W_g/S_g` divides by the group
+SUM `S_g` instead: `S_g = 0` is a separate degenerate case, ±inf, pre-existing
+and reachable only with `P = 0` and `bkg = 0`).  The SIGN of `W_g` is part of the
+formula, so a negative total is computed rather than dropped (`Q(-w) = -Q(w)`,
+`dQ/dP(-w) = -dQ/dP(w)`), and the weights need not share a sign — a signed
+(sWeight) bin is a legitimate group — but its MEAN PDF must come out positive:
+a group whose `S_g/W_g <= 0` has no log, and the kernels return NaN for it with
+no diagnostic (the reference warns once, through numpy).
 At `> 1` with **group-normalised** weights (Σw = 1 per group) the log argument
 becomes the group's mean pdf — that is a *different* objective from the
 per-event sum (a Jensen shift), not an approximation of it; normalising this
