@@ -418,3 +418,87 @@ def _synth(kc, n, seed, lo=0.6, hi=1.7):
         "weight": 0.5 + r.rand(n),
         "bkg": np.abs(r.randn(n)) * 0.1 + 0.05,
     }
+
+
+def test_a_probe_that_failed_is_not_no_gpu(monkeypatch):
+    """The DEVICE NODE decides what "no CUDA" means, not the probe's failure.
+
+    A probe failure on a box WITH `/dev/nvidia*` must raise: reading it as "no
+    GPU" silently picks a CPU backend, which is how a driver/upgrade mismatch
+    or a container started without `--gpus` used to downshift a fit.  The same
+    failure with no device node IS the fact "CPU-only".  The probe also carries
+    no deadline — asserted on the call itself, because a fake `run` that ignores
+    kwargs would let `timeout=5` survive the test.
+    """
+    from tabpwa.backends import auto_backend as ab
+
+    seen = {}
+
+    def missing(*a, **kw):
+        seen.update(kw)
+        raise FileNotFoundError("nvidia-smi")
+
+    class Dead:
+        returncode = 9
+        stdout = ""
+
+    # (1) device node + missing binary -> raise, and no deadline was passed
+    ab.reset_cuda_state()
+    monkeypatch.setattr(ab, "gpu_device_present", lambda: True)
+    monkeypatch.setattr(ab.subprocess, "run", missing)
+    try:
+        with pytest.raises(RuntimeError, match="probe failed"):
+            ab.cuda_state()
+        assert "timeout" not in seen, seen
+    finally:
+        monkeypatch.undo()
+        ab.reset_cuda_state()
+
+    # (2) device node + a driver that will not answer (non-zero exit) -> raise
+    monkeypatch.setattr(ab, "gpu_device_present", lambda: True)
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: Dead())
+    try:
+        with pytest.raises(RuntimeError, match="probe failed"):
+            ab.cuda_state()
+    finally:
+        monkeypatch.undo()
+        ab.reset_cuda_state()
+
+    # (3) no device node: the same failures are the FACT "no CUDA"
+    monkeypatch.setattr(ab, "gpu_device_present", lambda: False)
+    monkeypatch.setattr(ab.subprocess, "run", missing)
+    try:
+        assert ab.cuda_state()["has_cuda"] is False
+    finally:
+        monkeypatch.undo()
+        ab.reset_cuda_state()
+
+    monkeypatch.setattr(ab, "gpu_device_present", lambda: False)
+    monkeypatch.setattr(ab.subprocess, "run", lambda *a, **k: Dead())
+    try:
+        assert ab.cuda_state()["has_cuda"] is False
+    finally:
+        monkeypatch.undo()
+        ab.reset_cuda_state()
+
+
+def test_a_hidden_device_is_never_a_gpu(monkeypatch):
+    """`CUDA_VISIBLE_DEVICES=""` is answered BEFORE any probe.
+
+    The runtime cannot use a device the caller hid, so `auto` must not pick a
+    CUDA backend — and the probe is not even consulted (a working `nvidia-smi`
+    on a GPU box must not override the caller's request).
+    """
+    from tabpwa.backends import auto_backend as ab
+
+    probed = []
+    monkeypatch.setattr(ab.subprocess, "run",
+                        lambda *a, **k: probed.append(a) or None)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    ab.reset_cuda_state()
+    try:
+        assert ab.cuda_state()["has_cuda"] is False
+        assert probed == [], "the probe must not run when devices are hidden"
+    finally:
+        monkeypatch.undo()
+        ab.reset_cuda_state()

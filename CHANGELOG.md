@@ -316,6 +316,19 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   reported as that command's failure, and the pool then refuses further work:
   the failed worker's later replies were still queued, so reusing it could
   return the previous call's numbers.
+- `backend: auto` could silently pick a CPU backend for a GPU box: its
+  `nvidia-smi` probe turned ANY failure into "no CUDA", including a timeout.
+  The DEVICE NODE now decides: if `/dev/nvidia*` exists the box has a GPU, so
+  every probe failure (missing or non-executable `nvidia-smi`, a non-zero exit
+  from a driver mismatch or a container started without `--gpus`, no usable
+  output) raises with the cause instead of downshifting the fit; with no
+  device node the same failure is simply a CPU-only box.  The probe has no
+  deadline of its own.  `cuda/build`'s arch probe had the same fault — a slow
+  `nvidia-smi` fell through to nvcc's default SM instead of the installed GPU
+  — and now shares ONE probe with the build key, so a binary built for one SM
+  can no longer be accepted under `auto:unknown`.  A device that reports
+  several compute capabilities targets the first (a newline from a multi-device
+  query used to land inside the `-arch` flag).
 - `fd_hess` divided a Hessian COLUMN by the step of its ROW
   (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
   space="bounded")` was wrong on the off-diagonals once the bounded values had

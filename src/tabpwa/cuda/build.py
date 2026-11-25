@@ -275,6 +275,71 @@ def set_tag(tag):
     _tag_cache.clear()
 
 
+def cuda_hidden():
+    """Whether ``CUDA_VISIBLE_DEVICES`` explicitly hides every device.
+
+    Empty (or the legacy ``-1``) means the CUDA runtime sees no device, so a
+    caller who asked for CPU-only must not be told the box has a GPU.
+    """
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    return vis is not None and vis.strip() in ("", "-1")
+
+
+def gpu_device_present():
+    """Whether a device node says a GPU is here, whatever a probe reports.
+
+    This is the discriminator between "no GPU" and "a probe that failed": the
+    probe is not the fact, the device node is.  Shared with
+    ``backends.auto_backend.cuda_state`` so the two probes never disagree —
+    including an EXPLICIT hide, which answers "no device" before anything is
+    probed.
+    """
+    import glob
+    if cuda_hidden():
+        return False
+    return bool(glob.glob("/dev/nvidia[0-9]*"))
+
+
+def _gpu_compute_caps():
+    """``nvidia-smi``'s compute capabilities, or ``None`` when there is no GPU.
+
+    NO deadline of its own: a probe that did not answer must not be read as
+    "no GPU", because that silently builds for nvcc's default archs — and in
+    :func:`_arch_signature` it would let a native binary look interchangeable
+    with a fat one.  A MISSING ``nvidia-smi`` (or a failed query) with device
+    nodes present RAISES, naming ``--arch``; with no device nodes it is a fact
+    about the box (CPU-only) and ``None`` is the right answer.
+
+    One entry per device, in ``nvidia-smi`` order; the FIRST is the device the
+    build targets (and the one the key records).
+    """
+    try:
+        r = subprocess.run(
+            ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
+            capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        if gpu_device_present():
+            raise RuntimeError(
+                "nvidia-smi is missing but /dev/nvidia* exists: cannot tell "
+                "which SM to build for; pass --arch (or set TABPWA_ARCH)")
+        return None
+    except Exception as exc:
+        if gpu_device_present():
+            raise RuntimeError(
+                f"the GPU arch probe failed ({type(exc).__name__}: {exc}); "
+                f"pass --arch (or set TABPWA_ARCH) instead of guessing") from exc
+        return None
+    caps = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    if r.returncode != 0 or not caps:
+        if gpu_device_present():
+            raise RuntimeError(
+                f"`nvidia-smi --query-gpu=compute_cap` returned "
+                f"{r.returncode} with no usable output; pass --arch (or set "
+                f"TABPWA_ARCH) instead of guessing")
+        return None
+    return caps
+
+
 def _arch_flags(nvcc):
     """Auto-detect GPU compute capability from nvidia-smi.
 
@@ -288,18 +353,12 @@ def _arch_flags(nvcc):
             sm = sm.strip()
             flags.extend(['-gencode', f'arch=compute_{sm[3:]},{_code(sm)}'])
         return flags
-    try:
-        r = subprocess.run(
-            ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
-            capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            ver = r.stdout.strip()
-            sm = f'sm_{ver.replace(".", "")}'
-            if _ptx_enabled():
-                return [f'-gencode', f'arch=compute_{sm[3:]},{_code(sm)}']
-            return [f'-arch={sm}']
-    except Exception:
-        pass
+    caps = _gpu_compute_caps()
+    if caps:
+        sm = 'sm_' + caps[0].replace('.', '')
+        if _ptx_enabled():
+            return [f'-gencode', f'arch=compute_{sm[3:]},{_code(sm)}']
+        return [f'-arch={sm}']
     r = subprocess.run([nvcc, '--version'], capture_output=True, text=True)
     m = re.search(r'release (\d+\.\d+)', r.stdout)
     cuda_ver = float(m.group(1)) if m else 0
@@ -426,14 +485,12 @@ def _arch_signature():
     if _override_arch:
         return "arch:" + ",".join(
             s.strip() for s in _override_arch.split(",") if s.strip())
-    try:
-        r = subprocess.run(
-            ['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
-            capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            return "auto:" + r.stdout.strip().splitlines()[0].strip()
-    except Exception:
-        pass
+    # the SAME probe (and the same failure policy) the flags use: a key that
+    # says "unknown" for a device the flags DID target would accept a binary
+    # built for another SM
+    caps = _gpu_compute_caps()
+    if caps:
+        return "auto:" + caps[0]
     return "auto:unknown"
 
 

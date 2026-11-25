@@ -18,7 +18,8 @@ import subprocess
 
 import numpy as np
 
-from tabpwa.cuda.build import find_nvcc
+from tabpwa.cuda.build import (cuda_hidden, find_nvcc,
+                               gpu_device_present)
 
 from .core import (ComputeBackend, backends_for_model, create_backend,
                    register_backend)
@@ -71,24 +72,49 @@ def cuda_state():
     """Cache one ``nvidia-smi`` probe plus the nvcc lookup.
 
     Returns ``dict(has_cuda, free_bytes, total_bytes, cc, smem_optin_bytes)``.
-    Any failure of the probe (no binary, non-zero exit, timeout, unusable
-    output) or a missing nvcc gives ``has_cuda=False`` with the rest ``None``.
-    Never raises; cached per process (see :func:`reset_cuda_state`).
+    The DISCRIMINATOR is the device node, not the probe: with ``/dev/nvidia*``
+    present this box HAS a GPU, so EVERY probe failure (missing or
+    non-executable ``nvidia-smi``, a non-zero exit, no usable output, an
+    exception) RAISES with the cause — reading it as "no GPU" would silently
+    pick a CPU backend for a GPU box, which is how a post-update driver
+    mismatch or a container started without ``--gpus`` used to downshift a fit.
+    With no device node the failure IS a fact (CPU-only) and gives
+    ``has_cuda=False`` with the rest ``None``.
+
+    The probe carries no deadline of its own: the duration of a probe is not
+    something this package may assume.  A raised probe is NOT cached (a retry
+    re-probes); a successful or fact-determined answer is cached per process
+    (see :func:`reset_cuda_state`).
     """
     global _state
     if _state is not None:
         return _state
     empty = dict(has_cuda=False, free_bytes=None, total_bytes=None, cc=None,
                  smem_optin_bytes=None)
+    if cuda_hidden():
+        # the process cannot see a device, whatever the box has: do not probe,
+        # and do not let `auto` pick a CUDA backend the runtime would refuse
+        _state = empty
+        return _state
+    failure = None
+    out = None
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=" + _QUERY,
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5, check=False)
-    except Exception:
-        _state = empty
-        return _state
-    if out.returncode != 0 or not out.stdout.strip():
+            capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        failure = "nvidia-smi is missing"
+    except Exception as exc:                  # a probe that did not answer
+        failure = f"{type(exc).__name__}: {exc}"
+    if failure is None and (out.returncode != 0 or not out.stdout.strip()):
+        failure = f"nvidia-smi exited {out.returncode} with no usable output"
+    if failure is not None:
+        if gpu_device_present():
+            raise RuntimeError(
+                f"the GPU probe failed ({failure}) although a GPU device node "
+                f"exists; `backend: auto` would otherwise choose a CPU backend "
+                f"for a GPU box — set the backend explicitly, or retry")
         _state = empty
         return _state
     try:
