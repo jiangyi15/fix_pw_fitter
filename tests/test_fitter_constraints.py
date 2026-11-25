@@ -530,16 +530,28 @@ def test_the_bounded_matrix_lives_in_its_own_file(tmp_path, monkeypatch):
 
     fitter = Fitter(CONFIG_FILE, backend="numpy")
     fitter.apply_constrains()
+    # N is NOT part of this claim: the 2N gradient sweep at the fixture's 147
+    # free parameters costs 12.4 s (MEASURED) and at three it costs 0.08 s — on
+    # the same config, sample and files, with the frames and the round trip
+    # unchanged.  The first three slots stay free; `name` is the third.
+    names = list(fitter.cm.var_registry.flat_names)
+    resolved = fitter.cm.from_flat(fitter.initial_values(seed=42))
+    fitter.cm.set_fixed({nm: float(resolved[nm]) for nm in names[3:]})
     x0 = fitter.initial_values(seed=42)
     n = len(x0)
-    name = fitter.cm.var_registry.flat_names[2]
+    name = names[2]
     y_c = float(fitter.cm.from_flat(x0)[name])
     fitter.set_range(name, y_c - 0.5, y_c + 0.5)
     x0 = x0.copy()
-    x0[fitter.cm.var_registry.flat_names.index(name)] = 0.0   # branch centre
+    x0[2] = 0.0                                             # branch centre
     # the bounded matrix is computed from the NLL, so a (tiny) sample is needed
-    fitter.set_phsp(fitter.generate_phsp(20, seed=1))
-    fitter.set_data(fitter.generate_toy(x0, 15, seed=2))
+    # — but not a GENERATED one: `generate_toy` on this amplitude runs at 0.01 %
+    # efficiency (110 k proposals for 15 events, MEASURED 12 s), while a slice
+    # of the phase-space sample is the same kind of buffer and costs nothing.
+    phsp = fitter.generate_phsp(35, seed=1)
+    fitter.set_phsp(phsp)
+    fitter.set_data({k: (v[:15] if hasattr(v, "__getitem__") else v)
+                     for k, v in phsp.items()})
 
     res = FitResult.from_x(x0)
     res.hess_inv = np.eye(n) * 0.2

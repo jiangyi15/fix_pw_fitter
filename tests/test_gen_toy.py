@@ -570,7 +570,11 @@ def test_the_td_ceiling_is_raised_not_fixed():
     from tabpwa.toy_generator import toy_generate
 
     f = _fitter(CFG_TD, "numpy")
-    ev = toy_generate(f, 300, seed=3, compute_batch=100, p_max_margin=1.0,
+    # 40 accepted, not 300: at this amplitude's 0.09 % efficiency that is 452
+    # proposal batches, i.e. the "later batch above the calibration max" is
+    # exercised many times over, while the accepted count only buys time
+    # (MEASURED: 300 -> 42.5 s, 40 -> 7.2 s, same p_max).
+    ev = toy_generate(f, 40, seed=3, compute_batch=100, p_max_margin=1.0,
                       progress=False)
     assert ev["p_max"] >= float(ev["P"].max()) * (1 - 1e-12)
     with pytest.raises(ValueError, match="p_max_margin"):
