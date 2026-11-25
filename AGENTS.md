@@ -653,8 +653,12 @@ per-kernel fixture), or claim the copy is made "under its own new symbol names"
 RENAMING").  Editing such a comment would change the source digest the case-1
 table pins, i.e. it would break the very guard that proves the kernel was not
 touched, so the stale text stays: read it as provenance, not as a rule.
-(`kernels_flat_pwa_gen.cu`, `kernels_flat_pwa_gen_s0c.cu` and
-`kernels_flat_pwa_gen_s0c2.cu` still carry it.)
+`kernels_flat_pwa_gen_s0f.cu` still carries it (it cites the deleted
+`tests/test_cuda_flat_pwa_gen_s0f.py`) and is the one to leave alone: its digest
+IS in the case-1 table.  `kernels_flat_pwa_gen.cu` had the same stale text but
+has NO pin (it is the parent, not a copy), so it is corrected — along with
+`kernels_flat_pwa_gen_s0c.cu` / `_s0c2.cu`, whose digest moved for the
+zero-weight repair anyway.
 
 ## Amplitude models
 

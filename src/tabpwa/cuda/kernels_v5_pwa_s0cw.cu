@@ -607,7 +607,13 @@ __global__ void grp_scale_kernel_v5s0cw(
     int e = idx / n_proj;
     int g = e / rsize;
     double Pb = gP[g];
-    double c = -gW[g] / (Pb + norm * gB[g]);
+    /* W_g = 0 is INERT (this kernel's own nll branch above says so), and
+     * its group sum is 0 as well, so -W/S is 0/0: the scale must be 0 or
+     * every dQ/dP of that group is NaN. */
+    double W = gW[g];
+    double c = (W > 0.0)
+             ? -W / (Pb + norm * gB[g])
+             : 0.0;
     double w = weight[e] * c;
     dar[idx] *= w;
     dai[idx] *= w;

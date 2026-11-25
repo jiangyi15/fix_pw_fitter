@@ -2,9 +2,13 @@
  * cuda_flat_pwa_gen_s0c — cuda_v5_pwa_s0c's COMPUTE on the flat `pwa_gen`
  * config, with the fill replaced.
  *
- * Case-1 copy (kernel policy §1): own `.cu`, own `.so`, own symbols, own
- * wrapper.  `kernels_v5_pwa_s0c.cu`, `kernels_v4_pwa_s0c.cu`, every other
- * `s0*` kernel and `kernels_flat_pwa_gen{2,_1bw,_s0e}.cu` stay byte-identical.
+ * Case-1 copy (kernel policy §1): own `.cu`, own `.so`, own wrapper — and a
+ * copy is made WITHOUT RENAMING, so its identifiers are its parent's.  The
+ * `gsc_` prefix here is HISTORY (it predates that rule), not a convention: the
+ * kernels live in separate `.so`s loaded `RTLD_LOCAL`, so an identical symbol
+ * name in another library cannot interpose.  `kernels_v5_pwa_s0c.cu`,
+ * `kernels_v4_pwa_s0c.cu`, every other `s0*` kernel and
+ * `kernels_flat_pwa_gen{2,_1bw,_s0e}.cu` stay byte-identical.
  *
  * ── why s0c's compute and not a new one ─────────────────────────────────
  *
@@ -598,7 +602,14 @@ __global__ void gsc_grp_scale_kernel(
     int e = idx / n_proj;
     int g = e / rsize;
     double Pb = gP[g];
-    double c = -gW[g] / (Pb + norm * gB[g]);
+    /* W_g = 0 is INERT (the objective's own rule): the group sum is
+     * 0 as well (every w is 0), so -W/S is 0/0.  The nll kernel guards
+     * this and never publishes a scale; this one has to say it too, or
+     * every dQ/dP of such a group is NaN. */
+    double W = gW[g];
+    double c = (W > 0.0)
+             ? -W / (Pb + norm * gB[g])
+             : 0.0;
     double w = weight[e] * c;
     dar[idx] *= w;
     dai[idx] *= w;

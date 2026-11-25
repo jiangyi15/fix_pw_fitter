@@ -63,9 +63,12 @@
  * buffers needs it, the fused launcher falls back to the three separate
  * chunked launches, exactly as s0c runs them.
  *
- * Case-1 copy (kernel policy §1): own `.cu`, own `.so`, own symbols, own
- * wrapper.  `kernels_flat_pwa_gen_s0c.cu` / `_flat_pwa_gen_s0c.py` and every
- * `s0*` / `s0e*` file stay byte-identical.
+ * Case-1 copy (kernel policy §1): own `.cu`, own `.so`, own wrapper — the rule is
+ * that a copy is made WITHOUT RENAMING; THIS copy PREDATES it, so its `gsc2_`
+ * identifiers are HISTORY, not a convention (separate `.so`s, `RTLD_LOCAL`).  `kernels_flat_pwa_gen_s0c.cu` /
+ * `_flat_pwa_gen_s0c.py` and every `s0*` / `s0e*` file stay byte-identical.
+ * Its contract is gated in `tests/test_flat_dedup.py` (the fused-reduction bit
+ * parity against `s0c`) and `tests/_flat_masked.py` is `s0f`/`s0g`'s.
  *
  * ── why s0c's compute and not a new one ─────────────────────────────────
  *
@@ -659,7 +662,14 @@ __global__ void gsc2_grp_scale_kernel(
     int e = idx / n_proj;
     int g = e / rsize;
     double Pb = gP[g];
-    double c = -gW[g] / (Pb + norm * gB[g]);
+    /* W_g = 0 is INERT (the objective's own rule): the group sum is
+     * 0 as well (every w is 0), so -W/S is 0/0.  The nll kernel guards
+     * this and never publishes a scale; this one has to say it too, or
+     * every dQ/dP of such a group is NaN. */
+    double W = gW[g];
+    double c = (W > 0.0)
+             ? -W / (Pb + norm * gB[g])
+             : 0.0;
     double w = weight[e] * c;
     dar[idx] *= w;
     dai[idx] *= w;

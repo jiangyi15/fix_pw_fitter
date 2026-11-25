@@ -241,24 +241,6 @@ def test_grouped_gradients_match_central_differences():
     b.free()
 
 
-def test_zero_weight_group_is_inert():
-    """A fully zero-weight group must contribute neither Q nor a gradient."""
-    f, kc = _kc()
-    x = f.initial_values(seed=1)
-    params, _ = f.build_params(x)
-    data = _replicate(_in_grid(kc, 16, seed=6), 2)
-    killed = np.zeros_like(data["weight"])
-    killed[:2] = 0.0                              # zero out group 0 entirely
-    a = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=2)
-    Qa, _ga, _Pa = a.compute(params, a.load_data({**data, "weight": killed}),
-                             norm=1.3)
-    keep = np.concatenate([np.arange(0, 0), np.arange(2, len(killed))])
-    sub = {k: np.asarray(v)[keep] for k, v in {**data, "weight": killed}.items()}
-    Qb, _gb, _Pb = a.compute(params, a.load_data(sub), norm=1.3)
-    assert Qa == pytest.approx(Qb, rel=1e-12)
-    a.free()
-
-
 # ── gate 4: every registered backend takes the kwarg ───────────────
 
 #: composers take a nested backend spec, not a kernel config, so they are
@@ -296,6 +278,80 @@ def _pwa_gen_backends():
     return [n for n in names
             if n != "default" and n not in COMPOSERS and n not in pinned
             and n not in probes]
+
+
+def _all_leaf_backends():
+    """Every real `pwa_gen` leaf — INCLUDING the pinned-coefficient ones.
+
+    The inert-group contract is not the free-coefficient one: a pinned leaf
+    returns `dcoeff == 0` by contract on both sides of the comparison below, so
+    it can (and does) pass.  `_pwa_gen_backends()` subtracts them for the FD
+    sweeps, which is where that exclusion belongs.
+    """
+    probes = set(backends_for_model("pwa_gen", tag="probe"))
+    return [n for n in sorted(backends_for_model("pwa_gen"))
+            if n != "default" and n not in COMPOSERS and n not in probes]
+
+
+@pytest.mark.parametrize("name", _all_leaf_backends() or ["<none>"])
+def test_a_zero_weight_group_is_inert_on_every_leaf(name):
+    """``W_g = 0``: no log, NO division, no gradient — and no NaN, on any leaf.
+
+    ``dQ/dP_e = -(W_g/S_g)·(w_e/norm)`` is where a zero-weight group would
+    blow up if it were written as ``w_e/W_g``; every weight-total kernel has
+    the `W > 0` branch instead (``gscale[g] = 0``), and the reference uses
+    ``np.where(safe, …)``.  Nothing exercised it: the old gate here compared
+    ``Q`` on ``numpy_flat`` alone, and a leaf returning NaN in the GRADIENT
+    blocks — the quantity that would carry the division — was never run.
+
+    The comparison is the same leaf on the same events with the group REMOVED:
+    an inert group adds exact zeros, so ``Q``, ``P`` on the surviving rows,
+    every gradient block and ``dnorm`` must agree to the leaf's own
+    reproducibility (CUDA accumulates ``Q``/``dnorm`` with ``atomicAdd``, so
+    1e-12 rather than bit equality).
+    """
+    if name == "<none>":
+        pytest.skip("no pwa_gen backend registered in this build")
+    f, kc = _kc()
+    params, _ = f.build_params(f.initial_values(seed=1))
+    rs = 2
+    data = _replicate(_in_grid(kc, 8, seed=6), rs)      # 4 groups of 2
+    w = np.array(data["weight"], float).copy()
+    w[:rs] = 0.0                                       # group 0 fully inert
+    killed = {**data, "weight": w}
+    keep = np.arange(rs, len(w))
+    trimmed = {k: np.asarray(v)[keep] for k, v in killed.items()}
+
+    a = create_backend(name, kc, model="pwa_gen", resolution_size=rs)
+    b = create_backend(name, kc, model="pwa_gen", resolution_size=rs)
+    try:
+        Qa, ga, Pa = a.compute(params, a.load_data(killed), norm=1.3)
+        Qb, gb, Pb = b.compute(params, b.load_data(trimmed), norm=1.3)
+        assert np.isfinite(Qa) and np.isfinite(Qb), f"{name}: Q not finite"
+        for label, g in (("with the inert group", ga),
+                         ("group removed", gb)):
+            for key, val in g.items():
+                if val is not None:
+                    assert np.all(np.isfinite(np.asarray(val))), \
+                        f"{name}: d{key} not finite {label}"
+        assert _dnorm_of(a) is not None and _dnorm_of(b) is not None, \
+            f"{name}: no _last_dnorm to check"
+        assert np.isfinite(_dnorm_of(a)) and np.isfinite(_dnorm_of(b)), \
+            f"{name}: dnorm not finite"
+        assert Qa == pytest.approx(Qb, rel=1e-12), f"{name}: Q"
+        assert _dnorm_of(a) == pytest.approx(_dnorm_of(b), rel=1e-12), \
+            f"{name}: dnorm"
+        # per-event P is per event: the surviving rows match, nothing shifted
+        from _flat_models import tol_for
+        assert np.allclose(np.asarray(Pa)[keep], np.asarray(Pb),
+                           rtol=tol_for(name), atol=1e-15), f"{name}: P"
+        for key in ("ck", "coeff"):
+            if key not in ga or ga[key] is None:
+                continue
+            assert _rel(ga[key], gb[key]) <= 1e-12, f"{name}: d{key}"
+    finally:
+        a.free()
+        b.free()
 
 
 def test_every_pwa_gen_backend_accepts_resolution_size():

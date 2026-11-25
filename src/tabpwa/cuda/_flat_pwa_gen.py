@@ -1,7 +1,8 @@
 """``cuda_flat_pwa_gen`` — the flat ``pwa_gen`` config on the GPU.
 
-Case-1 copy: own ``.cu``, own ``.so``, own wrapper, own symbols
-(``cuda_*_flat_pwa_gen``).  Nothing is shared with another kernel.
+The flat family's ORIGINAL (``cuda_*_flat_pwa_gen``): ``gen2``, ``_1bw``,
+``_s0e*``, ``cache`` and ``fslot`` are case-1 copies of it, each its own
+``.cu``/``.so``/wrapper.
 
 It consumes the arrays emitted by
 :func:`tabpwa.pwa_gen_config.build_from_groups` **as emitted** — the full,

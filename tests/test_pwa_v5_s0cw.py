@@ -249,6 +249,25 @@ def test_s0cw_zero_weight_group_inert(pwa_small):
                                               + norm * Bb_g[live]))))
         assert dn == pytest.approx(dn_ref, rel=1e-8)
         assert np.isfinite(Q) and np.isfinite(dn)
+        # the SCALE kernel multiplies dQ/dP by -W_g/(group sum); for W_g = 0
+        # that is 0/0, so the gradients are where a missing guard shows
+        # (MEASURED before it: Q/dnorm finite, dck/m0/g0 all NaN).  The same
+        # kernel on the same events with the inert group REMOVED must agree.
+        keep = np.arange(resolution_size, ne)
+        d2 = {k2: np.asarray(v)[keep] for k2, v in data_w.items()}
+        k2 = _make(KS0CW, kc, resolution_size=resolution_size)
+        h2 = k2.load_data(d2)
+        try:
+            Q2, g2, _ = k2.compute(params, h2, norm=norm)
+            assert Q2 == pytest.approx(Q, rel=1e-12)
+            for key in ("ck", "m0", "g0"):
+                assert np.all(np.isfinite(np.asarray(_g[key]))), \
+                    f"d{key} not finite with the inert group"
+                assert np.allclose(np.asarray(_g[key]), np.asarray(g2[key]),
+                                   rtol=1e-12, atol=0), f"d{key}"
+        finally:
+            h2.free()
+            k2.free()
     finally:
         h.free(); hp.free()
         k.free()

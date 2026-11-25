@@ -63,9 +63,9 @@ SOURCE_SHA256 = {
     "kernels_flat_pwa_gen_s0e5.cu":
         "0abc4f5c3641fc87e38cea2dda37b7a7cd5a7cf6d9f69da4372fe9b497463090",
     "kernels_flat_pwa_gen_s0c.cu":
-        "a16cabd68ca8bf6b8c6cd9535125e6aec2b061a736fbf619634453d67f30a192",
+        "527685463c9616d1b233ea8c04f8f7f4680222524710d41f55a42dbf41d64040",
     "kernels_flat_pwa_gen_s0c2.cu":
-        "a406a25868e3429796a30845578743e03e4ee45df52c422e18d6cc21a18e68b3",
+        "57e4300fef34d202fb261f86e346a4efa7ad45e2604b6a4a9fa84f2349643dde",
     "kernels_flat_pwa_gen_s0f.cu":
         "a108ba867b1ce1375066812c69b3d613293bdd4020dade35545650146d4e7744",
     "kernels_flat_pwa_gen_s0g.cu":

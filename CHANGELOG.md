@@ -267,6 +267,19 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `task_queue.get()`.  One consequence: a NESTED `shard` (a shard worker
   hosting another shard pool, which used to run) is now REFUSED by name, since
   daemonic processes may not start children — use one flat `backends` list.
+- A zero-weight group returned `NaN` gradients on `cuda_flat_pwa_gen_s0c`,
+  `cuda_flat_pwa_gen_s0c2` and `cuda_v5_pwa_s0cw` (`dck`, `dm0`, `dg0`, and
+  `dcoeff` on the flat pair): the objective declares such a group inert
+  (`W_g = 0` contributes no log, no gradient), and the NLL kernel skipped it —
+  but the group-scale kernel divided `-W_g` by the group sum, which is 0 as
+  well, so `0/0` was multiplied into every `dQ/dP` of that group (`dck` came
+  back all-NaN).  Both kernels now publish a scale of 0 for a zero-weight
+  group, exactly as their siblings already did.  Nothing changes for a group
+  with positive weight (measured bit-identical on `Q`/`P`/every gradient/
+  `dnorm`), and `s0c`/`s0c2` remain bit-identical to each other.  The
+  `cuda_v5_pwa` / `_s0` / `_s0c` / `_s0d` siblings keep their own objective —
+  `Q = -Σ log(pdf)` with no group weight — so they have no such division and
+  are unchanged.
 - `fd_hess` divided a Hessian COLUMN by the step of its ROW
   (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
   space="bounded")` was wrong on the off-diagonals once the bounded values had
