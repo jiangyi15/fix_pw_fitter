@@ -156,8 +156,26 @@ def _reap_all(procs):
             pass
 
 
+_POSIX = os.name == "posix"
+
+
 def _pid_alive(pid):
-    """Whether *pid* names a live process (a ZOMBIE still answers here)."""
+    """Whether *pid* names a live process (a ZOMBIE still answers here).
+
+    POSIX ONLY, deliberately: on Windows ``os.kill(pid, 0)`` is
+    ``TerminateProcess``, so this probe would KILL the driver instead of asking
+    about it.  Off POSIX it answers "alive" and the parent watchdog is NOT
+    IMPLEMENTED: Windows never reparents a child, so ``getppid()`` is frozen at
+    creation and cannot see a dead parent either.  (The shard backend is POSIX
+    in practice — as are the kernels it shards.)
+
+    It answers about a NUMBER, not an identity: a driver pid recycled before the
+    next idle slice would keep a worker waiting until that pid is released.
+    The error is in the conservative direction — a DELAYED exit, never a
+    premature one.
+    """
+    if not _POSIX:
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

@@ -173,6 +173,28 @@ def test_spawn_re_executes_the_calling_program_so_it_must_be_guarded(tmp_path):
             or "shard worker 0 died" in r.stderr), r.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="os.kill(pid, 0) is POSIX-only")
+def test_the_liveness_probe_answers_about_a_pid_and_kills_nothing():
+    """`_pid_alive` asks, it does not signal.
+
+    Off POSIX the helper answers "alive" WITHOUT probing, because there
+    `os.kill(pid, 0)` is `TerminateProcess` (it would kill the driver) — and
+    the parent watchdog is not implemented there at all, since Windows never
+    reparents and `getppid()` is frozen.  This gate pins the POSIX semantics
+    only: a live pid reads alive, a REAPED child reads gone, and the caller
+    still exists afterwards.  (That signal 0 never signals cannot be observed;
+    the non-POSIX refusal is a branch this box cannot execute.)
+    """
+    from tabpwa.backends.shard_backend import _pid_alive
+
+    assert _pid_alive(os.getpid()) is True
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    pid = child.pid
+    child.wait()
+    assert _pid_alive(os.getpid()) is True      # still here: nothing signalled
+    assert _pid_alive(pid) is False             # reaped: ESRCH
+
+
 def test_two_datasets_in_one_pool_do_not_cross():
     """Two datasets, two handles: each compute gets its OWN dataset back.
 
@@ -289,8 +311,11 @@ def test_a_worker_does_not_outlive_a_SIGKILLed_driver(tmp_path, method):
             be.compute(params, h, norm=None)
             with open({str(pids_file)!r}, "w") as fh:
                 fh.write(" ".join(str(p.pid) for p in be._procs))
-            from multiprocessing import forkserver as _fs
-            fs_pid = _fs._forkserver._forkserver_pid
+            try:                      # a private CPython handle; cleanup only
+                from multiprocessing import forkserver as _fs
+                fs_pid = _fs._forkserver._forkserver_pid
+            except Exception:
+                fs_pid = None
             with open({str(fs_file)!r}, "w") as fh:
                 fh.write(str(fs_pid) if fs_pid else "")
             sys.stdout.flush()
