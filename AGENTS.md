@@ -1026,9 +1026,14 @@ of the built flat config, `tabpwa/pwa_gen_config.drop_unit_factors(kc)`, applied
 (`return drop_unit_factors(config)`), so every `pwa_gen` backend — `numpy_flat` included — receives it.  `drop_unit_factors`
 drops every factor `r` whose DENOMINATOR is the constant 1 in EVERY wave — the check is the whole
 chain `gamma_matrix[:, r]` (which rows it selects) → `basis_table` (the row really is 1, not merely named
-`one`) → the weight (`den_names == "one"`, the fixed parameter-free coefficient).  The numerator is NOT
-consulted: it is expanded per wave through `num_m_index` and is not part of the factor's identity.  It
-shrinks ONLY the factor axis: `num_table`, `gamma_matrix`, and the basis rows only that factor selected
+`one`) → the weight (`den_names == "one"`, the fixed parameter-free coefficient) → the NUMERATOR
+(`num_table[:, r]` must be the constant 1 in every wave).  The numerator check is what keeps
+`spline_c_idx` — a unit DENOMINATOR carrying the whole lineshape in its numerator — from being dropped
+(measured: dropping it silently deleted the expansion); `skip`'s numerator IS 1, so `skip` still drops.
+A numerator axis that is PRESENT but unreadable (not 3-D, or the wrong `n_res`) **raises** instead of
+falling back to the denominator-only rule — `dedup()` emits a 2-D `num_table`, so a deduped config
+cannot answer the question at all and must be passed in its full form.
+It shrinks ONLY the factor axis: `num_table`, `gamma_matrix`, and the basis rows only that factor selected
 (`basis_table`, `basis_m_index` ROWS, `basis_m_key`, `basis_kind`, `den_names`, `basis_key`); the shared
 `one` row survives.  `num_m_index`
 and `basis_m_index` keep their STRUCTURAL values — they ARE the mass column (`n_res·topo + r`), so nothing
@@ -1040,6 +1045,66 @@ A config switches it off with `drop_unit: false`, which keeps every factor — t
 agree with (same P, Q within 1e-13).  `skip` is `pwa_gen` only: on the plain `pwa` path it declares no
 running width, so that guard is the error.  `one` is NOT this — numerically 1 but occupying a slot, so its
 users' configs are untouched.
+
+#### Complex cubic spline in the numerator (`model: spline_c_idx`)
+
+`SplineCIdx` (`particle_model/spline_c_idx_model.py`) is TFPWA's
+`Interp1DSplineIdx` (`tf_pwa/amp/interpolation.py`) ported onto a
+`BasisModel`: a **complex cubic spline in the daughter invariant mass, carried
+by the NUMERATOR**.  The rows are solved ONCE at construction by
+`spline_k_model.spline_basis_matrix` — the VERBATIM port of TFPWA's
+`spline_xi_matrix` (piecewise cubic monomials `a + b·m + c·m² + d·m³` per
+interval, one column per knot) — with **`bc_type: not-a-knot`** (the default;
+`natural` differs by up to 0.449 in a cardinal row, so the choice is not
+cosmetic; TFPWA's `clamped` has no port and is refused by name).
+`with_bound` (default `False`) pins the two END knots to 0 by DROPPING columns
+0 and N−1 (`n_free = N − 2`); `True` keeps all `N` (`n_free = N`) — column
+omission is exact because the matrix is linear in the knot values.  The rows
+are REAL; the coefficient is COMPLEX, one per FITTED knot, so `c_i = A(
+points[i])` and `A` is the complex cubic spline through `(points[i], c_i)`.
+`points` (or `min_m` / `max_m` / `interp_N`) needs `N > 2`, finite, unique,
+ascending (not-a-knot is SINGULAR at exactly three knots and says so — use
+`natural` there).  The denominator is the single constant row `[1]` (the
+shared fixed `"one"` — the `SkipModel` shape), so `|A|² ∝ |Σ_i c_i·B_i(m)|²`
+and the normalisation is the fit's.  `pwa_gen` expands ONE FLAT `ck` SLOT PER
+ROW, so a geometry wave owns `n_free` contiguous slots
+`ck_{w,i} = g_ls(w)·c_i` and `len(ck) == n_wave·n_free`.  **Nothing but the
+coefficients is fitted**: the knots are config constants, so
+`make_basis_transform() -> None` (a coefficient IS its knot's value) and
+`get_defaults() == {}`; the heads are plain ck parameters, which
+`_pg_chain_factors` accepts WITHOUT a transform (a DERIVED weight — `kmatrix_n`'s
+β, `ExpCheb`'s Bessel weights — still needs one).  The spelling is TFPWA's:
+`{name}_point_{i}r` / `{name}_point_{i}i` (`complex_tail`; the pair
+`CKProduct` already builds) — no doubled row axis, and `polar: false` has no
+tabpwa counterpart (refused).  GAUGE: TFPWA pins `point_value[fix_idx] = 1`
+(default `fix_idx = N//2 − 1`); tabpwa's `ck_redundancy` constrain removes the
+same redundancy but pins the FIRST fitted coefficient, so the model only
+VALIDATES and EXPOSES `fix_idx` (`fixed_values()` returns the slot dict) — to
+reproduce TFPWA's middle knot, free the default pin and `set_fixed(...)`.
+`outside` (default `"spline"`, TFPWA's `spline_c_idx`): the interval index is
+clipped to `[0, N−2]` and the end interval's CUBIC is evaluated — cubic
+continuation, which GROWS (measured on the 6-knot fixture with random
+coefficients: `|A|` = 4.8 / 10.5 / 142 at h/2, h, 4h BELOW the support and
+5.9 / 15.1 / 236 ABOVE); `outside="zero"` is TFPWA's twin `spline_c` (exactly
+0 outside; the two agree inside).  Rows MEASURED on the 6-knot fixture: vs
+`scipy.CubicSpline` 5.8e-14 (not-a-knot) / 1.0e-13 (natural), vs an
+independent tridiagonal solve 1.1e-13, partition of unity 9.5e-14,
+cardinality 2.8e-14 (4.6e-12 over 18 knots); `num_basis` costs 0.14 ms on the
+2000-point build grid (0.31 ms at 18 knots; one memoised evaluation per build,
+the builder asks once per row on the same object).  TABULATION: TFPWA
+evaluates the cubic exactly per event; here `num_basis` is sampled on
+`gamma_grid` (`n_interp`, default 2000) and the kernels re-interpolate with
+Catmull-Rom, so the amplitude is CR∘spline — keep `points` inside the grid
+window (`m_min − 0.01 … m_max + 0.01`) and raise `n_interp` via
+`build_defaults.scope` to shrink that extra error, which is ≈2.1e-7 at the
+default and falls as `n_interp⁻³` (`~1.6e3/n³`; measured 1.07e-4, 1.33e-5,
+1.61e-6, 2.05e-7, 2.46e-8 at n = 250/500/1000/2000/4000).  `drop_unit_factors` checks the NUMERATOR too: a unit
+denominator does not make a factor the identity (`skip` still drops, this model
+must not).  Fixtures `tests/config_pwa_gen_cidx.yml` (6 points, `with_bound`
+default ⇒ 4 slots) and `tests/config_pwa_gen_cidx_2f.yml` (a two-factor chain:
+the spline beside an ordinary BW, where the denominator-only rule would have
+dropped the expansion); gates `tests/test_spline_c_idx.py` for the model and
+`tests/test_skip_model.py` for `drop_unit_factors` (the owner of that function).
 
 ### Barrier factors & build-time defaults
 

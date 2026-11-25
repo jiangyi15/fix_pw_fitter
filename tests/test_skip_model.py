@@ -18,12 +18,15 @@ from tabpwa import Fitter
 from tabpwa.backends import create_backend
 from tabpwa.config_loader import RawConfig
 from tabpwa.amp_model import build_amplitude_model
-from tabpwa.pwa_gen_config import drop_unit_factors
+from tabpwa.pwa_gen_config import drop_unit_factors, dedup
 from _flat_grid import _in_grid
 
 CFG = "tests/config_skip.yml"
 CFG_ONE = "tests/config_skip_one.yml"
 CFG_ALL = "tests/config_skip_all.yml"
+# a two-factor chain whose first factor has a UNIT denominator and a REAL
+# numerator (the spline), which is NOT the identity
+CFG_CIDX = "tests/config_pwa_gen_cidx_2f.yml"
 
 
 def _cfg(path, **over):
@@ -90,6 +93,111 @@ def test_a_partially_constant_axis_is_left_alone():
         [np.asarray(kc["num_m_index"]), np.zeros((g.shape[0], 1), np.int32)],
         axis=1)
     assert drop_unit_factors(kc2) is kc2
+
+
+def test_drop_unit_keeps_a_unit_denominator_with_a_real_numerator():
+    """The identity test is BOTH axes: ``skip`` drops, this model must not.
+
+    A unit denominator is necessary but not sufficient — ``spline_c_idx``
+    states ``[1]`` while the NUMERATOR carries the spline, so dropping the
+    factor would silently delete the expansion.
+    """
+    n = 4
+    gam = np.zeros((1, 2, 2))
+    gam[0, 0, 0] = 1.0                         # factor 0: the constant row
+    gam[0, 1, 1] = 1.0                         # factor 1: a real basis row
+    base = {
+        "gamma_matrix": gam,
+        "den_names": ["one", "k2_one"],
+        "basis_table": np.stack([np.ones(n), np.linspace(0, 1, n)]),
+        "basis_m_index": np.zeros(2, int),
+        "num_m_index": np.zeros((1, 2), int),
+        "basis_kind": np.zeros(2, int),
+        "basis_key": [("one", 0, 0), ("k2_one", 1, 0)],
+    }
+    # factor 0 has a UNIT denominator but a CURVE numerator (this model) and
+    # factor 1 has a real denominator: nothing is the identity -> no drop
+    kc = dict(base, num_table=np.stack([np.linspace(0, 1, n)[None, :],
+                                        np.ones((1, n))], axis=1))
+    assert drop_unit_factors(kc) is kc
+    # a constant numerator (``skip``'s shape) IS dragged out, and only it
+    kc2 = dict(base, num_table=np.ones((1, 2, n)))
+    out = drop_unit_factors(kc2)
+    assert out is not kc2
+    assert np.asarray(out["num_table"]).shape == (1, 1, n)
+    assert int(np.asarray(out["gamma_matrix"]).shape[1]) == 1
+    assert np.allclose(np.asarray(out["num_table"])[0, 0], 1.0)
+
+
+def test_drop_unit_keeps_the_numerator_expansion_end_to_end():
+    """The guard on a REAL config: ``b: spline_c_idx`` beside an ordinary BW.
+
+    ``b``'s denominator is the constant row ``[1]`` (so the OLD, denominator-only
+    rule made the factor droppable) while its numerator carries the whole
+    spline; ``c`` is a plain BW, so the axis is not all-identity and the early
+    return cannot save it.  The pre-guard code built ``(6, 1, 2000)`` here:
+    slicing the factor axis that way on ``_in_grid(48, 2)`` moves P by a factor
+    2.6-50 per event and Q from 24.87 to -54.64.  With both axes checked
+    nothing is droppable, so ``drop_unit`` on/off must agree EXACTLY.
+    """
+    on = Fitter(_cfg(CFG_CIDX, amp_model="pwa_gen", drop_unit=True),
+                backend="numpy_flat")
+    off = Fitter(_cfg(CFG_CIDX, amp_model="pwa_gen", drop_unit=False),
+                 backend="numpy_flat")
+    try:
+        kc_on, kc_off = on.kernel_config, off.kernel_config
+        for kc in (kc_on, kc_off):
+            assert np.asarray(kc["num_table"]).shape[1] == 2
+        # the old rule's premise: b's denominator selects the constant row ONLY
+        gam = np.asarray(kc_off["gamma_matrix"])
+        den = [str(n) for n in kc_off["den_names"]]
+        one = {j for j, n in enumerate(den) if n == "one"}
+        assert set(np.nonzero(gam[:, 0])[1].tolist()) <= one
+        # ... and its numerator is a curve, not 1 — so it is not the identity
+        assert np.max(np.abs(np.asarray(kc_off["num_table"])[:, 0] - 1.0)) > 0.1
+
+        # the same parameter point, mapped by basis NAME (the twin's idiom)
+        on.apply_constrains()
+        params_on, _ = on.build_params(on.initial_values(seed=1))
+        names_on = [str(n) for n in kc_on["den_names"]]
+        names_off = [str(n) for n in kc_off["den_names"]]
+        by_name = dict(zip(names_on, np.asarray(params_on["coeff"])))
+        params_off = dict(params_on)
+        params_off["coeff"] = np.array([by_name.get(n, 1.0)
+                                        for n in names_off])
+        data = _in_grid(kc_off, 48, 2)
+        a = create_backend("numpy_flat", kc_off, model="pwa_gen")
+        b = create_backend("numpy_flat", kc_on, model="pwa_gen")
+        try:
+            Qa, ga, Pa = a.compute(params_off, a.load_data(data), norm=1.3)
+            Qb, gb, Pb = b.compute(params_on, b.load_data(data), norm=1.3)
+        finally:
+            a.free()
+            b.free()
+        # MEASURED: P bit-equal, Q rel 0.0, dck rel 0.0 (nothing was dropped,
+        # so the two configs are the same arrays)
+        assert np.array_equal(np.asarray(Pa), np.asarray(Pb)), "P must be exact"
+        assert abs(Qa - Qb) <= 1e-13 * max(abs(Qa), 1.0)
+        assert np.allclose(np.asarray(ga["ck"]), np.asarray(gb["ck"]),
+                           rtol=1e-13, atol=1e-15)
+    finally:
+        on.backend.free()
+        off.backend.free()
+
+
+def test_drop_unit_refuses_a_malformed_numerator_axis():
+    """A 2-D ``num_table`` must fail CLOSED, not restore the pre-guard path.
+
+    ``dedup()`` emits a 2-D ``num_table`` (+ ``num_index``), and swallowing the
+    shape error there is exactly how a numerator expansion would disappear
+    silently again.  The full config is the only form this question can be
+    asked of.
+    """
+    kc = _flat(CFG_CIDX).kernel_config
+    dd = dedup(kc)
+    assert np.asarray(dd["num_table"]).ndim == 2
+    with pytest.raises(ValueError, match="num_table"):
+        drop_unit_factors(dd)
 
 
 # ── the consumers ──────────────────────────────────────────────────────

@@ -805,6 +805,47 @@ def test_a_model_without_a_basis_transform_fits_its_weights_directly():
     assert abs(grad[i] - fd) <= 1e-4 * abs(grad[i]) + 1e-6, (grad[i], fd)
 
 
+def test_only_spline_c_idx_declares_heads_without_a_basis_transform():
+    """A DERIVED numerator weight still needs a transform; a raw one does not.
+
+    ``_pg_chain_factors`` accepts heads without a transform only because such
+    a head IS a ``ck`` parameter (``spline_c_idx``: ``c_i`` is the spline's
+    value at its knot).  Every model whose weights are DERIVED from physical
+    parameters (``kmatrix_n``'s beta, ``ExpCheb``'s Bessel weights) must keep
+    its transform — losing it would silently turn the weights into free
+    parameters and move them instead of the physics.  This pins the SET, so a
+    future model that drops its transform fails here.
+    """
+    from tabpwa.particle_model import ALL_MODELS
+    from tabpwa.particle_model.base import BasisModel, build_particle
+
+    def declares_heads(cls):
+        """Does the class (not a base) define ``get_num_name`` with heads?"""
+        for c in cls.__mro__:
+            if "get_num_name" in vars(c):
+                return c is not BasisModel
+        return False
+
+    # the config a model needs to construct (a head-declaring model that needs
+    # something else makes this test fail, which is the point)
+    needed = {
+        "kmatrix_n": dict(mass_list=[0.80], width_list=[0.15]),
+        "kmatrix_n_gs": dict(mass_list=[0.80], width_list=[0.15]),
+        "kmatrix_n_ieps": dict(mass_list=[0.80], width_list=[0.15]),
+        "kmatrix_n_gs_ieps": dict(mass_list=[0.80], width_list=[0.15]),
+        "spline_c_idx": dict(points=[0.30, 0.80, 1.30, 1.80]),
+    }
+    built = {}
+    for nm, cls in ALL_MODELS.items():
+        if declares_heads(cls):
+            built[nm] = build_particle("x", model=nm, **needed.get(nm, {}))
+    assert {"kmatrix_n", "kmatrix_n_gs", "spline_c_idx"} <= set(built)
+    assert all(mdl.get_num_name() for mdl in built.values())
+    raw = {nm for nm, mdl in built.items()
+           if mdl.make_basis_transform() is None}
+    assert raw == {"spline_c_idx"}, raw
+
+
 def test_the_fitted_mass_enters_the_basis_weights():
     """A basis transform CONSUMES its couplings; it must not re-derive them.
 

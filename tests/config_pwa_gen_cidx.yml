@@ -1,0 +1,48 @@
+# pwa_gen with the NUMERATOR-expanded complex cubic spline (``spline_c_idx``).
+#
+# The resonance states its lineshape as a COMPLEX cubic spline through the
+# config's `points` list, carried by the NUMERATOR (denominator [1]), so the
+# flat coefficient axis is `ck`: each geometry wave owns one contiguous slot
+# per FITTED KNOT, `ck_{w,i} = g_ls(w)·c_i`.  `with_bound` defaults to false,
+# which pins the two END knots to 0 and fits the N-2 inner ones, so here
+# n_free = 6 - 2 = 4.  The fixture is deliberately small (one chain, one
+# partial wave) so the expansion is legible: len(ck) = n_wave · 4.
+# Slots: k2_point_{1,2,3,4}{r,i} (TFPWA's spelling); `ck_redundancy` pins the
+# first of them, leaving three complex coefficients.  See
+# tests/test_spline_c_idx.py.
+amp_model: pwa_gen
+data:
+  dat_order: [pip, pim, eta]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  jpsi:
+    - [pipi, eta]
+  pipi: [pip, pim]
+particle:
+  $top: jpsi
+  $finals: [pip, pim, eta]
+  pipi: [k2]
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    model: spline_c_idx
+    # six support points spanning the pip-pim two-body mass range
+    points: [0.30, 0.75, 1.20, 1.65, 2.10, 2.50]

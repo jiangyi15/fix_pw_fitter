@@ -874,11 +874,14 @@ class PWAGen(PWA):
             heads = list(mdl.get_num_name())
             rows = [None]
             if heads:
-                if mdl.make_basis_transform() is None:
-                    raise ValueError(
-                        f"pwa_gen: particle model '{mdl.name}' declares "
-                        f"numerator weights {heads} but no basis "
-                        f"transform — the weights would never be resolved")
+                # A transform is REQUIRED only when the numerator weights are
+                # DERIVED from physical parameters (``kmatrix_n``'s beta,
+                # ``ExpCheb``'s Bessel weights).  A model whose weights ARE its
+                # parameters (``spline_c_idx``) declares none: its heads are
+                # plain ck parameters, already carried by ``get_ck_map`` and
+                # registered by ``param_names`` as the ``{head}{mag}`` /
+                # ``{head}{phase}`` slots ``CKProduct`` multiplies in, exactly
+                # like ``g_ls`` -- nothing is left unresolved.
                 n_rows = len(mdl.num_basis(np.zeros(1)))
                 if n_rows != len(heads):
                     raise ValueError(

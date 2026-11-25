@@ -64,10 +64,14 @@ def drop_unit_factors(kc):
     ``build_from_groups`` emitted.
 
     Factor ``r`` is droppable when, in EVERY wave, its DENOMINATOR selects
-    only basis rows named ``"one"`` — the factor axis is the denominator's
-    (``basis_m_index`` / ``gamma_matrix``); the numerator is expanded per wave
-    through ``num_m_index`` and is not part of the factor's identity.  Those
-    ``r`` are removed from the factor axis
+    only basis rows named ``"one"`` AND its NUMERATOR is the constant 1 —
+    the factor axis is the denominator's (``basis_m_index`` /
+    ``gamma_matrix``), but a unit denominator does not by itself make a factor
+    trivial: ``spline_c_idx`` states its denominator as ``[1]`` while its
+    NUMERATOR carries the whole lineshape, and dropping it would silently
+    delete the expansion.  So ``num_table[:, r]`` is checked as well, and
+    ``skip`` (numerator 1, denominator 1) stays droppable.  Those ``r`` are
+    removed from the factor axis
     ``(wave, r)`` — ``num_table``, ``num_m_index``, ``gamma_matrix`` — and the
     basis rows that only a dropped factor selected are pruned with them (the
     shared ``"one"`` row survives whenever a kept factor uses it).
@@ -105,9 +109,30 @@ def drop_unit_factors(kc):
         if tab is None or np.allclose(np.asarray(tab[j]).ravel(), 1.0,
                                       rtol=0.0, atol=1e-14):
             is_one[j] = True
+    # the numerator is part of the factor's identity: a unit denominator is
+    # necessary but not sufficient (``spline_c_idx`` expands in the numerator)
+    num_tab = kc.get("num_table")
+    if num_tab is not None:
+        num_tab = np.asarray(num_tab)
+        if num_tab.ndim != 3 or num_tab.shape[1] != n_res:
+            # FAIL CLOSED.  A present-but-unreadable numerator axis must NOT
+            # restore the pre-guard behaviour silently: the factor would be
+            # dropped while its numerator survived nowhere.  ``dedup()``
+            # emits a 2-D ``num_table`` (+ ``num_index``), so a deduped
+            # config cannot answer this question at all.
+            raise ValueError(
+                f"drop_unit_factors: 'num_table' has shape {num_tab.shape}, "
+                f"expected (n_wave, n_res={n_res}, n_interp) — the numerator "
+                f"axis must be readable to decide whether a factor is the "
+                f"identity.  Pass the FULL config (``build_from_groups`` "
+                f"output); a deduped one carries a 2-D num_table")
     drop = []
     for r in range(n_res):
-        identity = True
+        identity = (num_tab is None
+                    or bool(np.allclose(num_tab[:, r], 1.0,
+                                        rtol=0.0, atol=1e-14)))
+        if not identity:
+            continue
         for k in range(n_wave):
             sel = np.nonzero(gam[k, r])[0]
             if sel.size == 0 or not np.all(is_one[sel]):

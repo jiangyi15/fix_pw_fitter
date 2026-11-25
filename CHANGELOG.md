@@ -19,6 +19,26 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
 
 ### Added
 
+- `spline_c_idx` particle model (`particle_model/spline_c_idx_model.py`): a
+  COMPLEX cubic spline in the daughter invariant mass, carried by the
+  NUMERATOR as a `BasisModel` — TFPWA's `Interp1DSplineIdx` construction (the
+  `spline_xi_matrix` port; `bc_type: not-a-knot`), with the knot values as the
+  fitted complex coefficients (`{name}_point_{i}r` / `{name}_point_{i}i`;
+  `with_bound: false` by default pins the end knots to 0 and fits the N−2
+  inner ones).  The denominator is the constant row `[1]`, so `pwa_gen`
+  expands one flat `ck` slot per fitted knot and
+  `|A|^2 ∝ |Σ_i c_i·B_i(m)|^2`; `outside: spline` keeps TFPWA's cubic
+  continuation outside the support (`outside: zero` returns 0 there, TFPWA's
+  `spline_c` twin), and the plain `pwa` path refuses the model naming
+  `amp_model: pwa_gen`.  A numerator model whose weights ARE its parameters is
+  now accepted by `pwa_gen` without a basis transform.  `drop_unit_factors`
+  additionally requires a factor's NUMERATOR to be 1 before dropping it, so a
+  unit denominator no longer hides a numerator expansion (`skip` unchanged),
+  and it now raises on a present-but-unreadable numerator axis (a deduped
+  config's 2-D `num_table`) instead of silently restoring the old rule.
+  Fixtures `tests/config_pwa_gen_cidx.yml` and
+  `tests/config_pwa_gen_cidx_2f.yml`, gates `tests/test_spline_c_idx.py` and
+  `tests/test_skip_model.py`.
 - Config-declared plugins: a top-level `plugin: [module, …]` (also `plugins:`, or
   a bare string) makes `Fitter` import those modules right after loading the
   config — before the amplitude model is built and before the backend is

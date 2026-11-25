@@ -45,6 +45,7 @@ from . import kmatrix_model       # noqa: F401 — register pipi_swave model
 from . import kmatrix_n_model      # noqa: F401 — register kmatrix_n model
 from . import kmatrix_n_ieps_model  # noqa: F401 — register the ieps variants
 from . import exp_cheb_model      # noqa: F401 — register ExpCheb
+from . import spline_c_idx_model  # noqa: F401 — register spline_c_idx
 __all__ = [
     "BaseModel", "BasisModel", "ALL_MODELS", "register_model", "build_particle",
 ]

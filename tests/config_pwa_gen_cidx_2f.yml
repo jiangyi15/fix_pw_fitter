@@ -1,0 +1,64 @@
+# Two BW factors in one chain, one of them a numerator-expanded complex cubic
+# spline whose DENOMINATOR is the constant row [1]:
+#
+#     a -> (b -> e f) (c -> g h) d
+#
+# `b: spline_c_idx` therefore has a UNIT denominator but a REAL numerator, so
+# `drop_unit_factors` must NOT drop it (the pre-guard check consulted only the
+# denominator and silently deleted the whole expansion — P wrong by up to 97x).
+# `c` is an ordinary Breit-Wigner, so the factor axis survives `c` and the drop
+# decision is real (the single-factor `config_pwa_gen_cidx.yml` returns early
+# because nothing survives to make the axis non-empty).
+#
+# Used by `tests/test_skip_model.py` (the owner of `drop_unit_factors`): the
+# guard's end-to-end gate and the `drop_unit` on/off parity.
+amp_model: pwa_gen
+data:
+  dat_order: [e, f, g, h, d]
+  data: ./data_slice.npy
+  phsp: ./phsp_slice.npy
+decay:
+  a:
+    - [b, c, d]
+  b: [e, f]
+  c: [g, h]
+particle:
+  $top: a
+  $finals: [e, f, g, h, d]
+  a:
+    J: 1
+    P: -1
+    spins: [-1, 1]
+    mass: 3.0
+  b:
+    J: 0
+    P: +1
+    mass: 1.0
+    model: spline_c_idx
+    # five support points spanning the e-f mass window inside the table grid
+    points: [0.30, 0.92, 1.54, 2.16, 2.78]
+  c:
+    J: 1
+    P: -1
+    mass: 0.775
+    width: 0.149
+  d:
+    J: 0
+    P: -1
+    mass: 0.547
+  e:
+    J: 0
+    P: -1
+    mass: 0.139
+  f:
+    J: 0
+    P: -1
+    mass: 0.139
+  g:
+    J: 0
+    P: -1
+    mass: 0.493
+  h:
+    J: 0
+    P: -1
+    mass: 0.493
