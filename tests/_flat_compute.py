@@ -35,8 +35,9 @@ asserts that the suite swept what it happened to see.
 Local (the family files): dedup/index pins, CSR, tile/smem, path A/B, the
 parent A/B, this family's own-module/`.so`/symbols, registration, and the
 sparse-row edge cases.  Which file owns which leaf is ``CONFIG_OWNER`` below.
-Tolerances are the ones the per-variant files used: the fp32 cache floor is
-ABSOLUTE, so ``_floor_ok`` accepts either the relative or the absolute bound.
+Tolerances are decided by the leaf's ACCURACY TAG (``fp32_cache`` -> 1e-4, else
+1e-12), never by a per-backend number: see ``_flat_models.CORRECT_TOL``.  The
+per-leaf figures in ``FLOORS`` are the measured record of what each leaf does.
 
 ``test_flat_compute.py`` imports this module so pytest collects the suite under
 ``[<backend name>]`` ids.
