@@ -307,22 +307,24 @@ class Kernel:
 
 
 #: s0e2's ONLY numerical change is the summation order of the sparse dot (one
-#: packed 64-bit CSR load, two independent fp64 chains).  Same fp64 operations
-#: in the same order otherwise, so the two kernels agree to the rounding of a
-#: single re-association — ~1e-16, never 1e-15.
-S0E2_TOL = 1e-15
-#: ``dcoeff`` is a SUM over (e,k) of ``2·(pv_r·Z_i + pv_i·Z_r)``: the terms are
-#: per-event contributions, the result is their (partly cancelling) sum, so the
-#: same 1-ulp shift is amplified when measured RELATIVE to a small result —
-#: the same absolute-vs-relative issue the fp32 cache floor has above.
-#: MEASURED over CFG_ONE/CFG_KM x rsize 1,17 x norm None,1.3:
-#:     Q 0 .. 5.6e-16    P 0 .. 6.5e-16    dck 0 .. 3.3e-16
-#:     dnorm 0 .. 7.1e-16
-#:     dcoeff 0 .. 2.8e-15   (worst absolute 4.7e-13 on max|dcoeff| = 0.17)
-#: 1e-14 is still 10 orders below the fp32 cache floor (1e-4), so it cannot hide
-#: an algebra change; it only stops the cancellation from tripping a bound that
-#: was never meaningful for a sum.
-S0E2_TOL_COEFF = 1e-14
+#: packed 64-bit CSR load, two independent fp64 chains) — but the GLOBAL Q and
+#: dnorm are ``atomicAdd`` sums across blocks, so the two kernels cannot be
+#: compared tighter than the launch-order noise of ONE kernel.  MEASURED on
+#: this gate's fixture (CFG_KM, rsize 1, norm 1.3, 25 launches each):
+#:     s0e2 vs s0e2 (SELF): Q up to 6.4e-16 (11/25 non-zero), dck 2.2e-16,
+#:                          dcoeff 3.5e-17, dnorm 3.8e-16, P 0.0
+#:     s0e2 vs s0e   (gate): Q up to 4.8e-16, P 8.7e-16, dck 2.0e-16,
+#:                          dcoeff 4.2e-16, dnorm 5.6e-16
+#: and a full-suite run hit Q = 1.13e-15 (2.5e-14 absolute), i.e. the old
+#: 1e-15 bound sat INSIDE the launch noise and failed on a correct pair.
+#: dcoeff is a SUM over (e,k) of ``2·(pv_r·Z_i + pv_i·Z_r)``: the terms are
+#: per-event contributions and the result is their (partly cancelling) sum, so
+#: the same 1-ulp shift is amplified when measured RELATIVE to a small result —
+#: 2.8e-15 worst over CFG_ONE/CFG_KM x rsize 1,17 x norm None,1.3 (absolute
+#: 4.7e-13 on max|dcoeff| = 0.17).  1e-14 matches s0e3/s0e4 and is still ~10
+#: orders below the fp32 cache floor (1e-4), so it cannot hide an algebra
+#: change; it only stops the atomics from tripping a bound that never held.
+S0E2_TOL = 1e-14
 
 #: s0e3 vs s0e: the fp32 seed + 2 Newton steps differ from the exact fp64
 #: divide by 1-2 ulp of ``1/|D|²``, so the quantities are no longer bit-equal.
@@ -388,7 +390,7 @@ def parent_gate_s0e2(k):
                 b = create_backend(k.name, kc, model="pwa_gen",
                                    resolution_size=rs)
                 _compare_to_parent(a, b, params, data, norm,
-                                   S0E2_TOL, S0E2_TOL_COEFF,
+                                   S0E2_TOL, S0E2_TOL,
                                    f"{cfg} rs={rs} norm={norm}")
 
 
