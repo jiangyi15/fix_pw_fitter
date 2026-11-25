@@ -36,9 +36,6 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   unit denominator no longer hides a numerator expansion (`skip` unchanged),
   and it now raises on a present-but-unreadable numerator axis (a deduped
   config's 2-D `num_table`) instead of silently restoring the old rule.
-  Fixtures `tests/config_pwa_gen_cidx.yml` and
-  `tests/config_pwa_gen_cidx_2f.yml`, gates `tests/test_spline_c_idx.py` and
-  `tests/test_skip_model.py`.
 - Config-declared plugins: a top-level `plugin: [module, …]` (also `plugins:`, or
   a bare string) makes `Fitter` import those modules right after loading the
   config — before the amplitude model is built and before the backend is
@@ -58,8 +55,7 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   and has no rank, so a program writes output once; `n_procs` is required,
   `local` is a leaf, nesting inside an MPI/Slurm step is refused, and lifecycle
   is `shutdown`→`terminate`→`kill` with an `atexit` reaper.  `ship` loading in
-  v1.  Design `docs/mpi_service_design.md`, as built `docs/mpi_service.md`;
-  fixture `tests/test_mpi_service.py`.
+  v1.  Design `docs/mpi_service_design.md`, as built `docs/mpi_service.md`.
 
 - `mpi` backend (`tabpwa/backends/mpi_backend.py`, tags `delegate`+`external`): N ranks
   under `mpiexec`, one contiguous slice each (`split_offsets`, weighted/align-
@@ -80,7 +76,7 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `mpi` backend inside a `shard` worker is refused.
   Optional extra `tabpwa[mpi]` (mpi4py, lazy import).  Design:
   `docs/mpi_backend_design.md`; as built and measured: `docs/mpi_backend.md`;
-  deployment: `docs/slurm.md`; fixture `tests/test_mpi_backend.py`.
+  deployment: `docs/slurm.md`.
 
 ### Added (pwa_gen factor-level dedup)
 
@@ -95,11 +91,7 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   saving against the parent's own dot count (at equality the extra reduction
   buys nothing and measured 4 % slower), otherwise the parent's path runs
   unchanged (`n_res == 1` always).  No `n_res1`
-  tag — it takes a multi-BW chain.  Fixtures `tests/config_pwa_gen_mb2.yml` and
-  `tests/config_pwa_gen_4pi_mb.yml` (identical-particle blocks AND a multi-BW
-  chain at once); contract in `tests/test_flat_dedup.py`, where the multi-BW
-  anchor and its finite-difference gradient check are parametrised over all
-  three multi-BW shapes.
+  tag — it takes a multi-BW chain.
 
 ### Added (toy generation)
 
@@ -247,10 +239,7 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   wave — a spin-1/2 core decaying to two scalars needs `l = 1/2`, which does
   not exist — is now refused by name at that vertex instead of surfacing as
   `ValueError: need at least one array to stack` from `build_from_groups`; a
-  single dead chain beside live ones still builds (the declaration-only tree
-  tolerates it, as `tests/test_decay_tree.py` pins).
-  Fixture `tests/config_pwa_gen_spin_half.yml` (`1/2 -> 1/2 0 0`: top 1/2,
-  finals 1/2, 0, 0), gates `tests/test_spin_half.py`.
+  single dead chain beside live ones still builds.
 - A HOPELESS toy background was diagnosed after ~33 s: the all-zero check
   samples a 1e6-event budget in batches, the batch was pinned at
   `max(64, 4·(n_bg−have))`, and `build_event_data` costs 55 µs/event at 64 vs
@@ -277,8 +266,7 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   unhandled error in the parent hung the program on a worker blocked in
   `task_queue.get()`.  One consequence: a NESTED `shard` (a shard worker
   hosting another shard pool, which used to run) is now REFUSED by name, since
-  daemonic processes may not start children — use one flat `backends` list.  Gates in `tests/test_shard_worker.py`
-  (a dead worker; an unguarded program as a subprocess).
+  daemonic processes may not start children — use one flat `backends` list.
 - `fd_hess` divided a Hessian COLUMN by the step of its ROW
   (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
   space="bounded")` was wrong on the off-diagonals once the bounded values had
