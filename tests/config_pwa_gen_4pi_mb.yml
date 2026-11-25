@@ -1,0 +1,76 @@
+# pwa_gen, TWO-resonance chains AND identical-particle blocks at the same time.
+#
+# `tests/config_pwa_gen_mb.yml` / `_mb2.yml` are `n_res == 2` with `n_blocks == 1`
+# and every other fixture is `n_res == 1`, so neither covers the COMBINATION a
+# factor-level dedup has to survive: the gamma row of a factor is shared across
+# identical-particle blocks too, which multiplies the wave axis (B -> (pipi)(sig)
+# with pipi -> pip pip2 and sig -> pim pim2 gives 4 permutations x 2 CP = 8
+# blocks, 32 waves), and the two topologies (`sig` vs `sig2`) make `pipi` recur.
+#
+#     n_wave 32  n_res 2  n_basis 40  nnz 256
+#     wave blocks 8   factor rows 12   ->  dots/event 16 -> 12 (-25 %)
+#
+# Counted on the host (tests/benchmark_mb_factor.py, and pinned in
+# tests/test_flat_dedup.py).  This is what `cuda_flat_pwa_gen_fslot` is gated on
+# for `n_blocks > 1` with `n_res > 1`; `cuda_flat_pwa_gen2` is the reference.
+#
+# The kernel parity on this fixture is gated in tests/test_flat_dedup.py at the
+# model-default parameter point AND at a second, independently drawn one, and
+# each evaluation first asserts that both kernels repeat to 1e-13 on their own
+# handle — so a comparison here cannot be launch order wearing a shape.
+amp_model: pwa_gen
+defaults:
+  n_interp: 4000
+data:
+  dat_order: [pip, pip2, pim, pim2]
+  identical_particles:
+    - [pip, pip2]
+    - [pim, pim2]
+decay:
+  jpsi:
+    - [pipi, sig]
+    - [pipi, sig2]
+  pipi: [pip, pip2]
+  sig: [pim, pim2]
+  sig2: [pim, pim2]
+particle:
+  $top: jpsi
+  $finals: [pip, pip2, pim, pim2]
+  pipi: [k2]
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pip2:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim2:
+    J: 0
+    P: -1
+    mass: 0.139567
+  sig:
+    J: 0
+    P: 1
+    mass: 0.77
+    width: 0.15
+  sig2:
+    J: 0
+    P: 1
+    mass: 1.20
+    width: 0.25
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    model: kmatrix_n
+    mass_list: [0.80, 1.35]
+    width_list: [0.15, 0.20]

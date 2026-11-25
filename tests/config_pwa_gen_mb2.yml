@@ -1,0 +1,88 @@
+# pwa_gen, TWO-resonance chains, with SEVERAL topologies sharing one factor.
+#
+# `tests/config_pwa_gen_mb.yml` proves the factor PRODUCT representation
+# (`D = bw_{w,0} * bw_{w,1}`, one CSR row per (wave, factor)) but has ONE
+# topology, so every wave shares both factors and the wave-level `slot_map`
+# already collapses everything: a factor-level dedup would be a no-op there.
+#
+# Here the top decays to `pipi + sigX + eta` for THREE different `sigX` (the same
+# two-body state, different BW parameters), so:
+#
+#   * `pipi` (the `kmatrix_n` basis, 5 denominator rows) is the SAME factor in
+#     every topology — same basis rows, same mass column, same gamma pattern;
+#   * `sig`, `sig2`, `sig3` (3-row ordinary BW) differ between topologies.
+#
+# Counted on the host (see tests/benchmark_mb_factor.py):
+#
+#   n_wave 12, n_res 2, n_basis 12, (wave,factor) rows 24
+#   distinct wave BLOCKS 3   distinct FACTOR rows 4
+#   denominator dots/event: wave-level 6, factor-level 4  (33 % fewer)
+#
+# The trend is `1 + n_topo` factor dots against `2 * n_topo`, i.e. up to 2x as
+# the number of topologies sharing a factor grows.  This fixture is what the
+# factor-level (`fslot`) kernel copy, `cuda_flat_pwa_gen_fslot`, is gated on
+# (tests/test_flat_dedup.py); `cuda_flat_pwa_gen2` is the wave-level reference.
+amp_model: pwa_gen
+defaults:
+  n_interp: 20000
+data:
+  dat_order: [pip, pim, kp, km, eta]
+decay:
+  jpsi:
+    - [pipi, sig, eta]
+    - [pipi, sig2, eta]
+    - [pipi, sig3, eta]
+  pipi: [pip, pim]
+  sig: [kp, km]
+  sig2: [kp, km]
+  sig3: [kp, km]
+particle:
+  $top: jpsi
+  $finals: [pip, pim, kp, km, eta]
+  pipi: [k2]
+  jpsi:
+    J: 1
+    P: -1
+    mass: 3.096813522559038
+  pip:
+    J: 0
+    P: -1
+    mass: 0.139567
+  pim:
+    J: 0
+    P: -1
+    mass: 0.139567
+  kp:
+    J: 0
+    P: -1
+    mass: 0.493677
+  km:
+    J: 0
+    P: -1
+    mass: 0.493677
+  eta:
+    J: 0
+    P: -1
+    mass: 0.5478621409593663
+  sig:
+    J: 0
+    P: 1
+    mass: 0.5
+    width: 0.12
+  sig2:
+    J: 0
+    P: 1
+    mass: 0.7
+    width: 0.18
+  sig3:
+    J: 0
+    P: 1
+    mass: 0.9
+    width: 0.24
+  k2:
+    J: 1
+    P: -1
+    mass: 0.80
+    model: kmatrix_n
+    mass_list: [0.80, 1.35]
+    width_list: [0.15, 0.20]

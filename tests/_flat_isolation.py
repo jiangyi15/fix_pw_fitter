@@ -1,9 +1,13 @@
 """ONE case-1 table for the flat ``pwa_gen`` kernels: a copy, its parent, and
 the source digests.
 
-A case-1 copy is standalone: its own module, its own ``.so``, its own symbols,
-and the kernel it was copied FROM left byte-identical.  That is one property
-with three faces, so it is one row here and one test — not a per-family file.
+A case-1 copy is standalone: its own module, its own ``.so``, and the kernel
+it was copied FROM left byte-identical.  The C IDENTIFIERS are not part of that
+identity: a copy made under the current rule keeps the parent's verbatim
+(``cffi.dlopen`` is ``RTLD_LOCAL`` and each kernel is its own ``.so``, so
+identical names cannot be interposed) — ``fslot`` is the first such, declared
+per row as ``symbols: "parent"``.  The older copies export their own prefixes;
+that is HISTORY, recorded per row as ``symbols: "own"``, not a convention.
 
 WHICH FAMILIES CARRY A ROW IS A DECISION, and it is written here:
 
@@ -11,7 +15,10 @@ WHICH FAMILIES CARRY A ROW IS A DECISION, and it is written here:
 * the fixed-coefficient caches (``s0f``, ``s0g``);
 * the s0e tile family (``s0e`` is the original, ``s0e2``/``s0e3``/``s0e4`` copy
   it and ``s0e5`` copies ``s0e2``);
-* ``s0c2``, a copy of ``s0c``.
+* ``s0c2``, a copy of ``s0c``;
+* ``fslot``, a copy of ``gen2`` — the first made WITHOUT RENAMING its C
+  identifiers, which the policy now requires of every copy; the table says so
+  per row (``symbols: "parent"``), because the older copies do carry their own.
 
 Those are exactly the kernels whose source is a copy under the kernel policy.
 The dense leaves (``gen``/``cache``/``gen2``/``1bw``/``s0c``) have no case-1
@@ -67,6 +74,12 @@ SOURCE_SHA256 = {
         "a2b53fa491f7180f58665b82c0835b1803fead5401514716cc8c165ae9efd69a",
     "kernels_flat_pwa_gen_ampcache32.cu":
         "3bbbb5ce2afd9f7477e4ccf3b10b692d2d89509dcc7703b6112498c40d7bc8a3",
+    # the parent of `cuda_flat_pwa_gen_fslot` (no row of its own: gen2 predates
+    # the rule, see NO_ISOLATION) — a copy may not edit what it copies from
+    "kernels_flat_pwa_gen2.cu":
+        "bd8274595645eabba01270bb571f1e19c12dd3370c4cd1701e5eec779009541d",
+    "kernels_flat_pwa_gen_fslot.cu":
+        "66a976995e459f340ad4931f032945d00f5afc69de7f389a7dbba54c5322e24c",
 }
 
 #: name -> the source this kernel was copied FROM (``None`` = the family's
@@ -84,6 +97,14 @@ ISOLATION = {
     "cuda_flat_pwa_gen_ampcache": {"parent": "kernels_flat_pwa_gen_s0f.cu"},
     "cuda_flat_pwa_gen_ampcache32": {
         "parent": "kernels_flat_pwa_gen_ampcache.cu"},
+    # the FACTOR-LEVEL dedup: a copy of gen2 whose backward sweep runs over
+    # distinct (wave, factor) rows instead of wave blocks.  `symbols` is the
+    # ROW's declaration of the copy's C API: "parent" = made WITHOUT RENAMING
+    # (kernel policy §1), i.e. its library exports the parent's own
+    # `cuda_*_flat_pwa_gen2` names and is kept apart by being a separate
+    # `dlopen` object.  Omitted = its own names (the older rows).
+    "cuda_flat_pwa_gen_fslot": {"parent": "kernels_flat_pwa_gen2.cu",
+                                "symbols": "parent"},
 }
 
 #: leaves with NO case-1 claim, each with the reason.  Explicit, so the
@@ -168,6 +189,9 @@ def _imported_modules(path):
 #: The originals are listed separately, because THEY carry the helpers by
 #: definition and must not be mistaken for unguarded copies.
 HELPER_COPIES = {
+    "_flat_pwa_gen_fslot": {
+        "slot_map": "_flat_pwa_gen2",
+    },
     "_flat_pwa_gen_s0f": {
         "uslot_map": "_flat_pwa_gen_s0e",
         "amp_slot_map": "_flat_pwa_gen_s0e",
@@ -200,6 +224,10 @@ HELPER_COPIES = {
 HELPER_ORIGINALS = (
     "_flat_pwa_gen_s0e", "_flat_pwa_gen_s0e2", "_flat_pwa_gen_s0e3",
     "_flat_pwa_gen_s0e4", "_flat_pwa_gen_s0e5", "_flat_pwa_gen_1bw",
+    # the wave-level ``slot_map`` the `fslot` copy travels with: `gen2` DEFINES
+    # it, and `1bw` carries its OWN variant (its body differs from gen2's, so
+    # neither is an unguarded copy of the other)
+    "_flat_pwa_gen2",
 )
 
 #: helper -> (arguments, keywords) on a real kernel config, derived the way the
@@ -220,6 +248,10 @@ _HELPER_ARGS = {
     "index_runs": lambda kc: (
         (np.asarray(kc["gamma_matrix"], np.float64),),
         {"n_basis": int(np.asarray(kc["basis_table"]).shape[0])}),
+    # the wave-level dedup helper; ``fslot`` travels with it VERBATIM and calls
+    # it on the reshaped `(wave, factor)` matrix as well
+    "slot_map": lambda kc: (
+        (np.asarray(kc["gamma_matrix"], np.float64),), {}),
 }
 
 
@@ -318,26 +350,39 @@ def test_the_helper_comparison_covers_every_element():
     assert np.all(hi > lo)                   # no empty wave
 @pytest.mark.parametrize("name", sorted(ISOLATION))
 def test_case1_isolation(name):
-    """A standalone copy: own module/``.so``/symbols, parent source intact.
+    """A standalone copy: own module/``.so``, parent source intact.
 
-    Everything but the row's ``parent`` is DERIVED from the registry name, so
-    the four faces of the property cannot disagree: the copy does not import
-    the kernel it copies, it loads its own ``.so`` with its own symbols, its
-    parent's ``.so`` does not carry them, a second instance shares the one
-    loaded library, and every source involved matches ``SOURCE_SHA256``.
+    Everything but the row's ``parent`` (and its declared symbol face) is
+    DERIVED from the registry name, so the faces of the property cannot
+    disagree: the copy does not import the kernel it copies, it loads its own
+    ``.so`` — a SEPARATE object from the parent's — a second instance shares
+    the one loaded library, and every source involved matches
+    ``SOURCE_SHA256``.
+
+    THE SYMBOL FACE IS THE ROW'S.  A copy made WITHOUT RENAMING (the policy's
+    form: the new ``.cu`` is the parent's source apart from the change)
+    exports the parent's ``cuda_*_flat_pwa_gen2`` names, so the old
+    mutual-exclusion pair — "my library has no parent symbol and the parent's
+    has none of mine" — is vacuous there and is asserted only for the rows
+    that DID take their own names.  What keeps the two apart in either case is
+    the OBJECT: ``cffi.ffi.dlopen`` is ``RTLD_NOW | RTLD_LOCAL`` and each
+    kernel is its own ``.so``, so identical names cannot be interposed.
     """
     row = ISOLATION[name]
     prefix = prefix_of(name)
     mod = importlib.import_module(module_of(name))
-    mine = "cuda_compute_" + prefix
+    parent = row["parent"]
+    verbatim = row.get("symbols") == "parent"
+    parent_prefix = parent[len("kernels_"):-len(".cu")] if parent else None
+    mine = "cuda_compute_" + (parent_prefix if verbatim else prefix)
     own_src = "kernels_" + prefix + ".cu"
+    if verbatim:
+        assert parent is not None, f"{name}: a verbatim face needs a parent"
 
     # own module: the copy must not import the kernel it copies
     py = os.path.splitext(mod.__file__)[0] + ".py"
     imported = _imported_modules(py)
-    parent = row["parent"]
     if parent is not None:
-        parent_prefix = parent[len("kernels_"):-len(".cu")]
         parent_module = "tabpwa.cuda._" + parent_prefix
         assert mod is not importlib.import_module(parent_module)
         assert not any(parent_module in m for m in imported), (
@@ -356,10 +401,16 @@ def test_case1_isolation(name):
                 theirs = "cuda_compute_" + parent_prefix
                 assert b.kernel._lib is not lib, "the copy shares the parent's .so"
                 assert hasattr(b.kernel._lib, theirs)
-                assert not hasattr(lib, theirs), (
-                    f"{name}'s library carries the parent's {theirs}")
-                assert not hasattr(b.kernel._lib, mine), (
-                    f"the parent's library carries {name}'s {mine}")
+                if verbatim:
+                    # the copy's C API IS the parent's: same names, different
+                    # object — that is the whole contract, so check the name is
+                    # really there rather than that it is absent
+                    assert hasattr(lib, theirs)
+                else:
+                    assert not hasattr(lib, theirs), (
+                        f"{name}'s library carries the parent's {theirs}")
+                    assert not hasattr(b.kernel._lib, mine), (
+                        f"the parent's library carries {name}'s {mine}")
             finally:
                 b.free()
         # ONE library per process for THIS kernel: the module-level handle

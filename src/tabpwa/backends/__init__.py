@@ -36,6 +36,7 @@ from . import numpy_flat_backend  # noqa: F401 — register NumpyFlatBackend
 from . import cuda_flat_pwa_gen_backend  # noqa: F401 — register cuda_flat_pwa_gen
 from . import cuda_flat_cache_backend  # noqa: F401 — register cuda_flat_cache_pwa_gen
 from . import cuda_flat_pwa_gen2_backend  # noqa: F401 — register cuda_flat_pwa_gen2
+from . import cuda_flat_pwa_gen_fslot_backend  # noqa: F401 — register cuda_flat_pwa_gen_fslot
 from . import cuda_flat_pwa_gen_1bw_backend  # noqa: F401 — register cuda_flat_pwa_gen_1bw
 from . import cuda_flat_pwa_gen_s0e_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0e
 from . import cuda_flat_pwa_gen_s0e2_backend  # noqa: F401 — register cuda_flat_pwa_gen_s0e2

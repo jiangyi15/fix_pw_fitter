@@ -124,6 +124,13 @@ FLOORS = {
     # measured agreement.
     "cuda_flat_pwa_gen": (1e-12, 1e-12, 1e-12, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen2": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
+    # the FACTOR-LEVEL dedup copy of gen2: `n_res == 1` runs the parent's path
+    # verbatim (the gate is off there), and on a multi-BW chain the sweep only
+    # re-associates `dQ/dcoeff` — MEASURED over QUALIFYING at rsize 1/17 x
+    # norm None/1.3 the same band as gen2 (Q 1.2e-7, P 4.3e-7, ck 2.7e-7,
+    # coeff 1.9e-6).  Its factor path is gated on the multi-BW fixtures by
+    # test_flat_dedup.py, which owns this leaf's config contract.
+    "cuda_flat_pwa_gen_fslot": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_1bw": (2e-5, 3e-5, 1e-4, False, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0c": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
     "cuda_flat_pwa_gen_s0c2": (2e-5, 4e-5, 2e-4, True, tuple(QUALIFYING)),
@@ -331,6 +338,7 @@ CONFIG_OWNER = {
     "cuda_flat_pwa_gen": "test_flat_dedup.py",
     "cuda_flat_cache_pwa_gen": "test_flat_dedup.py",
     "cuda_flat_pwa_gen2": "test_flat_dedup.py",
+    "cuda_flat_pwa_gen_fslot": "test_flat_dedup.py",
     "cuda_flat_pwa_gen_1bw": "test_flat_dedup.py",
     "cuda_flat_pwa_gen_s0c": "test_flat_dedup.py",
     "cuda_flat_pwa_gen_s0c2": "test_flat_dedup.py",

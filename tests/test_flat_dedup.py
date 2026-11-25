@@ -49,6 +49,13 @@ from _flat_grid import (CFG_CP, CFG_IDENT, CFG_KM, CFG_MB, CFG_ONE, CFG_SAME,
 # ── the fixtures ────────────────────────────────────────────────────
 ALL_CFGS = [CFG_ONE, CFG_KM, CFG_MB, CFG_IDENT, CFG_SAME, CFG_CP]
 CFG_IDS = ["one", "km", "mb", "ident", "same", "cp"]
+#: the SECOND multi-BW fixture: three topologies sharing one factor, so the
+#: factor-level gate has something to fold that the wave collapse does not
+CFG_MB2 = "tests/config_pwa_gen_mb2.yml"
+#: the IDENTICAL-PARTICLE multi-BW fixture: `n_blocks > 1` AND `n_res > 1`
+#: (32 waves = 8 blocks x 4, n_res 2), the combination `_mb`/`_mb2` do not
+#: reach — the gamma row of a factor is shared across CP/permutation blocks too
+CFG_4PI = "tests/config_pwa_gen_4pi_mb.yml"
 CFG_ID = {c: i for c, i in zip(ALL_CFGS, CFG_IDS)}
 
 # ── the kernels: one entry per registered flat leaf ─────────────────
@@ -84,6 +91,19 @@ KERNELS = {
     ),
     "gen2": dict(
         name="cuda_flat_pwa_gen2",
+        floors=(2e-5, 3e-5, 1e-4),
+        multi_bw=True,
+        slot=True,
+        rsize_opts=(None,),
+        wide=True,
+        zero_coeff=True,
+    ),
+    "fslot": dict(
+        # the FACTOR-LEVEL dedup copy of gen2: same forward pass, same fp64
+        # `s_pv`, a backward sweep over distinct (wave, factor) rows instead of
+        # wave blocks.  `slot=True` because the parent's `slot_collapse` knob
+        # is still there (it is forced off whenever the factor gate engages).
+        name="cuda_flat_pwa_gen_fslot",
         floors=(2e-5, 3e-5, 1e-4),
         multi_bw=True,
         slot=True,
@@ -172,10 +192,10 @@ def _kernels(*keys):
     return [k for k in KERNELS if k in keys]
 
 
-MULTI_BW = _kernels("gen", "cache", "gen2")
-SLOT = _kernels("gen2", "1bw")
-RSIZE = _kernels("gen2", "1bw")
-WIDE = _kernels("cache", "gen2", "1bw")
+MULTI_BW = _kernels("gen", "cache", "gen2", "fslot")
+SLOT = _kernels("gen2", "fslot", "1bw")
+RSIZE = _kernels("gen2", "fslot", "1bw")
+WIDE = _kernels("cache", "gen2", "fslot", "1bw")
 HOLE = _kernels("1bw", "s0c", "s0c2")
 GAMMA01 = _kernels("s0c", "s0c2")
 N_RES1 = _kernels("1bw", "s0c", "s0c2")
@@ -393,17 +413,29 @@ def test_a_deduped_config_is_refused(key):
 # 3. the numeric contract on the configs the leaves were measured with
 # ════════════════════════════════════════════════════════════════════
 
+#: The multi-BW shapes, which differ in what the denominator axis multiplies:
+#: `_mb` one topology, `_mb2` three sharing a factor, `4pi` identical-particle
+#: blocks AND two topologies at once (`n_blocks > 1` x `n_res > 1`).
+MULTI_BW_CFGS = [CFG_MB, CFG_MB2, CFG_4PI]
+MULTI_BW_IDS = ["mb", "mb2", "4pi"]
+
+
+@pytest.mark.parametrize("cfg", MULTI_BW_CFGS, ids=MULTI_BW_IDS)
 @pytest.mark.parametrize("norm", [None, 1.3])
 @pytest.mark.parametrize("key", MULTI_BW)
-def test_the_multi_bw_anchor(key, norm):
-    """``_mb`` (``n_res == 2``) against ``numpy_flat``, at the leaf's own floor.
+def test_the_multi_bw_anchor(key, norm, cfg):
+    """Every multi-BW shape against ``numpy_flat``, at the leaf's own floor.
 
     The shared anchor sweeps the ``n_res == 1`` fixtures only, so the multi-BW
-    shape is anchored here — with the SAME per-backend numbers
+    shapes are anchored here — with the SAME per-backend numbers
     :data:`_flat_compute.FLOORS` records, so a leaf cannot be looser here.
+    The CONFIG axis is what makes this the contract rather than one shape:
+    `_mb` has one topology, `_mb2` three sharing a factor, and `4pi` is the
+    only place where identical-particle blocks multiply the wave axis AND a
+    two-resonance chain multiplies the factor axis (32 waves = 8 blocks x 4).
     """
     rel, floor_p, floor_c = KERNELS[key]["floors"]
-    kc, params, data = _setup(CFG_MB)
+    kc, params, data = _setup(cfg)
     ref = _numpy_flat(kc)
     gpu = _backend(KERNELS[key]["name"], kc)
     try:
@@ -545,16 +577,18 @@ def test_the_grouped_objective_at_other_group_sizes(key, collapsed, rs):
         gpu.free()
 
 
+@pytest.mark.parametrize("cfg", MULTI_BW_CFGS, ids=MULTI_BW_IDS)
 @pytest.mark.parametrize("key", MULTI_BW)
-def test_gradients_match_fd_on_the_multi_bw_chain(key):
+def test_gradients_match_fd_on_the_multi_bw_chain(key, cfg):
     """``dcoeff`` and ``dck`` against central differences of this kernel's ``Q``.
 
     The shared suite runs the same FD sweeps on the ``n_res == 1`` fixtures; a
     gradient is only as right as the config it was checked on, so the multi-BW
     Product denominator (its own per-factor accumulation) gets the same
-    independent check here.
+    independent check here — on each multi-BW shape, `4pi` included, where the
+    blocks and the factor axis multiply each other.
     """
-    kc, params, data = _setup(CFG_MB, 48)
+    kc, params, data = _setup(cfg, 48)
     gpu = _backend(KERNELS[key]["name"], kc)
     h = gpu.load_data(data)
     try:
@@ -811,3 +845,297 @@ def test_the_fused_reductions_agree_on_a_wide_basis():
     finally:
         ref.free()
         new.free()
+
+
+def test_a_shared_factor_is_redundant_beyond_the_wave_collapse():
+    """The fixture that makes a FACTOR-level dedup non-vacuous.
+
+    ``slot_map`` collapses whole wave blocks, so it only pays when two waves are
+    copies of each other.  ``config_pwa_gen_mb.yml`` is one topology — every wave
+    shares both factors, the wave collapse is complete and a factor-level key
+    adds nothing (2 factor rows = 2 dots).  Once TWO topologies share a
+    resonance (`config_pwa_gen_mb2.yml`: three topologies, all with the same
+    `pipi`), the wave collapse leaves 3 blocks x 2 factors = 6 dots where 4
+    factor rows suffice — the shared parent is computed once per topology
+    instead of once per wave block.  This pins the STRUCTURE that
+    ``cuda_flat_pwa_gen_fslot`` exploits; the numbers it must NOT move are
+    :func:`test_the_factor_dedup_does_not_move_a_number`'s.
+    """
+    import numpy as np
+
+    from tabpwa.amp_model import build_amplitude_model
+
+    def counts(path):
+        kc = build_amplitude_model(path).build_kernel_config()
+        g = np.asarray(kc["gamma_matrix"], float)
+        nw, nr, _nb = g.shape
+        # the key is the gamma ROW, at both levels — that is what the kernel's
+        # `slot_map` hashes (`rows[k].tobytes()`).  The mass column is NOT part
+        # of it: it is a property of the BASIS row (`basis_m_index[m]`, one
+        # entry per basis row, shared by every wave and factor), so two rows
+        # with the same gamma select the same basis rows and the same column.
+        blocks = len({tuple(r.tobytes() for r in g[k]) for k in range(nw)})
+        rows = len({g[k, r].tobytes()
+                    for k in range(nw) for r in range(nr)})
+        return nw, nr, blocks, rows
+
+    nw1, nr1, b1, f1 = counts("tests/config_pwa_gen_mb.yml")
+    assert (nw1, nr1, b1, f1) == (4, 2, 1, 2)
+    assert f1 == b1 * nr1                     # one topology: nothing to gain
+
+    nw2, nr2, b2, f2 = counts("tests/config_pwa_gen_mb2.yml")
+    assert (nw2, nr2, b2, f2) == (12, 2, 3, 4)
+    assert f2 < b2 * nr2                      # 3 topologies sharing `pipi`
+    assert (b2 * nr2) - f2 == 2               # the shared factor, once per extra topo
+
+    # ... and the shape where blocks and the factor axis multiply each other
+    nw3, nr3, b3, f3 = counts("tests/config_pwa_gen_4pi_mb.yml")
+    assert (nw3, nr3, b3, f3) == (32, 2, 8, 12)
+    assert f3 < b3 * nr3                      # 12 factor rows against 8 x 2 dots
+
+
+#: The factor-path bound: an fp64 ASSOCIATION floor, not a cache floor.
+#:
+#: ``np.array_equal`` against the parent is NOT available for any second
+#: kernel, and that is a property of the parent, not of this copy: phase 2 of
+#: the tile splits the wave axis over ``nlane = ceil(256/n_out)`` threads and
+#: each lane ``atomicAdd``s its partial into ``s_A``, so ``A`` — hence ``P``,
+#: ``Q``, ``dck`` and ``dcoeff`` — depends on the warp retirement order.
+#: MEASURED (``config_pwa_gen_mb2.yml``, ne 200, norm 1.3, two instances of the
+#: SAME backend): Q 4 u, P 5 u, ck 2 u, coeff 4 u of spread, and on the mb2
+#: grouped run at ne 64 the dck spread alone is 376 u.  The gate below is
+#: therefore a floor on the ASSOCIATION, ~8 orders tighter than the family's
+#: fp32 cache floor (2e-5), and it is measured, not chosen:
+FSLOT_FLOOR = 1e-13
+
+
+def test_the_factor_dedup_does_not_move_a_number():
+    """``fslot`` vs ``gen2``: the factor path where it pays, the parent where not.
+
+    The change is backward-only and a pure reassociation — every row of a
+    factor carries that factor's own gamma row, so summing ``dQ/ds`` over a
+    factor's rows before the dot product is the same number — so
+    ``Q``/``P``/``dck``/``dnorm`` must not move and ``dcoeff`` may only
+    re-associate.  The gate is :data:`FSLOT_FLOOR` (see the note above for why
+    it cannot be ``array_equal``).
+
+    BOTH SIDES OF THE GATE are pinned: ``_mb2`` (4 factor rows against the
+    parent's 6 dots) takes the factor path, ``_mb`` (2 against 2) must NOT —
+    there the CSR accumulation buys no dot and measured 4 % slower — and its
+    numbers are then the parent's own path.  MEASURED (ne 64, seed 0,
+    rsize 1, norm 1.3, six paired draws): mb2 Q 8.1e-16, P 2.0e-16, ck 3.9e-16,
+    dcoeff 2.9e-16, against a same-kernel baseline of Q 1.0e-15 / ck 3.9e-16 /
+    dcoeff 4.3e-16 on that sample; the mb pair is the parent path either way
+    and matches to its own spread.
+    """
+    for cfg, n_fslot, n_rows, gate_on in ((CFG_MB2, 4, 24, True),
+                                          (CFG_MB, 2, 8, False)):
+        kc, params, data = _setup(cfg)
+        new = _backend("cuda_flat_pwa_gen_fslot", kc)
+        ref = _backend("cuda_flat_pwa_gen2", kc)
+        try:
+            assert new.kernel.n_fslot == n_fslot, (cfg, new.kernel.n_fslot)
+            assert new.kernel.n_wave * new.kernel.n_res == n_rows, cfg
+            assert new.kernel.parent_dots == ref.kernel.n_slot * ref.kernel.n_res
+            assert new.kernel.use_fslot is gate_on, (cfg, new.kernel.use_fslot)
+            # the two paths are exclusive, and the parent's own is unchanged
+            assert new.kernel.use_slots is (not gate_on), cfg
+            assert ref.kernel.use_slots, cfg
+            for norm in (None, 1.3):
+                Qn, gn, Pn = new.compute(params, new.load_data(data), norm=norm)
+                Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=norm)
+                assert _rel(Qn, Qr) < FSLOT_FLOOR, (cfg, norm, "Q")
+                assert _rel(Pn, Pr) < FSLOT_FLOOR, (cfg, norm, "P")
+                assert _rel(gn["ck"], gr["ck"]) < FSLOT_FLOOR, (cfg, norm, "dck")
+                assert _rel(gn["coeff"], gr["coeff"]) < FSLOT_FLOOR, \
+                    (cfg, norm, "dcoeff")
+                if norm is not None:
+                    assert _rel(new.kernel._last_dnorm,
+                                ref.kernel._last_dnorm) < FSLOT_FLOOR, \
+                        (cfg, norm, "dnorm")
+        finally:
+            new.free()
+            ref.free()
+
+
+def test_the_factor_gate_asks_for_a_real_saving():
+    """The gate is STRICT: at equality the CSR accumulation buys no dot.
+
+    The factor sweep pays one per-row reduction and saves ``parent_dots -
+    n_fslot`` dot products, so ``n_fslot == parent_dots`` is the break-even
+    where it can only lose (MEASURED on ``_mb``: 4 % slower than the parent).
+    ``_mb`` is exactly that shape — one topology, 2 factor rows against its own
+    collapsed 1 x 2 — and it is the case a ``<`` (rather than ``<=``) exists
+    for; ``_mb2``/``4pi`` are the ``<`` side.
+    """
+    from tabpwa.cuda._flat_pwa_gen_fslot import fslot_threshold_says_use
+
+    for n in (1, 2, 3, 4, 6, 12, 16):
+        assert fslot_threshold_says_use(n, n) is False, n
+        if n > 1:
+            assert fslot_threshold_says_use(n - 1, n) is True, n
+    assert fslot_threshold_says_use(2, 2) is False       # _mb: 2 vs 1 x 2
+    assert fslot_threshold_says_use(4, 6) is True        # _mb2: 4 vs 3 x 2
+    assert fslot_threshold_says_use(12, 16) is True      # 4pi: 12 vs 8 x 2
+
+
+def test_the_factor_gate_is_off_at_one_resonance_per_chain():
+    """``n_res == 1``: nothing NEW to group, so the PARENT's path runs verbatim.
+
+    With one factor per chain a row IS a wave, so the factor slots are exactly
+    the parent's wave slots (``n_fslot == n_slot <= n_wave``): the gate would
+    buy the same dot count as the collapse the parent already does, so it is
+    off and the factor buffer is never allocated — the point of the gate,
+    since the CSR sweep would otherwise be pure overhead.
+    """
+    for cfg in (CFG_ONE, CFG_KM, CFG_IDENT):
+        kc, params, data = _setup(cfg)
+        be = _backend("cuda_flat_pwa_gen_fslot", kc)
+        try:
+            assert int(np.asarray(kc["num_table"]).shape[1]) == 1, cfg
+            assert not be.kernel.fslot_gate and not be.kernel.use_fslot, cfg
+            assert be.kernel.n_fslot == be.kernel.n_slot <= be.kernel.n_wave, cfg
+            # ... and the numbers are still the parent's own band
+            ref = _backend("cuda_flat_pwa_gen2", kc)
+            try:
+                Qn, gn, Pn = be.compute(params, be.load_data(data), norm=1.3)
+                Qr, gr, Pr = ref.compute(params, ref.load_data(data), norm=1.3)
+                assert _rel(Qn, Qr) < FSLOT_FLOOR, cfg
+                assert _rel(gn["coeff"], gr["coeff"]) < FSLOT_FLOOR, cfg
+            finally:
+                ref.free()
+        finally:
+            be.free()
+
+
+#: On the 4pi fixture the fp32 cache floor is its own number — the family's
+#: `2^-24` cache ulp (6e-8) read on a wider P dynamic range than any other
+#: fixture, so `_rel` (worst absolute / global max) sits above it.  MEASURED
+#: against `numpy_flat` (`_in_grid`, seed 0, ne 64/120/200, norm None/1.3, both
+#: parameter points, worst of the matrix): Q 5.7e-8, P 4.4e-7, dck 2.6e-7,
+#: dcoeff 2.6e-7.  A sample's numbers, not a constant: another run reads
+#: 7.2e-9 / 4.9e-8 / 2e-8 / 1.9e-8 on the same fixtures.  5e-6 keeps an >=11x
+#: margin on the worse of the two and is still 4x tighter than the family's
+#: measured WIDE floor (2e-5).
+FOURPI_REF_FLOOR = 5e-6
+
+
+def _conditioned_params(kc, seed=7):
+    """A second, independently drawn parameter point for the 4pi shape.
+
+    Not a rescue from a broken point — the model-default point passes too
+    (that is asserted first) — but the check that the parity does not depend
+    on where the fit sits: a random ``ck`` (complex, modulus 0.5-1.5) against
+    ``coeff`` 0.3-1.2, which is ``_wide_params``' COEFF half (its ``ck`` is the
+    model's own, so only the coefficient half is shared).
+    """
+    rng = np.random.default_rng(seed)
+    n_wave = int(np.asarray(kc["fl_table"]).shape[0])
+    n_basis = int(np.asarray(kc["basis_table"]).shape[0])
+    return {"ck": rng.uniform(0.5, 1.5, n_wave)
+                  * np.exp(1j * rng.uniform(-np.pi, np.pi, n_wave)),
+            "coeff": rng.uniform(0.3, 1.2, n_basis)}
+
+
+def test_the_factor_dedup_on_identical_particle_blocks():
+    """``n_blocks > 1`` AND ``n_res > 1``: the 4pi multi-BW shape.
+
+    Every other multi-BW fixture is one block and every block fixture is
+    ``n_res == 1``, so this is the only place the two axes multiply: 8
+    identical-particle blocks x 4 waves = 32, ``n_res`` 2, and 12 distinct
+    factor rows against the parent's 8 blocks x 2 = 16 dots.  A grouping that
+    mixed a row's BLOCK with its factor (or sized the factor buffers by the
+    block count) shows up here and nowhere else.
+
+    Evaluated at BOTH parameter points — the model default the rest of the
+    suite uses and :func:`_conditioned_params`' — and at each one the
+    comparison is asserted to be MEANINGFUL (both kernels recomputed on their
+    own handle first, and required reproducible to 1e-13, so the rest cannot
+    be measuring launch order), then against the parent, then against
+    ``numpy_flat``.
+    """
+    kc, params_default, data = _setup(CFG_4PI, 64)
+    be = _backend("cuda_flat_pwa_gen_fslot", kc)
+    ref = _backend("cuda_flat_pwa_gen2", kc)
+    try:
+        # the fixture really is the combination this test exists for
+        assert int(np.asarray(kc["num_table"]).shape[1]) == 2
+        assert be.kernel.n_wave == 32 and be.kernel.n_res == 2
+        assert be.kernel.n_slot == 8, be.kernel.n_slot       # 8 CP/perm blocks
+        assert be.kernel.n_fslot == 12, be.kernel.n_fslot
+        assert be.kernel.use_fslot and not be.kernel.use_slots
+        assert be.kernel.n_fslot < ref.kernel.n_slot * ref.kernel.n_res, (
+            "the fixture must make the factor dedup non-vacuous",
+            be.kernel.n_fslot, ref.kernel.n_slot * ref.kernel.n_res)
+        # ... and the parent's own collapse is on for this shape, so the two
+        # paths really are different paths (not a fixture where both are no-ops)
+        assert ref.kernel.use_slots, "the parent must take its collapsed path"
+        assert 2 * ref.kernel.n_slot <= ref.kernel.n_wave
+
+        def check(ptag, params):
+            for ne in (64, 120):
+                d = _in_grid(kc, ne, 0)
+                for norm in (None, 1.3):
+                    # the comparison is only meaningful where the kernels repeat
+                    h = be.load_data(d)
+                    r0 = be.compute(params, h, norm=norm)
+                    r1 = be.compute(params, h, norm=norm)
+                    h.free()
+                    assert _rel(r0[2], r1[2]) < FSLOT_FLOOR, \
+                        (ptag, ne, norm, "fslot repeat")
+                    hr = ref.load_data(d)
+                    s0 = ref.compute(params, hr, norm=norm)
+                    s1 = ref.compute(params, hr, norm=norm)
+                    hr.free()
+                    assert _rel(s0[2], s1[2]) < FSLOT_FLOOR, \
+                        (ptag, ne, norm, "gen2 repeat")
+
+                    Qn, gn, Pn = r1
+                    Qr, gr, Pr = s1
+                    assert _rel(Qn, Qr) < FSLOT_FLOOR, (ptag, ne, norm, "Q")
+                    assert _rel(Pn, Pr) < FSLOT_FLOOR, (ptag, ne, norm, "P")
+                    assert _rel(gn["ck"], gr["ck"]) < FSLOT_FLOOR, \
+                        (ptag, ne, norm, "dck")
+                    assert _rel(gn["coeff"], gr["coeff"]) < FSLOT_FLOOR, \
+                        (ptag, ne, norm, "dcoeff")
+                    if norm is not None:
+                        assert _rel(be.kernel._last_dnorm,
+                                    ref.kernel._last_dnorm) < FSLOT_FLOOR, \
+                            (ptag, ne, norm, "dnorm")
+
+                    # ... and both are the physics, not merely equal to each other
+                    npr = _backend("numpy_flat", kc)
+                    try:
+                        Qq, gq, Pq = npr.compute(params, npr.load_data(d),
+                                                 norm=norm)
+                    finally:
+                        npr.free()
+                    assert _rel(Pn, Pq) < FOURPI_REF_FLOOR, \
+                        (ptag, ne, norm, "P vs ref")
+                    assert _rel(Qn, Qq) < FOURPI_REF_FLOOR, \
+                        (ptag, ne, norm, "Q vs ref")
+                    assert _rel(gn["coeff"], gq["coeff"]) < FOURPI_REF_FLOOR, \
+                        (ptag, ne, norm, "dcoeff vs ref")
+
+        check("model default", params_default)
+        check("conditioned", _conditioned_params(kc))
+
+        # the grouped objective on the same shape, at a group larger than a tile
+        rep = {k: np.repeat(np.asarray(v), 10, axis=0) for k, v in data.items()}
+        rep["weight"] = np.full(len(np.asarray(data["weight"])) * 10, 1.0 / 10)
+        ga = _backend("cuda_flat_pwa_gen_fslot", kc, resolution_size=10)
+        gb = _backend("cuda_flat_pwa_gen2", kc, resolution_size=10)
+        try:
+            Qa, xa, Pa = ga.compute(params_default, ga.load_data(rep), norm=1.3)
+            Qb, xb, Pb = gb.compute(params_default, gb.load_data(rep), norm=1.3)
+            assert _rel(Qa, Qb) < FSLOT_FLOOR, "Q (rsize 10)"
+            assert _rel(Pa, Pb) < FSLOT_FLOOR, "P (rsize 10)"
+            assert _rel(xa["coeff"], xb["coeff"]) < FSLOT_FLOOR, "dcoeff (rsize 10)"
+            assert _rel(ga.kernel._last_dnorm,
+                        gb.kernel._last_dnorm) < FSLOT_FLOOR, "dnorm (rsize 10)"
+        finally:
+            ga.free()
+            gb.free()
+    finally:
+        be.free()
+        ref.free()

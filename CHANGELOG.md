@@ -62,6 +62,25 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `docs/mpi_backend_design.md`; as built and measured: `docs/mpi_backend.md`;
   deployment: `docs/slurm.md`; fixture `tests/test_mpi_backend.py`.
 
+### Added (pwa_gen factor-level dedup)
+
+- `cuda_flat_pwa_gen_fslot` (`pwa_gen`): a case-1 copy of
+  `cuda_flat_pwa_gen2` that runs the coefficient-gradient sweep over distinct
+  FACTOR rows — `(wave, factor)` gamma rows grouped across waves and across the
+  factor axis — instead of the parent's wave blocks, so two topologies that
+  share a resonance compute it once.  Backward only (phase 1, `Q`, `P`, `dck`
+  and `norm` are the parent's, and `dcoeff` is the same sum re-associated:
+  measured 5 ulp (`_mb`) / 26 ulp (`mb2`) against the parent, at or below gen2's OWN run-to-run spread), and
+  gated: it engages only when `n_res > 1` and `n_fslot < n_slot·n_res` — a real
+  saving against the parent's own dot count (at equality the extra reduction
+  buys nothing and measured 4 % slower), otherwise the parent's path runs
+  unchanged (`n_res == 1` always).  No `n_res1`
+  tag — it takes a multi-BW chain.  Fixtures `tests/config_pwa_gen_mb2.yml` and
+  `tests/config_pwa_gen_4pi_mb.yml` (identical-particle blocks AND a multi-BW
+  chain at once); contract in `tests/test_flat_dedup.py`, where the multi-BW
+  anchor and its finite-difference gradient check are parametrised over all
+  three multi-BW shapes.
+
 ### Added (toy generation)
 
 - `generate_toy(progress=True)` prints one throttled progress line per second
