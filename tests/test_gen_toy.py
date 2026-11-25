@@ -190,6 +190,9 @@ def test_generate_toy_bg_survives_a_narrow_support():
     def zero(ev):
         return np.zeros(len(ev["mass"]))
 
+    # the refusal is the claim; its cost is the engine's (a 1e6-event all-zero
+    # budget, MEASURED 32.7 s before the adaptive batch and 4.4 s after — NOT
+    # `stall_loops`, which measures nothing here)
     with pytest.raises(RuntimeError, match="zero over"):
         f.generate_toy_bg(x0, 10, purity=0.0, bg=zero, seed=1)
 

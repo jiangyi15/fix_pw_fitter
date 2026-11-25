@@ -234,6 +234,17 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
 
 ### Fixed
 
+- A HOPELESS toy background was diagnosed after ~33 s: the all-zero check
+  samples a 1e6-event budget in batches, the batch was pinned at
+  `max(64, 4·(n_bg−have))`, and `build_event_data` costs 55 µs/event at 64 vs
+  5.4 at 1e5 — 15 625 rebuilds.  The batch now GROWS while the answer is still
+  "zero" (64 → 8192, cap); the 1e6 budget and the message are unchanged and the
+  cost is 4.1 s (MEASURED).  A NARROW support costs the same (its first small
+  batch already accepts) but a background that is zero on an EARLY batch now
+  proposes larger batches, so it draws a DIFFERENT RNG sequence at a fixed
+  seed — a different sample from the previous release.  The false "zero over
+  1e6" probability is unchanged: it depends on the total sampled events, not on
+  how they are chunked.
 - `shard` reported nothing when a worker could not be started or died: the
   parent saw `BrokenPipeError` from `p.start()` (spawn's preparation write) or
   blocked forever in `queue.get()` when a worker had already exited

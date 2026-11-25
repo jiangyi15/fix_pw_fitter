@@ -599,12 +599,20 @@ def generate_toy_bg(fitter, x0, n_data, *, purity=None, bg=None, seed=None,
     # only after a cumulative budget of all-zero draws.
     bg_parts = {}
     have, guess, loops, zero_seen, bg_tried = 0, None, 0, 0, 0
+    # the all-zero diagnosis below samples up to 1e6 events; a batch of 64 is
+    # the right shape for a NARROW support (one that may be missed) but wrong
+    # for a HOPELESS one: ``build_event_data`` costs 55 us/event at 64 and
+    # 5.4 us/event at 1e5 (MEASURED), so 15 625 tiny batches spent 55 s to
+    # reach a budget that costs ~6 s in large ones.  The batch GROWS while the
+    # answer is still "zero", so a narrow support still gets its small probes.
+    flat_batch = 64
     chain = fitter.decay_tree.partial_waves()[0][1]
     while have < n_bg:
         loops += 1
         if loops > 100_000:
             raise RuntimeError("toy: the background function rejects everything")
-        m = int(max(64, 4 * (n_bg - have)) if bg is not None else (n_bg - have))
+        m = (int(max(flat_batch, 4 * (n_bg - have))) if bg is not None
+             else (n_bg - have))
         bg_tried += m
         # flat phase space, then the MODEL's background rows (its own layout,
         # and its own flat law for any extra per-event input such as frac/time)
@@ -625,6 +633,7 @@ def generate_toy_bg(fitter, x0, n_data, *, purity=None, bg=None, seed=None,
                         "toy: the background function is zero over "
                         f"{zero_seen} sampled events — its support is too small "
                         "for this n_data (raise n_data or widen the support)")
+                flat_batch = min(8192, flat_batch * 4)
                 continue
             if guess is None:
                 guess = vmax * 1.0001
