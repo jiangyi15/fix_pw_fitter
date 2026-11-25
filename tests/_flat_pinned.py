@@ -196,7 +196,11 @@ def _pair(name, cfg, rs=1, **kw):
 def test_registration_and_the_pinned_tag(name):
     assert name in set(backends_for_model("pwa_gen"))
     assert name not in set(backends_for_model("pwa"))
-    assert backend_tags(name, "pwa_gen") == frozenset({"coeff_pinned"})
+    # `coeff_pinned` is the CONTRACT this suite owns; `fp32_cache` is the leaf's
+    # accuracy class (it caches the amplitude as float2) — an independent
+    # declaration, and the suite's gate comes from it.
+    assert backend_tags(name, "pwa_gen") == frozenset(
+        {"coeff_pinned", "fp32_cache"})
 
 
 def test_the_tag_is_declared_metadata_and_the_set_is_not_empty():

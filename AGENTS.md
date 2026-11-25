@@ -1556,13 +1556,14 @@ tests/validate_gradients.py              # 3-point gradient validation (all 6 ba
 ```
 
 **The flat family's suite is grouped by CONTRACT; there are no kernel-named test
-files.**  Seven files, each the owner of one contract (no other file may hold a
+files.**  Eight files, each the owner of one contract (no other file may hold a
 gate on the same backend/sample/config — a duplicate is deleted rather than kept
 in two copies that can drift):
 
 | file | owns |
 |---|---|
-| `tests/_flat_compute.py` | the unmasked `load_data`/`compute` contract, over every leaf |
+| `tests/_flat_compute.py` | the unmasked `load_data`/`compute` contract, over every leaf — **axis A**: a kc STRUCTURE x every leaf — `_flat_models.CONFIGS` declares each fixture's `needs` (the capability tag it must tolerate) and the mechanism it covers; a leaf is swept on every fixture whose `needs` its tags do not refuse (`REFUSES`), minus the multi-BW pair whose anchor `test_flat_dedup.py` owns, so `FLOORS` is the measured RECORD and no longer the selector |
+| `tests/test_flat_models.py` (`tests/_flat_models.py`) | **axis B**: every registered particle MODEL as a UNIT OF A CONFIG — its declaration (row names, heads, `ck` count, `wave_expansion`) with no backend, then its numbers and its FD gradient on `pwa_gen`'s own default (the `numpy_flat` PATH is `isinstance`-pinned, no absolute value is pinned per model — a self-consistent wrong forward passes, a wrong VJP does not); no per-leaf matrix and no fixture — each entry renders into `_flat_models.TEMPLATE`, a minimal in-memory config, pinned key-by-key against `config_pwa_gen.yml` for the default basis.  `MODELS`/`EXCLUDED` (reason + owner) and `OWNED_ELSEWHERE` (a model-only fixture's owner) are live gates |
 | `tests/_flat_masked.py` | the fixed-coefficient contract (`fixed_coeff`), incl. the split's per-context scratch gate |
 | `tests/_flat_pinned.py` | the pinned-coefficient contract (`coeff_pinned`) |
 | `tests/test_flat_tile.py` | the s0e family's config contract (five kernels as parameters) |

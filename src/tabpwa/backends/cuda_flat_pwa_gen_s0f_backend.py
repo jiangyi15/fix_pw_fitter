@@ -20,6 +20,6 @@ from tabpwa.cuda import _flat_pwa_gen_s0f as _k
 
 
 @register_backend("cuda_flat_pwa_gen_s0f", model="pwa_gen",
-                  tags=("n_res1", "fixed_coeff"))
+                  tags=("n_res1", "fixed_coeff", "fp32_cache"))
 class CUDAFlatPwaGenS0FBackend(_k.CUDAFlatPwaGenS0FBackend):
     """Registered alias of the wrapper in ``tabpwa.cuda._flat_pwa_gen_s0f``."""

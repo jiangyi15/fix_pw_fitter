@@ -7,6 +7,6 @@ from .core import register_backend
 from tabpwa.cuda import _flat_cache_pwa_gen as _k
 
 
-@register_backend("cuda_flat_cache_pwa_gen", model="pwa_gen")
+@register_backend("cuda_flat_cache_pwa_gen", model="pwa_gen", tags=("fp32_cache",))
 class CUDAFlatCachePWAGenBackend(_k.CUDAFlatCachePWAGenBackend):
     """Registered alias of the wrapper in ``tabpwa.cuda._flat_cache_pwa_gen``."""

@@ -51,7 +51,7 @@ import pytest
 from tabpwa import Fitter
 from tabpwa.backends import (backend_tags, backends_for_model,
                              create_backend)
-from _flat_grid import _in_grid
+from _flat_grid import _in_grid, anchor_inputs
 
 CFG_ONE = "tests/config_pwa_gen.yml"
 CFG_KM = "tests/config_pwa_gen_km.yml"
@@ -85,6 +85,23 @@ QUALIFYING = [CFG_ONE, CFG_KM, CFG_IDENT, CFG_SAME, CFG_CP]
 # so their file also gated the ABSOLUTE error (1e-4) — `abs_ok` records that,
 # and `_floor_ok` (rel OR abs) is used for those five entries: `s0c`'s pair and
 # the three CPU leaves, as their own files did.
+#: THE GATE IS A CLASS, NOT A NUMBER PER BACKEND.
+#:
+#: Every leaf computes the same numbers as the fp64 reference; the only
+#: question is how far a leaf's OWN rounding can move them, and that is a
+#: property of its ACCURACY CLASS — declared at registration as the tag
+#: ``fp32_cache``, meaning "this leaf keeps interpolation/amplitude rows in
+#: fp32 registers or a float2 cache somewhere" (it is NOT always the amplitude:
+#: `cuda_flat_cache_pwa_gen` caches `F`/`fa`, `s0c` replaced the fill), or by
+#: its absence (fp64).
+#: ``_gate`` reads the class through ``_flat_models.tol_for``: 1e-4 for a
+#: cached leaf, 1e-12 for an fp64 one.  Nothing below is a gate IN THIS FILE:
+#: the per-leaf numbers in ``FLOORS`` are the MEASURED RECORD of what each leaf
+#: actually does (the 5th field is the config set that record was taken on).
+#: ``test_flat_tile.py`` and ``test_cpu_flat_pwa_gen*.py`` still READ those
+#: numbers for their own claims, so they must stay accurate; the docstrings
+#: around them mention the retired helper (``_floor_ok``) and the old
+#: ``rel/p/coeff/abs_ok`` columns — read those as history.
 CACHE_FLOOR_ABS = 1e-4
 NH = 1e-6
 
@@ -193,6 +210,11 @@ FLOORS = {
 #:   fixed_coeff — takes ``fixed_cols`` + ``fixed_values`` and caches the
 #:                 columns a fixed wave reads (the mask suite's selector,
 #:                 ``tests/_flat_masked.py``)
+#:   fp32_cache — the leaf carries the amplitude in a float2 cache, so it is
+#:                 ACCURATE to ~1e-7..2.5e-5, not to fp64's ~1e-15.  The
+#:                 accuracy CLASS of the leaf, declared at registration: the
+#:                 suite's gate is chosen from it (``_flat_models.tol_for``),
+#:                 which is why no per-backend number is written down anywhere.
 #:   coeff_pinned — every coefficient is PINNED: the whole per-wave amplitude
 #:                 is a load-time cache, ``grads["coeff"] == 0`` by contract and
 #:                 a compute whose ``coeff`` moved RAISES.  Subtracted from this
@@ -214,7 +236,8 @@ FLOORS = {
 #: changes no selection — the vocabulary is closed so a NEW tag cannot be added
 #: silently.
 TAG_VOCABULARY = frozenset({"reference", "delegate", "external", "n_res1",
-                            "fixed_coeff", "coeff_pinned", "probe"})
+                            "fp32_cache", "fixed_coeff", "coeff_pinned",
+                            "probe"})
 
 #: tags that REMOVE a name from this suite — by capability, never by name.
 #: `reference`/`delegate`/`coeff_pinned` are not this suite's contract (their
@@ -374,19 +397,6 @@ PINNED = frozenset(backends_for_model("pwa_gen", tag="coeff_pinned"))
 MULTI_BW_SWEEP = sorted(set(SPECS) | PINNED)
 
 
-def _floor_ok(a, b, rel_bound, abs_bound=CACHE_FLOOR_ABS):
-    """The fp32 floor is ABSOLUTE; ``_rel`` divides by the value.
-
-    Accepting either bound keeps the gate meaningful for a near-zero Q without
-    loosening it for the ordinary ones (the absolute bound IS the measured
-    shared-cache gap).
-    """
-    a = np.asarray(a).ravel()
-    b = np.asarray(b).ravel()
-    worst = float(np.abs(a - b).max())
-    return worst / max(np.abs(b).max(), 1e-300) < rel_bound or worst < abs_bound
-
-
 def _rel(a, b):
     a = np.asarray(a).ravel()
     b = np.asarray(b).ravel()
@@ -451,39 +461,54 @@ def other_gpu_users():
     return sorted(pids)
 
 
+#: THE correctness criterion of the whole family: a leaf is CORRECT when it
+#: agrees with the fp64 reference to a share of the reference's own scale.
+#:
+#: There is deliberately no per-backend accuracy claim.  The leaves differ only
+#: in where they round (fp64 summation order ~1e-15, the float2 amplitude cache
+#: ~1e-7..2.5e-5 measured over every fixture and model), and the per-leaf
+#: numbers that used to gate this suite were 1e-15 (s0e2), 1e-12, 1e-6, 2e-5 —
+#: i.e. they measured the CACHE, and the tightest of them sat inside the
+#: cross-block atomic noise of a single kernel (MEASURED: s0e2 vs ITSELF up to
+#: 6.4e-16, 11/25 launches non-zero), so it failed on a correct pair.  A bound
+#: that can only be met by one kernel on one fixture is not a correctness gate.
+#:
+#: THE BOUND IS DECIDED BY THE LEAF'S ACCURACY TAG, not by a per-backend
+#: number written down here: ``fp32_cache`` (the amplitude is a float2 cache)
+#: is correct to 1e-4, an fp64 leaf to 1e-12.  1e-4 is 4x the worst MEASURED
+#: cached gap (`ExpSplineSVD`'s 10-row basis: gradient 2.5e-5) and four orders
+#: below an algebra change (`_ident`/`_cp` span P from 7.5e-4 to 7.2e2, so a
+#: wrong sign/term moves the result by O(1)); 1e-12 is the fp64
+#: summation-order floor.  1e-15 sat inside the cross-block atomic noise of a
+#: SINGLE kernel (MEASURED: s0e2 vs itself up to 6.4e-16, 11/25 launches).
+#: (The numbers live in ``_flat_models.CORRECT_TOL`` — ONE copy, read through
+#: ``tol_for``; a second definition here invited drift.)
 def _gate(name, a, b, which="rel", cfg=None):
-    """The floor for THAT backend on THAT fixture class.
+    """Correct for THIS leaf's accuracy class — the tag decides, not a table.
 
-    Inside the configs its own file measured, the backend's own bound applies
-    (the dense ones reach 1e-6, the tile family 3e-5 — one family-wide number
-    would loosen some of them).  Outside that set, the family's measured
-    wide-range floor applies, so the case is still GATED rather than skipped.
+    ``name``/``which``/``cfg`` are accepted because every call site passes them
+    (and they name the quantity in the failure message); the BOUND comes from
+    ``_flat_models.tol_for(name)``.  ``FLOORS``' numbers remain as MEASURED
+    DOCUMENTATION of what each leaf actually does, never as its gate.
     """
-    rel, p, coeff, abs_ok, cfgs = FLOORS[name]
-    if cfg is not None and cfg not in cfgs:
-        return _rel(a, b) < WIDE[which]
-    # "ck" shares the generic rel bound; WIDE carries it separately
-    bound = {"rel": rel, "p": p, "ck": rel, "coeff": coeff}[which]
-    return _floor_ok(a, b, bound) if abs_ok else _rel(a, b) < bound
+    import _flat_models as fm
+    return _rel(a, b) < fm.tol_for(name)
 
 
 def _cfgs(name):
-    """The config set THIS backend's own anchor was measured on."""
-    return FLOORS[name][4]
+    """The fixtures this leaf is swept on — decided by its CAPABILITY TAGS.
+
+    One rule (``_flat_models.configs_for``): a leaf takes every fixture whose
+    ``needs`` its tags do not refuse (``n_res1`` refuses a multi-BW chain), so
+    a new fixture is swept by every eligible leaf and no per-leaf list has to
+    be maintained.  ``FLOORS``' fifth field stays as the PROVENANCE of that
+    leaf's recorded measurement (a comment, not a selector); with one
+    correctness bound it no longer needs to double as one.
+    """
+    import _flat_models as fm
+    return fm.configs_for(name)
 
 
-#: On a fixture OUTSIDE a backend's recorded set the gate is the family's own
-#: measured wide-range floor, never a skip: dropping the case would test the
-#: backend on nothing at all, and lifting its 1e-6 there would be a gate that
-#: cannot pass.  MEASURED over the whole family on ``_ident``/``_cp``,
-#: rsize 1/17, worst of norm 1.3 and norm None: Q 1.20e-7, P 4.28e-7,
-#: ck 2.65e-7, coeff 1.94e-6 (the fp32-cached s0e tiles) — the 10-23x margins
-#: below.  It stays at the CACHED family's level on purpose: it must hold for
-#: every leaf, and the fp64 leaves clearing it by 10 orders does not make it
-#: the right bound for the ones that do not.  Q and ck are the norm-dependent
-#: pair (norm=None is the raw sum, so its gradient is not divided by the
-#: normalisation).
-WIDE = {"rel": 2e-6, "p": 1e-5, "ck": 5e-6, "coeff": 2e-5}
 #: The grouped-objective scenario (34 events, seed 5, rsize 17, un-normalised
 #: weights) is its own: MEASURED worst 1.3e-6 across the family -> 4x margin.
 GROUPED = 5e-6
@@ -503,17 +528,43 @@ def _replicate(data, rs):
 def test_backend_tags_are_declared_metadata():
     """Tags are DECLARED at registration — the suite selects on them."""
     assert backend_tags("numpy_flat", "pwa_gen") == frozenset({"reference"})
+    # `n_res1` is a CAPABILITY (it refuses a multi-BW chain); `fp32_cache` is
+    # the ACCURACY CLASS (the suite's bound comes from it).  Both declared.
     assert backend_tags("cuda_flat_pwa_gen_s0c2", "pwa_gen") \
-        == frozenset({"n_res1"})
+        == frozenset({"n_res1", "fp32_cache"})
     assert backend_tags("auto", "pwa_gen") == frozenset({"delegate"})
     # a pinned-coefficient kernel is a LEAF with its own contract, never an
     # oracle and never a forwarding wrapper.  It carries NO `n_res1`: the
     # denominator is the product over the factor axis, so a multi-BW chain is
     # computed by it like any other leaf (the sweep below covers it).
     assert backend_tags("cuda_flat_pwa_gen_ampcache", "pwa_gen") \
-        == frozenset({"coeff_pinned"})
+        == frozenset({"coeff_pinned", "fp32_cache"})
+    # the fp64 leaves carry NO accuracy tag: `fp64` is the absence of one
+    assert "fp32_cache" not in backend_tags("numpy_flat", "pwa_gen")
+    assert "fp32_cache" not in backend_tags("cuda_flat_pwa_gen", "pwa_gen")
+    assert "fp32_cache" not in backend_tags("cpu_flat_pwa_gen", "pwa_gen")
     # an untagged backend returns an empty frozenset, not None
     assert backend_tags("cuda_v4_pwa", "pwa") == frozenset()
+
+
+def test_the_accuracy_tag_is_exactly_the_measured_class():
+    """``fp32_cache`` is a PROPERTY of the leaf, and it must agree with the record.
+
+    A tag is not decoration: it names something the backend HAS (a float2
+    amplitude cache, a refusal of multi-BW chains, a fixed-column contract), so
+    an fp64 leaf carries none and ``FLOORS``' recorded measurement has to match
+    the declaration — a leaf tagged ``fp32_cache`` that measures 1e-12, or an
+    untagged one that needs 1e-4, would make the gate lie in one direction or
+    the other.  ``1e-6`` separates the two classes by six orders
+    (``cuda_flat_cache_pwa_gen`` measures exactly 1e-6, the loose end).
+    """
+    tagged = {n for n in SPECS if "fp32_cache" in backend_tags(n, "pwa_gen")}
+    loose = {n for n in SPECS if FLOORS[n][0] >= 1e-6}   # `cache` sits ON 1e-6
+    assert tagged == loose, (
+        f"declared {sorted(tagged)} but measured {sorted(loose)}")
+    # and the reverse claim: an untagged leaf really is fp64-grade
+    for name in set(SPECS) - tagged:
+        assert FLOORS[name][0] <= 1e-12, (name, FLOORS[name][0])
 
 
 def test_the_pinned_tag_is_out_of_this_suite_and_nobody_else_is():
@@ -640,19 +691,24 @@ def test_the_rule_excludes_a_probe_and_reports_a_late_backend():
                                tags.__getitem__) == []
 
 
-@pytest.mark.parametrize("cfg", QUALIFYING)
+#: The anchor matrix: (leaf, fixture) pairs decided by CAPABILITY — the leaf's
+#: tags against the fixture's declared needs (``_flat_models.configs_for``), so
+#: a fixture is swept by every leaf that can take it and a new fixture needs no
+#: edit here.  A pair list, not two independent axes: ``n_res1`` must never be
+#: paired with a ``multi_bw`` fixture.
+ANCHOR_CASES = [(name, cfg) for name in SPECS for cfg in _cfgs(name)]
+
+
+@pytest.mark.parametrize("name,cfg", ANCHOR_CASES,
+                         ids=[f"{n}-{c.split('/')[-1]}" for n, c in ANCHOR_CASES])
 @pytest.mark.parametrize("norm", [None, 1.3])
 @pytest.mark.parametrize("rs", [1, 17])
-@pytest.mark.parametrize("name", SPECS)
 def test_anchor_matches_numpy_flat(name, cfg, norm, rs):
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
+    kc, params = anchor_inputs(cfg)
     # the sibling fixtures' anchor shape (64 events, seed 0), so the floors
     # below are the same measurements they were calibrated on
     base = _in_grid(kc, 64, 0)
     data = _replicate(base, rs) if rs > 1 else base
-    params, _ = f.build_params(f.initial_values(seed=1))
     ref = create_backend("numpy_flat", kc, model="pwa_gen",
                          resolution_size=rs)
     gpu = create_backend(name, kc, model="pwa_gen",
@@ -683,11 +739,8 @@ def test_one_group_per_event_reduces_to_the_per_event_nll(name, cfg):
     `-log(Pb/norm + Bb)` — the two differ by ``W_g`` whenever a group's weights
     do not sum to 1.  Un-normalised weights make that difference visible.
     """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
+    kc, params = anchor_inputs(cfg)
     data = _in_grid(kc, 34, 5)              # 34 events: a short final group
-    params, _ = f.build_params(f.initial_values(seed=1))
     ref = create_backend("numpy_flat", kc, model="pwa_gen", resolution_size=17)
     gpu = create_backend(name, kc, model="pwa_gen",
                          resolution_size=17)
@@ -732,10 +785,7 @@ def test_coeff_gradient_matches_central_differences(name, cfg, rs):
     repeatable (both computes wrong the same way), so only an independent
     derivative can catch it.
     """
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
+    kc, params = anchor_inputs(cfg)
     base = _in_grid(kc, 48)
     data = _replicate(base, rs) if rs > 1 else base
     gpu = create_backend(name, kc, resolution_size=rs, model="pwa_gen")
@@ -762,10 +812,7 @@ def test_coeff_gradient_matches_central_differences(name, cfg, rs):
 @pytest.mark.parametrize("name", SPECS)
 def test_ck_gradient_matches_fd(name, cfg):
     """``dck`` after the u-merge — the same independent check."""
-    f = Fitter(cfg)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
+    kc, params = anchor_inputs(cfg)
     data = _in_grid(kc, 48)
     gpu = create_backend(name, kc, model="pwa_gen")
     h = gpu.load_data(data)
@@ -797,10 +844,7 @@ def test_a_multi_chunk_call_equals_a_single_chunk_call(name, ):
     Exercised with and without the grouped objective, and at batch sizes that
     straddle both guards (1/5 are below one group at rsize 17; 1e9 is capped).
     """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
+    kc, params = anchor_inputs(CFG_KM)
     data = _in_grid(kc, 500, 3)
 
     def run(rs, bs):
@@ -835,10 +879,7 @@ def test_a_chunk_boundary_does_not_move_the_fill(name, ):
     the first computed from the wrong masses (measured: Q off by 8.5 on 16
     events at batch_size 1).  Pinned by a sample much longer than the chunk.
     """
-    f = Fitter(CFG_KM)
-    f.apply_constrains()
-    kc = f.kernel_config
-    params, _ = f.build_params(f.initial_values(seed=1))
+    kc, params = anchor_inputs(CFG_KM)
     data = _in_grid(kc, 37, 11)
     k = create_backend(name, kc, batch_size=4, model="pwa_gen")
     h = k.load_data(data)

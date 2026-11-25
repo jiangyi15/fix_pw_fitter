@@ -26,7 +26,7 @@ from tabpwa.cuda import _flat_pwa_gen_ampcache as _k
 
 
 @register_backend("cuda_flat_pwa_gen_ampcache", model="pwa_gen",
-                  tags=("coeff_pinned",))
+                  tags=("coeff_pinned", "fp32_cache"))
 class CUDAFlatPwaGenAmpCacheRegistered(_k.CUDAFlatPwaGenAmpCacheBackend):
     """Registered alias of the wrapper in
     ``tabpwa.cuda._flat_pwa_gen_ampcache``.  The ONLY place the
