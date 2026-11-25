@@ -86,6 +86,81 @@ def test_worker_error_raises_instead_of_hanging():
         shard.free()
 
 
+def test_a_worker_that_dies_is_reported_instead_of_hanging():
+    """A worker that never replies must raise, not block forever.
+
+    ``worker_timeout=None`` (the default) means "wait as long as the worker
+    needs" and cannot cover a worker that is GONE: its queue stays empty, so a
+    blocking ``get()`` hangs — on a batch system, a burnt allocation.  The
+    death is detected by polling the process, and the message names the common
+    cause (a ``spawn`` worker re-imports the calling program).
+    """
+    import pytest
+
+    cfg = Config("tests/config_pwa.yml")
+    kc = cfg.build_all_index()
+    data = _arrays(50, kc, 0)
+    # a spec that cannot build: the child raises before its task loop starts
+    shard = create_backend(
+        {"name": "shard", "backends": "no_such_backend", "n_workers": 1,
+         "start_method": "spawn"}, kc)
+    import faulthandler
+    try:
+        h = shard.load_data(data)
+        # a wall-clock bound: if the death detection were removed this gate
+        # would HANG instead of failing, which is the failure mode it exists to
+        # prevent — so the hang itself must be a failure
+        faulthandler.dump_traceback_later(60, exit=True)
+        with pytest.raises(RuntimeError) as ei:
+            shard.compute(_params(kc), h)
+        msg = str(ei.value)
+        assert "died (exitcode=" in msg and "without returning a result" in msg
+        assert "if __name__ == '__main__':" in msg      # the spawn hint
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        shard.free()
+
+
+def test_spawn_re_executes_the_calling_program_so_it_must_be_guarded(tmp_path):
+    """Without ``if __name__ == '__main__':`` a spawn worker cannot start.
+
+    ``spawn`` has no memory to inherit, so it reconstructs ``__main__`` by
+    RE-EXECUTING the calling script (``runpy.run_path(…, "__mp_main__")``) — the
+    ``Process`` object is pickled and its target may live in ``__main__``, so
+    the child needs that module.  An unguarded program re-runs its own work
+    there, starts another pool and aborts the bootstrap; a bare
+    ``multiprocessing`` program then exits **0** with a dead worker, while the
+    shard backend raises and names the guard.
+    """
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    cfg = str(Path("tests/config_pwa.yml").resolve())
+    script = tmp_path / "unguarded.py"
+    script.write_text(textwrap.dedent(f"""
+        import numpy as np
+        from tabpwa.config_loader import Config
+        from tabpwa.backends import create_backend
+
+        kc = Config({cfg!r}).build_all_index()
+        be = create_backend({{"name": "shard", "backends": "numpy_pwa",
+                             "n_workers": 1, "start_method": "spawn"}}, kc)
+        be.load_data({{"mass": np.array([[2.2]])}})
+        """))
+    r = subprocess.run([sys.executable, str(script)],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode != 0, r.stdout + r.stderr
+    # CPython's own bootstrap text also names the idiom, so THIS line passes on
+    # the unfixed code too; the discriminating assertion is the next one
+    assert "if __name__ == '__main__':" in r.stderr
+    # OUR translation, not only Python's bootstrap text; which of the two
+    # branches reports it depends on the parent/child race
+    assert ("shard worker 0 could not be started" in r.stderr
+            or "shard worker 0 died" in r.stderr), r.stderr
+
+
 def test_worker_dict_spec_keeps_kwargs():
     """A dict worker spec must keep its kwargs (only device is stripped)."""
     from tabpwa.backends.shard_backend import ShardBackend

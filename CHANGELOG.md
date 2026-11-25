@@ -234,6 +234,23 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
 
 ### Fixed
 
+- `shard` reported nothing when a worker could not be started or died: the
+  parent saw `BrokenPipeError` from `p.start()` (spawn's preparation write) or
+  blocked forever in `queue.get()` when a worker had already exited
+  (`worker_timeout=None` is the default and means "no deadline", not "no
+  diagnosis") — on a batch system, a burnt allocation.  Both now raise with the
+  worker index and, for `spawn`/`forkserver`, the cause: those methods RE-EXECUTE
+  the calling script in every worker (`runpy.run_path(…, run_name="__mp_main__")`,
+  since the `Process` object is pickled and its target may live in `__main__`), so
+  a program whose top-level code is not under `if __name__ == "__main__":`
+  re-runs itself in the child (measured: a bare `multiprocessing` program then
+  exits 0 with a dead worker).  Workers are now DAEMON processes owned by the
+  backend, and a non-daemon worker is joined by the interpreter at exit, so an
+  unhandled error in the parent hung the program on a worker blocked in
+  `task_queue.get()`.  One consequence: a NESTED `shard` (a shard worker
+  hosting another shard pool, which used to run) is now REFUSED by name, since
+  daemonic processes may not start children — use one flat `backends` list.  Gates in `tests/test_shard_worker.py`
+  (a dead worker; an unguarded program as a subprocess).
 - `fd_hess` divided a Hessian COLUMN by the step of its ROW
   (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
   space="bounded")` was wrong on the off-diagonals once the bounded values had

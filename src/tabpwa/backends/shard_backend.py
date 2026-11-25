@@ -108,6 +108,14 @@ def split_offsets(ne, weights, align=None):
 # First element of a result-queue message that carries a worker traceback.
 _ERROR = "__shard_worker_error__"
 
+#: A worker that DIED (bootstrap crash, segfault, OOM kill) never replies, so a
+#: blocking ``queue.get()`` waits forever.  The default ``worker_timeout=None``
+#: means "as long as the worker needs", which cannot cover a worker that needs
+#: nothing: poll its process instead, then give the queue one ``_DEATH_GRACE``
+#: second so a result flushed just before the exit is not lost.
+_DEATH_POLL = 0.5
+_DEATH_GRACE = 2.0
+
 
 def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
                  device=None, model=None):
@@ -131,6 +139,15 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
         spec = backend_spec
 
     be = create_backend(spec, kernel_config, model=model)
+    # a worker is DAEMON (see ``_ensure_pool``), and daemonic processes may not
+    # start children — so a nested shard pool, which WORKED before the workers
+    # became daemonic, must be refused by name instead of dying later inside
+    # ``Process.start`` with CPython's bare ``AssertionError``.
+    if isinstance(be, ShardBackend):
+        raise RuntimeError(
+            "a shard worker cannot host another shard pool: the workers are "
+            "daemonic, and daemonic processes may not start children.  Use "
+            "one flat ``backends`` list instead of nesting `shard`")
     handles = {}
     for task in iter(task_queue.get, None):
         try:
@@ -214,9 +231,11 @@ class ShardBackend(ComputeBackend):
         CUDA applications where ``fork`` is unsafe.
     worker_timeout : float, optional
         Seconds to wait for each worker result before raising.  ``None``
-        (default) blocks until the worker replies; worker exceptions are
-        always reported back (never a silent hang).  Set a positive value
-        to also catch a hard worker crash (segfault/OOM).
+        (default) = no DEADLINE, not "no diagnosis": a worker that has EXITED
+        (bootstrap crash, segfault, OOM) is detected by polling its process and
+        raises with the exit code, and worker exceptions always come back as a
+        message.  A positive value adds a wall-clock bound on a worker that is
+        alive but stuck.
     align : int, optional
         Round every interior split boundary down to a multiple of *align*
         (worker chunks then start/end on ``align``-aligned rows, except the
@@ -285,6 +304,38 @@ class ShardBackend(ComputeBackend):
 
     # -- data lifecycle ------------------------------------------------
 
+    def _start_hint(self):
+        """Why a spawn/forkserver worker cannot start, and the fix.
+
+        Both methods re-IMPORT the calling program in the child, so its
+        top-level code runs there too: an unguarded program builds the backend
+        again, starts another pool, and the bootstrap aborts (or recurses)
+        before the worker ever reads a task.
+        """
+        if self._mp.get_start_method() in ("spawn", "forkserver"):
+            return (
+                f"; with start_method={self._mp.get_start_method()!r} every "
+                "worker re-imports the calling program, so its top-level code "
+                "must be under `if __name__ == '__main__':`")
+        return ""
+
+    def _shutdown_started(self, failed=None):
+        """Kill the workers of a PARTLY started pool (a failed ``start``).
+
+        ``failed`` is the process whose ``start()`` raised: it is NOT in
+        ``_procs`` (it is appended only on success) but it may have left a
+        child behind, so it is killed too.  The joins are bounded like
+        ``free()``'s — an error path must not hang on a worker in ``D`` state.
+        """
+        procs = list(self._procs) + ([failed] if failed is not None else [])
+        self._procs.clear()
+        for p in procs:
+            if p.pid is None:          # start() never completed: not joinable
+                continue
+            if p.is_alive():
+                p.kill()
+            p.join(timeout=5)
+
     def _ensure_pool(self):
         if self._procs:
             return
@@ -298,7 +349,24 @@ class ShardBackend(ComputeBackend):
                 args=(self.kernel_config, spec, self._task_queues[i],
                       self._result_queues[i], device, self._model),
             )
-            p.start()
+            # the backend OWNS these processes (`free()` shuts them down); a
+            # non-daemon child is joined by the interpreter at exit, so an
+            # unhandled error in the parent would hang the program forever on
+            # a worker blocked in ``task_queue.get()``.  A worker never starts
+            # a child of its own (shard-in-shard and mpi-in-worker are
+            # refused), which is the only thing daemon mode forbids.
+            p.daemon = True
+            try:
+                p.start()
+            except (RuntimeError, OSError) as exc:
+                # BrokenPipeError (an OSError) is what the parent sees when the
+                # child aborts before reading its preparation data; the raw
+                # RuntimeError is what the CHILD sees on the same failure.
+                self._shutdown_started(failed=p)
+                raise RuntimeError(
+                    f"shard worker {i} could not be started "
+                    f"({type(exc).__name__}: {str(exc).strip()})"
+                    f"{self._start_hint()}") from exc
             self._procs.append(p)
 
     def load_data(self, data_np):
@@ -331,12 +399,42 @@ class ShardBackend(ComputeBackend):
 
     # -- result handling -----------------------------------------------
 
+    def _dead_message(self, i, proc):
+        """Why a silent worker is silent, and what to do about the usual cause."""
+        return (f"shard worker {i} died (exitcode={proc.exitcode}) without "
+                f"returning a result; its own traceback is on stderr"
+                f"{self._start_hint()}")
+
+    def _get_alive(self, i):
+        """``result_queues[i].get()`` that also fails when the worker DIES.
+
+        ``worker_timeout=None`` means "wait as long as the worker needs" — but
+        a worker that is GONE needs nothing, and its queue stays empty forever
+        (a hang, on a batch system a burnt allocation).  A bootstrap crash (e.g.
+        ``spawn`` with a top-level program that is not under
+        ``if __name__ == '__main__'``), a segfault and an OOM kill all land
+        here.  Poll the process; honour a result put just before the exit, then
+        raise with the exit code.
+        """
+        rq = self._result_queues[i]
+        proc = self._procs[i] if i < len(self._procs) else None
+        while True:
+            try:
+                return rq.get(timeout=_DEATH_POLL)
+            except Empty:
+                if proc is None or proc.is_alive():
+                    continue
+                try:
+                    return rq.get(timeout=_DEATH_GRACE)
+                except Empty:
+                    raise RuntimeError(self._dead_message(i, proc)) from None
+
     def _recv(self, i):
         """Receive worker *i*'s result; turn an error/timeout into a raise."""
         rq = self._result_queues[i]
         try:
             msg = (rq.get(timeout=self._worker_timeout)
-                   if self._worker_timeout else rq.get())
+                   if self._worker_timeout else self._get_alive(i))
         except Empty:
             alive = self._procs[i].is_alive() if i < len(self._procs) else False
             raise RuntimeError(
@@ -407,4 +505,9 @@ class ShardBackend(ComputeBackend):
         self._result_queues.clear()
 
     def __del__(self):
-        self.free()
+        # best effort: a failed ``_ensure_pool`` can leave the object being
+        # collected at interpreter shutdown, where no thread may be created
+        try:
+            self.free()
+        except Exception:
+            pass
