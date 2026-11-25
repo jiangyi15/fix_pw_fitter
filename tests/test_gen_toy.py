@@ -168,7 +168,11 @@ def test_generate_toy_bg_works_for_the_time_dependent_model():
 
     # top_p/maxp stay refused: this model owns its phase space
     with pytest.raises(ValueError, match="do not apply"):
-        f.generate_toy_bg(x0, 5, purity=0.5, top_p=fix_beam(0.034))
+        # a SEED: an unseeded Poisson(2.5) draw is 0 about 8 % of the time,
+        # and with no signal events the model's generator is never called
+        # (so nothing can refuse `top_p`) — the test would flake
+        f.generate_toy_bg(x0, 5, purity=0.5, seed=3,
+                          top_p=fix_beam(0.034))
 
 
 def test_generate_toy_bg_survives_a_narrow_support():
