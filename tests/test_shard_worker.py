@@ -140,26 +140,53 @@ def test_spawn_re_executes_the_calling_program_so_it_must_be_guarded(tmp_path):
     RE-EXECUTING the calling script (``runpy.run_path(…, "__mp_main__")``) — the
     ``Process`` object is pickled and its target may live in ``__main__``, so
     the child needs that module.  An unguarded program re-runs its own work
-    there, starts another pool and aborts the bootstrap; a bare
-    ``multiprocessing`` program then exits **0** with a dead worker, while the
-    shard backend raises and names the guard.
+    there and aborts the bootstrap, while the shard backend raises and names
+    the guard.
+
+    Two things make this gate DISCRIMINATING rather than vacuous:
+
+    * the worker backend is a no-op ``register_backend`` at MODULE level, so a
+      correctly guarded script's worker really starts and computes (the gate
+      then sees ``rc == 0``).  ``kc = {}`` plus a real backend would die in ITS
+      constructor (``numpy_pwa`` reads ``matrix_angle`` eagerly), which looks
+      exactly like a bootstrap death and would pass the gate for the wrong
+      reason;
+    * the kernel config stays TINY: CPython pipes the ``Process`` object to the
+      child, and a child that dies during ``prepare()`` (where an unguarded
+      ``__main__`` fails) has consumed only the preparation data.  A payload
+      over the 64 KiB pipe therefore blocks the PARENT inside ``p.start()`` —
+      measured on 3.12, while 3.13 raises ``BrokenPipeError`` — before any
+      backend code, which no backend message can report.
+
+    Module-level code runs in the child too (that is the point), so the
+    registration is visible to the worker in both variants.
     """
     import subprocess
     import sys
     import textwrap
-    from pathlib import Path
 
-    cfg = str(Path("tests/config_pwa.yml").resolve())
     script = tmp_path / "unguarded.py"
-    script.write_text(textwrap.dedent(f"""
+    script.write_text(textwrap.dedent("""
         import numpy as np
-        from tabpwa.config_loader import Config
         from tabpwa.backends import create_backend
+        from tabpwa.backends.core import ComputeBackend, register_backend
 
-        kc = Config({cfg!r}).build_all_index()
-        be = create_backend({{"name": "shard", "backends": "numpy_pwa",
-                             "n_workers": 1, "start_method": "spawn"}}, kc)
-        be.load_data({{"mass": np.array([[2.2]])}})
+        @register_backend("shard_gate_noop")
+        class _Noop(ComputeBackend):
+            # buildable from an EMPTY config, so a guarded worker survives
+            def __init__(self, kernel_config, **kw):
+                pass
+            def load_data(self, data):
+                return data
+            def compute(self, params, handle, norm=None, return_p=True):
+                return 0.0, {}, None
+
+        kc = {}                      # tiny on purpose: see the docstring
+        be = create_backend({"name": "shard", "backends": "shard_gate_noop",
+                             "n_workers": 1, "start_method": "spawn"}, kc)
+        h = be.load_data({"mass": np.array([[2.2]])})
+        be.compute({}, h, norm=None)
+        print("worker started and computed")
         """))
     r = subprocess.run([sys.executable, str(script)],
                        capture_output=True, text=True, timeout=300)
@@ -171,6 +198,32 @@ def test_spawn_re_executes_the_calling_program_so_it_must_be_guarded(tmp_path):
     # branches reports it depends on the parent/child race
     assert ("shard worker 0 could not be started" in r.stderr
             or "shard worker 0 died" in r.stderr), r.stderr
+
+
+def test_a_failed_start_names_the_worker_and_the_cause(monkeypatch):
+    """`p.start()` raising is the OTHER report; the guard text comes with it.
+
+    End to end this branch needs a payload larger than the spawn pipe to make
+    ``p.start()`` fail deterministically, and that payload is exactly what
+    blocks CPython on 3.12 (see the gate above), so the branch is pinned here:
+    ``Process.start`` is made to raise, and the backend must name the worker,
+    the exception and the guard, and leave no half-started pool behind.
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 1, "start_method": "spawn"}, kc)
+
+    def boom(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(shard._mp.Process, "start", boom)
+    with pytest.raises(RuntimeError) as ei:
+        shard.load_data(_arrays(10, kc, 0))
+    msg = str(ei.value)
+    assert "shard worker 0 could not be started" in msg
+    assert "BrokenPipeError" in msg
+    assert "if __name__ == '__main__':" in msg
+    assert shard._procs == [] and shard._task_queues == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="os.kill(pid, 0) is POSIX-only")
