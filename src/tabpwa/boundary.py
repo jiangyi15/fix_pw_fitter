@@ -12,6 +12,16 @@ and provides dict-level apply / gradient-correction / save-load methods.
 
 import numpy as np
 
+#: The gradient share a START keeps off a wall: ``|dy/dx| >= START_GRAD``.
+#: A start placed exactly ON a wall has ``dy/dx = 0``, i.e. it is a stationary
+#: point of ``F(x) = NLL(y(x))`` with ``F'' = |g_y|/k > 0`` — PD, so a minimizer
+#: reads "converged" at iteration 0 even when the optimum is INTERIOR.  Every
+#: shape is quadratically flat at its wall, so a small angle buys the whole
+#: slope: at ``START_GRAD = 0.1`` the start sits 0.25 % of a range's width (or
+#: ``5.0e-3``) inside the edge in ``y``, and it keeps 10 % of the y-gradient in
+#: ``x`` — far above any ``gtol``.  Used by :meth:`BoundTransform.start_inside`.
+START_GRAD = 0.1
+
 
 class BoundTransform:
     """ONE bound map, for a two-sided range or a one-sided (half-line) bound.
@@ -125,6 +135,33 @@ class BoundTransform:
             return np.abs(u)
         return -np.abs(u)
 
+    def start_inside(self, y):
+        """Optimizer start for a desired bounded value *y*, OFF a flat wall.
+
+        :meth:`inverse` is the exact inverse, so a *y* outside the range CLIPS
+        to the edge — where ``dy/dx = 0`` — and a fit started there reports
+        convergence at iteration 0 because the edge is a stationary point (for
+        an optimum that is INTERIOR, that is a wrong answer, not a bound hit).
+        This keeps the exact inverse wherever it already has a healthy slope
+        and, otherwise, moves the start to the nearest point on the same side
+        with ``|dy/dx| == START_GRAD`` — 0.25 % of a range's width in ``y``,
+        ``5.0e-3`` for a half-line.  The wall itself is untouched: ``forward``,
+        ``grad`` and ``inverse`` keep their exact meaning, so a fit pulled
+        outwards still converges ONTO the edge.
+        """
+        if self.kind == "range":
+            if self.k == 0.0:
+                return self.inverse(y)      # a constant map has no slope
+            x = float(self.inverse(y))
+            if abs(np.cos(x / self.k)) >= START_GRAD:
+                return x
+            return float(np.sign(x)) * self.k * np.arccos(START_GRAD)
+        x = float(self.inverse(y))
+        if float(self.grad(x)) >= START_GRAD:
+            return x
+        off = START_GRAD / np.sqrt(1.0 - START_GRAD * START_GRAD)
+        return off if self.kind == "lower" else -off
+
     def trans_err(self, x, error):
         """Propagate an UNBOUNDED error: ``|dy/dx| * error`` at *x*."""
         return np.abs(self.grad(x)) * error
@@ -192,6 +229,16 @@ class Boundary:
         """
         bt = self._tfm.get(name)
         return bt.inverse(val) if bt else val
+
+    def start_inside(self, name, val):
+        """Start for bounded *val* off a flat wall (see ``BoundTransform``).
+
+        The exact inverse for a value that gives a healthy slope; the nearest
+        point with ``|dy/dx| == START_GRAD`` otherwise.  Unbounded names pass
+        through unchanged, like :meth:`inverse`.
+        """
+        bt = self._tfm.get(name)
+        return bt.start_inside(val) if bt else val
 
     def apply_from_unbounded(self, name, val, err=None):
         """Apply forward bound and optionally propagate error.

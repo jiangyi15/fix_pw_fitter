@@ -204,6 +204,19 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   parameter — so `|x| ≈ 1` is the quadratic region everywhere and `dy/dx → 1` in
   the bulk.  The open side is `±inf` internally (the step/clip code is unchanged)
   and `null` in the saved JSON.
+- A `default` that maps onto a transform's WALL now starts just INSIDE it:
+  `initial_values` places the start at the nearest point with
+  `|dy/dx| = START_GRAD = 0.1` (`boundary.BoundTransform.start_inside`) instead
+  of exactly on the edge, where `dNLL/dx = 0` and `F'' = |g_y|/k > 0` — a
+  stationary, PD point, so a minimizer reported convergence at iteration 0 and
+  a default outside its range silently fitted the WRONG (wall) value (the
+  `pi1(1600)` case: range `[1.4, 1.9]`, default `1.3544`, interior optimum
+  `0.22` away).  The inset is a fraction of the WIDTH, not of the range's
+  position, because every shape is quadratically flat at its wall: `0.25 %` of
+  a range's width in `y` (`5.0e-3` for a half-line) buys 10 % of the y-gradient
+  in `x`, far above any `gtol`.  The warning stays (the default and the range
+  disagree — a config error) and the transforms keep their exact meaning, so a
+  fit genuinely pulled outwards still converges ONTO the edge.
 
 - `generate_toy`'s runaway guard is now a NO-PROGRESS window, not a total
   candidate budget: `stall_loops` (default 1000 batches) raises when that many

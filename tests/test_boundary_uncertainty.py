@@ -1,7 +1,10 @@
-"""Bound-transform uncertainty propagation (apply_bound_dict)."""
+"""Bound transforms: the uncertainty chain, the start off a wall, the frames."""
+import warnings
+
 import numpy as np
 import pytest
 
+from tabpwa.boundary import BoundTransform, START_GRAD
 from tabpwa.param_constraint import ConstraintManager
 
 
@@ -83,24 +86,113 @@ def test_bound_error_unbounded_names_untouched():
     assert e2["a"] == pytest.approx(0.1)
 
 
-def test_a_default_outside_its_range_warns_at_startup():
-    """A default on/outside the edge starts the fit on the wall (gradient 0)."""
+def test_a_default_outside_its_range_warns_and_starts_off_the_wall():
+    """A default outside its range warns AND starts just inside the edge.
+
+    The exact inverse would put the start ON the wall, where ``dy/dx = 0``: the
+    edge is a stationary point with ``F'' > 0``, so a minimizer reports
+    convergence at iteration 0 — a WRONG answer when the optimum is interior.
+    The start keeps ``|dy/dx| = START_GRAD`` instead, which costs 0.25 % of the
+    range's width in ``y`` (the map is quadratically flat at the wall).
+    """
     cm = ConstraintManager(["a", "b"])
     cm.set_defaults({"a": 0.9})          # outside the range below
     cm.set_range("a", 0.3, 0.8)
     with pytest.warns(RuntimeWarning, match="outside its range"):
         x = cm.initial_values(seed=1)
-    # the start is the FINITE branch end, not a huge number
     bt = cm.bounds["a"]
-    assert float(x[0]) == pytest.approx(bt.k * np.pi / 2, rel=1e-12)
-    # an in-range default is silent
+    # finite, inside the range, strictly off the wall
+    assert float(x[0]) > 0.0                       # the RIGHT wall (0.9 > 0.8)
+    assert abs(float(bt.grad(x[0]))) == pytest.approx(START_GRAD, rel=1e-12)
+    assert bt.a < float(bt(x[0])) < bt.b
+    # the inset is tiny in y (0.25 % of the width), so the clipped value is kept
+    assert bt.b - float(bt(x[0])) == pytest.approx(
+        bt.k * (1.0 - np.sqrt(1.0 - START_GRAD ** 2)), rel=1e-12)
+    assert bt.b - float(bt(x[0])) < 5e-3 * (bt.b - bt.a)
+    # an in-range default is silent and EXACT (no nudge)
     cm2 = ConstraintManager(["a"])
     cm2.set_defaults({"a": 0.5})
     cm2.set_range("a", 0.3, 0.8)
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        cm2.initial_values(seed=1)
+        x2 = cm2.initial_values(seed=1)
+    assert float(x2[0]) == pytest.approx(
+        float(cm2.bounds.inverse("a", 0.5)), rel=0, abs=0)
+
+
+def test_a_start_off_the_wall_lets_the_fit_reach_an_interior_optimum():
+    """The pi1(1600) case: range [1.4, 1.9], default 1.3544, optimum interior.
+
+    Started exactly on the wall the objective has a zero gradient and BFGS
+    stops at iteration 0, 0.2 away from the truth.  Started at the off-wall
+    point it finds the interior optimum.
+    """
+    from scipy.optimize import minimize
+
+    cm = ConstraintManager(["a"])
+    cm.set_defaults({"a": 1.3544})
+    cm.set_range("a", 1.4, 1.9)
+    with pytest.warns(RuntimeWarning, match="outside its range"):
+        x0 = cm.initial_values(seed=1)
+    bt = cm.bounds["a"]
+    y_target = 1.62
+
+    def f(x):
+        return (np.asarray(bt(x)).item() - y_target) ** 2
+
+    def g(x):
+        return 2.0 * (np.asarray(bt(x)).item() - y_target) * np.asarray(
+            bt.grad(x)).item()
+
+    wall = float(bt.inverse(1.3544))
+    assert float(g(wall)) == pytest.approx(0.0, abs=1e-15)
+    with warnings.catch_warnings():
+        # scipy reports "precision loss" instead of converging: that IS the bug
+        warnings.simplefilter("ignore")
+        stuck = minimize(f, wall, jac=g, method="BFGS")
+    assert abs(float(bt(stuck.x[0])) - y_target) > 0.15      # the hazard
+
+    res = minimize(f, x0, jac=g, method="BFGS", options={"gtol": 1e-10})
+    assert abs(float(bt(res.x[0])) - y_target) < 5e-3
+
+
+def test_start_inside_keeps_an_in_range_default_exact():
+    """A value with a healthy slope maps through the exact inverse, unchanged."""
+    bt = BoundTransform(1.4, 1.9)
+    for y in (1.45, 1.65, 1.85):
+        assert float(bt.start_inside(y)) == float(bt.inverse(y))
+    # a value inside the flat zone (0.1 % of the width off the wall) is pulled
+    # to the same slope, on the same side
+    near = 1.4 + 1e-3 * 0.5
+    x = float(bt.start_inside(near))
+    assert x < 0.0
+    assert abs(float(bt.grad(x))) == pytest.approx(START_GRAD, rel=1e-12)
+    # the wall itself still maps to the exact branch end (inverse untouched)
+    assert float(bt.inverse(bt.a)) == pytest.approx(-bt.k * np.pi / 2, rel=1e-12)
+    assert float(bt.grad(bt.inverse(bt.a))) == pytest.approx(0.0, abs=1e-15)
+
+
+@pytest.mark.parametrize("lo,hi", [(0.0, None), (None, 2.0)])
+def test_start_inside_on_a_half_line(lo, hi):
+    """An out-of-range default on a half-line start 5.0e-3 inside, slope 0.1."""
+    bt = BoundTransform(lo, hi)
+    wall = bt.lo if lo is not None else bt.hi
+    beyond = wall - 0.5 if lo is not None else wall + 0.5
+    x = float(bt.start_inside(beyond))
+    assert float(bt.grad(x)) == pytest.approx(START_GRAD, rel=1e-12)
+    if lo is not None:
+        assert x > 0.0 and float(bt(x)) == pytest.approx(
+            bt.lo + np.sqrt(1.0 + x * x) - 1.0, rel=1e-12)
+    else:
+        assert x < 0.0 and float(bt(x)) == pytest.approx(
+            bt.hi - np.sqrt(1.0 + x * x) + 1.0, rel=1e-12)
+    assert abs(float(bt(x)) - wall) == pytest.approx(
+        (1.0 - np.sqrt(1.0 - START_GRAD ** 2)) / np.sqrt(1.0 - START_GRAD ** 2),
+        rel=1e-12)
+    # in-range values are exact
+    inside = 0.7 if lo is not None else 1.3
+    assert float(bt.start_inside(inside)) == float(bt.inverse(inside))
 
 
 # ── the pipeline's forward and backward cuts (start_after) ────────────

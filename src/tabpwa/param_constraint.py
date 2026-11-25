@@ -1401,8 +1401,13 @@ class ConstraintManager:
         backward compatibility) slots whose name has a physical default
         (``cm.defaults``) start at that default, mapped to the unbounded
         optimizer variable through the bounds inverse (identity if the name
-        is not bounded; the edge maps to the finite branch end).  Names without
-        a default — notably ck — stay random ``U(-π, π)``, RESCALED onto the
+        is not bounded).  A default that maps onto a transform's WALL — outside
+        its range, or any value inside the flat ``|dy/dx| < START_GRAD``
+        zone — starts at the nearest point with ``|dy/dx| = START_GRAD``
+        instead, because a start exactly on a wall is a stationary point of
+        the objective and the fit would stop at iteration 0
+        (``BoundTransform.start_inside``).  Names without a default — notably
+        ck — stay random ``U(-π, π)``, RESCALED onto the
         transform's branch ``|x| <= k*π/2`` for a bounded slot: drawing that
         slot's x on the full ``U(-π, π)`` would put most starts on the flat
         region past the edge.  Pass ``use_default=False`` for an all-random
@@ -1416,26 +1421,28 @@ class ConstraintManager:
         for i, name in enumerate(self.var_registry.flat_names):
             if name in self.bounds:
                 # ONE interface: each shape maps the draw onto its own branch
-                # (uniform in x, so |dy/dx| stays away from 0)
+                # (uniform in x, so the draw is not piled on the edge)
                 x[i] = self.bounds[name].draw_start(x[i] / np.pi)
         if use_default:
             import warnings
             for i, name in enumerate(self.var_registry.flat_names):
                 if name in self._defaults:
                     val = float(self._defaults[name])
-                    x[i] = self.bounds.inverse(name, val)
+                    # off the wall: a start ON it has dNLL/dx = 0 (PD, so the
+                    # optimizer would report convergence at iteration 0)
+                    x[i] = self.bounds.start_inside(name, val)
                     if name in self.bounds:
                         bt = self.bounds[name]
                         if not (bt.a <= val <= bt.b):
-                            # a start on the wall has dNLL/dx = 0 by
-                            # construction (the transform is flat there), so the
-                            # fit would "converge" at iteration 0 — the default
-                            # and the range disagree, which is a CONFIG error
+                            # the default and the range disagree, which is a
+                            # CONFIG error: the requested value is unreachable,
+                            # so the start is the nearest usable point inside
                             warnings.warn(
                                 f"initial_values: default {name}={val:g} is "
                                 f"outside its range [{bt.a:g}, {bt.b:g}]; the "
-                                f"start is pinned to the edge, where the "
-                                f"gradient is zero", RuntimeWarning, stacklevel=2)
+                                f"start is moved just inside the edge (a start "
+                                f"exactly on it has dNLL/dx = 0)", RuntimeWarning,
+                                stacklevel=2)
         return x
 
     # ── modifiers ──────────────────────────────────────────────

@@ -333,8 +333,16 @@ width).  The open side is carried as `±inf` in `a`/`b`, so the code that clips 
 value or a step inside a range needs no special case, and the saved JSON writes
 `null`.  `cm.initial_values` draws a bounded slot ON the branch (rescaled from
 `U(-π,π)`; `|u|/π` for a half-line), and a `default` outside its range WARNS: the
-start would be pinned to the wall, where `dNLL/dx = 0` by construction, so the
-fit would "converge" at iteration 0 (`boundary.py`).
+requested value is unreachable (the default and the range disagree — a config
+error), so the start is placed just INSIDE the edge instead, at the nearest
+point where `|dy/dx| = START_GRAD = 0.1` (`boundary.py`).  That inset is what
+keeps a start usable: exactly on a wall `dNLL/dx = 0` with `F'' = |g_y|/k > 0`,
+so a minimizer reads "converged" at iteration 0 — a wrong answer when the
+optimum is INTERIOR.  Every shape is quadratically flat at its wall, so the
+inset costs only 0.25 % of a range's width in `y` (5.0e-3 for a half-line)
+while keeping 10 % of the y-gradient in `x`, far above any `gtol`.  The wall
+itself is untouched — `forward`/`grad`/`inverse` keep their exact meaning — so
+a fit genuinely pulled outwards still converges ONTO the edge.
 
 A BINDING soft range is REPORTED, not repaired: the edge of the sine IS the
 bound and it sits at a FINITE `x = ±kπ/2` (the arctan needed `1e15`), so
