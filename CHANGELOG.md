@@ -294,6 +294,28 @@ A release moves that block under a new dated `## [X.Y.Z]` heading, bumps
   `cuda_v5_pwa` / `_s0` / `_s0c` / `_s0d` siblings keep their own objective —
   `Q = -Σ log(pdf)` with no group weight — so they have no such division and
   are unchanged.
+- `shard` could leave its workers running when the job was done: `free()`
+  delivered the stop message first and only then killed, so a delivery that
+  failed (a closed queue, an interpreter shutting down) returned before ANY
+  worker was stopped — and because the workers are daemonic, a parent that
+  keeps running after the fit kept a GPU worker for the rest of its life.
+  `free()` now detaches its state first, treats every step as best-effort, and
+  KILLS a worker that is still alive after the join, so the pool always ends
+  with the job.  The same for a driver that dies WITHOUT `free()`: a `kill -9`
+  (or a scheduler's SIGKILL) runs no `atexit`, so nothing terminated the
+  daemonic children and they blocked forever — a worker now checks
+  whether the driver that started it is still alive while it waits, and
+  exits with it (under `forkserver` its direct parent is the forkserver,
+  which outlives the driver, so the driver's pid is checked too).  A
+  dropped `ShardDataHandle` also frees its dataset now (it is not a
+  `DataHandle` subclass, so it never inherited that `__del__`).
+- `shard`'s worker protocol is now exactly the commands a worker receives —
+  create, load, compute, free, and an explicit exit command (the former `None`
+  stop value is gone, and a malformed task is an error instead of a shutdown).
+  A failure of ANY command — a load or a free, not just a compute — is now
+  reported as that command's failure, and the pool then refuses further work:
+  the failed worker's later replies were still queued, so reusing it could
+  return the previous call's numbers.
 - `fd_hess` divided a Hessian COLUMN by the step of its ROW
   (`/ (2*eps)` with a per-slot `eps` array), so `compute_numerical_hessian(
   space="bounded")` was wrong on the off-diagonals once the bounded values had

@@ -1,6 +1,16 @@
 """ShardBackend end-to-end worker compute (numpy_pwa workers, no GPU)."""
 
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+
+import pathlib
+
 import numpy as np
+import pytest
 
 from tabpwa.config_loader import Config
 from tabpwa.backends import create_backend
@@ -106,11 +116,13 @@ def test_a_worker_that_dies_is_reported_instead_of_hanging():
          "start_method": "spawn"}, kc)
     import faulthandler
     try:
-        h = shard.load_data(data)
         # a wall-clock bound: if the death detection were removed this gate
         # would HANG instead of failing, which is the failure mode it exists to
         # prevent — so the hang itself must be a failure
         faulthandler.dump_traceback_later(60, exit=True)
+        # `load_data` queues and returns (only a COMPUTE replies), so the dead
+        # worker is detected by the first call that waits for a result
+        h = shard.load_data(data)
         with pytest.raises(RuntimeError) as ei:
             shard.compute(_params(kc), h)
         msg = str(ei.value)
@@ -159,6 +171,217 @@ def test_spawn_re_executes_the_calling_program_so_it_must_be_guarded(tmp_path):
     # branches reports it depends on the parent/child race
     assert ("shard worker 0 could not be started" in r.stderr
             or "shard worker 0 died" in r.stderr), r.stderr
+
+
+def test_two_datasets_in_one_pool_do_not_cross():
+    """Two datasets, two handles: each compute gets its OWN dataset back.
+
+    Two datasets are loaded before either is computed (the harder order — the
+    second load sits between the first load and the first compute), so this
+    pins that a handle carries its dataset's identity, not just a reply slot:
+    doubling the weights doubles `Q` exactly, and freeing one handle leaves the
+    other's numbers untouched.
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    params = _params(kc)
+    d1 = _arrays(60, kc, 0)
+    d2 = {**d1, "weight": np.full(60, 2.0)}       # a different sample
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 2, "start_method": "spawn"}, kc)
+    try:
+        h1 = shard.load_data(d1)
+        h2 = shard.load_data(d2)
+        Q1, _g1, _ = shard.compute(params, h1, norm=None)
+        Q2, _g2, _ = shard.compute(params, h2, norm=None)
+        # the weights differ by 2 → a weight-sum norm differs, P does not
+        assert Q2 == pytest.approx(2.0 * Q1, rel=1e-12), (Q1, Q2)
+        h1.free()
+        Q3, _g3, _ = shard.compute(params, h2, norm=None)   # h2 unaffected
+        assert Q3 == pytest.approx(Q2, rel=1e-12)
+    finally:
+        shard.free()
+
+
+def test_free_stops_every_worker():
+    """`free()` must leave NO worker alive — the pool is the job's lifetime.
+
+    They are daemonic, so a parent that exits takes them with it; a parent that
+    KEEPS RUNNING (a library user building one pool per fit) would keep a GPU
+    worker forever if `free()` returned early.
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    data = _arrays(30, kc, 1)
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 2, "start_method": "spawn"}, kc)
+    try:
+        shard.load_data(data)
+        procs = list(shard._procs)
+        assert len(procs) == 2 and all(p.is_alive() for p in procs)
+    finally:
+        shard.free()
+    assert not any(p.is_alive() for p in procs), "a worker outlived free()"
+
+
+def test_free_kills_the_workers_when_the_exit_command_cannot_be_delivered():
+    """A failed `put(("exit",))` (a closed queue) must still take the workers down.
+
+    MEASURED before the fix: with the task queues closed, `free()` raised on the
+    first delivery attempt and BOTH workers were still alive — a daemonic leak
+    that only ends when the parent does.
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    data = _arrays(30, kc, 1)
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 2, "start_method": "spawn"}, kc)
+    try:
+        shard.load_data(data)
+        procs = list(shard._procs)
+        for q in shard._task_queues:
+            q.close()
+            q.join_thread()
+    finally:
+        shard.free()                      # must not raise
+    assert not any(p.is_alive() for p in procs), "a worker outlived free()"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs SIGKILL and kill(2)")
+@pytest.mark.parametrize("method", ["spawn", "fork", "forkserver"])
+def test_a_worker_does_not_outlive_a_SIGKILLed_driver(tmp_path, method):
+    """A driver killed with SIGKILL runs no `atexit`: the worker must notice.
+
+    Nothing terminates a daemonic child on `SIGKILL` and no `("exit",)` command
+    can arrive, so a blocking `get()` would hold a GPU context forever.  The
+    worker re-checks `os.getppid()` each idle slice — reparenting happens when
+    the parent dies, and unlike the multiprocessing sentinel it cannot be
+    inherited from a SIBLING worker (`fork` copies the earlier workers' write
+    ends, which made a sentinel-based pool stop one worker per slice) — and the
+    DRIVER's pid is checked too, because under `forkserver` the worker's direct
+    parent is the forkserver, which outlives the driver.  All three start
+    methods run here; `spawn` alone never sees either problem.
+
+    The wait below is `n_workers` slices, derived from the backend's own
+    constant: a bound on how long the TEST waits, never a claim about how long
+    any work takes.
+    """
+    from tabpwa.backends.shard_backend import _WORKER_POLL
+
+    n = 3
+    script = tmp_path / "killed.py"
+    pids_file = tmp_path / "pids.txt"
+    fs_file = tmp_path / "fs.txt"
+    script.write_text(textwrap.dedent(f"""
+        import os, signal, sys
+        sys.path.insert(0, {str(pathlib.Path("tests").resolve())!r})
+        from tabpwa import Fitter
+        from tabpwa.backends import create_backend
+        from _flat_grid import _in_grid
+
+        def main():
+            f = Fitter({str(pathlib.Path("tests/config_pwa_gen_km.yml").resolve())!r})
+            f.apply_constrains()
+            kc = f.kernel_config
+            params, _ = f.build_params(f.initial_values(seed=1))
+            data = _in_grid(kc, 40, seed=2)
+            be = create_backend({{"name": "shard", "backends": "numpy_flat",
+                                  "n_workers": {n},
+                                  "start_method": {method!r}}}, kc, model="pwa_gen")
+            h = be.load_data(data)
+            be.compute(params, h, norm=None)
+            with open({str(pids_file)!r}, "w") as fh:
+                fh.write(" ".join(str(p.pid) for p in be._procs))
+            from multiprocessing import forkserver as _fs
+            fs_pid = _fs._forkserver._forkserver_pid
+            with open({str(fs_file)!r}, "w") as fh:
+                fh.write(str(fs_pid) if fs_pid else "")
+            sys.stdout.flush()
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        if __name__ == "__main__":
+            main()
+        """))
+    # the driver's OUTPUT goes to a FILE, not a pipe: a `forkserver` child
+    # inherits the driver's stdio, and `subprocess.run(capture_output=True)`
+    # would block on the pipe's EOF long after the workers are gone
+    log = tmp_path / "driver.log"
+    with open(log, "w") as fh:
+        r = subprocess.run([sys.executable, str(script)], stdout=fh, stderr=fh,
+                           timeout=4 * (n + 1) * _WORKER_POLL)
+    detail = log.read_text()[-800:]
+    assert r.returncode == -signal.SIGKILL, (r.returncode, detail)
+    pids = [int(x) for x in pids_file.read_text().split()]
+    assert len(pids) == n
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    deadline = time.time() + (n + 1) * _WORKER_POLL
+    while time.time() < deadline and any(alive(p) for p in pids):
+        time.sleep(0.2)
+    try:
+        assert not any(alive(p) for p in pids), \
+            f"[{method}] worker(s) outlived the SIGKILLed driver: " \
+            f"{[p for p in pids if alive(p)]}"
+    finally:
+        # a forkserver is CPython's own helper process: OUR contract is about
+        # the workers, so it is cleaned up here rather than asserted on
+        fs = fs_file.read_text().strip() if fs_file.exists() else ""
+        if fs:
+            try:
+                os.kill(int(fs), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_worker_failure_names_its_phase_and_stops_reuse():
+    """A failed worker leaves the reply stream shifted: refuse, don't reuse.
+
+    `compute` queues one task per worker and reads one reply per worker.  When
+    a worker fails it replies with `(_ERROR, phase, traceback)`, and with the
+    failure consumed the NEXT reply in its queue belongs to the attempt that
+    just failed — so a retry would return the previous call's numbers.  The
+    pool therefore reports the phase and refuses further work.
+
+    The failure is triggered in the compute (a coefficient vector of the wrong
+    length), which is the phase every kernel can be made to fail in.
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    bad = _params(kc)
+    bad["ck"] = bad["ck"][:-3]              # wrong length: the kernel raises
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 2, "start_method": "spawn"}, kc)
+    try:
+        h = shard.load_data(_arrays(40, kc, 0))
+        with pytest.raises(RuntimeError, match="failed during compute"):
+            shard.compute(bad, h, norm=None)
+        with pytest.raises(RuntimeError, match="desynchronised"):
+            shard.compute(_params(kc), h, norm=None)   # not the old numbers
+        with pytest.raises(RuntimeError, match="desynchronised"):
+            shard.load_data(_arrays(40, kc, 1))
+    finally:
+        shard.free()
+
+
+def test_compute_after_free_names_the_lifecycle_error():
+    """A compute with no pool is a stated error, never an `IndexError`.
+
+    `free()`/`kill()` detach the process list and the queues, so a later
+    `compute` has nothing to send to and nothing to read from.  Say that;
+    an index error out of `_result_queues[i]` would look like a kernel bug.
+    A stale handle is a no-op (its dataset is already gone with the pool).
+    """
+    kc = Config("tests/config_pwa.yml").build_all_index()
+    shard = create_backend({"name": "shard", "backends": "numpy_pwa",
+                            "n_workers": 2, "start_method": "spawn"}, kc)
+    h = shard.load_data(_arrays(40, kc, 0))
+    shard.free()
+    with pytest.raises(RuntimeError, match="pool is not running"):
+        shard.compute(_params(kc), h, norm=None)
+    h.free()                      # the dataset went with the pool: no-op
+    assert shard._procs == [] and shard._task_queues == []
 
 
 def test_worker_dict_spec_keeps_kwargs():

@@ -51,6 +51,7 @@ Usage::
     }, kc)
 """
 import os
+import time
 import traceback
 from queue import Empty
 
@@ -108,23 +109,81 @@ def split_offsets(ne, weights, align=None):
 # First element of a result-queue message that carries a worker traceback.
 _ERROR = "__shard_worker_error__"
 
-#: A worker that DIED (bootstrap crash, segfault, OOM kill) never replies, so a
-#: blocking ``queue.get()`` waits forever.  The default ``worker_timeout=None``
-#: means "as long as the worker needs", which cannot cover a worker that needs
-#: nothing: poll its process instead, then give the queue one ``_DEATH_GRACE``
-#: second so a result flushed just before the exit is not lost.
+#: How often the parent looks at a SILENT worker to see whether it is still
+#: there.  These bound no work: ``worker_timeout=None`` (the default) means
+#: "as long as the work takes", and a worker that is ALIVE is simply waited
+#: for.  The poll exists only because a worker that has EXITED needs nothing
+#: and its queue would stay empty forever.  Once the worker is GONE, what it
+#: produced is already in the pipe (its feeder flushes at exit), so the result
+#: is DRAINED, not waited for: no grace period is scheduled for anyone's work.
 _DEATH_POLL = 0.5
-_DEATH_GRACE = 2.0
+
+#: How long an IDLE worker waits on its task queue before looking at its
+#: parent.  This bounds NO work: a task wakes ``get`` the moment it arrives and
+#: is then executed without any limit (``worker_timeout`` is the caller's knob,
+#: ``None`` by default).  It is a slice only for the parent check — the one
+#: thing that must not be assumed is that a driver stays alive: a `kill -9`ed
+#: driver runs no `atexit`, so nothing else would ever stop the worker.  The
+#: parent is identified by ``os.getppid()`` PLUS the driver's pid, NOT by a
+#: multiprocessing sentinel: under ``fork`` a worker inherits the sentinels of
+#: the workers started before it, so a sentinel reports its EOF only when the
+#: LATER workers are gone and the pool would stop one worker per slice, in
+#: creation order.  ``getppid()`` is reparenting, which the kernel performs at
+#: the instant the parent dies — but under ``forkserver`` the worker's DIRECT
+#: parent is the forkserver, which outlives the driver, so the driver's own pid
+#: is checked as well.
+_WORKER_POLL = 5.0
+
+#: How long a REAP pass waits after SIGKILL — ONE budget for the whole pool,
+#: not per process, so eight wedged workers cannot turn a `__del__` into eight
+#: waits.  Reaping is not waiting on the worker's work (the process is already
+#: dead or in the kernel's hands), but a process in uninterruptible sleep (a
+#: hung GPU driver call is the canonical case here) would otherwise block the
+#: interpreter with nothing left to do.  After this the process is left to the
+#: kernel.
+_REAP_WAIT = 5.0
+
+
+def _reap_all(procs):
+    """Join processes that have ALREADY been SIGKILLed, within one budget."""
+    deadline = time.monotonic() + _REAP_WAIT
+    for p in procs:
+        if p.pid is None:             # start() never completed: not joinable
+            continue
+        try:
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
+
+
+def _pid_alive(pid):
+    """Whether *pid* names a live process (a ZOMBIE still answers here)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:          # alive, just not signalable by us
+        return True
+    return True
 
 
 def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
-                 device=None, model=None):
+                 device=None, model=None, driver_pid=None):
     """Persistent worker: one backend, several datasets keyed by id.
 
     Tasks are tuples ``("load", data_id, chunk)`` /
-    ``("compute", data_id, params, norm, return_p)`` / ``("free", data_id)``;
-    ``None`` shuts the worker down.
+    ``("compute", data_id, params, norm, return_p)`` / ``("free", data_id)`` /
+    ``("exit",)``.  Every command is an explicit tuple: the worker stops on
+    ``("exit",)`` and on nothing else (a malformed task is an error, not a
+    shutdown).  Only a COMPUTE has a normal reply; a failure of ANY command
+    replies once as ``(_ERROR, phase, traceback)``.
     """
+    # the driver this worker belongs to, read ONCE: `getppid` changes when the
+    # parent dies (the kernel reparents), and unlike the multiprocessing
+    # sentinel it cannot be inherited from a sibling under `fork`.  Under
+    # `forkserver` the direct parent is the FORKSERVER, so the driver's pid is
+    # checked too — otherwise a `kill -9`ed driver would never be noticed.
+    ppid0 = os.getppid()
     # an MPI rank inside this forked/spawned child would use a broken MPI state
     os.environ["TABPWA_SHARD_WORKER"] = "1"
     if device is not None:
@@ -149,9 +208,24 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
             "daemonic, and daemonic processes may not start children.  Use "
             "one flat ``backends`` list instead of nesting `shard`")
     handles = {}
-    for task in iter(task_queue.get, None):
+    while True:
         try:
-            op = task[0]
+            task = task_queue.get(timeout=_WORKER_POLL)
+        except Empty:
+            # The driver may be GONE without having sent `("exit",)`: a
+            # `kill -9` (or a scheduler's SIGKILL on a timeout) runs no
+            # `atexit`, so nothing terminates a daemonic child and no command
+            # ever arrives — the worker would block in `get()` forever, holding
+            # its GPU context.  Exit with the parent instead.
+            # (`_WORKER_POLL` is only a slice: a task wakes it at once.)
+            if (os.getppid() != ppid0
+                    or (driver_pid is not None and not _pid_alive(driver_pid))):
+                break
+            continue
+        op = task[0] if isinstance(task, (tuple, list)) and task else None
+        if op == "exit":
+            break
+        try:
             if op == "load":
                 _, data_id, chunk = task
                 handles[data_id] = be.load_data(chunk)
@@ -169,11 +243,13 @@ def _worker_main(kernel_config, backend_spec, task_queue, result_queue,
                 if h is not None and hasattr(h, "free"):
                     h.free()
             else:
-                raise RuntimeError(f"unknown shard task {op!r}")
+                raise RuntimeError(f"unknown shard task {task!r}")
         except Exception:
             # Never die silently: the parent waits on this queue, so an
             # unhandled error must come back as a message (else it hangs).
-            result_queue.put((_ERROR, traceback.format_exc()))
+            # The PHASE is part of the message: a failing `load`/`free` replies
+            # too, and the parent must say which command failed.
+            result_queue.put((_ERROR, op or "task", traceback.format_exc()))
 
     # explicit release of every remaining dataset before the backend context
     for h in handles.values():
@@ -200,8 +276,25 @@ class ShardDataHandle:
         if self.data_id < 0 or self._backend is None:
             return
         for tq in self._backend._task_queues:
-            tq.put(("free", self.data_id))
+            try:
+                tq.put(("free", self.data_id))
+            except Exception:
+                break                     # a broken pool: its own free() kills it
         self.data_id = -1
+
+    def __del__(self):
+        """Drop the dataset when the handle is collected.
+
+        ``ShardDataHandle`` is not a ``DataHandle`` subclass, so it did not
+        inherit ``DataHandle.__del__``: a caller that loads many datasets into
+        one long-lived pool and drops them kept every worker-side copy.  The
+        pool is still the lifetime unit; this only stops a dataset from
+        outliving its handle.
+        """
+        try:
+            self.free()
+        except Exception:
+            pass
 
 
 @register_backend("shard", tags=('delegate',))
@@ -230,12 +323,18 @@ class ShardBackend(ComputeBackend):
         default).  Prefer ``"spawn"``/``"forkserver"`` in multi-threaded or
         CUDA applications where ``fork`` is unsafe.
     worker_timeout : float, optional
-        Seconds to wait for each worker result before raising.  ``None``
-        (default) = no DEADLINE, not "no diagnosis": a worker that has EXITED
-        (bootstrap crash, segfault, OOM) is detected by polling its process and
-        raises with the exit code, and worker exceptions always come back as a
-        message.  A positive value adds a wall-clock bound on a worker that is
-        alive but stuck.
+        Seconds to wait for each worker COMPUTE result before raising.
+        ``None`` (default) = no DEADLINE, not "no diagnosis": a worker that has
+        EXITED (bootstrap crash, segfault, OOM) is detected by polling its
+        process and raises with the exit code, and worker exceptions always
+        come back as a message.  A positive value adds a wall-clock bound on a
+        worker that is alive but stuck in ``compute``.
+        Only a COMPUTE has a NORMAL reply.  ``load_data`` queues its command
+        and returns (its duration — a complex config's kernel build or cache
+        fill — is not something this backend may assume).  A failure of any
+        command, ``load``/``free`` included, replies ONCE and is reported with
+        its phase; the pool is then refused further work, because the failed
+        worker's later replies are still queued.
     align : int, optional
         Round every interior split boundary down to a multiple of *align*
         (worker chunks then start/end on ``align``-aligned rows, except the
@@ -274,6 +373,9 @@ class ShardBackend(ComputeBackend):
         self._result_queues = []
         self._procs = []
         self._next_id = 0
+        #: set when a worker replied with a failure: its later replies are still
+        #: queued, so one reply per compute no longer holds
+        self._broken = None
 
         if backends is None:
             backends = []
@@ -324,17 +426,30 @@ class ShardBackend(ComputeBackend):
 
         ``failed`` is the process whose ``start()`` raised: it is NOT in
         ``_procs`` (it is appended only on success) but it may have left a
-        child behind, so it is killed too.  The joins are bounded like
-        ``free()``'s — an error path must not hang on a worker in ``D`` state.
+        child behind, so it is killed too.  Each join follows a SIGKILL, so it
+        does not depend on the worker cooperating, and it is BOUNDED: a process
+        wedged in uninterruptible sleep must not hang an error path.
         """
         procs = list(self._procs) + ([failed] if failed is not None else [])
         self._procs.clear()
+        # the queues this pool created are abandoned too; close them so no
+        # feeder thread is left writing into a pipe nobody reads
+        for q in list(self._task_queues) + list(self._result_queues):
+            try:
+                q.close()
+            except Exception:
+                pass
+        self._task_queues = []
+        self._result_queues = []
         for p in procs:
             if p.pid is None:          # start() never completed: not joinable
                 continue
-            if p.is_alive():
-                p.kill()
-            p.join(timeout=5)
+            try:
+                if p.is_alive():
+                    p.kill()
+            except Exception:
+                pass
+        _reap_all(procs)
 
     def _ensure_pool(self):
         if self._procs:
@@ -347,7 +462,8 @@ class ShardBackend(ComputeBackend):
             p = self._mp.Process(
                 target=_worker_main,
                 args=(self.kernel_config, spec, self._task_queues[i],
-                      self._result_queues[i], device, self._model),
+                      self._result_queues[i], device, self._model,
+                      os.getpid()),
             )
             # the backend OWNS these processes (`free()` shuts them down); a
             # non-daemon child is joined by the interpreter at exit, so an
@@ -370,6 +486,10 @@ class ShardBackend(ComputeBackend):
             self._procs.append(p)
 
     def load_data(self, data_np):
+        if self._broken is not None:
+            raise RuntimeError(
+                f"{self._broken}\nthe pool is desynchronised; build a new "
+                f"backend instead of reusing this one")
         ne = data_np["mass"].shape[0]
         nw = self._n_workers
         if nw == 0:
@@ -395,6 +515,13 @@ class ShardBackend(ComputeBackend):
         self._next_id += 1
         for i in range(nw):
             self._task_queues[i].put(("load", data_id, chunks[i]))
+        # NO normal reply for a load: the worker protocol is exactly the
+        # commands it receives — create, load, compute, free, exit — and only
+        # a compute answers.  Ordering is the queue's: a worker runs its load
+        # before the compute that follows it on the same queue, so one reply
+        # per compute stays attributed.  A FAILURE of the load replies once as
+        # `(_ERROR, "load", traceback)` and marks the pool desynchronised, so
+        # it is reported as a load failure rather than as the next compute's.
         return ShardDataHandle(data_id, ne, self)
 
     # -- result handling -----------------------------------------------
@@ -417,32 +544,70 @@ class ShardBackend(ComputeBackend):
         raise with the exit code.
         """
         rq = self._result_queues[i]
-        proc = self._procs[i] if i < len(self._procs) else None
+        if i >= len(self._procs):
+            raise RuntimeError(
+                f"shard worker {i} is gone: the pool was freed or never "
+                f"started")
+        proc = self._procs[i]
         while True:
             try:
                 return rq.get(timeout=_DEATH_POLL)
             except Empty:
-                if proc is None or proc.is_alive():
+                if proc.is_alive():
                     continue
+                # the worker is GONE and its feeder thread flushes at exit, so
+                # whatever it produced is already in the pipe: DRAIN it, never
+                # wait a scheduled grace for it
                 try:
-                    return rq.get(timeout=_DEATH_GRACE)
+                    return rq.get_nowait()
                 except Empty:
                     raise RuntimeError(self._dead_message(i, proc)) from None
 
-    def _recv(self, i):
-        """Receive worker *i*'s result; turn an error/timeout into a raise."""
+    def _recv_raw(self, i, timeout=None):
+        """Next message from worker *i*: a COMPUTE result, or a failure.
+
+        The normal message is a compute result; a failure of any command is
+        ``(_ERROR, phase, traceback)`` and latches the pool broken.
+
+        ``timeout=None`` means "as long as the worker needs" — a worker that
+        has EXITED is still detected (``_get_alive``), because its queue then
+        stays empty forever.  With a ``timeout`` the death is still attributed:
+        a worker that died during the wait is reported with its exit code, not
+        as "did not respond".
+        """
         rq = self._result_queues[i]
+        proc = self._procs[i] if i < len(self._procs) else None
         try:
-            msg = (rq.get(timeout=self._worker_timeout)
-                   if self._worker_timeout else self._get_alive(i))
+            msg = (rq.get(timeout=timeout) if timeout is not None
+                   else self._get_alive(i))
         except Empty:
-            alive = self._procs[i].is_alive() if i < len(self._procs) else False
+            if proc is not None and not proc.is_alive():
+                raise RuntimeError(self._dead_message(i, proc)) from None
+            alive = proc.is_alive() if proc is not None else False
             raise RuntimeError(
-                f"shard worker {i} did not respond within "
-                f"{self._worker_timeout}s (alive={alive})") from None
-        if isinstance(msg, tuple) and len(msg) == 2 and msg[0] == _ERROR:
-            raise RuntimeError(f"shard worker {i} failed:\n{msg[1]}")
+                f"shard worker {i} did not respond within {timeout}s "
+                f"(alive={alive})") from None
+        except (EOFError, OSError) as exc:
+            # a worker killed mid-`send_bytes` tears its message
+            if proc is not None and not proc.is_alive():
+                raise RuntimeError(self._dead_message(i, proc)) from None
+            raise RuntimeError(
+                f"shard worker {i} result stream is broken "
+                f"({type(exc).__name__}: {exc})") from exc
+        if isinstance(msg, tuple) and len(msg) >= 2 and msg[0] == _ERROR:
+            phase = msg[1] if len(msg) > 1 else "?"
+            detail = msg[2] if len(msg) > 2 else msg[-1]
+            # one failure leaves the worker's remaining replies in the queue,
+            # so the stream no longer matches one reply per compute: refuse
+            # further work instead of returning a previous call's numbers
+            self._broken = (f"shard worker {i} failed during {phase}:\n"
+                            f"{detail}")
+            raise RuntimeError(self._broken)
         return msg
+
+    def _recv(self, i):
+        """Receive worker *i*'s COMPUTE result; an error becomes a raise."""
+        return self._recv_raw(i, self._worker_timeout)
 
     # -- compute -------------------------------------------------------
 
@@ -452,6 +617,14 @@ class ShardBackend(ComputeBackend):
             if return_p:
                 return 0.0, {}, np.array([])
             return 0.0, {}, None
+        if self._broken is not None:
+            raise RuntimeError(
+                f"{self._broken}\nthe pool is desynchronised; build a new "
+                f"backend instead of reusing this one")
+        if not self._procs:
+            raise RuntimeError(
+                "shard pool is not running: free()/kill() was called, or "
+                "load_data() was never reached")
 
         did = data_handle.data_id
         for tq in self._task_queues:
@@ -493,21 +666,92 @@ class ShardBackend(ComputeBackend):
     # -- cleanup -------------------------------------------------------
 
     def free(self):
-        for tq in self._task_queues:
-            tq.put(None)
-        for p in self._procs:
-            p.join(timeout=5)
-            if p.is_alive():
-                p.kill()
-                p.join()
-        self._procs.clear()
-        self._task_queues.clear()
-        self._result_queues.clear()
+        """Stop the pool COOPERATIVELY: the ``("exit",)`` command, then wait.
+
+        No deadline is put on a worker's current task — that is the user's
+        work, and this backend may not decide how long it takes.  An IDLE
+        worker exits at once; a BUSY one finishes what it is doing and then
+        exits.  :meth:`kill` is the immediate form (and what ``__del__`` uses,
+        because an interpreter shutdown must not block).
+
+        The KILL pass sits in a ``finally``: an interrupt during the
+        cooperative wait (or a worker that never reads the command, because it
+        is stuck inside a compute) still takes the pool down.  That reap is
+        BOUNDED — the process has already been killed, so waiting on it is not
+        waiting on anyone's work, and a process in uninterruptible sleep is
+        left to the kernel.
+
+        Idempotent: the state is detached before anything can raise.
+        """
+        tqs, self._task_queues = self._task_queues, []
+        procs, self._procs = self._procs, []
+        rqs, self._result_queues = self._result_queues, []
+        delivered = True
+        try:
+            for tq in tqs:
+                try:
+                    tq.put(("exit",))
+                except Exception:
+                    delivered = False
+                    break     # the command cannot arrive: go straight to KILL
+            if delivered:
+                for p in procs:
+                    if p.pid is None:     # start() never completed
+                        continue
+                    # COOPERATIVE and deliberately unbounded: a busy worker
+                    # finishes its task.  This is the user's work, so no clock
+                    # is put on it; the `finally` is what guarantees an exit.
+                    try:
+                        p.join()
+                    except Exception:
+                        pass
+        finally:
+            for p in procs:
+                if p.pid is None:
+                    continue
+                try:
+                    if p.is_alive():
+                        p.kill()
+                except Exception:
+                    pass
+            _reap_all(procs)
+            for q in list(tqs) + list(rqs):
+                try:
+                    q.close()             # no feeder left writing into a pipe
+                except Exception:
+                    pass
+
+    def kill(self):
+        """Stop the pool NOW: SIGKILL every worker, no exit command.
+
+        For an abort (an exception mid-compute, an interrupted job) and for
+        interpreter shutdown — never a deadline on a worker's work, just no
+        cooperation.  The join after a SIGKILL only REAPS the process; it does
+        not wait for anything the worker was doing.
+        """
+        procs, self._procs = self._procs, []
+        tqs, self._task_queues = self._task_queues, []
+        rqs, self._result_queues = self._result_queues, []
+        for p in procs:
+            if p.pid is None:
+                continue
+            try:
+                if p.is_alive():
+                    p.kill()
+            except Exception:
+                pass
+        _reap_all(procs)
+        for q in list(tqs) + list(rqs):
+            try:
+                q.close()
+            except Exception:
+                pass
 
     def __del__(self):
-        # best effort: a failed ``_ensure_pool`` can leave the object being
-        # collected at interpreter shutdown, where no thread may be created
+        # KILL, never free(): at interpreter shutdown nothing may block on a
+        # worker's current task, and a failed ``_ensure_pool`` can leave the
+        # object being collected where no thread may be created
         try:
-            self.free()
+            self.kill()
         except Exception:
             pass
